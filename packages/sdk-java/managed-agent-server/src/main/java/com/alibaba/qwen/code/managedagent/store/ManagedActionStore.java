@@ -5,6 +5,10 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Stored
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -50,8 +54,8 @@ public class ManagedActionStore {
 
     public String approvalMode(String tenantId, String sessionId) {
         return jdbc.queryForObject(
-                "SELECT approval_mode FROM managed_agent_session WHERE tenant_id = ? AND session_id"
-                        + " = ?",
+                "SELECT approval_mode FROM ma_session WHERE tenant_id = ? AND session_id"
+                        + " = ? AND session_kind = 'PUBLIC'",
                 String.class,
                 tenantId,
                 sessionId);
@@ -72,59 +76,31 @@ public class ManagedActionStore {
     private OwnerRow ownerRow(String tenantId, String sessionId) {
         return DataAccessUtils.nullableSingleResult(jdbc.query(
                 "SELECT owner_actor_key, creator_actor_key, workspace_id, tool_profile"
-                        + " FROM managed_agent_session WHERE"
-                        + " tenant_id = ? AND session_id = ?",
+                        + " FROM ma_session WHERE"
+                        + " tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC'",
                 (result, row) -> new OwnerRow(result.getBytes(1),
                         result.getBytes(2), result.getString(3), result.getString(4)),
                 tenantId, sessionId));
     }
 
-    // The immutable half of the responder gate: the recorded owner, the
-    // create-command actor for Sessions written before the owner record,
-    // or the tenant-owned shape of an anonymous open-mode Session. Written
-    // once, so it runs before the idempotency replay.
-    private boolean ownerIdentityAdmits(String tenantId, String sessionId,
-            OwnerRow session, byte[] key) {
+    // Persisted ownership and the anonymous tenant-owned shape precede replay.
+    private boolean ownerIdentityAdmits(OwnerRow session, byte[] key) {
         byte[] recorded = session == null ? null
                 : session.owner() != null ? session.owner() : session.creator();
         if (recorded != null) {
             return key != null && Arrays.equals(recorded, key);
         }
-        int commands = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
-                        + " tenant_id = ? AND session_id = ?",
-                Integer.class, tenantId, sessionId);
-        if (commands == 0) {
-            // No recorded owner: an anonymous open-mode Session is
-            // tenant-owned, matching its read semantics.
-            return session == null || session.workspaceId() == null;
-        }
-        return key != null
-                && jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
-                                + " tenant_id = ? AND session_id = ? AND actor_id = ?",
-                        Integer.class, tenantId, sessionId, key) == 1;
+        return session != null && session.workspaceId() == null;
     }
 
     // The mutable half: any actor holding OPERATOR on the Session's
     // Workspace. Revocable out from under an admitted caller, so admit
     // evaluates it after the actor-scoped replay.
     private boolean workspaceOperatorAdmits(String tenantId,
-            OwnerRow session, byte[] key) {
-        return session != null && session.workspaceId() != null && key != null
-                && !jdbc.queryForList(
-                        "SELECT 1 FROM managed_workspace_access WHERE"
-                                + " tenant_id = ? AND workspace_id = ?"
-                                + " AND CAST(CONCAT(tenant_id, '!')"
-                                + " AS BINARY(513)) = CAST(CONCAT(?, '!')"
-                                + " AS BINARY(513))"
-                                + " AND CAST(CONCAT(workspace_id, '!')"
-                                + " AS BINARY(513)) = CAST(CONCAT(?, '!')"
-                                + " AS BINARY(513))"
-                                + " AND actor_id = ? AND role IN ('OPERATOR',"
-                                + " 'OWNER')",
-                        Integer.class, tenantId, session.workspaceId(),
-                        tenantId, session.workspaceId(), key).isEmpty();
+            OwnerRow session, String actorId) {
+        return session != null && session.workspaceId() != null
+                && new ManagedWorkspaceRegistry(jdbc)
+                        .accessOf(tenantId, actorId, session.workspaceId()).canCreate();
     }
 
     private record OwnerRow(byte[] owner, byte[] creator, String workspaceId, String toolProfile) {
@@ -168,6 +144,7 @@ public class ManagedActionStore {
             if (!"action.changed".equals(event.path("kind").asText())) {
                 continue;
             }
+            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
             JsonNode envelope = event.deepCopy();
             ((com.fasterxml.jackson.databind.node.ObjectNode) envelope).remove("subject");
             if (event.has("subject")) {
@@ -308,31 +285,28 @@ public class ManagedActionStore {
             } else {
                 require(decision.isNull());
             }
+            String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+            String recordKey = ManagedSchemaKeys.key(scope, "ACTION", id);
             if (previous == null) {
-                jdbc.update(
-                        "INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state,"
-                                + " options_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        tenantId,
-                        sessionId,
-                        id,
-                        state,
-                        options.toString(),
-                        options.path("createdAt").asLong());
+                jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id,"
+                                + " workspace_id, session_id, record_kind, domain, record_id,"
+                                + " action_id, revision, action_version, state, options_json,"
+                                + " created_at, first_sequence) VALUES (?, ?, ?, ?, ?, 'ACTION',"
+                                + " 'action', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        scope, recordKey, tenantId, workspaceId, sessionId, id, id,
+                        event.path("sequence").asLong(), options.path("inputRevision").asLong(),
+                        state, options.toString(), options.path("createdAt").asLong(), event.path("sequence").asLong());
             } else {
-                jdbc.update(
-                        "UPDATE managed_agent_action SET state = ?, decision_receipt_id = ?,"
-                                + " decision_digest = ? WHERE tenant_id = ? AND session_id = ? AND"
-                                + " action_id = ?",
-                        state,
-                        receipt,
-                        digest,
-                        tenantId,
-                        sessionId,
-                        id);
+                jdbc.update("UPDATE ma_session_record SET state = ?, decision_receipt_id = ?,"
+                                + " decision_digest = ?, revision = ? WHERE session_scope_key = ?"
+                                + " AND record_kind = 'ACTION' AND action_id = ?",
+                        state, receipt, digest, event.path("sequence").asLong(), scope, id);
             }
+            replaceActionReferences(tenantId, workspaceId, sessionId, recordKey,
+                    event.path("sequence").asLong(), ref, options, decision);
             if (jdbc.queryForObject(
-                            "SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ? AND"
-                                    + " session_id = ?",
+                            "SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND"
+                                    + " session_id = ? AND session_kind = 'PUBLIC'",
                             Integer.class,
                             tenantId,
                             sessionId)
@@ -349,14 +323,43 @@ public class ManagedActionStore {
         }
     }
 
+    private void replaceActionReferences(String tenantId, String workspaceId, String sessionId,
+            String recordKey, long revision, JsonNode optionsRef, JsonNode options, JsonNode decisionRef) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        List<JsonNode> refs = new ArrayList<>(List.of(optionsRef));
+        if (options.has("inputRef")) {
+            refs.add(options.get("inputRef"));
+        }
+        if (options.has("continuationRef")) {
+            refs.add(options.get("continuationRef"));
+        }
+        if (decisionRef != null && !decisionRef.isNull()) {
+            refs.add(decisionRef);
+        }
+        jdbc.update(
+                "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
+                        + " 'SESSION_RECORD' AND owner_key = ?",
+                scope, recordKey);
+        for (JsonNode ref : refs) {
+            String resourceId = ref.path("resourceId").asText();
+            jdbc.update(
+                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                        + " resource_id, created_at) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?,"
+                        + " ?, CURRENT_TIMESTAMP(6))",
+                    scope, recordKey, revision, ManagedSchemaKeys.key(scope, resourceId), tenantId, workspaceId, sessionId, resourceId);
+        }
+    }
+
     public Optional<Action> find(String tenantId, String sessionId, String id) {
         if (!id.matches("tool_approval_[0-9a-f]{32}")) {
             return Optional.empty();
         }
         return jdbc
                 .query(
-                        "SELECT * FROM managed_agent_action WHERE tenant_id = ? AND session_id = ?"
-                                + " AND action_id = ?",
+                        "SELECT * FROM ma_session_record WHERE session_scope_key = ? AND"
+                                + " record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND"
+                                + " action_id = ?",
                         (r, row) ->
                                 new Action(
                                         r.getString("action_id"),
@@ -364,16 +367,14 @@ public class ManagedActionStore {
                                         read(r.getString("options_json")),
                                         r.getString("decision_receipt_id"),
                                         r.getString("decision_digest")),
-                        tenantId,
-                        sessionId,
-                        id)
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, id)
                 .stream()
                 .findFirst();
     }
 
     public List<Action> list(
             String tenantId, String sessionId, Long before, String beforeId, int limit) {
-        List<Object> args = new ArrayList<>(List.of(tenantId, sessionId));
+        List<Object> args = new ArrayList<>(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId));
         String cursor = "";
         if (before != null) {
             cursor = " AND (created_at < ? OR created_at = ? AND action_id < ?)";
@@ -383,8 +384,8 @@ public class ManagedActionStore {
         }
         args.add(limit);
         return jdbc.query(
-                "SELECT * FROM managed_agent_action WHERE tenant_id = ? AND session_id = ? AND"
-                        + " state = 'requested'"
+                "SELECT * FROM ma_session_record WHERE session_scope_key = ? AND record_kind ="
+                        + " 'ACTION' AND tenant_id = ? AND session_id = ? AND state = 'requested'"
                         + cursor
                         + " ORDER BY created_at DESC, action_id DESC LIMIT ?",
                 (r, row) ->
@@ -409,10 +410,11 @@ public class ManagedActionStore {
             JsonNode body,
             long now) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
         jdbc.queryForObject(
-                "SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id ="
-                        + " ? FOR UPDATE",
+                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id ="
+                        + " ? AND session_kind = 'PUBLIC' FOR UPDATE",
                 String.class,
                 tenantId,
                 sessionId);
@@ -421,18 +423,16 @@ public class ManagedActionStore {
         // The immutable owner arms answer before the replay; the mutable
         // Workspace role arm follows it, so a role revoked after admission
         // still resolves a retry to the caller's own operation.
-        boolean admitted = ownerIdentityAdmits(tenantId, sessionId, ownerRow,
-                actorKey);
+        boolean admitted = ownerIdentityAdmits(ownerRow, actorKey);
         List<String> replay =
                 jdbc.query(
-                        "SELECT operation_id FROM managed_agent_operation WHERE tenant_id = ? AND"
-                                + " session_id = ? AND operation_kind = 'ACTION_RESPONSE' AND"
-                                + " actor_digest = ? AND idempotency_key = ?",
+                        "SELECT operation_id FROM ma_operation WHERE scope_key = ? AND target_key ="
+                            + " ? AND tenant_id = ? AND session_id = ? AND operation_kind ="
+                            + " 'ACTION_RESPONSE' AND actor_digest = ? AND idempotency_digest = ?"
+                            + " AND idempotency_key = ?",
                         (r, row) -> r.getString(1),
-                        tenantId,
-                        sessionId,
-                        actorDigest,
-                        key);
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), ManagedSchemaKeys.key(sessionId),
+                        tenantId, sessionId, actorDigest, ManagedSchemaKeys.key(key), key);
         if (!replay.isEmpty()) {
             OperationRecord existing =
                     sessions.findOperation(tenantId, sessionId, replay.get(0)).orElseThrow();
@@ -447,8 +447,7 @@ public class ManagedActionStore {
         // A Shell answer runs a command, so the Workspace-operator arm does
         // not apply. Other Actions keep that arm.
         boolean shell = ownerRow != null && WorkspaceToolProfiles.isPublicShell(ownerRow.toolProfile());
-        if (!admitted && (shell || !workspaceOperatorAdmits(tenantId, ownerRow,
-                actorKey))) {
+        if (!admitted && (shell || !workspaceOperatorAdmits(tenantId, ownerRow, actorId))) {
             throw shell ? shellForbidden() : forbidden();
         }
         // Every bound admission certifies delivery exactly like the
@@ -462,7 +461,7 @@ public class ManagedActionStore {
                     "Hosted Workspace execution is not available.");
         }
         WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
-        String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
+        String sessionStatus = jdbc.queryForObject("SELECT status FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {
             throw new ApiException(HttpStatus.CONFLICT, "session_inactive", "The Session does not accept responses.");
@@ -497,25 +496,44 @@ public class ManagedActionStore {
             throw new ApiException(
                     HttpStatus.CONFLICT, "action_expired", "The Action has expired.");
         }
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String actionScope = ManagedSchemaKeys.key(scope, actionId, Long.toString(o.path("inputRevision").asLong()));
+        String decision = decisionDigest(body);
+        List<String[]> reserved = jdbc.query(
+                        "SELECT request_digest, result_operation_key FROM ma_request_receipt WHERE"
+                                + " namespace = 'ACTION_DECISION' AND tenant_key = ? AND"
+                                + " decision_scope_key = ?",
+                (r, row) -> new String[]{r.getString(1), r.getString(2)}, ManagedSchemaKeys.key(tenantId), actionScope);
+        if (!reserved.isEmpty()) {
+            if (!decision.equals(reserved.getFirst()[0])) {
+                throw new ApiException(HttpStatus.CONFLICT, "action_already_resolved", "A different Action decision is already admitted.");
+            }
+            String original = jdbc.queryForObject("SELECT operation_id FROM ma_operation WHERE operation_key = ?",
+                    String.class, reserved.getFirst()[1]);
+            return new OperationAdmission(sessions.findOperation(tenantId, sessionId, original).orElseThrow(), true);
+        }
         String op = "op_" + UUID.randomUUID().toString().replace("-", "");
+        String operationKey = ManagedSchemaKeys.operationKey(OperationKind.ACTION_RESPONSE, scope, ManagedSchemaKeys.key(sessionId), op);
         jdbc.update(
-                "INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id,"
-                    + " operation_kind, actor_digest, idempotency_key, request_digest, state,"
-                    + " admission_stage, delivery_state, session_status_before, available_at,"
-                    + " created_at, updated_at, action_id, response_json) VALUES (?, ?, ?,"
-                    + " 'ACTION_RESPONSE', ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE',"
-                    + " ?, ?, ?, ?, ?)",
-                tenantId,
-                sessionId,
-                op,
-                actorDigest,
-                key,
-                requestDigest,
-                now,
-                now,
-                now,
-                actionId,
-                body.toString());
+                "INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key,"
+                    + " tenant_id, session_id, operation_id, operation_kind, actor_digest,"
+                    + " idempotency_key, idempotency_digest, request_digest, request_json, phase,"
+                    + " state, admission_stage, delivery_state, session_status_before,"
+                    + " available_at, created_at, updated_at, action_id) VALUES (?, ?, 'SESSION',"
+                    + " ?, ?, ?, ?, 'ACTION_RESPONSE', ?, ?, ?, ?, ?, 'PENDING', 'PENDING',"
+                    + " 'JAVA_DURABLE', 'PENDING', 'ACTIVE', ?, ?, ?, ?)",
+                operationKey, scope, ManagedSchemaKeys.key(sessionId), tenantId, sessionId, op,
+                actorDigest, key, ManagedSchemaKeys.key(key), requestDigest, body.toString(), now, now, now, actionId);
+        jdbc.update(
+                "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
+                    + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest,"
+                    + " request_digest, state, session_id, action_id, action_version,"
+                    + " result_operation_key, created_at, updated_at) VALUES (?, 'ACTION_DECISION',"
+                    + " ?, ?, 'SESSION', ?, ?, ?, ?, ?, 'ADMITTED', ?, ?, ?, ?, ?, ?)",
+                ManagedSchemaKeys.receiptKey(ReceiptNamespace.ACTION_DECISION, tenantId, ReceiptScope.SESSION, actionScope, actionId),
+                ManagedSchemaKeys.key(tenantId), tenantId, actionScope, actionScope, actionId, ManagedSchemaKeys.key(actionId), decision,
+                sessionId, actionId, o.path("inputRevision").asLong(), operationKey, now, now);
+
         return new OperationAdmission(
                 sessions.findOperation(tenantId, sessionId, op).orElseThrow(), false);
     }
@@ -523,7 +541,7 @@ public class ManagedActionStore {
     public Optional<String> publicTurnId(String tenantId, String sessionId, String promptId) {
         return jdbc
                 .query(
-                        "SELECT turn_id FROM managed_agent_turn WHERE tenant_id = ? AND session_id"
+                        "SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id"
                                 + " = ? AND prompt_id = ?",
                         (r, row) -> r.getString(1),
                         tenantId,
@@ -535,9 +553,9 @@ public class ManagedActionStore {
 
     public Response response(String tenantId, String sessionId, String op) {
         return jdbc.queryForObject(
-                "SELECT action_id, response_json, error_code, decision_receipt_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND session_id = ? AND"
-                        + " operation_id = ?",
+                "SELECT action_id, request_json, failure_code, decision_receipt_id FROM"
+                        + " ma_operation WHERE tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ? AND operation_kind = 'ACTION_RESPONSE'",
                 (r, row) ->
                         new Response(
                                 r.getString(1),
@@ -551,22 +569,22 @@ public class ManagedActionStore {
 
     public List<OperationTarget> deliverable(long now) {
         return jdbc.query(
-                "SELECT tenant_id, session_id, operation_id FROM managed_agent_operation WHERE"
-                        + " operation_kind = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND"
-                        + " available_at <= ?) OR (delivery_state = 'LEASED' AND lease_until < ?))"
-                        + " ORDER BY available_at LIMIT 50",
+                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind"
+                    + " = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND available_at <= ?)"
+                    + " OR (delivery_state = 'LEASED' AND claim_until < CURRENT_TIMESTAMP(6))) AND"
+                    + " state IN ('PENDING', 'RUNNING') ORDER BY available_at LIMIT 50",
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
-                now,
                 now);
     }
 
     public void settleEndedResponses(long now) {
         List<OperationTarget> ended = jdbc.query(
-                "SELECT o.tenant_id, o.session_id, o.operation_id FROM managed_agent_operation o"
-                        + " JOIN managed_agent_action a ON a.tenant_id = o.tenant_id AND"
-                        + " a.session_id = o.session_id AND a.action_id = o.action_id"
-                        + " WHERE o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
-                        + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",
+                        "SELECT o.tenant_id, o.session_id, o.operation_id FROM ma_operation o JOIN"
+                            + " ma_session_record a ON a.record_kind = 'ACTION' AND"
+                            + " a.session_scope_key = o.scope_key AND a.tenant_id = o.tenant_id AND"
+                            + " a.session_id = o.session_id AND a.action_id = o.action_id WHERE"
+                            + " o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
+                            + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)));
         for (OperationTarget target : ended) {
             Response response = response(target.tenantId(), target.sessionId(), target.operationId());
@@ -574,12 +592,12 @@ public class ManagedActionStore {
             boolean matched = "decided".equals(action.state())
                     && decisionDigest(response.body()).equals(action.decisionDigest());
             jdbc.update(
-                    "UPDATE managed_agent_operation SET state = ?, admission_stage ="
+                    "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage ="
                             + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
-                            + " error_code = ?, decision_receipt_id = ?, lease_owner = NULL,"
-                            + " lease_until = NULL, updated_at = ?, completed_at = ? WHERE tenant_id"
-                            + " = ? AND session_id = ? AND operation_id = ? AND operation_kind ="
-                            + " 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
+                            + " failure_code = ?, decision_receipt_id = ?, claim_owner = NULL,"
+                            + " claim_until = NULL, updated_at = ?, completed_at = ? WHERE tenant_id ="
+                        + " ? AND session_id = ? AND operation_id = ? AND operation_kind ="
+                        + " 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
                     matched ? "COMPLETED" : "FAILED",
                     "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                     matched ? null : endedCode(action.state()),
@@ -595,13 +613,15 @@ public class ManagedActionStore {
             String errorCode,
             String decisionReceiptId,
             long now) {
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, op.tenantId(), op.sessionId());
         jdbc.update(
-                "UPDATE managed_agent_operation SET state = ?, admission_stage ="
+                "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage ="
                     + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
-                    + " error_code = ?, decision_receipt_id = ?, lease_owner = NULL, lease_until ="
-                    + " NULL, updated_at = ?, completed_at = ? WHERE tenant_id = ? AND session_id ="
-                    + " ? AND operation_id = ? AND delivery_state = 'LEASED' AND lease_owner = ?"
-                    + " AND claim_generation = ?",
+                    + " failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until"
+                    + " = NULL, updated_at = ?, completed_at = ? WHERE tenant_id = ? AND session_id"
+                    + " = ? AND operation_id = ? AND delivery_state = 'LEASED' AND claim_owner = ?"
+                    + " AND operation_kind = 'ACTION_RESPONSE' AND claim_generation = ? AND"
+                    + " claim_until > CURRENT_TIMESTAMP(6)",
                 errorCode == null ? "COMPLETED" : "FAILED",
                 "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                 errorCode,

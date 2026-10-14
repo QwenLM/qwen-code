@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.managedprobes.ProbeAdvice;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
@@ -25,6 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 
 /**
  * End-to-end witness for #13533 finding A1: the background Shell and
@@ -65,8 +68,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * binding digest against the persisted row before identity or payload
  * validation; the unit fixture corpus pins the field-shape refusals.
  * <li>foreground (v3 lane): reserve OPEN + close NOT_STARTED +
- * recovery-blocked — off-Linux the ephemeral lane declines all shell-typed
- * executions alike; byte-level foreground regression is held by
+ * recovery-blocked — without a delegated cgroup v2 root the ephemeral lane
+ * declines all shell-typed executions alike; byte-level foreground regression is held by
  * {@code HostedWorkspaceToolTurnIT}'s main workspace/shell lane (G5), run in
  * the same verification pass.
  * </ul>
@@ -91,6 +94,9 @@ class HostedBackgroundPublicationGate {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 "true".equals(System.getProperty("qwen.wedge.probe")),
                 "background publication witness: skipped unless -Dqwen.wedge.probe=true");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                "Linux".equals(System.getProperty("os.name")),
+                "background publication witness requires Linux physical workspace storage");
         assertThat(System.getProperty("mysql.url")).as("witness requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user")).as("witness requires -Dmysql.user").isNotBlank();
@@ -194,12 +200,12 @@ class HostedBackgroundPublicationGate {
             var sessions = new ArrayList<Map<String, Object>>();
             for (int index = 0; index < specs.size(); index++) {
                 String workspaceId = "workspace-" + index;
-                jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+                jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref,"
                         + " state) VALUES (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE')",
                         tenant, workspaceId, "storage-" + index,
                         WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id,"
+                jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id,"
                         + " role) VALUES (?, ?, ?, 'OPERATOR')",
                         tenant, workspaceId, "actor".getBytes(StandardCharsets.UTF_8));
                 var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + index,
@@ -214,6 +220,19 @@ class HostedBackgroundPublicationGate {
                 if (specs.get(index).shellCommand() != null)
                     entry.put("shellCommand", specs.get(index).shellCommand());
                 sessions.add(entry);
+            }
+            var registration = new ManagedAgentProperties();
+            registration.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+            var mounts = new ArrayList<ManagedAgentProperties.RuntimeBroker.WorkspaceMount>();
+            for (int index = 0; index < workspaces.size(); index++) {
+                mounts.add(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        tenant, "storage-" + index, workspaces.get(index).toString()));
+            }
+            registration.getRuntimeBroker().setWorkspaceMounts(mounts);
+            var guard = new WorkspaceStorageGuard(jdbc,
+                    new DataSourceTransactionManager(jdbc.getDataSource()), registration);
+            for (int index = 0; index < workspaces.size(); index++) {
+                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
             EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
             Path phaseFile = temporary.resolve("phase");

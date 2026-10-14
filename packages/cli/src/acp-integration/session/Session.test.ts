@@ -53,6 +53,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -549,6 +550,8 @@ describe('Session', () => {
     | undefined;
   let unsubscribeApprovalModeChange: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
+    readActiveTranscriptChain: ReturnType<typeof vi.fn>;
+    recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
     recordCronPrompt: ReturnType<typeof vi.fn>;
@@ -939,6 +942,8 @@ describe('Session', () => {
     unsubscribeApprovalModeChange = vi.fn();
 
     mockChatRecordingService = {
+      readActiveTranscriptChain: vi.fn().mockResolvedValue([] as ChatRecord[]),
+      recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
       recordCronPrompt: vi.fn(),
@@ -6630,6 +6635,75 @@ describe('Session', () => {
   });
 
   describe('continueLastTurn', () => {
+    it.each(['user', 'unknown', 'interrupted'] as const)(
+      'checks raw transcript cancellation before admission (%s)',
+      async (reason) => {
+        const input: Content = {
+          role: 'user',
+          parts: [{ text: 'unfinished task' }],
+        };
+        markApiHistoryPrompt(input, 'client-turn');
+        vi.mocked(mockChat.getHistory).mockReturnValue([input]);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue([input]);
+        const records = [
+          chatRecord({
+            uuid: 'input',
+            promptId: 'client-turn',
+            daemonPromptId: 'daemon-turn',
+            message: input,
+          }),
+          chatRecord({
+            uuid: 'result',
+            parentUuid: 'input',
+            type: 'system',
+            subtype: 'turn_result',
+            promptId: 'client-turn',
+            systemPayload: {
+              promptId: 'daemon-turn',
+              state: 'cancelled',
+              startedAt: 1_000,
+              endedAt: 2_500,
+              ...(reason !== 'interrupted' ? { cancelledAt: 2_200 } : {}),
+              ...(reason === 'user' ? { cancelReason: 'user' } : {}),
+            },
+          }),
+        ];
+        mockChatRecordingService.readActiveTranscriptChain.mockResolvedValue(
+          records,
+        );
+        const canContinue = reason === 'interrupted';
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(await session.continueLastTurn()).toEqual({
+            accepted: canContinue,
+            interruption: canContinue ? 'interrupted_prompt' : 'none',
+          });
+          if (!canContinue) {
+            await expect(
+              session.prompt(
+                {
+                  sessionId: session.sessionId,
+                  prompt: [],
+                  _meta: { 'qwen.daemon.continueLastTurn': true },
+                },
+                {
+                  version: 1,
+                  sessionId: session.sessionId,
+                  promptId: `refused-${attempt}`,
+                },
+              ),
+            ).resolves.toEqual({ stopReason: 'end_turn' });
+          }
+        }
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordTurnAttempt,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
     it('returns none and starts no continuation when the last turn ended cleanly', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([
         { role: 'user', parts: [{ text: 'hi' }] },
@@ -11715,7 +11789,11 @@ describe('Session', () => {
           trustedContext,
         );
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: 'hello',
@@ -11747,7 +11825,11 @@ describe('Session', () => {
           trustedContext,
         );
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: '[image]',
@@ -11770,7 +11852,11 @@ describe('Session', () => {
           trustedContext,
         );
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: '[image]',
@@ -11786,8 +11872,8 @@ describe('Session', () => {
         );
 
         expect(
-          mockChatRecordingService.recordTurnResult,
-        ).toHaveBeenLastCalledWith(
+          mockChatRecordingService.recordTurnResult.mock.calls.at(-1)?.[0],
+        ).toEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: '',
@@ -11811,7 +11897,11 @@ describe('Session', () => {
           trustedContext,
         );
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: '[image]',
@@ -11828,8 +11918,8 @@ describe('Session', () => {
         );
 
         expect(
-          mockChatRecordingService.recordTurnResult,
-        ).toHaveBeenLastCalledWith(
+          mockChatRecordingService.recordTurnResult.mock.calls.at(-1)?.[0],
+        ).toEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: 'projected prompt body',
@@ -11863,7 +11953,11 @@ describe('Session', () => {
           trustedContext,
         );
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             state: 'completed',
             resultText: 'Hello, world!',
@@ -11934,7 +12028,11 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
           1,
         );
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({ resultText: 'The final answer is 42.' }),
         );
       });
@@ -12070,7 +12168,7 @@ describe('Session', () => {
           expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
         );
         now = 4_500;
-        cancellation.abort();
+        session.cancelPromptAdmission(cancellation, 'qwen:user-cancel');
         now = 9_500;
         releaseAdmission();
 
@@ -12083,12 +12181,17 @@ describe('Session', () => {
             },
           },
         });
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
             stopReason: 'cancelled',
             cancelledAt: 4_500,
+            cancelReason: 'user',
             endedAt: 9_500,
           }),
         );
@@ -12134,7 +12237,11 @@ describe('Session', () => {
           ),
         ).rejects.toThrow('model exploded');
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'error',
@@ -12164,7 +12271,11 @@ describe('Session', () => {
           ),
         ).rejects.toThrow('Request was aborted.');
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'error',
@@ -12198,7 +12309,11 @@ describe('Session', () => {
           },
         });
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
@@ -12209,45 +12324,61 @@ describe('Session', () => {
         );
       });
 
-      it('waits for the cancellation record to flush before returning', async () => {
-        let releaseFlush!: () => void;
-        const flushed = new Promise<void>((resolve) => {
-          releaseFlush = resolve;
-        });
-        mockChatRecordingService.flush.mockReturnValue(flushed);
-        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-          createFailingStream('Request was aborted.', () => {
-            void session.cancelPendingPrompt();
-          }),
-        );
-        let settled = false;
-        const prompt = session
-          .prompt(
-            {
-              sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: 'cancel me' }],
-            },
-            trustedContext,
-          )
-          .then((response) => {
-            settled = true;
-            return response;
+      it.each(['qwen:user-cancel', 'qwen:prompt-interrupted'])(
+        'flushes the durable cancellation record before returning (%s)',
+        async (reason) => {
+          let releaseFlush!: () => void;
+          const flushed = new Promise<void>((resolve) => {
+            releaseFlush = resolve;
           });
-        await vi.waitFor(() =>
-          expect(mockChatRecordingService.flush).toHaveBeenCalled(),
-        );
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
-          expect.objectContaining({ state: 'cancelled' }),
-        );
-        expect(settled).toBe(false);
-        releaseFlush();
-        await expect(prompt).resolves.toMatchObject({
-          stopReason: 'cancelled',
-          _meta: {
-            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
-          },
-        });
-      });
+          mockChatRecordingService.flush.mockReturnValue(flushed);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createFailingStream('Request was aborted.', () => {
+              void session.cancelPendingPrompt(reason);
+            }),
+          );
+          let settled = false;
+          const prompt = session
+            .prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'cancel me' }],
+              },
+              trustedContext,
+            )
+            .then((response) => {
+              settled = true;
+              return response;
+            });
+          await vi.waitFor(() =>
+            expect(mockChatRecordingService.flush).toHaveBeenCalled(),
+          );
+          expect(
+            mockChatRecordingService.recordTurnResult.mock.calls.map(
+              ([payload]) => payload,
+            ),
+          ).toContainEqual(expect.objectContaining({ state: 'cancelled' }));
+          expect(settled).toBe(false);
+          releaseFlush();
+          const result = await prompt;
+          expect(result.stopReason).toBe('cancelled');
+          const payload =
+            mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+          if (reason === 'qwen:user-cancel') {
+            expect(payload).toMatchObject({
+              cancelledAt: expect.any(Number),
+              cancelReason: 'user',
+            });
+            expect(result._meta?.['qwen.promptCancelled']).toMatchObject({
+              cancelledAt: expect.any(Number),
+            });
+          } else {
+            expect(payload).not.toHaveProperty('cancelledAt');
+            expect(payload).not.toHaveProperty('cancelReason');
+            expect(result._meta?.['qwen.promptCancelled']).toBeUndefined();
+          }
+        },
+      );
 
       it('records a cancelled turn when user cancel races a plain stream error', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
@@ -12271,7 +12402,11 @@ describe('Session', () => {
           },
         });
 
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
@@ -12606,7 +12741,10 @@ describe('Session', () => {
         );
         await Promise.resolve();
         await Promise.resolve();
-        admissionCancellation.abort();
+        session.cancelPromptAdmission(
+          admissionCancellation,
+          'qwen:user-cancel',
+        );
 
         releaseFirst();
         await first;
@@ -18491,6 +18629,8 @@ describe('Session', () => {
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        { promptId: 'test-session-id########1' },
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -18519,6 +18659,8 @@ describe('Session', () => {
         'qwen3-code-plus',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        { promptId: 'test-session-id########2' },
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -21861,10 +22003,12 @@ describe('Session', () => {
               loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
             }),
           );
-          expect(mockChat.addHistory).toHaveBeenCalledWith({
-            role: 'user',
-            parts: expect.arrayContaining([{ text: reminder }]),
-          });
+          expect(mockChat.addHistory).toHaveBeenCalledWith(
+            expect.objectContaining({
+              role: 'user',
+              parts: expect.arrayContaining([{ text: reminder }]),
+            }),
+          );
         } finally {
           restoreGuardMode();
         }
@@ -22371,6 +22515,8 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -22489,6 +22635,8 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -22823,6 +22971,8 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -23216,10 +23366,12 @@ describe('Session', () => {
           stopReason: 'cancelled',
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: expect.any(Array),
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.any(Array),
+          }),
+        );
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -23303,10 +23455,12 @@ describe('Session', () => {
         // The send never went out; the cancelled user turn was restored to
         // history and no token-limit diagnostic was emitted.
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: expect.any(Array),
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: expect.any(Array),
+          }),
+        );
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -27281,13 +27435,15 @@ describe('Session', () => {
           });
           expect(state.signal?.aborted).toBe(true);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-          expect(mockChat.addHistory).toHaveBeenCalledWith({
-            role: 'user',
-            parts: [
-              { text: `${interruptPrefix}look at this` },
-              { text: '[Attachment could not be processed]' },
-            ],
-          });
+          expect(mockChat.addHistory).toHaveBeenCalledWith(
+            expect.objectContaining({
+              role: 'user',
+              parts: [
+                { text: `${interruptPrefix}look at this` },
+                { text: '[Attachment could not be processed]' },
+              ],
+            }),
+          );
         });
 
         it.each(['a file read', 'a media bridge'] as const)(
@@ -28231,7 +28387,11 @@ describe('Session', () => {
             expect.objectContaining({ text: answer }),
           );
         });
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            ([payload]) => payload,
+          ),
+        ).toContainEqual(
           expect.objectContaining({
             resultText: answer.slice(0, core.TURN_RESULT_TEXT_MAX_CHARS),
             resultTruncated: true,
@@ -31790,10 +31950,12 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'cancelled' });
 
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: [{ text: 'Expanded prompt' }],
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: [{ text: 'Expanded prompt' }],
+          }),
+        );
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
@@ -35220,6 +35382,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
+          { promptId: 'test-session-id########1' },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
@@ -35334,6 +35497,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
+          { promptId: 'test-session-id########2' },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -35585,6 +35749,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
+          { promptId: 'test-session-id########2' },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });
