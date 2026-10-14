@@ -623,7 +623,7 @@ export interface LspServerHandle {
   /** Synchronization capability from this connection's initialize response. */
   textDocumentSync?: LspTextDocumentSync;
   /** Diagnostic pull support from this connection's initialize response. */
-  diagnosticPull?: { document: boolean; workspace: boolean };
+  diagnosticPull?: { document: boolean | undefined; workspace: boolean };
   /** Server process (for stdio transport) */
   process?: ChildProcess;
   /** Error that caused failure */

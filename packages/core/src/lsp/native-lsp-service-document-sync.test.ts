@@ -30,6 +30,8 @@ import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { IdeContextStore } from '../ide/ideContext.js';
 import type {
   LspCallHierarchyItem,
+  LspConnectionResult,
+  LspServerConfig,
   LspServerHandle,
   JsonRpcMessage,
   LspTextDocumentSync,
@@ -2202,6 +2204,52 @@ describe('NativeLspService disk document synchronization', () => {
   });
 
   describe('diagnostics failure visibility', () => {
+    it.each([
+      ['gopls', 'go', 'main.go', 'package main\n'],
+      ['pyright', 'python', 'main.py', 'value = 1\n'],
+    ])(
+      'retains document pulls for %s after initialize omits diagnosticProvider',
+      async (name, language, filename, content) => {
+        const [, targetUri] = addFile(filename, content);
+        handle.config = { ...handle.config, name, languages: [language] };
+        connection.initialize.mockResolvedValue({
+          capabilities: { textDocumentSync: { openClose: true, change: 2 } },
+        });
+        const initializer = manager as unknown as {
+          initializeLspServer(
+            connection: LspConnectionResult,
+            config: LspServerConfig,
+          ): Promise<{
+            textDocumentSync: LspTextDocumentSync | undefined;
+            diagnosticPull: NonNullable<LspServerHandle['diagnosticPull']>;
+          }>;
+        };
+        Object.assign(
+          handle,
+          await initializer.initializeLspServer(
+            {
+              connection,
+              initialize: connection.initialize,
+              shutdown: connection.shutdown,
+              exit: connection.end,
+            },
+            handle.config,
+          ),
+        );
+
+        await expect(run(service.diagnostics(targetUri))).resolves.toEqual([]);
+        expect(connection.requests).toContainEqual({
+          method: 'textDocument/diagnostic',
+          params: expect.objectContaining({ textDocument: { uri: targetUri } }),
+        });
+        connection.request.mockClear();
+        await expect(workspaceDiagnostics()).rejects.toThrow(
+          'No configured LSP server supports workspace pull diagnostics',
+        );
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
     const setDiagnosticPull = (
       target: LspServerHandle,
       document: boolean,

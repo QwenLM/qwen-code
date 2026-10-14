@@ -39,8 +39,10 @@ advertised capability is inaccurate. Other LSP operations are unchanged.
 ## Design
 
 `LspServerHandle` receives an optional per-connection `diagnosticPull` record
-with `document` and `workspace` booleans. A successful initialization always
-sets the record: an omitted or false `diagnosticProvider` means both are false;
+with a three-state `document` value and a `workspace` boolean. A successful
+initialization always sets the record: an omitted or null `diagnosticProvider`
+leaves document support unknown and workspace support false; explicit false
+means both are false;
 an object or true enables document pull; only an object with
 `workspaceDiagnostics: true` enables workspace pull. Before a new connection
 starts, and when a connection stops or resets, the record is cleared.
@@ -79,16 +81,24 @@ No other consumer reads `diagnosticPull`.
 
 ## Constraints and Risks
 
-Some servers may advertise pull support incorrectly. Their request failures
-continue through the existing failure and numeric `-32601` handling. Treating an
-omitted capability after successful initialization as unsupported follows the
-protocol, while treating missing state before successful initialization as
-unknown avoids false clean reports.
+Real initialization captures from gopls 0.22.0 and Pyright 1.1.414 omit
+`diagnosticProvider` even though document pulls return source diagnostics.
+Omission therefore remains unknown for document pulls, preserving the numeric
+`-32601` fallback for unsupported servers. This intentionally cannot avoid every
+document timeout: omission alone cannot distinguish these servers from
+typescript-language-server 5.3.0, which omits the field and returns `-32601`.
+Workspace pulls still require explicit advertisement. Unknown initialization
+continues to veto false clean reports.
+
+Dynamic registration is unsupported and advertised as false. Capabilities are
+captured once per connection; later registration requests do not update them.
 
 ## Validation
 
 - Reproduce the timeout and veto on the base revision.
 - Test the real initialization handshake and captured document/workspace flags.
+- Feed an omitted-capability initialize response through the real manager and
+  then query the service: document pulls remain available, workspace pulls do not.
 - Test capability clearing on stop and crash reset.
 - Test initial, newly-ready, and unreachable paths for both requested methods.
 - Test all-unsupported errors and conservative supporting/unknown failures.

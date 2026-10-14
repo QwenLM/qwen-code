@@ -153,10 +153,10 @@ const JSON_RPC_METHOD_NOT_FOUND = -32601;
 
 /**
  * Whether a diagnostics pull failed because the server does not implement
- * pull diagnostics at all. The reply code is the only signal that works:
+ * the requested pull. The reply code remains necessary for undeclared support:
  * real servers that serve `textDocument/diagnostic` (pyright, gopls) do not
  * advertise `diagnosticProvider` for it, while servers that do not serve it
- * (typescript-language-server, clangd) answer `-32601` every time. Such a
+ * (typescript-language-server, clangd) can answer `-32601`. Such a
  * server says nothing about the queried file, so it neither vetoes another
  * server's answer nor backs a clean one — and it is still named when nothing
  * else answered, with wording that says what it actually did. Every other

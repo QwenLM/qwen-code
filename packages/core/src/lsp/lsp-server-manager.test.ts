@@ -65,7 +65,7 @@ type ManagerPrivates = {
   ) => Promise<LspConnectionResult>;
   initializeLspServer: () => Promise<{
     textDocumentSync: LspTextDocumentSync | undefined;
-    diagnosticPull: { document: boolean; workspace: boolean };
+    diagnosticPull: { document: boolean | undefined; workspace: boolean };
   }>;
   findFirstTypescriptFile(): string | undefined;
   buildProcessEnv(env: Record<string, string>): NodeJS.ProcessEnv;
@@ -386,7 +386,7 @@ describe('LspServerManager', () => {
         expect(manager.getHandles().get('clangd')).toMatchObject({
           status: 'READY',
           textDocumentSync,
-          diagnosticPull: { document: false, workspace: false },
+          diagnosticPull: { document: undefined, workspace: false },
         });
         expect(connection.initialize).toHaveBeenCalledExactlyOnceWith(
           expect.objectContaining({
@@ -418,7 +418,8 @@ describe('LspServerManager', () => {
   );
 
   it.each([
-    [undefined, false, false],
+    [undefined, undefined, false],
+    [null, undefined, false],
     [false, false, false],
     [true, true, false],
     [

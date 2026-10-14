@@ -1263,9 +1263,7 @@ export class LspServerManager {
       textDocumentSync: result?.capabilities?.textDocumentSync,
       diagnosticPull: {
         document:
-          diagnosticProvider === true ||
-          (typeof diagnosticProvider === 'object' &&
-            diagnosticProvider !== null),
+          diagnosticProvider == null ? undefined : diagnosticProvider !== false,
         workspace:
           typeof diagnosticProvider === 'object' &&
           diagnosticProvider !== null &&
