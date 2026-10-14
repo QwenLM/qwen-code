@@ -417,9 +417,9 @@ final class ManagedSchemaCatalog {
             String expression =
                     column.group(4).substring(generated + "GENERATED ALWAYS AS".length());
             String stored = actual.get(column.group(1));
-            List<String> expectedTokens = booleanLiterals(expressionTokens(expression));
+            List<String> expectedTokens = numericBooleans(expressionTokens(expression));
             List<String> actualTokens =
-                    stored == null ? List.of() : booleanLiterals(expressionTokens(stored));
+                    stored == null ? List.of() : numericBooleans(expressionTokens(stored));
             boolean same = expectedTokens.equals(actualTokens);
             if (!same && "projection_pending".equals(column.group(1))) {
                 int split = expectedTokens.indexOf("or");
@@ -434,15 +434,6 @@ final class ManagedSchemaCatalog {
                         "Managed schema generated column differs: " + name + "." + column.group(1));
             }
         }
-    }
-
-    // MySQL and MariaDB store boolean literals in a generated column expression as 0/1.
-    private static List<String> booleanLiterals(List<String> tokens) {
-        return tokens.stream().map(token -> switch (token) {
-            case "false" -> "0";
-            case "true" -> "1";
-            default -> token;
-        }).toList();
     }
 
     static void validateChecks(Connection connection, String name, String body)
@@ -495,11 +486,7 @@ final class ManagedSchemaCatalog {
     private static List<String> checkShape(String expression) {
         List<String> flat = expressionTokens(expression);
         if (flat.contains("case")) {
-            return flat.stream().map(token -> switch (token) {
-                case "false" -> "0";
-                case "true" -> "1";
-                default -> token;
-            }).toList();
+            return flat;
         }
         String portable = portableExpression(expression);
         var matcher =
@@ -592,9 +579,25 @@ final class ManagedSchemaCatalog {
         List<String> result = new ArrayList<>();
         while (tokens.find()) {
             String token = tokens.group();
-            result.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            result.add(
+                    switch (normalized) {
+                        case "false" -> "0";
+                        case "true" -> "1";
+                        default -> normalized;
+                    });
         }
         return result;
+    }
+
+    // MariaDB stores a bare FALSE/TRUE in a generation expression as 0/1,
+    // while MySQL keeps the keyword, so boolean literals compare numerically.
+    private static List<String> numericBooleans(List<String> tokens) {
+        return tokens.stream().map(token -> switch (token) {
+            case "false" -> "0";
+            case "true" -> "1";
+            default -> token;
+        }).toList();
     }
 
     private static List<String> columns(String value) {

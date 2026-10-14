@@ -56,34 +56,26 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
-    void acceptsNumericBooleanGeneratedExpressionWithoutAcceptingDrift() throws Exception {
-        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE(tool_profile"
-                + " = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
-        String numeric =
-                "coalesce(`tool_profile` = 'csi-files-retirement/1' or `runtime_request_key`"
-                        + " is not null,0)";
-        try (var data = fixture(false); var statement = data.createStatement()) {
-            statement.execute("CREATE TABLE catalog_fixture.columns (column_name VARCHAR,"
-                    + " generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
-            try (var insert = data.prepareStatement(
-                    "INSERT INTO catalog_fixture.columns VALUES ('csi_guard', ?, 'PUBLIC', 'MA_SESSION')")) {
-                insert.setString(1, numeric);
-                insert.executeUpdate();
-            }
-            Connection connection = mariaDb(data, "MariaDB", 1, 1);
+    void acceptsNumericGeneratedBooleansWithoutAcceptingExpressionDrift() throws Exception {
+        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
+                + "tool_profile = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
+        String numeric = "coalesce(`tool_profile` = 'csi-files-retirement/1'"
+                + " or `runtime_request_key` is not null,0)";
+        try (var data = fixture(false); var update = data.prepareStatement(
+                "UPDATE catalog_fixture.columns SET generation_expression=?")) {
+            Connection connection = mariaDb(data, "MySQL", 1, 1);
+            update.setString(1, numeric);
+            update.executeUpdate();
             ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body);
-            try (var update = data.prepareStatement(
-                    "UPDATE catalog_fixture.columns SET generation_expression=?")) {
-                for (String drift : new String[] {
-                        numeric.replace("'csi-files-retirement/1'", "'other/1'"),
-                        numeric.replace("is not null", "is null"),
-                        numeric.replace(",0)", ",1)")}) {
-                    update.setString(1, drift);
-                    update.executeUpdate();
-                    assertThrows(SQLException.class,
-                            () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body),
-                            drift);
-                }
+            for (String changed : new String[] {
+                    numeric.replace(",0)", ",1)"),
+                    numeric.replace(",0)", ",'FALSE')"),
+                    numeric.replace(" = ", " <> ")}) {
+                update.setString(1, changed);
+                update.executeUpdate();
+                assertThrows(SQLException.class,
+                        () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body),
+                        changed);
             }
         }
     }
@@ -136,6 +128,10 @@ class ManagedSchemaCatalogTest {
         Connection data = DriverManager.getConnection("jdbc:h2:mem:catalog-" + UUID.randomUUID());
         try (var statement = data.createStatement()) {
             statement.execute("CREATE SCHEMA catalog_fixture");
+            statement.execute("CREATE TABLE catalog_fixture.columns"
+                    + " (column_name VARCHAR, generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
+            statement.execute("INSERT INTO catalog_fixture.columns"
+                    + " VALUES ('csi_guard',NULL,'PUBLIC','MA_SESSION')");
             statement.execute("CREATE TABLE catalog_fixture.table_constraints"
                     + " (constraint_name VARCHAR, constraint_schema VARCHAR, table_schema VARCHAR,"
                     + " table_name VARCHAR, constraint_type VARCHAR"
