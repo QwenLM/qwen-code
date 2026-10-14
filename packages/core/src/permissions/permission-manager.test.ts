@@ -3465,19 +3465,24 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     'printf X >&p.txt',
     'printf X <>p.txt',
     'echo $(printf X > p.txt)',
+    'echo `echo a #b` > p.txt',
+    'echo ${x:-a #b} > p.txt',
   ])('denies %s under Edit(p.txt)', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Edit(p.txt)'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
     expect(pm.findMatchingDenyRule(sh(command, '/repo'))).toBe('Edit(p.txt)');
   });
 
-  it.each(['cat 0<.env', 'exec 3<.env', 'diff a.txt <(cat .env)'])(
-    'denies %s under Read(.env)',
-    async (command) => {
-      const pm = repoPm({ permissionsDeny: ['Read(.env)'] });
-      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
-    },
-  );
+  it.each([
+    'cat 0<.env',
+    'exec 3<.env',
+    'diff a.txt <(cat .env)',
+    'cat .env&>out.txt',
+    '(cat .env)>out.txt',
+  ])('denies %s under Read(.env)', async (command) => {
+    const pm = repoPm({ permissionsDeny: ['Read(.env)'] });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
 
   it.each([
     'ls -la 2>&1',
@@ -3485,6 +3490,8 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     'echo hi > /dev/null',
     'echo hi # > p.txt',
     "echo '>' p.txt",
+    'echo $((a>b))',
+    'echo $(( a > b ))',
   ])('does not see a write in %s', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Write'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('allow');

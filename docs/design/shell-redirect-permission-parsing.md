@@ -13,7 +13,7 @@ Implemented. This is the first of three changes for #10196; the other two resolv
 - Writes spelled `3>file`, `>|file`, `<>file`, `>&file`, `exec 3>file`, or with the operator glued to the previous word (`printf X>file`) produced no write, so a `Bash(...)` allow rule ran them past an `Edit(...)` or `Write(...)` deny.
 - A quoted or escaped `>` counted as a redirection. `grep ">" .env` became a write to `.env` instead of a read, so a `Read(.env)` deny did not apply while a bare `Write` deny refused the command.
 - fd plumbing counted as a file: `2>&1` became a write to a file named `&1`, and `> /dev/null` a write to `/dev/null`.
-- `#` comments and the comparisons in `[[ a > b ]]` and `(( a > b ))` produced writes.
+- `#` comments, the comparisons in `[[ a > b ]]`, `(( a > b ))` and `$(( a > b ))`, and a `>` inside `${…}` produced writes.
 - The compound-command splitter read `>|` as a pipe and cut `printf X >| p.txt` into `printf X >` and `p.txt`.
 - Prefix commands (`sudo`, `env`, `timeout`, …) joined their words back with spaces, so `sudo cat "my notes.txt"` read two files, and `sudo bash -c '…'` was not unwrapped.
 
@@ -34,11 +34,11 @@ Implemented. This is the first of three changes for #10196; the other two resolv
 
 ### Tokenizer
 
-Each character of a word records how it was written: unquoted, inside double quotes, or literal (single quotes or a backslash escape). The text after quote removal is the same as before, so every command handler sees the same words. An unquoted `#` at the start of a word ends the command; inside a word, as in `""#x`, it is text.
+Each character of a word records how it was written: unquoted, inside double quotes, or literal (single quotes or a backslash escape). The text after quote removal is the same as before, so every command handler sees the same words. An unquoted `#` at the start of a word ends the command; inside a word, as in `""#x`, it is text. A `${…}` or `$((…))` expansion stays in one word, as in bash: its spaces, `<`, `>` and `#` belong to the expansion, not to the command. A `#` inside backquotes comments out only the inner command, so it does not end this one.
 
 ### Redirections
 
-A word is split at its unquoted `<` and `>` characters, except `<(` and `>(`, which start a process substitution. A run of digits or `&` before the first operator is its fd. Each piece is matched against one pattern covering `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `<<`, `<<-` and `<<<`. When the target is not glued to the operator, the next word is the target.
+A word is split at its unquoted `<` and `>` characters, except `<(` and `>(`, which start a process substitution. A run of digits or `&` before the first operator is its fd. Each piece is matched against one pattern covering `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `<<`, `<<-` and `<<<`. When the target is not glued to the operator, the next word is the target. Shell syntax glued to the end of the word in front is dropped, as for any word, so `cat .env&>f` and `(cat .env)>f` read `.env`.
 
 - `<` and `<&` read, `<>` reads and writes, the others write.
 - `>&N`, `>&-` and `N<&M-` duplicate or close fds and touch no file.
@@ -64,7 +64,7 @@ The words after a prefix command are quoted again before they are parsed a secon
 
 ## Validation
 
-- Unit tests for each redirection form, the non-file targets, quoting, comments, `[[ ]]`, `(( ))`, prefix commands and the `>|` split.
+- Unit tests for each redirection form, the non-file targets, quoting, comments, `[[ ]]`, `(( ))`, `$(( ))`, `${…}`, prefix commands and the `>|` split.
 - Permission-level tests: a `Bash(*)` allow rule does not outrank `Edit(p.txt)` or `Read(.env)` denies through these forms, and fd plumbing is not a write under a bare `Write` deny.
 - A comparison of 1,260 command and rule pairs against the previous extractor. No verdict became more permissive except the spurious writes listed under Problem.
 - The flow in `.qwen/e2e-tests/2026-10-13-shell-redirect-permissions.md`, run headless against the released `qwen` 0.24.6 and this change. All eight cases flipped as expected: the six redirections that read `.env` or wrote `protected.txt` before are now denied, and the two fd-plumbing commands a bare `Write` deny refused before now run.

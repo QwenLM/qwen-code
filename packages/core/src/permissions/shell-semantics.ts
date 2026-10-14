@@ -85,7 +85,9 @@ export interface ShellOperation {
  * How one character of a word was written. The shell expands `$` and
  * backticks unless the character is `literal` (single quotes or a backslash
  * escape), and reads `<` and `>` as syntax only when the character is
- * unquoted (`none`).
+ * unquoted (`none`). The inside of a `${…}` or `$((…))` expansion counts as
+ * `double`: its `$` still expands, but its spaces, `<`, `>` and `#` belong
+ * to the expansion, not to the command.
  */
 type CharQuoting = 'none' | 'double' | 'literal';
 
@@ -98,7 +100,8 @@ interface ShellWord {
 /**
  * Tokenize a shell command string, respecting single/double quotes and
  * backslash escapes, splitting on unquoted whitespace. A `#` that starts a
- * word begins a comment.
+ * word begins a comment. A `${…}` or `$((…))` expansion stays in one word,
+ * as in bash, and its `<`, `>` and `#` are not syntax.
  *
  * The input should be a single simple command (already split from compound
  * commands via `splitCompoundCommand`).
@@ -112,6 +115,11 @@ function tokenizeCommand(command: string): ShellWord[] {
   let escaped = false;
   // Set once anything, even an empty `""`, has been written for this word.
   let wordStarted = false;
+  // What closes each open expansion, innermost last: `}` for `${`, `))` for
+  // `$((`, and `)` for a parenthesis inside arithmetic.
+  const closers: string[] = [];
+  // A `#` inside `` `…` `` comments out the inner command only.
+  let inBackquote = false;
 
   const flush = (): void => {
     const word = toShellWord(text, quoting);
@@ -125,6 +133,8 @@ function tokenizeCommand(command: string): ShellWord[] {
     for (let k = 0; k < chars.length; k++) quoting.push(how);
     wordStarted = true;
   };
+  // The delimiters of an expansion are syntax unless it is nested in another.
+  const outside = (): CharQuoting => (closers.length > 0 ? 'double' : 'none');
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -149,12 +159,39 @@ function tokenizeCommand(command: string): ShellWord[] {
       continue;
     }
     if (!inSingle && !inDouble) {
+      const opener = command.startsWith('$((', i)
+        ? '$(('
+        : command.startsWith('${', i)
+          ? '${'
+          : undefined;
+      if (opener) {
+        append(opener, outside());
+        closers.push(opener === '${' ? '}' : '))');
+        i += opener.length - 1;
+        continue;
+      }
+      const closer = closers[closers.length - 1];
+      if (closer !== undefined) {
+        if (ch === closer[0]) {
+          closers.pop();
+          // `))` ends arithmetic. A lone `)` means the `$((` opened a
+          // substitution of a subshell, `$( (…) )`, which ends here too.
+          const end = closer === '))' && command[i + 1] === ')' ? '))' : ch;
+          append(end, outside());
+          i += end.length - 1;
+          continue;
+        }
+        if (ch === '(' && closer !== '}') closers.push(')');
+        append(ch, 'double');
+        continue;
+      }
       if (ch === ' ' || ch === '\t') {
         flush();
         continue;
       }
+      if (ch === '`') inBackquote = !inBackquote;
       // Only a `#` that starts a word begins a comment: `""#x` is one word.
-      if (ch === '#' && !wordStarted) break;
+      if (ch === '#' && !wordStarted && !inBackquote) break;
     }
     append(ch, inSingle ? 'literal' : inDouble ? 'double' : 'none');
   }
@@ -311,6 +348,8 @@ const FD_DUP_TARGET_RE = /^(?:\d+-?|-)$/;
  * Split a word at its unquoted `<` / `>` characters. Returns the plain word
  * in front of the first redirection, if any, and each redirection's text.
  * A run of digits (or `&`) directly before the first operator is its fd.
+ * Shell syntax glued to the end of the plain word is dropped, as for any
+ * word: the `&` of `.env&>f` and the `)` of `(cat .env)>f`.
  */
 function splitWordRedirects(
   word: ShellWord,
@@ -340,7 +379,11 @@ function splitWordRedirects(
   const redirects = starts.map((start, idx) =>
     text.slice(idx === 0 && leadIsFd ? 0 : start, starts[idx + 1]),
   );
-  return leadIsFd ? { redirects } : { before: lead, redirects };
+  if (leadIsFd) return { redirects };
+  const { start, end } = shellSyntaxBounds(lead, quoting.slice(0, starts[0]));
+  return start < end
+    ? { before: lead.slice(start, end), redirects }
+    : { redirects };
 }
 
 function redirectOps(

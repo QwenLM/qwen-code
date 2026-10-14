@@ -636,6 +636,17 @@ describe('redirect grammar', () => {
     ['redirects glued to a word', 'printf X>p.txt', [write(`${CWD}/p.txt`)]],
     ['`>&` with a file name', 'printf X >&out.txt', [write(`${CWD}/out.txt`)]],
     ['`&>` with a file name', 'printf X &>out.txt', [write(`${CWD}/out.txt`)]],
+    [
+      '`&>` glued to the word before it',
+      'cat .env&>f',
+      [read(`${CWD}/.env`), write(`${CWD}/f`)],
+    ],
+    ['`&>>` glued to the word before it', 'printf X&>>f', [write(`${CWD}/f`)]],
+    [
+      'a subshell closing right before a redirect',
+      '(cat .env)>f',
+      [read(`${CWD}/.env`), write(`${CWD}/f`)],
+    ],
     ['`exec` redirects', 'exec 3>p.txt', [write(`${CWD}/p.txt`)]],
     ['no write for fd duplication', 'ls -la 2>&1', [dir(CWD)]],
     ['no write for `>&2`', 'printf X >&2', []],
@@ -676,6 +687,19 @@ describe('redirect grammar', () => {
       [write(`${CWD}/f`)],
     ],
     [
+      'a `#` inside backquotes is not a comment',
+      'echo `echo a #b` > f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'a `#` inside `${…}` is not a comment',
+      'echo ${x:-a #b} > f',
+      [write(`${CWD}/f`)],
+    ],
+    ['a comment after backquotes', 'echo `echo a` # > f', []],
+    ['a comment after `${…}`', 'echo ${x} # > f', []],
+    ['no write for a `>` inside `${…}`', 'echo ${x:- > b }', []],
+    [
       '`[[` as an argument hides no redirect',
       'echo [[ > f',
       [write(`${CWD}/f`)],
@@ -687,6 +711,19 @@ describe('redirect grammar', () => {
       'arithmetic keeps its `>`',
       'echo $(( 1 > 0 )) > out.txt',
       [write(`${CWD}/out.txt`)],
+    ],
+    ['no write for a comparison in `$((…))`', 'echo $((a>b))', []],
+    ['no write for a spaced comparison in `$((…))`', 'echo $(( a > b ))', []],
+    ['arithmetic ends at its `))`', 'echo $((a>b))>f', [write(`${CWD}/f`)]],
+    [
+      'arithmetic nests parentheses',
+      'echo $(( (a) > b )) > f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      '`$((` without `))` is a substitution, not arithmetic',
+      'echo $((true) ) > f',
+      [write(`${CWD}/f`)],
     ],
   ])('%s', (_title, command, expected) => {
     expect(ops(command)).toEqual(expected);
