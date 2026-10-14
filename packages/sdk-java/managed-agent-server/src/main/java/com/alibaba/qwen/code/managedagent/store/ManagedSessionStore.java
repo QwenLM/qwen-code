@@ -2210,17 +2210,6 @@ public class ManagedSessionStore {
     }
 
     private CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
-        // csi_guard is generated from columns fixed when the Session row is
-        // created, so a plain read decides whether this Session can carry CSI
-        // authority at all. Ordinary Sessions stop here, before the
-        // tenant-wide guard rows and the CSI slot/binding range locks: taking
-        // them on every writer path would couple per-turn traffic of
-        // unrelated Sessions again (#13800). A CSI Session still takes them
-        // in placement, publication, Session order.
-        if (jdbc.queryForList("SELECT csi_guard FROM ma_session WHERE tenant_id = ?"
-                + " AND session_id = ? AND csi_guard = TRUE", tenantId, sessionId).isEmpty()) {
-            return null;
-        }
         return jdbc.execute(
                 (org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>)
                         connection -> {
@@ -2241,6 +2230,16 @@ public class ManagedSessionStore {
                                             "CSI mutation requires its original transaction"
                                                     + " connection");
                                 }
+                                return null;
+                            }
+                            // A lock-free read of every CSI marker first: an
+                            // ordinary Session stops here, before the
+                            // tenant-wide guard rows and the slot/binding
+                            // range locks. Taking them on every writer path
+                            // would couple per-turn traffic of unrelated
+                            // Sessions again (#13800). Any marker takes the
+                            // locked path, which re-checks under its locks.
+                            if (!JdbcCsiFilesRetirementGuard.mayCarryCsi(target, tenantId, sessionId)) {
                                 return null;
                             }
                             JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
