@@ -9,6 +9,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { getGlobalNpmRegistryConfig } from './npm-registry-config.js';
 
+const actualExecPath = process.execPath;
+const actualPlatform = process.platform;
+
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
   return { ...actual, homedir: vi.fn(actual.homedir) };
@@ -22,11 +25,16 @@ describe('global npm registry configuration', () => {
       if (/^npm_config_/i.test(key)) vi.stubEnv(key, undefined);
     }
     vi.mocked(os.homedir).mockReturnValue(root);
+    Object.defineProperty(process, 'execPath', {
+      value: path.join(root, 'runtime', 'bin', 'node'),
+    });
     vi.stubEnv('npm_config_globalconfig', path.join(root, 'global.npmrc'));
   });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+    Object.defineProperty(process, 'execPath', { value: actualExecPath });
+    Object.defineProperty(process, 'platform', { value: actualPlatform });
     fs.rmSync(root, { recursive: true, force: true });
   });
   const lookup = () => getGlobalNpmRegistryConfig('@qwen-code/qwen-code');
@@ -36,6 +44,88 @@ describe('global npm registry configuration', () => {
   function global(contents: string) {
     fs.writeFileSync(path.join(root, 'global.npmrc'), contents);
   }
+
+  it.each(['linux', 'win32'])(
+    'reads the adjacent bundled npm builtin defaults on %s',
+    (platform) => {
+      const runtime = path.join(root, 'runtime');
+      Object.defineProperty(process, 'platform', { value: platform });
+      Object.defineProperty(process, 'execPath', {
+        value:
+          platform === 'win32'
+            ? path.join(runtime, 'node.exe')
+            : path.join(runtime, 'bin', 'node'),
+      });
+      const npm = path.join(
+        runtime,
+        ...(platform === 'win32' ? [] : ['lib']),
+        'node_modules',
+        'npm',
+      );
+      fs.mkdirSync(npm, { recursive: true });
+      const builtin = path.join(npm, 'npmrc');
+      fs.writeFileSync(
+        builtin,
+        'registry=https://builtin.test/\n//builtin.test/:_authToken=synthetic-token',
+      );
+      expect(lookup()).toEqual({
+        registry: new URL('https://builtin.test/'),
+        authorization: 'Bearer synthetic-token',
+      });
+
+      vi.stubEnv('npm_config_globalconfig', undefined);
+      const prefix = path.join(root, 'distribution');
+      fs.mkdirSync(path.join(prefix, 'etc'), { recursive: true });
+      fs.writeFileSync(
+        path.join(prefix, 'etc', 'npmrc'),
+        'registry=https://prefix.test/',
+      );
+      fs.writeFileSync(builtin, `prefix=${prefix}`);
+      expect(lookup().registry.href).toBe('https://prefix.test/');
+
+      const userconfig = path.join(root, 'distribution-user.npmrc');
+      fs.writeFileSync(userconfig, 'registry=https://builtin-user.test/');
+      fs.writeFileSync(builtin, `userconfig=${userconfig}`);
+      expect(lookup().registry.href).toBe('https://builtin-user.test/');
+      const explicit = path.join(root, 'explicit-user.npmrc');
+      fs.writeFileSync(explicit, 'registry=https://env-user.test/');
+      vi.stubEnv('npm_config_userconfig', explicit);
+      expect(lookup().registry.href).toBe('https://env-user.test/');
+      vi.stubEnv('npm_config_userconfig', undefined);
+
+      fs.writeFileSync(
+        path.join(root, 'global.npmrc'),
+        'registry=https://builtin-global.test/',
+      );
+      fs.writeFileSync(
+        builtin,
+        `globalconfig=${path.join(root, 'global.npmrc')}`,
+      );
+      expect(lookup().registry.href).toBe('https://builtin-global.test/');
+      user('registry=https://user.test/');
+      expect(lookup().registry.href).toBe('https://user.test/');
+      vi.stubEnv('npm_config_registry', 'https://env.test/');
+      expect(lookup().registry.href).toBe('https://env.test/');
+    },
+  );
+
+  it('keeps builtin scoped registry and auth below matching global, user and env keys', () => {
+    const npm = path.join(root, 'runtime', 'lib', 'node_modules', 'npm');
+    fs.mkdirSync(npm, { recursive: true });
+    fs.writeFileSync(
+      path.join(npm, 'npmrc'),
+      '@qwen-code:registry=https://scope.test/\n//scope.test/:_authToken=builtin',
+    );
+    global('registry=https://global.test/\n//scope.test/:_authToken=global');
+    expect(lookup()).toEqual({
+      registry: new URL('https://scope.test/'),
+      authorization: 'Bearer global',
+    });
+    user('//scope.test/:_authToken=user');
+    expect(lookup().authorization).toBe('Bearer user');
+    vi.stubEnv('npm_config_//scope.test/:_authToken', 'env');
+    expect(lookup().authorization).toBe('Bearer env');
+  });
 
   it('merges global, user and env per key before selecting scoped registry', () => {
     global(

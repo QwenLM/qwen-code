@@ -434,12 +434,17 @@ function spawnAndCapture(
   args: string[],
   timeoutMs: number,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const env = { ...process.env };
+  // Probe the shipped interpreter and CLI without inherited preload hooks.
+  for (const key of Object.keys(env)) {
+    if (/^(NODE_OPTIONS|BUN_OPTIONS)$/i.test(key)) delete env[key];
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = execFile(
       command,
       args,
-      { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
+      { env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
       (err, out, stderr) => {
         if (settled) return;
         settled = true;
@@ -459,10 +464,10 @@ function spawnAndCapture(
         resolve({ exitCode: 0, stdout: out || '', stderr: stderr || '' });
       },
     );
-    child.on('error', (e) => {
+    child.on('error', () => {
       if (settled) return;
       settled = true;
-      reject(e);
+      reject(new Error('Smoke test failed: unable to start new binary'));
     });
   });
 }
@@ -525,22 +530,19 @@ async function smokeTest(
     );
   }
 
-  const { exitCode, stdout, stderr } = await spawnAndCapture(
+  const { exitCode, stdout } = await spawnAndCapture(
     interpreter,
     [cliBin, '--version'],
     10_000,
   );
   if (exitCode !== 0) {
-    const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
     throw new Error(
-      `Smoke test failed: new binary exited with code ${exitCode}${detail}`,
+      `Smoke test failed: new binary exited with code ${exitCode}`,
     );
   }
   const version = stdout.trim();
   if (!SEMVER_RE.test(version)) {
-    throw new Error(
-      `Smoke test failed: unexpected version output "${version}"`,
-    );
+    throw new Error('Smoke test failed: unexpected version output');
   }
   debugLogger.info(`Smoke test passed: ${version}`);
 }

@@ -454,6 +454,8 @@ describe('standalone-update', () => {
         target?: string;
         interpreterIdentity?: string;
         interpreterPath?: string;
+        interpreterExitCode?: number;
+        cliSource?: string;
       } = {},
     ) {
       const fixtureTarget = options.target ?? 'linux-x64';
@@ -490,7 +492,7 @@ describe('standalone-update', () => {
             'bin',
             options.runtime ?? 'node',
           ),
-          `#!/bin/sh\nif [ "$1" = "-e" ]; then\n  printf '%s\\n' '${options.interpreterIdentity ?? JSON.stringify({ runtime: options.runtime ?? 'node', platform: fixtureTarget.split('-')[0], arch: fixtureTarget.split('-')[1] })}'\nelse\n  printf "1.2.3\\n"\nfi\n`,
+          `#!/bin/sh\nif [ "$1" = "-e" ]; then\n  printf '%s\\n' '${options.interpreterIdentity ?? JSON.stringify({ runtime: options.runtime ?? 'node', platform: fixtureTarget.split('-')[0], arch: fixtureTarget.split('-')[1] })}'\n  exit ${options.interpreterExitCode ?? 0}\nelse\n  printf "1.2.3\\n"\nfi\n`,
           { mode: 0o755 },
         );
         fs.writeFileSync(
@@ -521,7 +523,7 @@ describe('standalone-update', () => {
             'lib',
             runtime === 'bun' ? 'cli-entry.js' : 'cli.js',
           ),
-          'console.log("1.2.3");',
+          options.cliSource ?? 'console.log("1.2.3");',
         );
       }
       const archivePath = path.join(tempDir, 'release.tar.gz');
@@ -542,6 +544,58 @@ describe('standalone-update', () => {
         return new Response('', { status: 404 });
       });
     }
+
+    it.each([
+      ['direct', 'deno'],
+      ['direct', null],
+      ['prepared', 'deno'],
+      ['prepared', null],
+    ])(
+      'rejects an unknown installed runtime before download (%s, %s)',
+      async (mode, runtime) => {
+        originalManifest = JSON.stringify({ target: 'linux-x64', runtime });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          originalManifest,
+        );
+        fs.writeFileSync(path.join(standaloneDir, 'sentinel'), 'live');
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'backup');
+        await expect(
+          mode === 'prepared'
+            ? prepareStandaloneUpdate(standaloneDir, '1.2.3')
+            : performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow('Unknown standalone runtime');
+        expect(mockFetch).not.toHaveBeenCalled();
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(originalManifest);
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'sentinel'), 'utf8'),
+        ).toBe('live');
+        expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+          'backup',
+        );
+        expect(fs.readdirSync(tempDir).sort()).toEqual([
+          'installed',
+          'installed.old',
+        ]);
+      },
+    );
+
+    it('retains the legacy Node fallback when the installed runtime is absent', async () => {
+      await serveArchive();
+      const pending = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
+      try {
+        expect(mockFetch.mock.calls[0][0]).toContain(
+          '/qwen-code-linux-x64.tar.gz',
+        );
+        expectInstallationPreserved();
+      } finally {
+        pending.cleanup();
+      }
+    });
 
     it.skipIf(process.platform === 'win32')(
       'keeps the Bun preview runtime through activation and rollback',
@@ -569,6 +623,180 @@ describe('standalone-update', () => {
         expect(
           fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
         ).toBe(oldManifest);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each(['front', 'exit'])(
+      'updates with a real interpreter despite inherited %s preload output',
+      async (mode) => {
+        const runtime = process.versions['bun'] ? 'bun' : 'node';
+        const target = `${os.platform()}-${os.arch()}`;
+        const preload = path.join(tempDir, 'tracer.cjs');
+        fs.writeFileSync(
+          preload,
+          mode === 'front'
+            ? 'console.log("synthetic-secret-front");'
+            : 'process.on("exit", () => console.log("synthetic-secret-exit"));',
+        );
+        vi.stubEnv('NODE_OPTIONS', `--require ${preload}`);
+        vi.stubEnv('BUN_OPTIONS', `--preload ${preload}`);
+        vi.stubEnv('QWEN_UPDATE_TEST_ENV', 'preserved');
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
+        const installedManifest = JSON.stringify({ target, runtime });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          installedManifest,
+        );
+        await serveArchive({
+          runnable: true,
+          runtime,
+          target,
+          interpreterPath: process.execPath,
+          cliSource:
+            'if (process.env.QWEN_UPDATE_TEST_ENV !== "preserved") process.exit(9); console.log("1.2.3");',
+        });
+        expect(await performStandaloneUpdate(standaloneDir, '1.2.3')).toBe(
+          'done',
+        );
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ).version,
+        ).toBe('1.2.3');
+        expect(process.env['NODE_OPTIONS']).toContain(preload);
+        expect(process.env['BUN_OPTIONS']).toContain(preload);
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .filter(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
+        ).toEqual([]);
+        expect(rollbackStandaloneUpdate(standaloneDir)).toEqual({ ok: true });
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(installedManifest);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([
+      [
+        'malformed',
+        'synthetic-secret-not-json',
+        0,
+        'invalid interpreter identity',
+      ],
+      [
+        'multiple records',
+        '{"runtime":"node","platform":"linux","arch":"x64"}\n{"runtime":"bun","platform":"linux","arch":"x64"}',
+        0,
+        'invalid interpreter identity',
+      ],
+      [
+        'nonzero exit',
+        '{"runtime":"node","platform":"linux","arch":"x64"}',
+        7,
+        'interpreter identity does not match',
+      ],
+    ])(
+      'rejects %s identity without exposing output or changing the installation',
+      async (_name, identity, exitCode, message) => {
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'backup');
+        await serveArchive({
+          runnable: true,
+          interpreterIdentity: String(identity),
+          interpreterExitCode: Number(exitCode),
+        });
+        const error = await performStandaloneUpdate(
+          standaloneDir,
+          '1.2.3',
+        ).catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(String(error)).toContain(message);
+        expect(String(error)).not.toContain('synthetic-secret');
+        expect(String(error)).not.toContain(String(identity));
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(originalManifest);
+        expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+          'backup',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+          false,
+        );
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .filter(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
+        ).toEqual([]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([
+      [
+        'version output',
+        'console.log("synthetic-secret-version");',
+        'unexpected version output',
+      ],
+      [
+        'CLI exit',
+        'console.error("synthetic-secret-stderr"); process.exit(7);',
+        'new binary exited with code 7',
+      ],
+    ])(
+      'redacts real interpreter %s errors and preserves the rollback installation',
+      async (_name, cliSource, message) => {
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
+        const runtime = process.versions['bun'] ? 'bun' : 'node';
+        const target = `${os.platform()}-${os.arch()}`;
+        originalManifest = JSON.stringify({ target, runtime });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          originalManifest,
+        );
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'backup');
+        await serveArchive({
+          runnable: true,
+          target,
+          runtime,
+          interpreterPath: process.execPath,
+          cliSource,
+        });
+        const error = await performStandaloneUpdate(
+          standaloneDir,
+          '1.2.3',
+        ).catch((error: unknown) => error);
+        expect(String(error)).toContain(message);
+        expect(String(error)).not.toContain('synthetic-secret');
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(originalManifest);
+        expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+          'backup',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+          false,
+        );
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .filter(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
+        ).toEqual([]);
       },
     );
 

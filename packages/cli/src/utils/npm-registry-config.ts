@@ -71,8 +71,21 @@ export function getGlobalNpmRegistryConfig(packageName: string): {
   const home = os.homedir();
   const configPath = (value: string) =>
     path.resolve(value.replace(/^~(?=\/|$)/, home));
+  // Use only the npm shipped beside this interpreter, as the old npm view did.
+  const builtin = readNpmrc(
+    path.join(
+      path.dirname(process.execPath),
+      ...(process.platform === 'win32'
+        ? ['node_modules', 'npm', 'npmrc']
+        : ['..', 'lib', 'node_modules', 'npm', 'npmrc']),
+    ),
+  );
   const user = readNpmrc(
-    configPath(env.get('userconfig') ?? path.join(home, '.npmrc')),
+    configPath(
+      env.get('userconfig') ??
+        builtin.get('userconfig') ??
+        path.join(home, '.npmrc'),
+    ),
   );
   let defaultPrefix = path.dirname(process.execPath);
   if (process.platform !== 'win32') {
@@ -82,16 +95,21 @@ export function getGlobalNpmRegistryConfig(packageName: string): {
     }
   }
   if (process.env['PREFIX']) defaultPrefix = process.env['PREFIX'];
-  const prefix = env.get('prefix') ?? user.get('prefix') ?? defaultPrefix;
+  const prefix =
+    env.get('prefix') ??
+    user.get('prefix') ??
+    builtin.get('prefix') ??
+    defaultPrefix;
   const global = readNpmrc(
     configPath(
       env.get('globalconfig') ??
         user.get('globalconfig') ??
+        builtin.get('globalconfig') ??
         path.join(prefix, 'etc', 'npmrc'),
     ),
   );
   // Match the previous `npm view --global`: project .npmrc is not loaded.
-  const config = new Map([...global, ...user, ...env]);
+  const config = new Map([...builtin, ...global, ...user, ...env]);
   const scope = packageName.startsWith('@')
     ? packageName.split('/')[0]
     : undefined;
