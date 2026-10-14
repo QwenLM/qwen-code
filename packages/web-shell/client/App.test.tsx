@@ -46793,6 +46793,17 @@ describe('App view navigation shortcuts (#13175)', () => {
   });
 
   it('opens the split view with Ctrl+Backslash', async () => {
+    // Split view needs desktop-scale room: the hotkey mirrors the
+    // sidebar's isLargeScreen gate, so match the large-screen queries.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
     const { container } = renderApp();
     await flush();
     await act(async () => {
@@ -46808,6 +46819,37 @@ describe('App view navigation shortcuts (#13175)', () => {
     expect(
       container.querySelector('[data-testid="split-view-page"]'),
     ).not.toBeNull();
+  });
+
+  it('does not open the split view on a narrow viewport', async () => {
+    // No min-width query matches: the sidebar withholds its split
+    // button, and the hotkey must honor the same gate.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      pressViewShortcut({
+        key: '\\',
+        code: 'Backslash',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    // Narrow viewports deliberately do not offer the split layout, so
+    // the shortcut must not open it either.
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
   });
 
   it('matches the physical key, not the produced character (RU layout)', async () => {
@@ -46877,6 +46919,72 @@ describe('App view navigation shortcuts (#13175)', () => {
     } finally {
       dialog.remove();
     }
+  });
+
+  it('does not open views while the artifact panel is fullscreen', async () => {
+    // Floating variant: below the dock breakpoint the panel opens in
+    // a drawer that covers the chat while fullscreen.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-portal-root] aside[aria-label="Right panel"] ' +
+            'button[aria-label="Fullscreen"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      pressViewShortcut({
+        key: 'O',
+        code: 'KeyO',
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      pressViewShortcut({
+        key: '\\',
+        code: 'Backslash',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    // A panel rendered under the covering surface is not open.
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    // The swallowed keystrokes leave the fullscreen state untouched.
+    expect(
+      document
+        .querySelector(
+          '[data-web-shell-portal-root] [data-slot="drawer-content"]',
+        )
+        ?.className,
+    ).toContain('w-full');
   });
 
   it('ignores alt-combos, unmodified presses, and key auto-repeat', async () => {

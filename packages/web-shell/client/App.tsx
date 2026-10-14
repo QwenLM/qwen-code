@@ -18687,6 +18687,10 @@ export function App({
       if (e.repeat || e.isComposing) return;
       const mod = e.metaKey || e.ctrlKey;
       if (!mod || e.altKey) return;
+      // A fullscreen artifact panel covers the viewport and a host-driven
+      // interaction block withholds the shell from input; the host block
+      // has no DOM presence for the query below to find, so gate on state.
+      if (artifactPanelFullscreen || externalInteractionBlockCount > 0) return;
       if (isWebTerminalTarget(e)) return;
       // Keep Esc dialog priority: skip while any dialog is open.
       if (document.querySelector('[role=dialog]')) return;
@@ -18694,7 +18698,9 @@ export function App({
         e.preventDefault();
         e.stopPropagation();
         shellApi.openSessionOverview();
-      } else if (!e.shiftKey && e.code === 'Backslash') {
+      } else if (!e.shiftKey && e.code === 'Backslash' && isLargeScreen) {
+        // The sidebar hides its split button below the large-screen
+        // breakpoint; the shortcut must not open what the UI withholds.
         e.preventDefault();
         e.stopPropagation();
         shellApi.openSplitView();
@@ -18702,7 +18708,12 @@ export function App({
     };
     window.addEventListener('keydown', onViewShortcut, true);
     return () => window.removeEventListener('keydown', onViewShortcut, true);
-  }, [shellApi]);
+  }, [
+    artifactPanelFullscreen,
+    externalInteractionBlockCount,
+    isLargeScreen,
+    shellApi,
+  ]);
 
   const resetEscapeState = useCallback(() => {
     escArmedActionRef.current = null;
