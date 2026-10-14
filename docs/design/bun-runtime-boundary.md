@@ -167,3 +167,30 @@ Bun 1.3.14 pin is verified by the packaging acceptance, not here.
 - `mem0-settings.ts` identity check couples `command === process.execPath`;
   migrate it together with its spawn site in S3 so the identity cannot drift
   from the launcher.
+
+## Standalone update regression
+
+After building, `npm run test:standalone:runtimes` loads the normal CLI build
+under Node 24.19.0 and Bun 1.3.14. Set `PINNED_NODE` and `PINNED_BUN` to the
+respective executable paths if they are not the current Node and PATH Bun.
+The existing script-test CI runs both hosts with both payload interpreters over local HTTPS
+with certificate verification enabled. The synthetic unsigned archives exercise
+checksum verification, identity/version rejection, activation and rollback;
+`.sig` 404 is checksum-only coverage, not production signature validation.
+
+Both smoke processes use a single private empty directory, removed in `finally`,
+to avoid executing project or archive `bunfig.toml` preloads. Smoke environment
+copies remove NODE_OPTIONS/BUN_OPTIONS while retaining other variables. Installed
+manifest null, scalars, arrays and invalid runtime declarations are rejected
+before download or lock allocation; an object without runtime retains the legacy
+Node fallback. Allocation assertions require a successful positive control; on
+Bun 1.3.14 the builtin binding observer is unavailable, so it checks directory
+cleanup without claiming zero allocations. This entry bypasses Vitest's Bun
+loader/coverage limitations and does not change their recorded failures or cover
+Windows, production signatures, or the remaining migration acceptance gates.
+
+The CI mode (`test:standalone:runtimes:ci`) downloads the fixed official Node
+archive with its published SHA256 and the fixed @oven Bun package with its
+published integrity, unless executable paths are supplied. It leaves dependency
+manifests and locks untouched, cleans tools in finally, and reports Windows as
+not covered. The existing `test:scripts` entry invokes it before Vitest.

@@ -110,3 +110,25 @@ Bun 1.3.14 固定版本由打包验收负责，不在此处。
 
 - 未来编译形态下 `ArenaManager` / managed-worker 重启：编译包必须发布 launcher（`QWEN_CODE_CLI`），上列同解释器回退位置需要 launcher 形态的迁移。已列入 S4 跟踪。
 - `mem0-settings.ts` 的身份判断与 `command === process.execPath` 耦合；S3 中与其 spawn 位置一起迁移，避免身份与 launcher 漂移。
+
+## Standalone 更新回归
+
+构建后，`npm run test:standalone:runtimes` 在 Node 24.19.0 与 Bun 1.3.14
+宿主中加载正常 CLI 构建模块。若当前 Node 与 PATH Bun 不是固定版本，可用
+`PINNED_NODE` 和 `PINNED_BUN` 指定解释器路径。现有脚本测试 CI 覆盖双宿主与两种
+payload 解释器，通过开启证书校验的本地 HTTPS 更新。合成 unsigned 归档覆盖
+checksum、身份/版本拒绝、激活和回滚；`.sig` 404 仅属 checksum-only 证据，
+不代表生产签名验证。
+
+两次 smoke 共用一个私有空目录，并在 `finally` 删除，避免执行项目或归档中的
+`bunfig.toml` preload。smoke 环境副本移除 NODE_OPTIONS/BUN_OPTIONS，保留
+其他变量。安装 manifest 为 null、标量、数组或非法 runtime 时，在下载或锁
+分配前拒绝；合法对象缺 runtime 仍保留 legacy Node 回退。分配断言必须有
+成功更新的正对照；Bun 1.3.14 的 builtin 绑定观察不可用，仅检查目录清理，
+不宣称零分配。此入口避开 Vitest 的 Bun loader/coverage 限制，不改变其历史
+失败记录，也不覆盖 Windows、生产签名或其他剩余迁移验收门禁。
+
+CI 模式 `test:standalone:runtimes:ci` 在未提供解释器路径时下载固定官方
+Node 归档（核对发布 SHA256）和固定 @oven Bun 包（核对发布 integrity）。
+不修改依赖 manifest/lock，finally 清理运行时工具，并明确 Windows 未覆盖。
+现有 `test:scripts` 在 Vitest 前执行该入口。

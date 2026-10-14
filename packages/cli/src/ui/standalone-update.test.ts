@@ -31,10 +31,15 @@ vi.mock('../utils/load-undici.js', () => ({
 // Arms rmSync failures for specific paths only; every other call delegates.
 // (The ESM namespace cannot be spied on directly, so this is the seam.)
 const rmSyncFailures = vi.hoisted(() => ({ targets: [] as string[] }));
+const allocations = vi.hoisted(() => ({ prefixes: [] as string[] }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    mkdtempSync: (...args: Parameters<typeof actual.mkdtempSync>) => {
+      allocations.prefixes.push(String(args[0]));
+      return actual.mkdtempSync(...args);
+    },
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       const target = String(args[0]);
       if (rmSyncFailures.targets.includes(target)) {
@@ -581,6 +586,76 @@ describe('standalone-update', () => {
           'installed',
           'installed.old',
         ]);
+      },
+    );
+
+    it.each(['direct', 'prepared'] as const)(
+      'rejects malformed installed manifests before allocations (%s)',
+      async (mode) => {
+        const downloadTmp = path.join(tempDir, 'download-tmp');
+        fs.mkdirSync(downloadTmp);
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) {
+          vi.stubEnv(name, downloadTmp);
+        }
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'backup');
+        for (const raw of [
+          'null',
+          '123',
+          '[]',
+          'true',
+          '"private manifest content"',
+          '{',
+        ]) {
+          fs.writeFileSync(path.join(standaloneDir, 'manifest.json'), raw);
+          const start = allocations.prefixes.length;
+          await expect(
+            mode === 'prepared'
+              ? prepareStandaloneUpdate(standaloneDir, '1.2.3')
+              : performStandaloneUpdate(standaloneDir, '1.2.3'),
+          ).rejects.toThrow('Invalid installed standalone manifest');
+          expect(allocations.prefixes.slice(start)).toEqual([]);
+          expect(mockFetch).not.toHaveBeenCalled();
+          expect(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ).toBe(raw);
+          expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+            'backup',
+          );
+          expect(fs.readdirSync(downloadTmp)).toEqual([]);
+          expect(fs.readdirSync(tempDir).sort()).toEqual([
+            'download-tmp',
+            'installed',
+            'installed.old',
+          ]);
+        }
+        // Positive control for both allocation families on the same observer.
+        await serveArchive();
+        const start = allocations.prefixes.length;
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          originalManifest,
+        );
+        const pending = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
+        try {
+          await expect(pending.activate()).rejects.toThrow(
+            'Smoke test failed:',
+          );
+          expect(
+            allocations.prefixes
+              .slice(start)
+              .some((p) => path.basename(p) === 'qwen-code-update-'),
+          ).toBe(true);
+          expect(
+            allocations.prefixes
+              .slice(start)
+              .some((p) => path.basename(p) === '.qwen-code-update-'),
+          ).toBe(true);
+        } finally {
+          pending.cleanup();
+        }
+        expect(fs.readdirSync(downloadTmp)).toEqual([]);
       },
     );
 

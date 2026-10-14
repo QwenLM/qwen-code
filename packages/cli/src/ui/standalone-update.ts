@@ -433,6 +433,7 @@ function spawnAndCapture(
   command: string,
   args: string[],
   timeoutMs: number,
+  cwd: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const env = { ...process.env };
   // Probe the shipped interpreter and CLI without inherited preload hooks.
@@ -444,7 +445,13 @@ function spawnAndCapture(
     const child = execFile(
       command,
       args,
-      { env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
+      {
+        env,
+        cwd,
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024,
+      },
       (err, out, stderr) => {
         if (settled) return;
         settled = true;
@@ -500,51 +507,60 @@ async function smokeTest(
     throw new Error(`Smoke test failed: CLI entry not found at ${cliBin}`);
   }
 
-  const identity = await spawnAndCapture(
-    interpreter,
-    [
-      '-e',
-      'console.log(JSON.stringify({runtime:process.versions.bun?"bun":"node",platform:process.platform,arch:process.arch}))',
-    ],
-    10_000,
-  );
-  let actual: unknown;
+  // The archive and the user's project may both contain bunfig preloads.
+  // mkdtemp creates an empty private directory (0700), shared by both probes.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-smoke-'));
   try {
-    actual = JSON.parse(identity.stdout);
-  } catch {
-    throw new Error('Smoke test failed: invalid interpreter identity');
-  }
-  const [platform, arch] = target.split('-');
-  if (
-    identity.exitCode !== 0 ||
-    !actual ||
-    typeof actual !== 'object' ||
-    Array.isArray(actual) ||
-    Reflect.get(actual, 'runtime') !== runtime ||
-    Reflect.get(actual, 'platform') !==
-      (platform === 'win' ? 'win32' : platform) ||
-    Reflect.get(actual, 'arch') !== arch
-  ) {
-    throw new Error(
-      'Smoke test failed: interpreter identity does not match the expected runtime and target',
+    const identity = await spawnAndCapture(
+      interpreter,
+      [
+        '-e',
+        'console.log(JSON.stringify({runtime:process.versions.bun?"bun":"node",platform:process.platform,arch:process.arch}))',
+      ],
+      10_000,
+      cwd,
     );
-  }
+    let actual: unknown;
+    try {
+      actual = JSON.parse(identity.stdout);
+    } catch {
+      throw new Error('Smoke test failed: invalid interpreter identity');
+    }
+    const [platform, arch] = target.split('-');
+    if (
+      identity.exitCode !== 0 ||
+      !actual ||
+      typeof actual !== 'object' ||
+      Array.isArray(actual) ||
+      Reflect.get(actual, 'runtime') !== runtime ||
+      Reflect.get(actual, 'platform') !==
+        (platform === 'win' ? 'win32' : platform) ||
+      Reflect.get(actual, 'arch') !== arch
+    ) {
+      throw new Error(
+        'Smoke test failed: interpreter identity does not match the expected runtime and target',
+      );
+    }
 
-  const { exitCode, stdout } = await spawnAndCapture(
-    interpreter,
-    [cliBin, '--version'],
-    10_000,
-  );
-  if (exitCode !== 0) {
-    throw new Error(
-      `Smoke test failed: new binary exited with code ${exitCode}`,
+    const { exitCode, stdout } = await spawnAndCapture(
+      interpreter,
+      [cliBin, '--version'],
+      10_000,
+      cwd,
     );
+    if (exitCode !== 0) {
+      throw new Error(
+        `Smoke test failed: new binary exited with code ${exitCode}`,
+      );
+    }
+    const version = stdout.trim();
+    if (!SEMVER_RE.test(version)) {
+      throw new Error('Smoke test failed: unexpected version output');
+    }
+    debugLogger.info(`Smoke test passed: ${version}`);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
-  const version = stdout.trim();
-  if (!SEMVER_RE.test(version)) {
-    throw new Error('Smoke test failed: unexpected version output');
-  }
-  debugLogger.info(`Smoke test passed: ${version}`);
 }
 
 // Check .deferred marker and .new directory for an in-flight swap from a
@@ -1151,8 +1167,16 @@ function standaloneUpdateTarget(standaloneDir: string): {
   let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
-    const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
-    const manifest = JSON.parse(manifestRaw) as {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    } catch {
+      throw new Error('Invalid installed standalone manifest');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Invalid installed standalone manifest');
+    }
+    const manifest = parsed as {
       target?: string;
       runtime?: unknown;
       version?: string;
