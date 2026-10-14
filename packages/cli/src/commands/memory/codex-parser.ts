@@ -124,6 +124,7 @@ function resolveProject(
     const value = quoted
       ? quoted[1]
       : (boundary < 0 ? rest : rest.slice(0, boundary)).trim();
+    if (!quoted && /\s[\w.-]+\s*[=:]/.test(value)) return ambiguous;
     let suffix = rest.slice(quoted ? quoted[0].length : value.length).trim();
     suffix = suffix.replace(
       /^\(rollout metadata\s+cwd\s*[=:]\s*[^()\r\n]+\)\s*/i,
@@ -171,13 +172,19 @@ function resolveProject(
       /^\((?:source checkout\b|source investigation in\b|investigation began in\b|with\s+(?:[\w-]+\s+)?source\s+at\b)/i,
     ].some((pattern) => pattern.test(suffix));
     const branch = suffix.match(
-      /^on\s+(?:branch\s+)?(?:`[^`]+`|(?!\/|[A-Za-z]:[\\/])[^\s`,;()|]+)/i,
+      /^on\s+(?:branch\s+)?(?:`(?!\/|[A-Za-z]:[\\/])[^`]+`|(?!\/|[A-Za-z]:[\\/])[^\s`,;()|]+)/i,
     );
     if (branch) {
       suffix = suffix.slice(branch[0].length).trim();
     } else if (supplemental) {
       const parenthetical = suffix.startsWith('(');
       const end = suffix.indexOf(parenthetical ? ')' : ';');
+      const annotation = end < 0 ? suffix : suffix.slice(0, end);
+      if (
+        Array.from(annotation.matchAll(/(?:^|[\s=,|`])(?:\/|[A-Za-z]:[\\/])/g))
+          .length > 1
+      )
+        return ambiguous;
       if (parenthetical && end < 0) return unsupported;
       suffix =
         end < 0 ? '' : suffix.slice(end + (parenthetical ? 1 : 0)).trim();

@@ -36,7 +36,14 @@ const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const ledgerSchema = z
   .object({
     version: z.literal(1),
+    candidates: z
+      .record(
+        z.string().regex(/^[a-f0-9]{20}$/),
+        z.string().regex(/^[a-f0-9]{64}$/),
+      )
+      .optional(),
     records: z.record(
+      z.string().regex(/^[a-f0-9]{20}$/),
       z
         .object({
           fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -427,6 +434,63 @@ async function plan(options: CodexImportOptions) {
       destination.docs = await scanDestination(destination);
       destinations.set(entry.targetRoot, destination);
     }
+  }
+  for (const destination of destinations.values()) {
+    const candidates = entries.filter(
+      (entry) => entry.targetRoot === destination.root,
+    );
+    const known = new Map(Object.entries(destination.ledger.candidates ?? {}));
+    for (const [id, record] of Object.entries(destination.ledger.records))
+      known.set(id, record.fingerprint);
+    const identities = new Map<ImportEntry, string>();
+    for (const entry of candidates) {
+      const fingerprint = hash(normalize(entry.content));
+      const match = [...known].find(([, value]) => value === fingerprint);
+      if (match) {
+        identities.set(entry, match[0]);
+        known.delete(match[0]);
+      }
+    }
+    const reserved = new Set(identities.values());
+    for (const entry of candidates) {
+      const identity = identities.get(entry);
+      if (identity) {
+        entry.id = identity;
+      } else if (reserved.has(entry.id)) {
+        entry.id = hash(`${entry.id}\0${normalize(entry.content)}`).slice(
+          0,
+          20,
+        );
+        entry.status = 'conflict';
+        entry.reason =
+          'Source entries moved and this changed entry has no reliable prior identity. Review it in a separate source section.';
+      } else if (
+        destination.ledger.candidates?.[entry.id] &&
+        !destination.ledger.records[entry.id]
+      ) {
+        entry.id = hash(`${entry.id}\0${normalize(entry.content)}`).slice(
+          0,
+          20,
+        );
+      }
+    }
+  }
+  const identityCounts = new Map<string, number>();
+  for (const entry of entries)
+    identityCounts.set(entry.id, (identityCounts.get(entry.id) ?? 0) + 1);
+  for (const entry of entries) {
+    if (identityCounts.get(entry.id)! > 1) {
+      entry.id = hash(
+        `${entry.id}\0${entry.targetRoot}\0${entry.sourceFile}\0${entry.sourceLine}`,
+      ).slice(0, 20);
+      if (entry.status !== 'blocked') {
+        entry.status = 'conflict';
+        entry.reason =
+          'Source movement reused an identity across destinations. Review these entries in separate source sections.';
+      }
+    }
+    if (!entry.targetRoot || entry.status !== 'ready') continue;
+    const destination = destinations.get(entry.targetRoot)!;
     const fingerprint = hash(normalize(entry.content));
     const record = destination.ledger.records[entry.id];
     if (record) {
@@ -477,15 +541,17 @@ async function plan(options: CodexImportOptions) {
       entry.reason =
         'A document with the same title or destination exists with different content.';
     } else if (
-      entries.some(
-        (previous) =>
-          previous !== entry &&
-          previous.targetRoot === entry.targetRoot &&
-          normalize(previous.content) === normalize(entry.content) &&
-          previous.status === 'ready' &&
-          (!options.selectedIds?.length ||
-            options.selectedIds.includes(previous.id)),
-      )
+      entries
+        .slice(0, entries.indexOf(entry))
+        .some(
+          (previous) =>
+            previous !== entry &&
+            previous.targetRoot === entry.targetRoot &&
+            normalize(previous.content) === normalize(entry.content) &&
+            previous.status === 'ready' &&
+            (!options.selectedIds?.length ||
+              options.selectedIds.includes(previous.id)),
+        )
     ) {
       entry.status = 'duplicate';
       entry.reason = 'Duplicate of another candidate in this destination.';
@@ -502,6 +568,11 @@ async function plan(options: CodexImportOptions) {
     })),
     warnings: [
       ...parsed.warnings,
+      ...(entries.some((entry) => entry.scope === 'project')
+        ? [
+            'Project entries use the displayed main project memory scope. Qwen does not automatically recall that scope from a linked worktree.',
+          ]
+        : []),
       ...(input.notes.length
         ? [
             'Supplemental source notes can contain corrections or deletion requests. Review them before selecting entries; applying requires --review-source with this preview sourceDigest. They are not automatically interpreted.',
@@ -595,6 +666,15 @@ export async function runCodexImport(
       );
     for (const entry of ready) {
       const destination = planned.destinations.get(entry.targetRoot!)!;
+      const candidates = (destination.ledger.candidates ??= {});
+      for (const candidate of planned.preview.entries) {
+        if (
+          candidate.targetRoot === destination.root &&
+          candidate.status !== 'conflict' &&
+          candidate.status !== 'blocked'
+        )
+          candidates[candidate.id] ??= hash(normalize(candidate.content));
+      }
       const duplicate = entry.status === 'duplicate';
       const file = duplicate ? null : `codex-${entry.id}.md`;
       const content = renderDocument(entry);

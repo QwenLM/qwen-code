@@ -440,6 +440,47 @@ describe('MemoryImportPreview', () => {
     );
   });
 
+  it('keeps selection aligned when navigation races opening full text', async () => {
+    let release!: () => void;
+    const onOpen = vi.fn<(text: string) => Promise<void>>().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const ui = setup(
+      {
+        ...fixture(),
+        reviewNotes: [],
+        warnings: [],
+        entries: [
+          entry({ id: 'alpha', name: 'Synthetic Alpha' }),
+          entry({ id: 'beta', name: 'Synthetic Beta' }),
+        ],
+      },
+      undefined,
+      onOpen,
+    );
+    await ui.press('\r', '› [x] ready: Synthetic Alpha');
+    await ui.write('o\u001b[B');
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
+    release();
+    await ui.write('');
+    await vi.waitFor(() =>
+      expect(ui.frame()).not.toContain('Opening full text'),
+    );
+    expect(ui.frame()).toContain('› [x] ready: Synthetic Beta');
+    await ui.write(' ');
+    expect(ui.frame()).toContain('› [ ] ready: Synthetic Beta');
+    await ui.write('d');
+    await vi.waitFor(() =>
+      expect(ui.onFinish).toHaveBeenCalledWith({
+        action: 'preview',
+        selectedIds: ['alpha'],
+      }),
+    );
+  });
+
   it('blocks navigation and finish during opening, then recovers from a sanitized failure', async () => {
     let reject!: (error: Error) => void;
     const onOpen = vi.fn<(text: string) => Promise<void>>().mockImplementation(

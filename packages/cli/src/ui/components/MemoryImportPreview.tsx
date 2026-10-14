@@ -96,6 +96,11 @@ function groupPreview(preview: ImportPreview): PreviewGroup[] {
         ...(entry.resolvedProject
           ? [`Resolved project: ${safe(entry.resolvedProject)}`]
           : []),
+        ...(!user
+          ? [
+              'Recall: this project scope is not automatically shared with linked worktrees.',
+            ]
+          : []),
         `Destination: ${safe(entry.targetRoot ?? 'unresolved')}`,
         `Source: ${safe(entry.sourceFile)}:${entry.sourceLine}`,
         `Source date: ${safe(entry.updatedAt ?? 'unknown')}`,
@@ -394,7 +399,6 @@ export function MemoryImportPreview({
             }
             initialIndex={insideGroup ? rowIndex : groupIndex}
             onHighlight={(index) => {
-              if (busyRef.current) return;
               setError(undefined);
               if (insideGroup && group)
                 setRowIndices((previous) => ({

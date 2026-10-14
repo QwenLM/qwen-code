@@ -377,7 +377,7 @@ export function resolveBootstrapRoute(
   const fastPathSafe = argvSafeForFastPath(argv);
 
   const firstPositional = firstPositionalArg(argv);
-  if (firstPositional === 'memory') {
+  if (argv[0] === 'memory') {
     return 'memory';
   }
   if (

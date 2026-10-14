@@ -139,16 +139,16 @@ vi.mock('./commands/mcp.js', () => ({
 }));
 
 describe('resolveBootstrapRoute', () => {
-  it('keeps memory operations and leading flags on the offline route', () => {
+  it('routes bare memory commands offline and leading flags through the full parser', () => {
     expect(
       resolveBootstrapRoute(['memory', 'import', 'codex', '--dry-run']),
     ).toBe('memory');
     expect(
       resolveBootstrapRoute(['--debug', 'memory', 'import', 'codex']),
-    ).toBe('memory');
+    ).toBe('default');
     expect(
       resolveBootstrapRoute(['--model', 'test-model', 'memory', '--help']),
-    ).toBe('memory');
+    ).toBe('default');
     expect(resolveBootstrapRoute(['--prompt', 'memory'])).toBe('default');
     expect(resolveBootstrapRoute(['--', 'memory'])).toBe('default');
     expect(resolveBootstrapRoute(['explain', 'memory'])).toBe('default');
@@ -923,10 +923,7 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['memory', 'import', 'codex', '--dry-run'],
-    ['--debug', 'memory', 'import', 'codex'],
-  ])(
+  it.each([['memory', 'import', 'codex', '--dry-run']])(
     'runs memory commands offline without loading the full CLI graph: %j',
     async (...argv) => {
       await runCliEntry(argv);
@@ -935,6 +932,12 @@ describe('runCliEntry', () => {
       expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     },
   );
+
+  it('lets the full parser handle global flags before memory', async () => {
+    await runCliEntry(['--debug', 'memory', 'import', 'codex', '--dry-run']);
+    expect(mocks.main).toHaveBeenCalledOnce();
+    expect(mocks.runMemoryCommand).not.toHaveBeenCalled();
+  });
 
   it('prints top-level help without loading the full CLI graph', async () => {
     await runCliEntry(['--help']);

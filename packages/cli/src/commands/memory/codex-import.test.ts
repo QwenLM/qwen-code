@@ -520,6 +520,140 @@ ${scope}
     ).toHaveLength(2);
   });
 
+  it.each([false, true])(
+    'keeps a surviving entry identity after a predecessor is removed (imported: %s)',
+    async (importBoth) => {
+      await fs.writeFile(
+        path.join(source, 'MEMORY.md'),
+        handbook('Synthetic Alpha.\n- Synthetic Beta.'),
+      );
+      const [alpha, beta] = (await preview()).entries;
+      await runCodexImport({
+        ...options(),
+        selectedIds: importBoth ? [alpha.id, beta.id] : [alpha.id],
+      });
+      const original = await fs.readFile(
+        path.join(alpha.targetRoot!, `codex-${alpha.id}.md`),
+        'utf8',
+      );
+      await fs.writeFile(
+        path.join(source, 'MEMORY.md'),
+        handbook('Synthetic Beta.'),
+      );
+      const result = (await preview()).entries[0];
+      expect(result.id).toBe(beta.id);
+      expect(result.status).toBe(importBoth ? 'previously-imported' : 'ready');
+      await runCodexImport({ ...options(), selectedIds: [result.id] });
+      expect(
+        await fs.readFile(
+          path.join(beta.targetRoot!, `codex-${beta.id}.md`),
+          'utf8',
+        ),
+      ).toContain('Synthetic Beta.');
+      expect(
+        await fs.readFile(
+          path.join(alpha.targetRoot!, `codex-${alpha.id}.md`),
+          'utf8',
+        ),
+      ).toBe(original);
+    },
+  );
+
+  it('preserves forgotten and edited documents when source entries swap', async () => {
+    await fs.writeFile(
+      path.join(source, 'MEMORY.md'),
+      handbook('Synthetic Alpha.\n- Synthetic Beta.'),
+    );
+    const [alpha, beta] = (await preview()).entries;
+    await runCodexImport({ ...options(), selectedIds: [alpha.id, beta.id] });
+    await fs.unlink(path.join(alpha.targetRoot!, `codex-${alpha.id}.md`));
+    await fs.appendFile(
+      path.join(beta.targetRoot!, `codex-${beta.id}.md`),
+      '\nQwen correction.',
+    );
+    await fs.writeFile(
+      path.join(source, 'MEMORY.md'),
+      handbook('Synthetic Beta.\n- Synthetic Alpha.'),
+    );
+    const entries = (await preview()).entries;
+    expect(entries.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: beta.id, status: 'conflict' },
+      { id: alpha.id, status: 'previously-imported' },
+    ]);
+  });
+
+  it('keeps unknown moved content conservative without assigning one ID twice', async () => {
+    await fs.writeFile(
+      path.join(source, 'MEMORY.md'),
+      handbook('Synthetic Alpha.\n- Synthetic Beta.'),
+    );
+    const [alpha] = (await preview()).entries;
+    await runCodexImport({ ...options(), selectedIds: [alpha.id] });
+    await fs.writeFile(
+      path.join(source, 'MEMORY.md'),
+      handbook('Synthetic New.\n- Synthetic Alpha.\n- Synthetic Beta.'),
+    );
+    const entries = (await preview()).entries;
+    expect(new Set(entries.map(({ id }) => id)).size).toBe(3);
+    expect(entries.map(({ status }) => status)).toEqual([
+      'conflict',
+      'previously-imported',
+      'ready',
+    ]);
+  });
+
+  it('refuses ambiguous identity reuse across project destinations', async () => {
+    const otherProject = path.join(temporary, 'borealis');
+    await fs.mkdir(otherProject);
+    await fs.writeFile(
+      path.join(source, 'MEMORY.md'),
+      handbook('Synthetic Alpha.\n- Synthetic Other.'),
+    );
+    const [alpha, other] = (await preview()).entries;
+    await runCodexImport({ ...options(), selectedIds: [other.id] });
+    await fs.writeFile(
+      path.join(source, 'MEMORY.md'),
+      handbook('Synthetic New.').replaceAll(
+        '/source/atlas',
+        '/source/borealis',
+      ) +
+        handbook('Synthetic Alpha.').replace(
+          'Task Group: Atlas releases',
+          'Task Group: Moved',
+        ),
+    );
+    const mapped = {
+      source,
+      projectMap: {
+        '/source/atlas': project,
+        '/source/borealis': otherProject,
+      },
+    };
+    const result = await runCodexImport({ ...mapped, dryRun: true });
+    expect(new Set(result.entries.map(({ id }) => id)).size).toBe(2);
+    expect(result.entries.map(({ status }) => status)).toEqual([
+      'conflict',
+      'conflict',
+    ]);
+    await expect(
+      runCodexImport({ ...mapped, selectedIds: [result.entries[0].id] }),
+    ).rejects.toThrow('conflict');
+    expect(await files(result.entries[0].targetRoot!)).toEqual([]);
+    expect(await files(alpha.targetRoot!)).not.toContain(
+      `codex-${alpha.id}.md`,
+    );
+  });
+
+  it('rejects unsafe candidate identity keys from a ledger', async () => {
+    const entry = (await preview()).entries[0];
+    await runCodexImport({ ...options(), selectedIds: [entry.id] });
+    const ledgerPath = path.join(entry.targetRoot!, '.codex-import.json');
+    const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'));
+    ledger.candidates['../../unsafe'] = ledger.candidates[entry.id];
+    await fs.writeFile(ledgerPath, JSON.stringify(ledger));
+    await expect(preview()).rejects.toThrow('Invalid Codex import ledger');
+  });
+
   it('does not duplicate imports or resurrect forgotten content even if source changes', async () => {
     const entry = (await preview()).entries[0];
     await runCodexImport({ ...options(), selectedIds: [entry.id] });

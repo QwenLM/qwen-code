@@ -250,7 +250,6 @@ describe('offline memory command', () => {
   it.each([
     ['memory', 'import', 'other'],
     ['memory', 'import', 'codex', '--unexpected'],
-    ['--debug', 'memory', 'import', 'codex'],
     ['memory', 'import', 'codex', '--source'],
   ])('rejects invalid arguments without importing: %j', async (...argv) => {
     await runMemoryCommand(argv);

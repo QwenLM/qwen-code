@@ -204,7 +204,6 @@ applies_to: cwd=/work/borealis
   it.each([
     'and worktree=/work/atlas-feature',
     'and worktree=/work/atlas-feature; updated_at=2025-01-01T00:00:00Z',
-    'and worktrees=/work/atlas-a,/work/atlas-b',
     'with worktree=/work/atlas-feature',
     'with implementation worktree=/tmp/atlas-feature',
     'and isolated release worktrees',
@@ -299,6 +298,12 @@ ${scope}
 
   it.each([
     'applies_to: cwd=/work/*',
+    'applies_to: cwd=/work/atlas cwd=/work/borealis',
+    'applies_to: cwd=/work/atlas updated_at=2026-09-01T10:00:00Z',
+    'applies_to: cwd=/work/atlas and worktrees=/work/borealis,/work/cygnus',
+    'applies_to: cwd=/work/atlas and worktrees=/work/borealis,/work/cygnus;',
+    'applies_to: cwd=/work/atlas on `/work/beta`',
+    'applies_to: cwd=/work/atlas on `C:\\work\\beta`',
     'applies_to: cwd=/work/atlas; cwd=/work/borealis',
     'applies_to: cwd=/work/atlas and /work/borealis',
     'applies_to: cwd=/work/atlas,/work/borealis',

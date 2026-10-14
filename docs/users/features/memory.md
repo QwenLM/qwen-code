@@ -321,6 +321,8 @@ An explicit `cwd` can include supplemental worktree, source-reference, or branch
 
 JSON exposes the effective `scope` (`user` or `project`). For global fallback candidates, `scopeReason` explains why project ownership could not be established; it remains visible even if `reason` later reports a duplicate or conflict. Global fallback makes the selected memory available across projects, so review its applicability before confirming the default selection. Fallback entries are clearly labeled and counted separately in the confirmation; they are never written just by opening the preview. Credential blocks, unsafe destinations, source-reading failures, and invalid ledgers are not bypassed by fallback.
 
+Project imports belong to the displayed main checkout’s memory scope. Qwen does not automatically recall that scope when running inside a linked worktree.
+
 For scripted import, review the text and destinations, then supply specific IDs:
 
 ```bash
@@ -342,7 +344,7 @@ Deduplication uses normalized exact text within each destination; it is not sema
 
 The private `.codex-import.json` ledger remains after Qwen edits, consolidates, or forgets imported notes. Do not delete it when cleaning up memory: it prevents a later import from restoring forgotten content. The importer reserves entries before creating documents; an interrupted import may leave a reserved entry requiring manual inspection instead of automatically retrying it. A `.codex-import.lock` prevents concurrent imports; remove a leftover lock only after confirming that no import is running. Index generation follows the existing native limits.
 
-Candidate IDs remain stable for text edits within the same slot. Changing headings or inserting/reordering entries may change IDs or produce conservative conflicts; preview again after reorganizing the source.
+Applying an import records candidate IDs and content fingerprints, including unselected candidates in that destination. Later previews preserve those identities when unchanged entries move or their neighbours are deleted. Edited content and moves that cannot be identified reliably remain conservative conflicts; preview again after reorganizing the source. Old import records without candidate history cannot recover the identity of never-imported entries retroactively. Dry-run does not save this history.
 
 Import is a one-time snapshot. Codex continues to own its source files, and Qwen owns imported copies. There is no automatic synchronization or overwrite of later Qwen corrections.
 
