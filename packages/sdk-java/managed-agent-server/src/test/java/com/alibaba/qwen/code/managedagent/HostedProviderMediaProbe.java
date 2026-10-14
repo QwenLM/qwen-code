@@ -170,7 +170,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(Map<String, Object> session) {
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?",
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?",
                 session.get("sessionId"));
         assertThat(rows.size()).as("one SQL invocation per Session").isEqualTo(1);
         return rows.getFirst();
@@ -223,13 +223,16 @@ final class HostedProviderMediaProbe implements AutoCloseable {
             if (fields.has("resultHash")) assertThat(hash).isEqualTo(fields.path("resultHash").asText());
             if (fields.has("resultBytes")) assertThat(encoded.length).isEqualTo(fields.path("resultBytes").asInt());
         }
-        String storageKey = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8)));
-        var owner = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
+        String storageId = "storage-" + sessions.indexOf(session);
+        var owner = jdbc.queryForMap("SELECT o.holder_key FROM ma_storage_owner o"
+                + " JOIN ma_storage s ON s.physical_key = o.storage_key"
+                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
+                tenant, storageId);
         boolean released = phase.equals("released") || phase.equals("restarted");
         if (released) assertThat(owner.get("holder_key")).isNull();
         else assertThat(owner.get("holder_key")).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?"
+        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, harness, runtimeId)).isEqualTo(released ? "RELEASED" : "READY");
         if (phase.equals("restarted")) {
             assertThat(restarted).isNotNull();
