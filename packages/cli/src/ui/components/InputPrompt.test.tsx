@@ -12,6 +12,7 @@ import {
   InputPrompt,
   classifyPastedImagePaths,
   expandPendingPastePlaceholders,
+  describeClipboardPaste,
 } from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -187,6 +188,13 @@ const mockSlashCommands: SlashCommand[] = [
     ],
   },
 ];
+
+/**
+ * A collapsed paste reaches the model inside the clipboard description. Spelled
+ * as a name so each assertion says what it expects rather than repeating the
+ * wording; the wording itself is pinned by its own case below.
+ */
+const markedPaste = describeClipboardPaste;
 
 describe('InputPrompt', () => {
   let props: InputPromptProps;
@@ -1660,8 +1668,7 @@ describe('InputPrompt', () => {
     });
 
     // Windows uses Alt+V (\x1Bv), non-Windows uses Ctrl+V (\x16)
-    const describeConditional = isWindows ? it.skip : it;
-    describeConditional(
+    it.skipIf(isWindows)(
       'should handle Ctrl+V when clipboard has an image',
       async () => {
         vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -1759,6 +1766,92 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).not.toHaveBeenCalled();
       expect(mockBuffer.setText).not.toHaveBeenCalled();
       unmount();
+    });
+
+    it('should paste clipboard text when the clipboard holds no image', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(
+        'https://example.com',
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(clipboardUtils.readClipboardText).toHaveBeenCalled();
+      expect(mockBuffer.insert).toHaveBeenCalledWith('https://example.com', {
+        paste: true,
+      });
+      unmount();
+    });
+
+    it('should collapse a large clipboard text behind a placeholder that stays marked on submit', async () => {
+      const largeContent = 'x'.repeat(1200);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(
+        largeContent,
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1200 chars]',
+        { paste: false },
+      );
+
+      // The placeholder is all the user ever sees of a paste this large, so the
+      // submitted prompt is the only place its provenance can live.
+      mockBuffer.text = '[Pasted Content 1200 chars]';
+      mockBuffer.lines = [mockBuffer.text];
+      mockBuffer.cursor = [0, mockBuffer.text.length];
+      stdin.write('\r');
+      await wait();
+
+      const submitCall = vi.mocked(props.onSubmit).mock.calls.at(-1);
+      expect(submitCall?.[0]).toBe(markedPaste(largeContent));
+      unmount();
+    });
+
+    it('should not read clipboard text when the clipboard holds an image', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(clipboardUtils.readClipboardText).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should describe a collapsed paste as clipboard material the user may not have read', () => {
+      const described = describeClipboardPaste('pasted payload');
+
+      expect(described.startsWith('<clipboard-paste>\n')).toBe(true);
+      expect(described).toContain('\npasted payload\n</clipboard-paste>\n');
+      expect(described).toContain('pasted from the system clipboard');
+      expect(described).toContain('may not have read it');
+      // Attribution, not refusal: pasted material is usually meant to be worked
+      // on, so the description must keep saying so.
+      expect(described).toContain('Act on it where it matches');
+      // The closing boundary is asserted from outside the block, so a forged
+      // end marker inside it cannot promote following text.
+      expect(described).toContain('This line closes the block');
+      expect(described.split('</clipboard-paste>').length - 1).toBe(1);
     });
 
     it('should show the native clipboard error only once across remounts', async () => {
@@ -5067,7 +5160,7 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify onSubmit was called with expanded content
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
+        expect(props.onSubmit).toHaveBeenCalledWith(markedPaste(largeContent), {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
         });
@@ -5111,7 +5204,7 @@ describe('InputPrompt', () => {
         await flush();
 
         expect(props.onSubmit).toHaveBeenCalledWith(
-          `${secondPaste}\n${firstPaste}`,
+          `${markedPaste(secondPaste)}\n${markedPaste(firstPaste)}`,
           {
             deferUntilIdle: false,
             submittedPrompt:

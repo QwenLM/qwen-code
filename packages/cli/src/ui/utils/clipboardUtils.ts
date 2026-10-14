@@ -60,8 +60,8 @@ export function writeOsc52(text: string): boolean {
 // Track which tool works on Linux to avoid redundant checks/failures
 let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
 
-// Cache for wl-paste image types (reset after each paste operation)
-let cachedWlPasteImageTypes: string[] | null = null;
+// Cache for wl-paste selection types (reset after each paste operation)
+let cachedWlPasteTypes: string[] | null = null;
 
 // Cache for @teddyzhu/clipboard module (macOS/Windows fallback)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -90,7 +90,7 @@ async function getClipboardModule(): Promise<any | null> {
  */
 export function resetLinuxClipboardTool(): void {
   linuxClipboardTool = undefined;
-  cachedWlPasteImageTypes = null;
+  cachedWlPasteTypes = null;
 }
 
 export function isWaylandSession(): boolean {
@@ -408,7 +408,7 @@ async function checkClipboardForImage(
 export async function clipboardHasImage(
   onUnavailable?: () => void,
 ): Promise<boolean> {
-  cachedWlPasteImageTypes = null; // Fresh check each time
+  cachedWlPasteTypes = null; // Fresh check each time
   if (process.platform === 'linux') {
     try {
       const tool = getLinuxClipboardTool();
@@ -454,19 +454,149 @@ export async function clipboardHasImage(
 }
 
 /**
- * Get the available image MIME types from wl-paste.
+ * How a reported selection type is consumed, derived from the names the
+ * standards define rather than from a list of types this code has heard of.
+ *
+ * X11 and Wayland describe the same content under several names at once: the
+ * ICCCM defines `TEXT`, `STRING` and `UTF8_STRING` as the standard text atoms
+ * and `TARGETS`, `MULTIPLE`, `SAVE_TARGETS`, `DELETE`, `INCR`, `TIMESTAMP` and
+ * `VERSION` as selection bookkeeping, while Wayland sources name their content
+ * with MIME types. So a type is readable text when it is one of the named text
+ * atoms, and readable-but-secondary when it is any other `text/*`; nothing else
+ * is requested, which is what keeps `TARGETS` itself from being read back as
+ * content.
+ */
+type ClipboardTextTier = 'plain' | 'other';
+
+interface ClipboardType {
+  /** Type name exactly as the tool reported it, for asking it back. */
+  raw: string;
+  tier: ClipboardTextTier;
+}
+
+/** ICCCM text atoms plus the MIME plain-text type: always the preferred read. */
+const PLAIN_TEXT_TYPES = new Set([
+  'text/plain',
+  'utf8_string',
+  'string',
+  'text',
+]);
+
+/** Selection bookkeeping properties, which are never content. */
+const BOOKKEEPING_TYPES = new Set([
+  'targets',
+  'multiple',
+  'save_targets',
+  'delete',
+  'incr',
+  'timestamp',
+  'version',
+]);
+
+/**
+ * Classify a reported type, ignoring parameters
+ * (`text/plain;charset=utf-8` is plain text) and letter case.
+ */
+function classifyClipboardType(name: string): ClipboardTextTier | null {
+  const base = name.trim().toLowerCase().split(';')[0].trim();
+  if (BOOKKEEPING_TYPES.has(base)) {
+    return null;
+  }
+  if (PLAIN_TEXT_TYPES.has(base)) {
+    return 'plain';
+  }
+  return base.startsWith('text/') ? 'other' : null;
+}
+
+/**
+ * Image types the save path writes. Case-sensitive and exact, matching what
+ * the enumeration has always accepted: `image/bmp` is there because WSL2
+ * exposes the Windows clipboard as BMP.
+ */
+const CLIPBOARD_IMAGE_TYPES = new Set(['image/png', 'image/bmp']);
+
+/** Ask the tool for one specific type it already said it has. */
+function clipboardReadArgs(tool: 'wl-paste' | 'xclip', type: string): string[] {
+  return tool === 'wl-paste'
+    ? ['--no-newline', '--type', type]
+    : ['-selection', 'clipboard', '-t', type, '-o'];
+}
+
+/**
+ * Capture stdout from a clipboard tool. Anything that is not a successful read
+ * — empty clipboard, unreachable tool, spawn failure, timeout — resolves to an
+ * empty string, so callers do not have to distinguish them. Whether a
+ * successful read is actually worth pasting is left to the caller to judge.
+ */
+async function readStdout(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      debugLogger.debug(`Failed to spawn ${command} ${args.join(' ')}:`, error);
+      resolve('');
+      return;
+    }
+
+    let stdout = '';
+    // `close` follows a spawn `error` and a timeout `kill()` as well, so
+    // without this latch a single failed query would resolve twice and the
+    // caller's loop would see a stale value.
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+      debugLogger.debug(
+        `${command} ${args.join(' ')} timed out after ${PROCESS_TIMEOUT_MS}ms`,
+      );
+      resolve('');
+    }, PROCESS_TIMEOUT_MS);
+
+    const done = (value: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
+    child.on('error', (err) => {
+      debugLogger.debug(`Failed to spawn ${command} ${args.join(' ')}:`, err);
+      done('');
+    });
+    child.on('close', (code) => {
+      if (code === 0) {
+        done(stdout);
+      } else {
+        debugLogger.debug(
+          `${command} ${args.join(' ')} exited with code ${code}`,
+        );
+        done('');
+      }
+    });
+  });
+}
+
+/**
+ * Enumerate the selection types wl-paste reports for the clipboard.
  * Uses cached result if available to avoid redundant calls.
  * @param onUnavailable Called when the wl-paste query fails (a non-zero exit
  *   that is not merely an empty clipboard, spawn error, timeout). A
- *   successful query with no image types stays quiet, and so does an empty
- *   clipboard.
+ *   successful query that lists no usable type stays quiet, and so does an
+ *   empty clipboard.
  */
-async function getWlPasteImageTypes(
-  onUnavailable?: () => void,
-): Promise<string[]> {
+async function listWlPasteTypes(onUnavailable?: () => void): Promise<string[]> {
   // Return cached result if available
-  if (cachedWlPasteImageTypes !== null) {
-    return cachedWlPasteImageTypes;
+  if (cachedWlPasteTypes !== null) {
+    return cachedWlPasteTypes;
   }
 
   return new Promise<string[]>((resolve) => {
@@ -492,7 +622,7 @@ async function getWlPasteImageTypes(
     // `error` and a timeout `kill()`, and re-entering the close handler for an
     // already-reported query would log an exit code the process never had,
     // notify twice, and — on the timeout/error paths — risk reaching the
-    // `cachedWlPasteImageTypes = types` line that must stay success-only.
+    // `cachedWlPasteTypes = types` line that must stay success-only.
     let settled = false;
 
     const timer = setTimeout(() => {
@@ -541,8 +671,9 @@ async function getWlPasteImageTypes(
       const types = stdout
         .trim()
         .split('\n')
-        .filter((t) => t === 'image/png' || t === 'image/bmp');
-      cachedWlPasteImageTypes = types;
+        .map((type) => type.trim())
+        .filter(Boolean);
+      cachedWlPasteTypes = types;
       resolve(types);
     });
     child.on('error', (err) => {
@@ -558,6 +689,85 @@ async function getWlPasteImageTypes(
       resolve([]);
     });
   });
+}
+
+/**
+ * Image types the save path can write, taken from the same cached enumeration
+ * as every other clipboard read.
+ */
+async function getWlPasteImageTypes(
+  onUnavailable?: () => void,
+): Promise<string[]> {
+  const types = await listWlPasteTypes(onUnavailable);
+  return types.filter((type) => CLIPBOARD_IMAGE_TYPES.has(type));
+}
+
+/**
+ * Enumerate the text the clipboard currently offers, whatever the display
+ * server is. Wayland reports selection types directly; X11 exposes the same
+ * list through the `TARGETS` atom. A clipboard that cannot be reached simply
+ * offers nothing, so a failed enumeration is indistinguishable from an empty
+ * one here and needs no separate reporting channel.
+ */
+async function listClipboardTypes(
+  tool: 'wl-paste' | 'xclip',
+): Promise<ClipboardType[]> {
+  const names =
+    tool === 'wl-paste'
+      ? await listWlPasteTypes()
+      : (
+          await readStdout(tool, [
+            '-selection',
+            'clipboard',
+            '-t',
+            'TARGETS',
+            '-o',
+          ])
+        ).split(/\s+/);
+
+  const types: ClipboardType[] = [];
+  for (const name of names) {
+    const tier = classifyClipboardType(name);
+    if (tier) {
+      types.push({ raw: name, tier });
+    }
+  }
+  return types;
+}
+
+/**
+ * Read text from the clipboard on Linux.
+ *
+ * The clipboard decides what is readable: only the types it actually lists are
+ * requested, and the ICCCM text atoms are asked for before any other `text/*`,
+ * so a selection that a browser describes as `text/uri-list` still arrives
+ * rather than nothing. Other platforms return `null`, because their text path is
+ * the native addon, which is not wired for reads here.
+ *
+ * Line endings come back as LF regardless of what the selection carried: a
+ * Windows clipboard reached through WSL2 is CRLF throughout, and so is the
+ * `text/uri-list` format by definition, neither of which belongs in the editor
+ * buffer.
+ */
+export async function readClipboardText(): Promise<string | null> {
+  if (process.platform !== 'linux') {
+    return null;
+  }
+  const tool = getLinuxClipboardTool();
+  if (!tool) {
+    return null;
+  }
+
+  const offers = await listClipboardTypes(tool);
+  for (const tier of ['plain', 'other'] as const) {
+    for (const type of offers.filter((offer) => offer.tier === tier)) {
+      const text = await readStdout(tool, clipboardReadArgs(tool, type.raw));
+      if (text.trim()) {
+        return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      }
+    }
+  }
+  return null;
 }
 
 /**

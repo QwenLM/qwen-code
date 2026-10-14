@@ -283,6 +283,7 @@ describe('clipboardUtils', () => {
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
   let isWaylandSession: () => boolean;
+  let readClipboardText: () => Promise<string | null>;
 
   beforeEach(async () => {
     // Clean up /tmp/test directory from previous runs to ensure
@@ -309,6 +310,7 @@ describe('clipboardUtils', () => {
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
     isWaylandSession = mod.isWaylandSession;
+    readClipboardText = mod.readClipboardText;
     mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
@@ -385,6 +387,178 @@ describe('clipboardUtils', () => {
 
       const result = await clipboardHasImage();
       expect(result).toBe(false);
+    });
+  });
+
+  describe('readClipboardText', () => {
+    // The file's `beforeEach` only clears call history, not implementations, so
+    // the clipboard simulator below has to be withdrawn by hand. Left in place
+    // it would answer every later test's spawn too, and those tests would pass
+    // or fail on the order they ran in rather than on their own setup.
+    afterEach(() => {
+      mockSpawn.mockReset();
+    });
+
+    /**
+     * Answer the way a real clipboard does: the enumeration query reports the
+     * types on offer, and an individual read only succeeds for a type that was
+     * actually listed. Payloads are keyed by the exact reported name, so asking
+     * for a normalised name that was never offered — or reading the `TARGETS`
+     * atom as if it were content — comes back empty.
+     */
+    function mockClipboard(types: string[], payloads: Record<string, string>) {
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild(
+            types.join('\n'),
+            types.length ? 0 : 1,
+            types.length ? '' : 'Nothing is copied',
+          );
+        }
+        const requested =
+          args[args.indexOf(args.includes('-t') ? '-t' : '--type') + 1];
+        if (requested === 'TARGETS') {
+          return createMockChild(types.join('\n'), 0);
+        }
+        const payload = payloads[requested] ?? '';
+        return createMockChild(payload, payload ? 0 : 1);
+      });
+    }
+
+    /** Type names the reader actually asked for, in order. */
+    function requestedTypes(): string[] {
+      return mockSpawn.mock.calls
+        .map(([, args]) => args as string[])
+        .filter(
+          (args) => !args.includes('--list-types') && !args.includes('TARGETS'),
+        )
+        .map(
+          (args) =>
+            args[args.indexOf(args.includes('-t') ? '-t' : '--type') + 1],
+        );
+    }
+
+    const cases: Array<{
+      name: string;
+      tool: 'wl-paste' | 'xclip';
+      types: string[];
+      payloads: Record<string, string>;
+      expected: string | null;
+      reads: string[];
+    }> = [
+      {
+        name: 'reads the text offer back under the exact name it was given',
+        tool: 'wl-paste',
+        types: ['image/png', 'text/plain;charset=utf-8'],
+        payloads: { 'text/plain;charset=utf-8': 'prose' },
+        expected: 'prose',
+        reads: ['text/plain;charset=utf-8'],
+      },
+      {
+        name: 'prefers text over the uri-list offered alongside it',
+        tool: 'wl-paste',
+        types: ['text/uri-list', 'text/plain'],
+        payloads: {
+          'text/uri-list': 'https://not-this',
+          'text/plain': 'the prose',
+        },
+        expected: 'the prose',
+        reads: ['text/plain'],
+      },
+      {
+        name: 'reads a uri-list, in its CRLF form, when there is no plain text',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: { 'text/uri-list': 'https://a.example\r\nhttps://b.example' },
+        expected: 'https://a.example\nhttps://b.example',
+        reads: ['text/uri-list'],
+      },
+      {
+        name: 'maps X11 atoms onto text without reading TARGETS as content',
+        tool: 'xclip',
+        types: ['TARGETS', 'TIMESTAMP', 'UTF8_STRING', 'STRING'],
+        payloads: {
+          TARGETS: 'UTF8_STRING\nSTRING',
+          UTF8_STRING: 'x11 prose',
+          STRING: 'fallback',
+        },
+        expected: 'x11 prose',
+        reads: ['UTF8_STRING'],
+      },
+      {
+        name: 'falls through to the next text atom when the first is empty',
+        tool: 'xclip',
+        types: ['UTF8_STRING', 'STRING'],
+        payloads: { UTF8_STRING: '', STRING: 'from STRING' },
+        expected: 'from STRING',
+        reads: ['UTF8_STRING', 'STRING'],
+      },
+      {
+        name: 'asks for nothing when the clipboard holds only an image',
+        tool: 'wl-paste',
+        types: ['image/png'],
+        payloads: { 'image/png': 'binary' },
+        expected: null,
+        reads: [],
+      },
+      {
+        name: 'asks for nothing when no listed type is text',
+        tool: 'wl-paste',
+        types: ['application/x-ole-meta', 'image/bmp'],
+        payloads: { 'application/x-ole-meta': 'blob' },
+        expected: null,
+        reads: [],
+      },
+      {
+        name: 'falls back to any other text type when no plain text is offered',
+        tool: 'wl-paste',
+        types: ['text/html', 'text/uri-list'],
+        payloads: {
+          'text/html': '<b>markup</b>',
+          'text/uri-list': 'https://ignored',
+        },
+        expected: '<b>markup</b>',
+        reads: ['text/html'],
+      },
+      {
+        name: 'treats a whitespace-only selection as nothing to paste',
+        tool: 'wl-paste',
+        types: ['text/plain'],
+        payloads: { 'text/plain': '  \n' },
+        expected: null,
+        reads: ['text/plain'],
+      },
+    ];
+
+    it.each(cases)('$name', async (testCase) => {
+      if (testCase.tool === 'xclip') {
+        setupX11Env();
+      }
+      mockExecSync.mockReturnValue(Buffer.from(`/usr/bin/${testCase.tool}`));
+      mockClipboard(testCase.types, testCase.payloads);
+
+      await expect(readClipboardText()).resolves.toBe(testCase.expected);
+      expect(requestedTypes()).toEqual(testCase.reads);
+    });
+
+    it('stays quiet when no clipboard tool is reachable', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('does not touch the tools off Linux', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(mockSpawn).not.toHaveBeenCalled();
     });
   });
 
