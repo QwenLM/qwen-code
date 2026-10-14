@@ -151,6 +151,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_turn_end',
   'code_mode_tool_result',
   'turn_result',
+  'turn_attempt',
   'user_text_elements',
   'agent_mention',
   'agent_message',

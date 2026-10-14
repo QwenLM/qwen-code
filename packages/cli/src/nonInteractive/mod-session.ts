@@ -14,7 +14,10 @@ import {
   orderModPlugins,
   resolveModDependency,
 } from '@qwen-code/qwen-code-core/mods/dependencies.js';
-import { resolveModOptions } from '@qwen-code/qwen-code-core/mods/options.js';
+import {
+  resolveModOptions,
+  resolveModToolDialect,
+} from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { MOD_END_TIMEOUT_MS } from '@qwen-code/qwen-code-core/mods/types.js';
@@ -123,6 +126,13 @@ export class ModSession implements ICommandLoader {
             marketplace,
             source,
             dependencies: source?.dependencies ?? [],
+            toolDialect: source
+              ? resolveModToolDialect(
+                  this.optionScopes,
+                  extension.name,
+                  marketplace,
+                )
+              : undefined,
             options: source
               ? resolveModOptions(
                   source.userConfig,
@@ -175,7 +185,7 @@ export class ModSession implements ICommandLoader {
       const ordered = orderModPlugins(mods);
       if (ordered.length) {
         this.runtime = await ModRuntime.createGroup(
-          ordered.map(({ extension, source, options }) => ({
+          ordered.map(({ extension, source, options, toolDialect }) => ({
             id: extension.id,
             name: extension.name,
             source: {
@@ -184,6 +194,7 @@ export class ModSession implements ICommandLoader {
               source: source!.source,
             },
             options,
+            toolDialect,
           })),
           this.config.getTargetDir(),
           (entry, plugin) => {
@@ -191,6 +202,7 @@ export class ModSession implements ICommandLoader {
             if (this.logsReady) this.flushLogs();
           },
           signal,
+          (name) => this.config.getToolRegistry().ensureTool(name),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
