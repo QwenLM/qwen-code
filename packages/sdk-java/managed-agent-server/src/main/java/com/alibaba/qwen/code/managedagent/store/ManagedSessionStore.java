@@ -391,12 +391,14 @@ public class ManagedSessionStore {
         checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
-        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId, request.workspaceId());
+        boolean createdRoot = ensureSessionRoot(tenantId, sessionId);
+        // A new CONTROL root cannot be CSI-backed. Probing the empty CSI index
+        // would gap-lock other tenants' first inserts under REPEATABLE READ.
+        var csiOriginal = createdRoot ? null : lockCsiOriginal(tenantId, sessionId);
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId, request.workspaceId());
-        ensureSessionRoot(tenantId, sessionId);
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
@@ -2689,11 +2691,11 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    private void ensureSessionRoot(String tenantId, String sessionId) {
+    private boolean ensureSessionRoot(String tenantId, String sessionId) {
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        jdbc.update(
+        int inserted = jdbc.update(
                 "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
                     + " session_key, session_scope_key, created_at, updated_at) VALUES (?, ?,"
                     + " 'CONTROL', ?, ?, ?, ?, ?)",
@@ -2713,6 +2715,7 @@ public class ManagedSessionStore {
                 tenantId,
                 sessionId,
                 now);
+        return inserted == 1;
     }
 
     public static String sessionScopeKey(String tenantId, String sessionId) {
