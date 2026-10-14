@@ -104,13 +104,16 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
 
 it('keeps browser gates hosted independently of the shared Linux runner', () => {
   expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
-  // 30, not 20: at 184 smoke tests plus ~7.5 min of setup, passing runs hit
-  // 20 flat (tests done at 20:07:49, cancelled 20:07:53; the last of 184
-  // still running at 02:04:58, cancelled 02:05:04). Sharding is the fix at
-  // the source once the suite keeps growing.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(30);
+  // Slow hosted browser installs took over 23 min, so reserve time in the
+  // 60-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
+  );
+  expect(hostedInstall['timeout-minutes']).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
@@ -479,8 +482,8 @@ describe('post-merge push lane', () => {
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
-      'Generate VS Code companion notices',
-      'Check VS Code companion notices are up-to-date',
+      'Generate Web Shell and VS Code companion notices',
+      'Check Web Shell and VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
       'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
@@ -500,6 +503,30 @@ describe('post-merge push lane', () => {
         )
         .map((x) => x.name),
     ).toEqual(FULL_PAYLOAD);
+    const generateNotices = stepByName.get(
+      'Generate Web Shell and VS Code companion notices',
+    ).run;
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=@qwen-code/web-shell',
+    );
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=qwen-code-vscode-ide-companion',
+    );
+    expect(
+      stepByName.get(
+        'Check Web Shell and VS Code companion notices are up-to-date',
+      ).run,
+    ).toContain(
+      'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
+    );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }

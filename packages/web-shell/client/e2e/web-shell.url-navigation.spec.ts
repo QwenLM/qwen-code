@@ -8,6 +8,7 @@ import {
 const pages = [
   ['plugins', 'Plugins'],
   ['channels', 'Channels'],
+  ['live', 'Live'],
   ['scheduled-tasks', 'Scheduled Tasks'],
   ['goals', 'Goals'],
   ['settings', 'Settings'],
@@ -23,7 +24,10 @@ async function expectPage(page: Page, path: string) {
     await expect(page.getByTestId('inline-panel')).toBeVisible();
     await expect(page.getByTestId('inline-panel')).toHaveAttribute(
       'aria-label',
-      new RegExp(path, 'i'),
+      new RegExp(
+        path === 'channels' || path === 'live' ? 'settings' : path,
+        'i',
+      ),
     );
   }
 }
@@ -47,18 +51,21 @@ for (const [path, label] of pages) {
   }, info) => {
     const daemon = await install(page, baseURL!);
     await page.goto('/?language=en-US&instanceId=host&instanceType=dsw');
-    await page
-      .locator('[data-sidebar-shell]')
-      .getByRole('button', { name: label, exact: true })
-      .click();
+    if (path === 'settings')
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+    await page.getByRole('button', { name: label, exact: true }).click();
     await expect(page).toHaveURL(
       new RegExp(`/${path}\\?instanceId=host&instanceType=dsw$`),
     );
     await expectPage(page, path);
     const historyLength = await page.evaluate(() => history.length);
+    if (path === 'settings')
+      await page.getByRole('button', { name: 'More', exact: true }).click();
     await page
-      .locator('[data-sidebar-shell]')
-      .getByRole('button', { name: label, exact: true })
+      .getByRole('button', {
+        name: label,
+        exact: true,
+      })
       .click();
     expect(await page.evaluate(() => history.length)).toBe(historyLength);
     await page.reload();
@@ -69,6 +76,8 @@ for (const [path, label] of pages) {
     await fresh.goto(page.url());
     await expectPage(fresh, path);
     if (path === 'plugins') await fresh.keyboard.press('Escape');
+    else if (['channels', 'live', 'scheduled-tasks', 'goals'].includes(path))
+      await fresh.getByRole('button', { name: 'Home', exact: true }).click();
     else
       await fresh
         .getByRole('button', { name: /^back$/i })
@@ -84,6 +93,12 @@ for (const [path, label] of pages) {
     await page.goBack();
     await expect(page).toHaveURL(/\/\?instanceId=host&instanceType=dsw$/);
     await expect(page.getByTestId('inline-panel')).toHaveCount(0);
+    await expect(
+      page
+        .locator('[data-web-shell-navigation-rail]')
+        .getByRole('button', { name: 'Home', exact: true }),
+    ).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('[data-web-shell-home-column]')).toBeVisible();
     await page.goForward();
     await expectPage(page, path);
     expect(
@@ -112,10 +127,8 @@ test('embedded base restores a page, retains host parameters and keeps split hid
   await expect(
     page.getByRole('button', { name: 'Split View', exact: true }),
   ).toHaveCount(0);
-  await page
-    .locator('[data-sidebar-shell]')
-    .getByRole('button', { name: 'Settings', exact: true })
-    .click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page).toHaveURL(
     /\/agentic-code\/settings\?instanceId=abc&instanceType=dsw$/,
   );
@@ -143,10 +156,8 @@ test('session survives page navigation and browser history restores sessions @sm
     scenario.sessionId,
     scenario.events.length,
   );
-  await page
-    .locator('[data-sidebar-shell]')
-    .getByRole('button', { name: 'Settings', exact: true })
-    .click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expectPage(page, 'settings');
   await page.getByTestId('panel-back').click();
   await expect(page).toHaveURL(
@@ -184,13 +195,14 @@ test('explicit page path wins over cockpit and slow capabilities do not erase it
   ).toHaveLength(0);
 });
 
-test('new task leaves a directly opened page without creating a session @smoke', async ({
+test('Home then new task leaves a directly opened page without creating a session @smoke', async ({
   page,
   baseURL,
 }) => {
   const daemon = await install(page, baseURL!);
   await page.goto('/plugins?instanceId=kept');
   await expectPage(page, 'plugins');
+  await page.locator('[data-web-shell-home-trigger]').click();
   await page
     .locator('[data-sidebar-shell]')
     .getByRole('button', { name: 'New task', exact: true })
@@ -284,4 +296,35 @@ test('failed sidebar session keeps its URL and retry targets that session @smoke
   expect(
     daemon.requests.filter((r) => r.method === 'POST' && r.path === '/session'),
   ).toHaveLength(0);
+});
+
+test('host defaults keep existing page URLs while explicit lists still restrict routes', async ({
+  page,
+  baseURL,
+}) => {
+  await install(page, baseURL!);
+  await page.route('**/agentic-code**', async (route) => {
+    if (!route.request().isNavigationRequest()) return route.fallback();
+    const response = await route.fetch({
+      url: `${baseURL}/e2e/url-navigation-harness.html`,
+    });
+    await route.fulfill({ response });
+  });
+  for (const mode of ['hidden', 'omitted', 'default']) {
+    for (const path of ['settings', 'plugins', 'goals']) {
+      await page.goto(`/agentic-code/${path}?sidebar=${mode}`);
+      await expectPage(page, path);
+      await expect(page).toHaveURL(
+        new RegExp(`/agentic-code/${path}\\?sidebar=${mode}$`),
+      );
+    }
+    await page.goto(`/agentic-code/live?sidebar=${mode}`);
+    await expect(page).toHaveURL(
+      new RegExp(`/agentic-code\\?sidebar=${mode}$`),
+    );
+    await expect(page.getByTestId('inline-panel')).toHaveCount(0);
+  }
+  await page.goto('/agentic-code/live?sidebar=explicit');
+  await expect(page).toHaveURL(/\/agentic-code\?sidebar=explicit$/);
+  await expect(page.getByTestId('inline-panel')).toHaveCount(0);
 });

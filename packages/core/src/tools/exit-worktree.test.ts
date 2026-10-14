@@ -27,86 +27,90 @@ import { SessionService } from '../services/sessionService.js';
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
+type ExitParams = Parameters<ExitWorktreeTool['build']>[0];
+
 function makeMockConfig(targetDir = process.cwd()): Config {
   // Default to cwd because `GitWorktreeService` constructs `simpleGit`
-  // against the dir, which fails on a non-existent path. Tests that
-  // need a real isolated repo create their own temp dir and pass it
-  // explicitly.
+  // against the dir, which fails on a non-existent path. Tests that need a
+  // real isolated repo create their own temp dir and pass it explicitly.
   return {
     getTargetDir: vi.fn(() => targetDir),
     getSessionId: vi.fn(() => 'mock-session-id'),
-    // Phase D-2: EnterWorktreeTool (used here for setup) reads this
-    // setting when creating a worktree. Return empty so the symlink
-    // loop is a no-op in tests.
+    // Phase D-2: EnterWorktreeTool (used here for setup) reads this setting
+    // when creating a worktree; empty makes the symlink loop a no-op.
     getWorktreeSymlinkDirectories: vi.fn(() => []),
   } as unknown as Config;
 }
 
+const mockTool = () => new ExitWorktreeTool(makeMockConfig());
+
+/** Initializes a git repo in `dir` with one commit on `main`. */
+async function initRepo(dir: string): Promise<void> {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
+  await fs.writeFile(path.join(dir, 'README.md'), 'hi\n');
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+    cwd: dir,
+  });
+}
+
+const listBranches = (cwd: string) =>
+  execFileSync('git', ['branch', '--list'], { cwd, encoding: 'utf8' });
+
+const exitWith = (config: Config, params: ExitParams) =>
+  new ExitWorktreeTool(config)
+    .build(params)
+    .execute(new AbortController().signal);
+
 describe('ExitWorktreeTool', () => {
-  // Real git invocations + user-global hooks can spike to 10-20s when
-  // the suite runs alongside other integ tests. Bump timeouts so the
-  // suite isn't flaky on CI / busy local runs. (Phase C #4174.)
+  // Real git invocations + user-global hooks can spike to 10-20s alongside
+  // other integ tests; bump timeouts so CI / busy local runs aren't flaky.
+  // (Phase C #4174.)
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
   describe('metadata', () => {
     it('exposes the correct tool name', () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
+      const tool = mockTool();
       expect(tool.name).toBe('exit_worktree');
       expect(tool.displayName).toBe('ExitWorktree');
     });
   });
 
   describe('validateToolParams', () => {
+    const validate = (params: ExitParams) =>
+      mockTool().validateToolParams(params);
+
     it('requires a non-empty name', () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      expect(tool.validateToolParams({ name: '', action: 'keep' })).toMatch(
-        /non-empty/i,
-      );
+      expect(validate({ name: '', action: 'keep' })).toMatch(/non-empty/i);
     });
 
     it('requires action to be keep or remove', () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
       expect(
-        tool.validateToolParams({
-          name: 'foo',
-          action: 'destroy' as 'keep' | 'remove',
-        }),
+        validate({ name: 'foo', action: 'destroy' as 'keep' | 'remove' }),
       ).toMatch(/keep.*remove/i);
-      expect(
-        tool.validateToolParams({ name: 'foo', action: 'keep' }),
-      ).toBeNull();
-      expect(
-        tool.validateToolParams({ name: 'foo', action: 'remove' }),
-      ).toBeNull();
+      expect(validate({ name: 'foo', action: 'keep' })).toBeNull();
+      expect(validate({ name: 'foo', action: 'remove' })).toBeNull();
     });
 
     it('rejects slugs that would resolve outside the worktrees dir', () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      expect(
-        tool.validateToolParams({ name: 'a/b', action: 'remove' }),
-      ).not.toBeNull();
-      expect(
-        tool.validateToolParams({ name: '../etc', action: 'remove' }),
-      ).not.toBeNull();
+      expect(validate({ name: 'a/b', action: 'remove' })).not.toBeNull();
+      expect(validate({ name: '../etc', action: 'remove' })).not.toBeNull();
     });
 
     it('accepts the reserved pr-<number> shape of a PR-backed worktree', () => {
       // `--worktree=#<N>` creates `pr-<N>` worktrees; exit_worktree never
       // CREATES slugs, so the reservation must not lock users out of
       // leaving or removing one of those worktrees.
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      expect(
-        tool.validateToolParams({ name: 'pr-42', action: 'keep' }),
-      ).toBeNull();
-      expect(
-        tool.validateToolParams({ name: 'pr-42', action: 'remove' }),
-      ).toBeNull();
+      expect(validate({ name: 'pr-42', action: 'keep' })).toBeNull();
+      expect(validate({ name: 'pr-42', action: 'remove' })).toBeNull();
     });
 
     it('rejects discard_changes when it is not a boolean', () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
       expect(
-        tool.validateToolParams({
+        validate({
           name: 'foo',
           action: 'remove',
           // @ts-expect-error: deliberately wrong type
@@ -117,34 +121,29 @@ describe('ExitWorktreeTool', () => {
   });
 
   describe('default permission', () => {
-    it("returns 'ask' when action is 'remove'", async () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      const inv = tool.build({ name: 'foo', action: 'remove' });
-      expect(await inv.getDefaultPermission()).toBe('ask');
-    });
-
-    it("returns 'allow' when action is 'keep'", async () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      const inv = tool.build({ name: 'foo', action: 'keep' });
-      expect(await inv.getDefaultPermission()).toBe('allow');
+    it.each([
+      ["returns 'ask' when action is 'remove'", 'remove', 'ask'],
+      ["returns 'allow' when action is 'keep'", 'keep', 'allow'],
+    ] as const)('%s', async (_title, action, permission) => {
+      const inv = mockTool().build({ name: 'foo', action });
+      expect(await inv.getDefaultPermission()).toBe(permission);
     });
   });
 
   describe('confirmation type — round-7 AUTO_EDIT bypass guard', () => {
-    // Regression guard for the round-7 finding: `getDefaultPermission`
-    // returning 'ask' was insufficient because BaseToolInvocation's
-    // default `getConfirmationDetails` returned `type: 'info'`, which
-    // `permissionFlow.isAutoEditApproved(AUTO_EDIT, 'info')` silently
+    // Round-7 regression: 'ask' from `getDefaultPermission` was not enough,
+    // because the base `getConfirmationDetails` returned `type: 'info'`,
+    // which `permissionFlow.isAutoEditApproved(AUTO_EDIT, 'info')` silently
     // approves. The override must return `type: 'exec'` for action=remove.
+    const confirmationFor = (action: 'keep' | 'remove') =>
+      mockTool()
+        .build({ name: 'foo', action })
+        .getConfirmationDetails(new AbortController().signal);
+
     it("returns type 'exec' for action=remove (NOT auto-approved by AUTO_EDIT)", async () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      const inv = tool.build({ name: 'foo', action: 'remove' });
-      const details = await inv.getConfirmationDetails(
-        new AbortController().signal,
-      );
+      const details = await confirmationFor('remove');
       expect(details.type).toBe('exec');
-      // Also verify the command field is populated, so the prompt UI
-      // shows the user what would actually run.
+      // The command must be populated so the prompt shows what would run.
       if (details.type === 'exec') {
         expect(details.command).toContain('git worktree remove');
         expect(details.command).toContain('git branch -d worktree-foo');
@@ -152,18 +151,13 @@ describe('ExitWorktreeTool', () => {
     });
 
     it("returns the base 'info' type for action=keep (non-destructive)", async () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
-      const inv = tool.build({ name: 'foo', action: 'keep' });
-      const details = await inv.getConfirmationDetails(
-        new AbortController().signal,
-      );
-      expect(details.type).toBe('info');
+      expect((await confirmationFor('keep')).type).toBe('info');
     });
   });
 
   describe('getDescription', () => {
     it('mentions remove vs keep', () => {
-      const tool = new ExitWorktreeTool(makeMockConfig());
+      const tool = mockTool();
       const remove = tool.build({ name: 'foo', action: 'remove' });
       expect(remove.getDescription()).toMatch(/remove/i);
       const keep = tool.build({ name: 'foo', action: 'keep' });
@@ -172,28 +166,14 @@ describe('ExitWorktreeTool', () => {
   });
 
   // ── execute() integration: real git repo, real worktree ──────
-  // These tests provision a temp git repo so we exercise the
-  // session-ownership guard, the keep path, and the missing-marker
-  // fallback against the actual implementation rather than mocking
-  // every git call.
+  // A temp git repo exercises the session-ownership guard, the keep path
+  // and the missing-marker fallback against the real implementation.
   describe('execute() — session ownership & lifecycle', () => {
     let repoRoot: string;
 
     beforeEach(async () => {
       repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-exit-wt-'));
-      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
-      execFileSync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repoRoot,
-      });
-      execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
-      execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repoRoot,
-      });
-      await fs.writeFile(path.join(repoRoot, 'README.md'), 'hi\n');
-      execFileSync('git', ['add', '.'], { cwd: repoRoot });
-      execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
-        cwd: repoRoot,
-      });
+      await initRepo(repoRoot);
     });
 
     afterEach(async () => {
@@ -201,19 +181,28 @@ describe('ExitWorktreeTool', () => {
     });
 
     async function provisionWorktree(slug: string): Promise<string> {
-      // Use EnterWorktreeTool to create a real worktree so the test
-      // exercises the same code path users hit.
+      // Create the worktree via EnterWorktreeTool, the path users hit.
       const enterCfg = {
         getTargetDir: () => repoRoot,
         getSessionId: () => 'session-creator',
         getWorktreeSymlinkDirectories: () => [],
       } as unknown as Config;
-      const enter = new EnterWorktreeTool(enterCfg);
-      const inv = enter.build({ name: slug });
-      const result = await inv.execute(new AbortController().signal);
+      const result = await new EnterWorktreeTool(enterCfg)
+        .build({ name: slug })
+        .execute(new AbortController().signal);
       expect(result.error).toBeUndefined();
       return new GitWorktreeService(repoRoot).getUserWorktreePath(slug);
     }
+
+    /** Runs exit_worktree from the repo root as `sessionId`. */
+    const exitAs = (sessionId: string, params: ExitParams) =>
+      exitWith(
+        {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => sessionId,
+        } as unknown as Config,
+        params,
+      );
 
     it('refuses remove when the marker names a different session', async () => {
       const wtPath = await provisionWorktree('owned-by-creator');
@@ -224,14 +213,10 @@ describe('ExitWorktreeTool', () => {
       );
       expect(marker.trim()).toBe('session-creator');
 
-      const otherCfg = {
-        getTargetDir: () => repoRoot,
-        getSessionId: () => 'session-stranger',
-      } as unknown as Config;
-      const exit = new ExitWorktreeTool(otherCfg);
-      const result = await exit
-        .build({ name: 'owned-by-creator', action: 'remove' })
-        .execute(new AbortController().signal);
+      const result = await exitAs('session-stranger', {
+        name: 'owned-by-creator',
+        action: 'remove',
+      });
       expect(result.error?.message).toMatch(
         /different session.*owner=session-creator/i,
       );
@@ -314,77 +299,55 @@ describe('ExitWorktreeTool', () => {
 
     it('keep returns success and leaves the worktree + branch intact', async () => {
       const wtPath = await provisionWorktree('keepme');
-      const cfg = {
-        getTargetDir: () => repoRoot,
-        getSessionId: () => 'session-creator',
-      } as unknown as Config;
-      const exit = new ExitWorktreeTool(cfg);
-      const result = await exit
-        .build({ name: 'keepme', action: 'keep' })
-        .execute(new AbortController().signal);
+      const result = await exitAs('session-creator', {
+        name: 'keepme',
+        action: 'keep',
+      });
       expect(result.error).toBeUndefined();
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
-      const branches = execFileSync('git', ['branch', '--list'], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-      });
-      expect(branches).toContain(worktreeBranchForSlug('keepme'));
+      expect(listBranches(repoRoot)).toContain(worktreeBranchForSlug('keepme'));
     });
 
     it('allows removal when the worktree predates the session-marker guard', async () => {
-      // Manually create a worktree without writing the marker — this
-      // is the upgrade path. The tool should warn-log and proceed.
+      // Upgrade path: a worktree created without the marker (deliberately no
+      // writeWorktreeSessionMarker). The tool should warn-log and proceed.
       const svc = new GitWorktreeService(repoRoot);
       const created = await svc.createUserWorktree('legacy');
       expect(created.success).toBe(true);
-      // Explicitly DO NOT call writeWorktreeSessionMarker.
       const wtPath = svc.getUserWorktreePath('legacy');
       await expect(
         fs.access(path.join(wtPath, WORKTREE_SESSION_FILE)),
       ).rejects.toBeDefined();
 
-      const cfg = {
-        getTargetDir: () => repoRoot,
-        getSessionId: () => 'session-stranger',
-      } as unknown as Config;
-      const result = await new ExitWorktreeTool(cfg)
-        .build({ name: 'legacy', action: 'remove' })
-        .execute(new AbortController().signal);
+      const result = await exitAs('session-stranger', {
+        name: 'legacy',
+        action: 'remove',
+      });
       expect(result.error).toBeUndefined();
       await expect(fs.access(wtPath)).rejects.toBeDefined();
     });
 
     it('returns an error result when the worktree directory is missing', async () => {
-      const cfg = {
-        getTargetDir: () => repoRoot,
-        getSessionId: () => 'session-creator',
-      } as unknown as Config;
-      const result = await new ExitWorktreeTool(cfg)
-        .build({ name: 'nonexistent', action: 'remove' })
-        .execute(new AbortController().signal);
+      const result = await exitAs('session-creator', {
+        name: 'nonexistent',
+        action: 'remove',
+      });
       expect(result.error?.message).toMatch(/not found/i);
     });
 
     it('refuses removal when the worktree branch has unmerged commits', async () => {
       const wtPath = await provisionWorktree('committed');
-      // Commit a change inside the worktree so it has work no other
-      // ref points at.
+      // Commit inside the worktree so it has work no other ref points at.
       await fs.writeFile(path.join(wtPath, 'new.txt'), 'work\n');
       execFileSync('git', ['add', '.'], { cwd: wtPath });
       execFileSync('git', ['commit', '-q', '-m', 'work', '--no-verify'], {
         cwd: wtPath,
       });
-      const cfg = {
-        getTargetDir: () => repoRoot,
-        getSessionId: () => 'session-creator',
-      } as unknown as Config;
-      const result = await new ExitWorktreeTool(cfg)
-        .build({
-          name: 'committed',
-          action: 'remove',
-          discard_changes: true,
-        })
-        .execute(new AbortController().signal);
+      const result = await exitAs('session-creator', {
+        name: 'committed',
+        action: 'remove',
+        discard_changes: true,
+      });
       expect(result.error?.message).toMatch(/unmerged|no other branch/i);
       // Both worktree and branch must still be present.
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
@@ -415,19 +378,7 @@ describe('ExitWorktreeTool', () => {
     beforeEach(async () => {
       const raw = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-exit-sup-'));
       repoRoot = await fs.realpath(raw);
-      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
-      execFileSync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: repoRoot,
-      });
-      execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
-      execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: repoRoot,
-      });
-      await fs.writeFile(path.join(repoRoot, 'README.md'), 'hi\n');
-      execFileSync('git', ['add', '.'], { cwd: repoRoot });
-      execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
-        cwd: repoRoot,
-      });
+      await initRepo(repoRoot);
       Storage.setRuntimeBaseDir(path.join(repoRoot, '.runtime'));
     });
 
@@ -476,13 +427,16 @@ describe('ExitWorktreeTool', () => {
       return { worktreePath, sidecarPath };
     }
 
-    function supersededConfig(worktreePath: string): Config {
-      return {
-        getTargetDir: () => worktreePath,
-        getSessionId: () => 'session-old',
-        getSessionService: () => new SessionService(worktreePath),
-      } as unknown as Config;
-    }
+    /** Removes `name` as the superseded 'session-old' from its checkout. */
+    const removeAsSuperseded = (worktreePath: string, name: string) =>
+      exitWith(
+        {
+          getTargetDir: () => worktreePath,
+          getSessionId: () => 'session-old',
+          getSessionService: () => new SessionService(worktreePath),
+        } as unknown as Config,
+        { name, action: 'remove', discard_changes: true },
+      );
 
     it('refuses remove when the current sidecar is superseded by the marker owner', async () => {
       const { worktreePath, sidecarPath } = await provisionTransferredWorktree(
@@ -490,13 +444,7 @@ describe('ExitWorktreeTool', () => {
         'session-new',
       );
 
-      const result = await new ExitWorktreeTool(supersededConfig(worktreePath))
-        .build({
-          name: 'transferred',
-          action: 'remove',
-          discard_changes: true,
-        })
-        .execute(new AbortController().signal);
+      const result = await removeAsSuperseded(worktreePath, 'transferred');
 
       expect(result.error?.message ?? 'removal was allowed to proceed').toMatch(
         /different session.*owner=session-new/i,
@@ -504,12 +452,9 @@ describe('ExitWorktreeTool', () => {
       // The replacement's checkout, branch, marker and the redirect link the
       // restore route depends on must all survive.
       await expect(fs.access(worktreePath)).resolves.toBeUndefined();
-      expect(
-        execFileSync('git', ['branch', '--list'], {
-          cwd: repoRoot,
-          encoding: 'utf8',
-        }),
-      ).toContain(worktreeBranchForSlug('transferred'));
+      expect(listBranches(repoRoot)).toContain(
+        worktreeBranchForSlug('transferred'),
+      );
       await expect(
         fs.readFile(path.join(worktreePath, WORKTREE_SESSION_FILE), 'utf8'),
       ).resolves.toBe('session-new');
@@ -525,13 +470,7 @@ describe('ExitWorktreeTool', () => {
       const { worktreePath, sidecarPath } =
         await provisionTransferredWorktree('stale-owned');
 
-      const result = await new ExitWorktreeTool(supersededConfig(worktreePath))
-        .build({
-          name: 'stale-owned',
-          action: 'remove',
-          discard_changes: true,
-        })
-        .execute(new AbortController().signal);
+      const result = await removeAsSuperseded(worktreePath, 'stale-owned');
 
       expect(result.error).toBeUndefined();
       await expect(fs.access(worktreePath)).rejects.toBeDefined();

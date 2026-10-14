@@ -16,7 +16,7 @@ public final class ExecutionReconciliation {
          * reconcile yet. This does not prove a dispatcher is still working
          * on it. A lapsed EXECUTING or CANCEL_REQUESTED record stays here
          * until a same-key retry or a cancel fences it as UNKNOWN, or a
-         * takeover scan does; a same-key retry re-dispatches a PREPARED or
+         * takeover scan settles it from Runtime evidence; a same-key retry re-dispatches a PREPARED or
          * lapsed DISPATCHING record, which never reached the Runtime.
          */
         IN_FLIGHT

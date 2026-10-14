@@ -147,7 +147,6 @@ tmp/
 
 # Brand build workspaces (created by the desktop-brand-builder skill)
 brand-builds/
-workspace/
 
 # Dependencies install with pnpm from pnpm-lock.yaml; keep an npm install
 # from bringing the retired root lockfile back.

@@ -1025,16 +1025,56 @@ describe('collectContextData (contextCommand)', () => {
           },
         },
       ) as DiscoveredMCPTool;
+      const controlSchema = {
+        name: 'tool_call',
+        parameters: { type: 'OBJECT', properties: {} },
+      };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
+        { name: controlSchema.name, schema: controlSchema },
       ];
-      const declared = [skillToolSchema];
+      const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
+      );
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
+      // The deficit comes out of the mcp row, not the built-in or skills rows.
+      expect(unscaled.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+      );
+      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
+      expect(unscaled.breakdown.builtinTools).toBe(0);
+      // With nothing declared the mcp row cannot absorb the whole deficit, so
+      // the rest is charged to skills and the window still adds up.
+      const undeclared = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared: [], history }),
+        false,
+      );
+      expect(undeclared.breakdown.mcpTools).toBe(0);
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(JSON.stringify([])),
+      );
+      expect(undeclared.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          undeclared.contextWindowSize -
+            sumRows(undeclared.breakdown) -
+            undeclared.breakdown.autocompactBuffer,
+        ),
       );
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
@@ -1057,6 +1097,23 @@ describe('collectContextData (contextCommand)', () => {
       ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
+
+      // `/context detail` lists the MCP tools under the mcp row, so they must
+      // add up to it on both paths.
+      const mcpDetailSum = (
+        item: Awaited<ReturnType<typeof collectContextData>>,
+      ) => item.mcpTools.reduce((sum, tool) => sum + tool.tokens, 0);
+      for (const options of [
+        { total: 0, tools, declared, history },
+        { total: 0, tools, declared: [], history },
+        { total, tools, declared, history },
+      ]) {
+        const detailed = await collectContextData(
+          makeChatConfig(options),
+          true,
+        );
+        expect(mcpDetailSum(detailed)).toBe(detailed.breakdown.mcpTools);
+      }
     });
 
     it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
@@ -1580,23 +1637,39 @@ describe('collectContextData (contextCommand)', () => {
 
   it('lists the auto-memory section as a separate memory entry (#7651)', async () => {
     // The managed auto-memory section is no longer part of getUserMemory(); its
-    // tokens are surfaced via getAutoMemoryPrompt(). Exercise the non-empty
-    // branch so a regression that drops the "auto memory" row from /context
-    // fails here instead of silently under-counting the memory breakdown.
-    const config = {
-      ...makeMockConfig(),
-      getUserMemory: vi.fn().mockReturnValue(''),
-      getOutputStyle: vi.fn().mockReturnValue(undefined),
-      getAutoMemoryPrompt: vi
-        .fn()
-        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
-    } as unknown as Config;
+    // tokens are surfaced via getAutoMemoryPrompt() plus the request-only
+    // catalog from getAutoMemoryContext(). Exercise the non-empty branch so a
+    // regression that drops the "auto memory" row from /context, or that drops
+    // either of its two terms, fails here instead of silently under-counting
+    // the memory breakdown.
+    const configWithCatalog = (catalog: string) =>
+      ({
+        ...makeMockConfig(),
+        getUserMemory: vi.fn().mockReturnValue(''),
+        getOutputStyle: vi.fn().mockReturnValue(undefined),
+        getAutoMemoryPrompt: vi
+          .fn()
+          .mockReturnValue('# auto memory\nStable policy'),
+        getAutoMemoryContext: vi.fn().mockReturnValue(catalog),
+      }) as unknown as Config;
 
-    const data = await collectContextData(config, true);
+    // contextCommand gates the row on the joined string, so a catalog-only
+    // config still yields exactly one row.
+    const policyOnly = await collectContextData(configWithCatalog(''), true);
+    const withCatalog = await collectContextData(
+      configWithCatalog('MEMORY_INDEX_MARKER\n'.repeat(200)),
+      true,
+    );
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(t('auto memory'));
-    expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+    expect(policyOnly.memoryFiles).toHaveLength(1);
+    expect(policyOnly.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(policyOnly.memoryFiles[0].tokens).toBeGreaterThan(0);
+
+    expect(withCatalog.memoryFiles).toHaveLength(1);
+    expect(withCatalog.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(withCatalog.memoryFiles[0].tokens).toBeGreaterThan(
+      policyOnly.memoryFiles[0].tokens,
+    );
   });
 
   it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {

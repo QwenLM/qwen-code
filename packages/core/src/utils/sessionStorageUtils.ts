@@ -15,7 +15,10 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import { getProjectHash } from './paths.js';
-import { _recoverObjectsFromLine } from './jsonl-utils.js';
+import {
+  _recoverObjectsFromLine,
+  parseLineTolerantWithIntegrity,
+} from './jsonl-utils.js';
 import { openSyncNoFollow } from './no-follow-open.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
@@ -821,18 +824,11 @@ export function isSinglePathSegment(value: string): boolean {
   );
 }
 
-const MANAGED_HEADER_MARKER = '"subtype":"managed_session_header_v1"';
+const MANAGED_HEADER_SUBTYPE = 'managed_session_header_v1';
+const MANAGED_HEADER_MARKER = `"subtype":"${MANAGED_HEADER_SUBTYPE}"`;
 const EXECUTION_ENGINE_SUBTYPE = 'session_execution_engine';
 const MANAGED_METADATA_MARKER = '"domain":"session_metadata"';
 const MANAGED_SOURCE_MARKER = '"domain":"session_source"';
-
-function lastLineContaining(text: string, marker: string): string | undefined {
-  const lines = text.split('\n');
-  for (let index = lines.length - 1; index >= 0; index--) {
-    if (lines[index].includes(marker)) return lines[index];
-  }
-  return undefined;
-}
 
 function lastCommittedDomainLine(
   text: string,
@@ -886,16 +882,49 @@ function lastCommittedDomainLine(
  * A positive identification, unlike the execution-engine reader, which reports
  * `unavailable` for any transcript with a completeness diagnostic and so cannot
  * gate legacy-only operations without regressing legacy sessions.
+ *
+ * The header must parse as a record of its own subtype: literal marker text
+ * left in a legacy line by an interrupted or glued append does not make the
+ * transcript Managed.
  */
 export function isManagedSessionTranscriptSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): boolean {
-  return (
-    readTranscriptHeadSync(filePath, scratchBuffer)?.includes(
-      MANAGED_HEADER_MARKER,
-    ) === true
-  );
+  const head = readTranscriptHeadSync(filePath, scratchBuffer);
+  return head !== undefined && headCarriesManagedHeader(head, filePath);
+}
+
+/** True for a parsed record that is itself the Managed Session header. */
+function isManagedHeaderRecord(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false;
+  const { type, subtype } = record as Record<string, unknown>;
+  return type === 'system' && subtype === MANAGED_HEADER_SUBTYPE;
+}
+
+/**
+ * The first Managed header record of the head, when one parses. Lines are
+ * parsed the way the owner reader parses them — a `\u`-spelled marker
+ * counts, raw marker text inside an unparseable or glued line does not.
+ */
+function findManagedHeaderRecord(
+  head: string,
+  filePath: string,
+): Record<string, unknown> | undefined {
+  for (const line of head.split('\n')) {
+    if (!line.includes(MANAGED_HEADER_MARKER) && !line.includes('\\u')) {
+      continue;
+    }
+    const record = parseLineTolerantWithIntegrity(line, filePath).records.find(
+      isManagedHeaderRecord,
+    );
+    if (record !== undefined) return record as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function headCarriesManagedHeader(head: string, filePath: string): boolean {
+  return findManagedHeaderRecord(head, filePath) !== undefined;
 }
 
 /**
@@ -904,27 +933,62 @@ export function isManagedSessionTranscriptSync(
  * record naming `managed`. A Managed owner is written before anything else,
  * so the head window holds it.
  *
- * Gates executing, recording and forking a session with Legacy. Operations
- * that depend on the Managed Session log format use
+ * Lines are parsed the way the owner reader parses them, so an owner record
+ * that parses whole counts even when another record shares its line. A line
+ * is parsed only when it could name the owner subtype: literally, or through a
+ * `\u` escape, the only JSON escape that can spell its letters and
+ * underscores.
+ *
+ * Gates executing, recording, renaming and forking a session with Legacy.
+ * Operations that depend on the Managed Session log format use
  * {@link isManagedSessionTranscriptSync}: an owner record alone is no log.
  */
 export function isManagedExecutionTranscriptSync(filePath: string): boolean {
-  const head = readTranscriptHeadSync(filePath);
-  if (head === undefined) return false;
-  return (
-    head.includes(MANAGED_HEADER_MARKER) ||
-    head.split('\n').some(isManagedOwnerRecordLine)
-  );
+  return readManagedExecutionEvidenceSync(filePath) === true;
 }
 
-function isManagedOwnerRecordLine(line: string): boolean {
-  if (!line.includes(EXECUTION_ENGINE_SUBTYPE)) return false;
-  let record: unknown;
+/**
+ * The evidence {@link isManagedExecutionTranscriptSync} looks for, telling a
+ * transcript whose head cannot be read (`undefined`) apart from one that is
+ * missing or empty (`false`).
+ */
+export function readManagedExecutionEvidenceSync(
+  filePath: string,
+): boolean | undefined {
+  let head: string;
   try {
-    record = JSON.parse(line);
-  } catch {
-    return false;
+    head = readTranscriptHeadOrThrowSync(filePath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
   }
+  // One parse pass serves both gates; a line is parsed only when it could
+  // name the header subtype (the wrapped marker) or the owner subtype (the
+  // bare string), literally or through a `\u` escape.
+  return head.split('\n').some((line) => {
+    if (
+      !line.includes(MANAGED_HEADER_MARKER) &&
+      !line.includes(EXECUTION_ENGINE_SUBTYPE) &&
+      !line.includes('\\u')
+    ) {
+      return false;
+    }
+    const { records } = parseLineTolerantWithIntegrity(line, filePath);
+    return (
+      records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
+    );
+  });
+}
+
+/**
+ * True for a parsed transcript record that names the Managed engine as the
+ * owner: a system record of the execution-engine subtype whose payload
+ * engine is `managed`. It is the one definition of that positive evidence.
+ * The owner reader validates owner records more strictly and reports one it
+ * rejects as unavailable, never as Legacy.
+ */
+export function isManagedOwnerRecord(record: unknown): boolean {
   if (!record || typeof record !== 'object') return false;
   const { type, subtype, systemPayload } = record as Record<string, unknown>;
   return (
@@ -940,10 +1004,23 @@ function readTranscriptHeadSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): string | undefined {
+  try {
+    const head = readTranscriptHeadOrThrowSync(filePath, scratchBuffer);
+    return head === '' ? undefined : head;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The head window, or `''` for an empty transcript; throws when unreadable. */
+function readTranscriptHeadOrThrowSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): string {
   let fd: number | undefined;
   try {
     const fileSize = fs.statSync(filePath).size;
-    if (fileSize === 0) return undefined;
+    if (fileSize === 0) return '';
     fd = openSyncNoFollow(filePath);
     const buffer =
       scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
@@ -952,8 +1029,6 @@ function readTranscriptHeadSync(
     const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const read = fs.readSync(fd, buffer, 0, length, 0);
     return buffer.toString('utf-8', 0, read);
-  } catch {
-    return undefined;
   } finally {
     if (fd !== undefined) {
       try {
@@ -1074,14 +1149,15 @@ function readManagedDomainBodySync(
     const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
     const headText = buffer.toString('utf-8', 0, headBytes);
-    const headerLine = lastLineContaining(headText, MANAGED_HEADER_MARKER);
-    if (headerLine === undefined) return undefined;
+    // Classify the way the header gates do: a parsed header record, not raw
+    // marker text a glued legacy line may carry.
+    const header = findManagedHeaderRecord(headText, filePath) as
+      | { managedSession?: { sessionKey?: { sessionId?: unknown } } }
+      | undefined;
+    if (header === undefined) return undefined;
 
     /* The recorded identity, not the file name, decides where the resources
        live. */
-    const header = JSON.parse(headerLine) as {
-      managedSession?: { sessionKey?: { sessionId?: unknown } };
-    };
     const recordedId = header.managedSession?.sessionKey?.sessionId;
     if (typeof recordedId !== 'string' || recordedId.length === 0) return {};
     const resourceRoot = managedSessionResourceRoot(runtimeBaseDir, recordedId);

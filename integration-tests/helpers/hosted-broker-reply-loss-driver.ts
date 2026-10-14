@@ -210,6 +210,7 @@ try {
       `${fault}: fault did not fire`,
     );
     const blocked = !['prepare', 'start'].includes(fault);
+    const retryRelease = ['release', 'release-before-forward'].includes(fault);
     assert.equal(
       (await json(`/session/${sessionId}/status`)).recoveryBlocked,
       blocked,
@@ -238,8 +239,13 @@ try {
     const terminals = events.filter(
       (event) => event.promptId === promptId && event.type.startsWith('turn_'),
     );
-    assert.equal(terminals.length, blocked ? 0 : 1, JSON.stringify(events));
-    if (!blocked) assert.equal(terminals[0].type, 'turn_complete');
+    assert.equal(
+      terminals.length,
+      blocked && !retryRelease ? 0 : 1,
+      JSON.stringify(events),
+    );
+    if (!blocked || retryRelease)
+      assert.equal(terminals[0].type, 'turn_complete');
     const results = events.filter(
       (event) => event.data.record?.type === 'tool_result',
     );
@@ -305,6 +311,8 @@ try {
       assert.equal(rejected.error, 'hosted_turn_recovery_required');
     }
     const traffic = exchanges.length;
+    const callsBeforeReload = modelCalls;
+    const rejectLoad = blocked && !retryRelease;
     await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
       `/session/${sessionId}/load`,
@@ -312,17 +320,65 @@ try {
         managedSessionStore: connection,
         toolProfile: 'hosted-workspace-files/1',
       },
-      blocked ? 409 : 200,
+      rejectLoad ? 409 : 200,
     );
-    if (blocked) assert.equal(loaded.error, 'hosted_turn_recovery_required');
+    if (rejectLoad) assert.equal(loaded.error, 'hosted_turn_recovery_required');
     else {
       clientId = loaded.clientId;
+      if (retryRelease) {
+        await waitUntil(async () => {
+          if (proxyFailure) throw proxyFailure;
+          return !(await json(`/session/${sessionId}/status`)).hasActivePrompt;
+        });
+        assert.equal(
+          (await json(`/session/${sessionId}/status`)).recoveryBlocked,
+          fault === 'release-before-forward',
+          cli.output,
+        );
+        const page = await json(
+          `/session/${sessionId}/transcript?cursor=0&limit=256`,
+        );
+        assert.equal(page.hasMore, false);
+        const recoveredEvents: typeof events = page.events;
+        assert.deepEqual(
+          recoveredEvents
+            .filter(
+              (event) =>
+                event.promptId === promptId && event.type.startsWith('turn_'),
+            )
+            .map((event) => event.type),
+          ['turn_complete'],
+        );
+        assert.equal(
+          recoveredEvents.filter(
+            (event) => event.data.record?.type === 'tool_result',
+          ).length,
+          1,
+        );
+      }
       await json(`/session/${sessionId}/detach`, {}, 204);
     }
+    const cleanupRetries = exchanges.slice(traffic);
+    if (retryRelease) {
+      assert(cleanupRetries.length > 0, 'Original cleanup must be retried');
+      const original = exchanges.find((entry) => entry.operation === 'release');
+      assert(original);
+      for (const entry of cleanupRetries) {
+        assert.equal(
+          entry.operation,
+          'release',
+          'Reload may only retry the original runtime release',
+        );
+        assert.deepEqual(entry.fields, {
+          ...original.fields,
+          requestId: entry.fields['requestId'],
+        });
+      }
+    } else assert.deepEqual(cleanupRetries, []);
     assert.equal(
-      exchanges.length,
-      traffic,
-      'Reload must not replay Broker work',
+      modelCalls,
+      callsBeforeReload,
+      'Reload must not call the model',
     );
     reports.push({ fault, promptId, executionCallId, idempotencyKey });
     console.log(

@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
 
-状态：W0e-1 实现及待评审的 W0e-2/3 后续设计，2026-09-27。生产 worker 接管与物理回收仍属于后续工作。基线：`e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`。
+状态：W0e-1/2/3 源码实现，2026-09-28。专用 Linux 物理重启验收仍待完成。基线：`e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`。
 
 关联：[路线图 #12380](https://github.com/QwenLM/qwen-code/issues/12380)、[丢失执行 #12670](https://github.com/QwenLM/qwen-code/issues/12670)、[本地 worker #12766](https://github.com/QwenLM/qwen-code/issues/12766)、[W0c-3](2026-09-26-managed-workspace-execution.zh-CN.md) 和 [W0d](managed-workspace-w0d-web-shell-binding.zh-CN.md)。
 
@@ -112,11 +112,19 @@ Binding 仓库负责准入和恢复事务。生产 JDBC 仓库必须使用同一
 
 升级已启用 Broker 的部署前，先暂停新准入并盘点带 seed 的历史 `FAILED` Binding。即使后来代数已是 `READY`，早前崩溃仍可能留下这类记录；新 guard 会拒绝该租户创建 placement。若存在此类记录，受影响流量必须保持停止，直到原写入域已被物理停止，且有保留证据的运维迁移可用。后续 `READY` Binding、删行或伪造停写回执都不能作为清理证明。本切片本身无法让含有这些记录的部署安全恢复准入。
 
-Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 journal 丢失，严格匹配 seed、lease 和 handle。它不证明子孙进程已停止，也不提供 Broker 重启后的 worker 接管。对仍存活的自有进程，短暂的 attestation 传输错误只使本次请求失败；Binding 保持 `READY`，下次调用重新认证。进程死亡或身份冲突仍会封闭 Binding，单次网络超时不会变成永久的物理失联证据。只有本地进程 provisioner 通过自有进程存活检查显式启用此重试，其他 provisioner 默认保持封闭。重启后缺少 ownership 仍不能提供证据。本切片没有生产 `WRITERS_STOPPED` 产生器，通过确定性 supervisor fixture 验证证据消费。Workspace storage holder 清理仍属于 W0e-3；仅有失联证据的恢复不会调用 transport release，也不会清除 holder。缓存 Session 的释放先检查持久状态，再检查存活性，确保已回收释放可幂等确认，而 LOST 代数不能走普通 transport 释放路径。Session 的最终释放在同一个代数锁下校验父 Binding 并更新 Session。正常 holder 释放在 SQL 事务内锁定并检查原 Binding 仍存活；迟到的停用响应不能在失联屏障后清除 holder。这仅保护普通清理，不启用 W0e-3 回收。
+W0e-1 的 Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 journal 丢失，严格匹配 seed、lease 和 handle。它不证明子孙进程已停止，也不提供 Broker 重启后的 worker 接管。对仍存活的自有进程，短暂的 attestation 传输错误只使本次请求失败；Binding 保持 `READY`，下次调用重新认证。进程死亡或身份冲突仍会封闭 Binding，单次网络超时不会变成永久的物理失联证据。只有本地进程 provisioner 通过自有进程存活检查显式启用此重试，其他 provisioner 默认保持封闭。重启后缺少 ownership 仍不能提供证据。本切片没有生产 `WRITERS_STOPPED` 产生器，通过确定性 supervisor fixture 验证证据消费。Workspace storage holder 清理仍属于 W0e-3；仅有失联证据的恢复不会调用 transport release，也不会清除 holder。缓存 Session 的释放先检查持久状态，再检查存活性，确保已回收释放可幂等确认，而 LOST 代数不能走普通 transport 释放路径。Session 的最终释放在同一个代数锁下校验父 Binding 并更新 Session。正常 holder 释放在 SQL 事务内锁定并检查原 Binding 仍存活；迟到的停用响应不能在失联屏障后清除 holder。这仅保护普通清理，不启用 W0e-3 回收。
 
 私有终态读取、取消和同键创建重试校验原保存的 Binding 与 Session 身份，要求服务鉴权，不依赖本地存活 Session，也不重新解析当前 actor 或映射。HTTP 保留 `runtime_broker_execution_unknown`，附带 `details.terminal: true` 和 `details.reason: runtime_lost`；TypeScript adapter 在 inspect、reconcile 和 cancel 路径保留这些信息，不对外投影物理证据。
 
 Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement guard。升级测试在迁移前直接写入旧版 SQL 行，迁移后校验 PREPARED、UNKNOWN 和 SETTLED 回执。写入 ABANDONED 前仍需协调升级，不能混用旧二进制。
+
+## 6b. W0e-2 实现
+
+[本地持久接管实现](2026-09-27-local-runtime-adoption.zh-CN.md) 增加默认启用的 Linux 身份存储（设置 `runtime-broker.durable-local-process=false` 与 `runtime-broker.trusted-local-reboot-recovery=false` 可退出）、带持久 PID/启动 tick 登记的 boot 屏障、永久启动锁和 Broker 重启后的接管。临时模式保留 W0e-1 行为，仍可通过该退出获得。两种模式均不在仅 worker 死亡时证明写入者已停止；W0e-3 物理回收仍单独实现。
+
+## 6c. W0e-3 实现
+
+[可信本地重启实现](2026-09-28-local-reboot-recovery.zh-CN.md) 增加随持久本地 provisioning 默认启用的同宿主 boot 证据、原 holder 清理、迟到 acquire 屏障和独立有界维护扫描。grant、产品 Session 或 Registry 改变后，清理仍使用原保存物理归属。loss 回执始终表示终态不确定性。真实 worker、SQL 和模拟 boot 身份测试覆盖完整链路；宣称物理验收前仍需专用 Linux 重启验证。
 
 ## 7. 交付顺序与边界
 
@@ -126,7 +134,7 @@ Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement 
 | W0e-2 / #12766 | 生产持久启动身份与存活 worker 对账                                                                 | 真实进程重启/接管测试通过；身份不完整不产生重复 worker；不支持的停止证明继续阻断 |
 | W0e-3          | 同宿主重启恢复、Workspace holder 清理、旧写入者故障门禁                                            | 真实 SQL、worker 与宿主/隔离证据在每个验收案例中证明安全推进或明确阻断           |
 
-这些是实施切片，不是三项已经完成的功能。启用 W0e-2 回收前先合入 W0e-1。W0e 只有完成 W0e-3 才算结束；测试辅助实现通过不能证明生产 provisioner 已达标。
+这些是实施切片，不是三项已经完成的功能。启用 W0e-2 接管前先合入 W0e-1。W0e 只有完成 W0e-3 才算结束；测试辅助实现通过不能证明生产 provisioner 已达标。
 
 [Hosted 文件工具 PR #12831](https://github.com/QwenLM/qwen-code/pull/12831) 已覆盖私有受控 Read/Write/Edit 编排，并明确排除进程丢失恢复。集成前协调它保存的 execution identity 和未知结果消费路径。公开绑定消息执行、Stage G Turn 接管/历史结算、任意 Shell 隔离、Kubernetes 和产品身份传递仍属独立工作。`workspace_context` 保持 false；W0d 的窄能力 `workspace_binding` 保持不变。
 
@@ -157,4 +165,4 @@ Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement 
 
 建议接受 `ABANDONED` 表示终态不确定性，保留独立物理占用，并在生产本地恢复前实现 W0e-1。对应 issue 仍需记录并评审这项决策；本文不代表 maintainer 已接受。
 
-W0e-2/3 实现必须选择受支持 OS 的稳定 host/boot identity 来源，并证明该平台的持久启动登记。若部署要求任意 Shell 后代存在时也能在仅 worker 死亡后自动恢复，则必须先选择可整体终止的隔离域。此前该路径正确的验收结果是明确阻断。这些前提不妨碍使用确定性的可信证据 fixture 设计和实现 W0e-1，但 fixture 不构成 W0e 完成证据。
+W0e-2 选择 Linux machine/boot/PID/time namespace 身份与持久启动登记。真实进程测试在 Linux 使用原生身份，在 macOS 使用仅测试可用的身份。W0e-3 仍需在受支持宿主验证物理重启。若部署要求任意 Shell 后代存在时也能在仅 worker 死亡后自动恢复，则必须先选择可整体终止的隔离域。此前该路径正确的验收结果是明确阻断。这些前提不妨碍使用确定性的可信证据 fixture 设计和实现 W0e-1，但 fixture 不构成 W0e 完成证据。

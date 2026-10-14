@@ -8,14 +8,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { once } from 'node:events';
 import type { CommandModule } from 'yargs';
+import { flushOutput } from '../utils/flush-output.js';
 import { DEFAULT_COMMAND_OPTIONS } from '../config/top-level-options.js';
 
 interface SandboxArgs {
   cmd?: string[];
   verify?: boolean;
-  sandbox?: boolean;
+  sandbox?: boolean | string;
   sandboxImage?: string;
   bare?: boolean;
   '--'?: string[];
@@ -73,8 +73,9 @@ export const sandboxCommand: CommandModule = {
           '../config/sandboxConfig.js'
         );
         const legacy = await loadSandboxConfig(settings, args);
+        const inherited = process.env['SANDBOX']?.trim();
         report(
-          `Tool execution sandbox: none${legacy ? ` (whole-CLI backend: ${legacy.command})` : ''}`,
+          `Tool execution sandbox: none${inherited ? ` (inherited whole-CLI marker: ${inherited})` : legacy ? ` (whole-CLI backend: ${legacy.command})` : ''}`,
         );
         report('Configure tools.executionSandbox in User or System settings.');
         if (command.length || args.verify)
@@ -92,8 +93,8 @@ export const sandboxCommand: CommandModule = {
       const { admitShellSandbox, probeShellSandbox } = await import(
         '@qwen-code/qwen-code-core/sandbox/runtime-shell-policy.js'
       );
-      const { executeBwrap } = await import(
-        '@qwen-code/qwen-code-core/sandbox/bwrap-execution.js'
+      const { executeSandbox } = await import(
+        '@qwen-code/qwen-code-core/sandbox/execute-sandbox.js'
       );
       const { sanitizeChildEnv } = await import(
         '@qwen-code/qwen-code-core/utils/sanitize-child-env.js'
@@ -103,7 +104,7 @@ export const sandboxCommand: CommandModule = {
         process.cwd(),
       );
       const candidate = createExecutionSandboxPolicy(selected, process.cwd());
-      const policy = admitShellSandbox(
+      const admitted = admitShellSandbox(
         {
           model: '',
           debugMode: false,
@@ -114,100 +115,104 @@ export const sandboxCommand: CommandModule = {
         Storage.getRuntimeBaseDir(),
         Storage.getGlobalQwenDir(),
       )!;
-      report(`Boundary: tools; backend: ${policy.requestedBackend} → bwrap`);
-      report(
-        `Filesystem: ${policy.filesystem}; workspace: ${policy.workspace}`,
-      );
-      report(`Command network: ${policy.network}`);
-      report('Model, authentication and session traffic stay on the host.');
-      report('Host reads and pathname Unix sockets remain accessible.');
-      await probeShellSandbox(policy, controller.signal);
-      report('Backend probe: passed');
-      const env = Object.fromEntries(
-        Object.entries(sanitizeChildEnv(process.env)).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string',
-        ),
-      );
-      if (command.length) {
-        const pendingDrains = new Map<'stdout' | 'stderr', Promise<void>>();
-        let outputError: NodeJS.ErrnoException | undefined;
-        const handleOutputError = (error: NodeJS.ErrnoException) => {
-          if (outputError || controller.signal.aborted) return;
-          outputError = error;
-          cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
-          controller.abort();
-        };
-        process.stdout.on('error', handleOutputError);
-        process.stderr.on('error', handleOutputError);
+      let fixture = '';
+      if (args.verify && !command.length) {
         try {
-          // env resolves PATH inside confinement and receives literal argv.
-          const handle = await executeBwrap(
-            policy,
-            {
-              executable: '/usr/bin/env',
-              args: ['--', ...command],
-              cwd: policy.workspace,
-              env,
-              inheritStdin: !process.stdin.isTTY,
-            },
-            (event) => {
-              if (event.type === 'raw_data') {
-                const streamKey = event.stream;
-                const stream =
-                  streamKey === 'stderr' ? process.stderr : process.stdout;
-                if (
-                  !stream.write(event.chunk) &&
-                  !pendingDrains.has(streamKey)
-                ) {
-                  const drained = once(stream, 'drain').then(
-                    () => undefined,
-                    (error: unknown) => {
-                      if (
-                        error instanceof Error &&
-                        (error as NodeJS.ErrnoException).code === 'EPIPE'
-                      )
-                        return;
-                      throw error;
-                    },
-                  );
-                  pendingDrains.set(streamKey, drained);
-                  const clearDrain = () => {
-                    if (pendingDrains.get(streamKey) === drained)
-                      pendingDrains.delete(streamKey);
-                  };
-                  void drained.then(clearDrain, clearDrain);
-                }
-              }
-            },
-            controller.signal,
-            false,
-            {},
-            { streamStdout: true, streamRawOutput: true },
+          fixture = fs.mkdtempSync(
+            path.join(os.tmpdir(), 'qwen-sandbox-verify-'),
           );
-          const result = await handle.result;
-          await Promise.all([...pendingDrains.values()]);
-          if (outputError && outputError.code !== 'EPIPE') throw outputError;
-          if (result.error && !result.aborted) throw result.error;
-          process.exitCode = result.aborted
-            ? cancellationExitCode
-            : (result.exitCode ?? 1);
-          return;
-        } finally {
-          process.stdout.removeListener('error', handleOutputError);
-          process.stderr.removeListener('error', handleOutputError);
+        } catch (error) {
+          throw new Error(
+            `Cannot create verification fixture in host temporary directory ${os.tmpdir()}: ${error instanceof Error ? error.message : String(error)}. Check TMPDIR and its permissions; this failure does not test the sandbox boundary.`,
+          );
         }
       }
-      if (!args.verify) return;
-      const fixture = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'qwen-sandbox-verify-'),
-      );
-      const outside = path.join(fixture, 'host-writable');
-      const inside = path.join(
-        policy.workspace,
-        `.qwen-sandbox-probe-${randomUUID()}`,
-      );
-      fs.writeFileSync(outside, 'unchanged', { flag: 'wx' });
       try {
+        const policy = await probeShellSandbox(admitted, controller.signal);
+        report(
+          `Boundary: tools; backend: ${policy.requestedBackend} → ${policy.effectiveBackend} (${policy.enforcement}${policy.landlockAbi ? `, ABI ${policy.landlockAbi}` : ''})`,
+        );
+        report(
+          `Filesystem: ${policy.filesystem}; workspace: ${policy.workspace}`,
+        );
+        report(`Command network: ${policy.network}`);
+        report('Model, authentication and session traffic stay on the host.');
+        report('Host reads and pathname Unix sockets remain accessible.');
+        report(
+          'Backend probe: passed (admission only; full-session viability is not tested).',
+        );
+        const env = Object.fromEntries(
+          Object.entries(sanitizeChildEnv(process.env)).filter(
+            (entry): entry is [string, string] => typeof entry[1] === 'string',
+          ),
+        );
+        if (command.length) {
+          let outputError: NodeJS.ErrnoException | undefined;
+          const outputControllers = {
+            stdout: new AbortController(),
+            stderr: new AbortController(),
+          };
+          const handleOutputError =
+            (stream: 'stdout' | 'stderr') => (error: NodeJS.ErrnoException) => {
+              outputControllers[stream].abort();
+              if (outputError) return;
+              outputError = error;
+              cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
+              controller.abort();
+            };
+          const stdoutError = handleOutputError('stdout');
+          const stderrError = handleOutputError('stderr');
+          process.stdout.on('error', stdoutError);
+          process.stderr.on('error', stderrError);
+          try {
+            // env resolves PATH inside confinement and receives literal argv.
+            const handle = await executeSandbox(
+              policy,
+              {
+                executable: '/usr/bin/env',
+                args: ['--', ...command],
+                cwd: policy.workspace,
+                env,
+                inheritStdin: !process.stdin.isTTY,
+              },
+              (event) => {
+                if (event.type === 'raw_data') {
+                  const stream =
+                    event.stream === 'stderr' ? process.stderr : process.stdout;
+                  stream.write(event.chunk);
+                }
+              },
+              controller.signal,
+              false,
+              {},
+              { streamStdout: true, streamRawOutput: true },
+            );
+            const result = await handle.result;
+            const output = await Promise.allSettled([
+              flushOutput(process.stdout, outputControllers.stdout.signal),
+              flushOutput(process.stderr, outputControllers.stderr.signal),
+            ]);
+            if (outputError && outputError.code !== 'EPIPE') throw outputError;
+            for (const flushed of output)
+              if (flushed.status === 'rejected') throw flushed.reason;
+            if (result.error && !result.aborted) throw result.error;
+            process.exitCode =
+              result.aborted || controller.signal.aborted
+                ? cancellationExitCode
+                : (result.exitCode ?? 1);
+            return;
+          } finally {
+            process.stdout.removeListener('error', stdoutError);
+            process.stderr.removeListener('error', stderrError);
+          }
+        }
+        if (!args.verify) return;
+        const outside = path.join(fixture, 'host-writable');
+        const inside = path.join(
+          policy.workspace,
+          `.qwen-sandbox-probe-${randomUUID()}`,
+        );
+        fs.writeFileSync(outside, 'unchanged', { flag: 'wx' });
         const hostPid = fs.readlinkSync('/proc/self/ns/pid');
         const hostNet = fs.readlinkSync('/proc/self/ns/net');
         const program = `
@@ -217,7 +222,7 @@ export const sandboxCommand: CommandModule = {
           if (inside === 'allowed') fs.unlinkSync(process.argv[1]);
           console.log(JSON.stringify({inside, outside:write(process.argv[2], 'w'), pid:fs.readlinkSync('/proc/self/ns/pid'), net:fs.readlinkSync('/proc/self/ns/net')}));
         `;
-        const handle = await executeBwrap(
+        const handle = await executeSandbox(
           policy,
           {
             executable: fs.realpathSync(process.execPath),
@@ -239,16 +244,26 @@ export const sandboxCommand: CommandModule = {
           [
             'workspace policy',
             observed['inside'] ===
-              (policy.filesystem === 'workspace-write' ? 'allowed' : 'EROFS'),
+              (policy.filesystem === 'workspace-write'
+                ? 'allowed'
+                : policy.effectiveBackend === 'landlock'
+                  ? 'EACCES'
+                  : 'EROFS'),
           ],
           [
             'host-writable outside file denied',
-            observed['outside'] === 'EROFS' &&
+            observed['outside'] ===
+              (policy.effectiveBackend === 'landlock' ? 'EACCES' : 'EROFS') &&
               fs.readFileSync(outside, 'utf8') === 'unchanged',
           ],
           [
-            'private PID namespace',
-            typeof observed['pid'] === 'string' && observed['pid'] !== hostPid,
+            policy.effectiveBackend === 'landlock'
+              ? 'shared PID namespace (Landlock boundary)'
+              : 'private PID namespace',
+            typeof observed['pid'] === 'string' &&
+              (policy.effectiveBackend === 'landlock'
+                ? observed['pid'] === hostPid
+                : observed['pid'] !== hostPid),
           ],
           [
             'command network namespace',
@@ -264,9 +279,17 @@ export const sandboxCommand: CommandModule = {
           throw new Error('Confinement verification failed.');
         report(`Confinement verified (${checks.length} checks).`);
       } finally {
-        fs.rmSync(fixture, { recursive: true, force: true });
+        if (fixture) fs.rmSync(fixture, { recursive: true, force: true });
       }
     } catch (error) {
+      const { FatalError } = await import(
+        '@qwen-code/qwen-code-core/utils/errors.js'
+      );
+      if (error instanceof FatalError) {
+        writeStderrLine(error.message);
+        process.exitCode = error.exitCode;
+        return;
+      }
       writeStderrLine(
         `Sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );

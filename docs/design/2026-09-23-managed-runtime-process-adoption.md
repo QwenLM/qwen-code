@@ -2,7 +2,7 @@
 
 [English](2026-09-23-managed-runtime-process-adoption.md) | [简体中文](2026-09-23-managed-runtime-process-adoption.zh-CN.md)
 
-Status: implemented. Updated: 2026-09-24. Continues the [attestation client](2026-09-23-java-runtime-attestation-client.md).
+Status: implemented. Updated: 2026-10-02. Continues the [attestation client](2026-09-23-java-runtime-attestation-client.md).
 
 ## This slice
 
@@ -18,4 +18,4 @@ Tool HTTP (`POST /internal/managed-runtime/v2/execute`) is on the Java client. T
 
 ## Not in this slice
 
-Per-call HTTP re-attestation on the session-scoped verbs; only the binding entrance attests, the verbs check local liveness. A Broker crash can still orphan the worker; that needs a worker-side parent watch. `stop` and `close` still send SIGTERM and do not escalate to SIGKILL. Spring configuration and Flyway live with the Java control-plane module, which is not on `main`. Kubernetes provisioning stays out. This slice uses the existing in-memory and JDBC repositories; it does not add a server.
+Per-call HTTP re-attestation on the session-scoped verbs; only the binding entrance attests, the verbs check local liveness. A Broker crash can still orphan the worker; that needs a worker-side parent watch. `stop` and `close` send SIGTERM — and since the [2026-10-02 hardening](2026-10-02-runtime-broker-hardening.md), a non-durable worker that ignores it is escalated to `destroyForcibly()` after a bounded 5 s grace, on release, on `close()` and in the JVM exit hook. Spring configuration and Flyway live with the Java control-plane module, which is not on `main`. Kubernetes provisioning stays out. This slice uses the existing in-memory and JDBC repositories; it does not add a server.

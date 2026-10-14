@@ -656,6 +656,15 @@ describe('acpRouteTable – matchRoute', () => {
     });
   });
 
+  it('POST /workspace/trust/grant maps to _qwen/workspace/trust/grant', () => {
+    const result = matchRoute('/workspace/trust/grant', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust/grant');
+    expect(result!.mapping.extractParams(result!.segments, {}, 'POST')).toEqual(
+      {},
+    );
+  });
+
   it('GET /workspace/permissions maps to _qwen/workspace/permissions', () => {
     const result = matchRoute('/workspace/permissions', 'GET');
     expect(result).not.toBeNull();
@@ -1151,6 +1160,14 @@ describe('acpRouteTable – query param coercion', () => {
     expect(method).toBe('_qwen/session/context_usage');
     expect(params).toEqual({ sessionId: 's1', detail: true });
     expect(params['detail']).toBe(true); // not the string 'true'
+  });
+
+  it('GET workspace/memory forwards content as the boolean true', () => {
+    expect(extract('/workspace/memory?content=true', 'GET')).toEqual({
+      method: '_qwen/workspace/memory',
+      params: { content: true },
+    });
+    expect(extract('/workspace/memory', 'GET').params).toEqual({});
   });
 
   it('GET context-usage without detail omits it (sessionId only)', () => {

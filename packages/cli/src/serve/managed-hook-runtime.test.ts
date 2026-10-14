@@ -1,0 +1,1743 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer, type ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  HookEventName,
+  HooksConfigSource,
+  HookType,
+} from '@qwen-code/qwen-code-core/hooks/types.js';
+import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
+import { ManagedOperationGrantGate } from '@qwen-code/qwen-code-core/managed-runtime/managed-operation-grant-gate.js';
+import type {
+  ManagedHookExecute,
+  ManagedHookOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import { MANAGED_HOOK_MAX_RUNNING } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import {
+  ManagedHookRuntime,
+  parseManagedHookControl,
+  type ManagedHookDefinition,
+} from './managed-hook-runtime.js';
+
+// A synchronous pathToFileURL throw must not strand the runtime hold. The
+// flag wrapper survives restoreAllMocks, which would reset a vi.fn's base
+// implementation for the existing tests that want the real conversion.
+const urlMock = vi.hoisted(() => ({ throwOnPathToFileURL: false }));
+vi.mock('node:url', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:url')>();
+  return {
+    ...actual,
+    pathToFileURL: (path: string) => {
+      if (urlMock.throwOnPathToFileURL)
+        throw new TypeError('Missing UNC resource path');
+      return actual.pathToFileURL(path);
+    },
+  };
+});
+const key = {
+  tenantId: 'tenant',
+  workspaceId: 'workspace',
+  sessionId: 'session',
+};
+const hasCgroup =
+  process.platform === 'linux' &&
+  Boolean(process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT']);
+const pin = {
+  catalogId: 'hooks',
+  catalogRevision: 1,
+  definitionDigest: 'a'.repeat(64),
+};
+let directory: string;
+let runtimes: ManagedHookRuntime[];
+beforeEach(async () => {
+  directory = await mkdtemp(path.join(tmpdir(), 'managed-hooks-'));
+  runtimes = [];
+});
+afterEach(async () => {
+  await Promise.all(runtimes.map((r) => r.close()));
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  await rm(directory, { recursive: true, force: true });
+});
+function definition(): ManagedHookDefinition {
+  return {
+    hookId: 'one',
+    eventName: HookEventName.PreToolUse,
+    sequential: false,
+    onceKey: null,
+    failClosed: true,
+    async: false,
+    config: {
+      type: HookType.Command,
+      command: 'printf x >> counter',
+      timeout: 5000,
+    },
+  };
+}
+function runtime(hooks = [definition()], active = true) {
+  const result = new ManagedHookRuntime(
+    { ...key, workspaceGeneration: '1' },
+    async (id) => (active && id === 'runtime-session' ? directory : undefined),
+    {
+      version: 1,
+      catalogs: [
+        { ...pin, tenantId: key.tenantId, workspaceId: key.workspaceId, hooks },
+      ],
+    },
+  );
+  runtimes.push(result);
+  return result;
+}
+function request(id = 'execution'): ManagedHookExecute {
+  return {
+    kind: 'hook-execute',
+    pin,
+    sessionKey: key,
+    operationId: id,
+    hookId: 'one',
+    input: {
+      session_id: key.sessionId,
+      cwd: '/not-the-workspace',
+      transcript_path: '',
+      hook_event_name: HookEventName.PreToolUse,
+      timestamp: new Date().toISOString(),
+    },
+    grant: {
+      sessionKey: key,
+      operationId: id,
+      domain: 'hook_execution',
+      operationRevision: 1,
+      ownerId: 'harness',
+      workspaceGeneration: '1',
+      resourceScope: {
+        recordRef: {
+          resourceId: 'record',
+          kind: 'managed-hook_execution',
+          schemaVersion: 1,
+          byteLength: 1,
+          digest: 'b'.repeat(64),
+        },
+        phases: ['execute'],
+      },
+      leaseDurationMs: 300_000,
+      expiresAt: Date.now() + 300_000,
+    },
+  };
+}
+async function settled(instance: ManagedHookRuntime, id = 'execution') {
+  let view: ManagedHookOperationView;
+  await vi.waitFor(
+    async () => {
+      view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'lookup',
+        targetOperationId: id,
+      });
+      expect(view.state).not.toBe('running');
+    },
+    { timeout: 8000 },
+  );
+  return view!;
+}
+describe('ManagedHookRuntime', () => {
+  it.each([1, 2])(
+    'fences native hook dispatch when CSI seals during directory lookup %s',
+    async (gateLookup) => {
+      let lookups = 0;
+      let entered!: () => void;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => (entered = resolve));
+      const lookup = new Promise<void>((resolve) => (release = resolve));
+      const instance = new ManagedHookRuntime(
+        { ...key, workspaceGeneration: '1' },
+        async () => {
+          if (++lookups === gateLookup) {
+            entered();
+            await lookup;
+          }
+          return directory;
+        },
+        {
+          version: 1,
+          catalogs: [
+            {
+              ...pin,
+              tenantId: key.tenantId,
+              workspaceId: key.workspaceId,
+              hooks: [
+                {
+                  ...definition(),
+                  config: {
+                    type: HookType.Http,
+                    url: 'https://example.com/hook',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      );
+      runtimes.push(instance);
+      const native = vi.spyOn(HttpHookRunner.prototype, 'execute');
+      const call = request();
+      const pending = instance.control('runtime-session', call);
+      const result = pending.catch((error: unknown) => error);
+      await waiting;
+      expect(instance.getDrainInspection()).toMatchObject({
+        hasActivity: true,
+        ...(gateLookup === 1
+          ? { pendingStarts: 1 }
+          : { pendingInvocations: 1 }),
+      });
+      instance.sealAdmission();
+      try {
+        await expect(
+          instance.control('runtime-session', request('new')),
+        ).rejects.toThrow('managed_hook_closed');
+        if (gateLookup === 2) {
+          expect(await instance.control('runtime-session', call)).toMatchObject(
+            {
+              operationId: call.operationId,
+              state: 'running',
+            },
+          );
+          await expect(
+            instance.control('runtime-session', {
+              ...call,
+              input: { ...call.input, timestamp: 'different' },
+            }),
+          ).rejects.toThrow('managed_hook_operation_conflict');
+          expect(
+            await instance.control('runtime-session', {
+              kind: 'hook-status',
+              sessionKey: key,
+              operationId: 'status',
+              targetOperationId: call.operationId,
+            }),
+          ).toMatchObject({ state: 'running' });
+        }
+      } finally {
+        release();
+      }
+      if (gateLookup === 1) {
+        expect(await result).toMatchObject({ code: 'managed_hook_closed' });
+      } else {
+        await result;
+        const receipt = await settled(instance);
+        expect(receipt).toMatchObject({
+          state: 'settled',
+          error: { code: 'managed_hook_closed' },
+        });
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(
+          await instance.control('runtime-session', {
+            kind: 'hook-cancel',
+            sessionKey: key,
+            operationId: 'cancel',
+            targetOperationId: call.operationId,
+          }),
+        ).toEqual(receipt);
+      }
+      expect(native).not.toHaveBeenCalled();
+      await instance.close();
+      expect(instance.getDrainInspection()).toEqual({
+        hasActivity: true,
+        pendingStarts: 0,
+        pendingInvocations: 0,
+      });
+    },
+  );
+
+  it.each(['_scope', '.scope', '-scope', ':scope'])(
+    'accepts existing scope and manifest identifiers with a leading punctuation (%s)',
+    async (id) => {
+      const scopedKey = { tenantId: id, workspaceId: id, sessionId: id };
+      const scopedPin = { ...pin, catalogId: id };
+      const instance = new ManagedHookRuntime(
+        { ...scopedKey, workspaceGeneration: '1' },
+        async () => directory,
+        {
+          version: 1,
+          catalogs: [
+            {
+              ...scopedPin,
+              tenantId: id,
+              workspaceId: id,
+              hooks: [{ ...definition(), hookId: id }],
+            },
+          ],
+        },
+      );
+      runtimes.push(instance);
+      const original = request(id);
+      const call = {
+        ...original,
+        sessionKey: scopedKey,
+        pin: scopedPin,
+        hookId: id,
+        input: { ...original.input, session_id: id },
+        grant: { ...original.grant, sessionKey: scopedKey, ownerId: id },
+      };
+      expect(() => parseManagedHookControl(call)).not.toThrow();
+      for (const kind of ['hook-status', 'hook-cancel'] as const)
+        expect(() =>
+          parseManagedHookControl({
+            kind,
+            sessionKey: scopedKey,
+            operationId: id,
+            targetOperationId: id,
+          }),
+        ).not.toThrow();
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-catalog',
+        sessionKey: scopedKey,
+        operationId: id,
+        pin: scopedPin,
+      });
+      expect(view).toMatchObject({
+        state: 'settled',
+        catalog: { catalogId: id, hooks: [{ hookId: id }] },
+      });
+    },
+  );
+
+  it.each(['', 'a/b', 'a b', 'a'.repeat(513)])(
+    'still rejects invalid Hook identifiers (%s)',
+    (id) => {
+      expect(() =>
+        parseManagedHookControl({ ...request(), operationId: id }),
+      ).toThrow('managed_hook_invalid');
+      expect(() => runtime([{ ...definition(), hookId: id }])).toThrow(
+        'managed_hook_manifest_invalid',
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: 'allowed',
+      variable: 'HOOK_TENANT',
+      value: 'acme',
+      allowed: true,
+      path: '/hooks/acme',
+    },
+    {
+      name: 'unlisted',
+      variable: 'HOOK_TENANT',
+      value: 'acme',
+      allowed: false,
+      path: '/hooks/',
+    },
+    {
+      name: 'internal secret',
+      variable: 'QWEN_SERVER_TOKEN',
+      value: 'secret',
+      allowed: true,
+      path: '/hooks/',
+    },
+    {
+      name: 'one interpolation',
+      variable: 'HOOK_TENANT',
+      value: '${HOOK_OTHER}',
+      allowed: true,
+      path: '/hooks/$%7BHOOK_OTHER%7D',
+    },
+  ])(
+    'dispatches the native interpolated URL ($name)',
+    async ({ variable, value, allowed, path: expectedPath }) => {
+      vi.stubEnv(variable, value);
+      vi.stubEnv('HOOK_OTHER', 'recursive');
+      const paths: string[] = [];
+      const server = createServer((req, res) => {
+        paths.push(req.url!);
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"continue":true}');
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: `http://127.0.0.1:${address.port}/hooks/\${${variable}}`,
+            allowedEnvVars: allowed ? [variable, 'HOOK_OTHER'] : [],
+          },
+        },
+      ]);
+      try {
+        const call = request();
+        await instance.control('runtime-session', call);
+        expect(await settled(instance)).toMatchObject({
+          state: 'settled',
+          result: { success: true, outcome: 'success' },
+        });
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+        });
+        expect(paths).toEqual([expectedPath]);
+        expect(instance.hasHolds('runtime-session')).toBe(false);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it.each(['10.0.0.1', '169.254.169.254', '100.100.100.200'])(
+    'retains native SSRF refusal after interpolating host %s',
+    async (host) => {
+      vi.stubEnv('HOOK_HOST', host);
+      const fetch = vi.spyOn(globalThis, 'fetch');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: 'http://${HOOK_HOST}/hook',
+            allowedEnvVars: ['HOOK_HOST'],
+          },
+        },
+      ]);
+      await instance.control('runtime-session', request());
+      expect(await settled(instance)).toMatchObject({
+        state: 'settled',
+        result: { success: false, outcome: 'non_blocking_error' },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+    },
+  );
+
+  it.each([HookEventName.PreToolUse, HookEventName.PermissionRequest])(
+    'retains quota refusals without dispatch or eviction and bounds grant storage (%s)',
+    async (eventName) => {
+      const hookRequest = (id: string) => {
+        const operation = request(id);
+        operation.input.hook_event_name = eventName;
+        return operation;
+      };
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => (release = resolve));
+      const execute = vi
+        .spyOn(HttpHookRunner.prototype, 'execute')
+        .mockImplementation(async () => {
+          await pending;
+          return {
+            hookConfig: {
+              type: HookType.Http,
+              url: 'https://example.com/hook',
+            },
+            eventName,
+            success: true,
+            outcome: 'success',
+            httpRequestState: 'response_received',
+            duration: 1,
+          };
+        });
+      const install = vi.spyOn(ManagedOperationGrantGate.prototype, 'install');
+      const instance = runtime([
+        {
+          ...definition(),
+          eventName,
+          failClosed: false,
+          config: { type: HookType.Http, url: 'https://example.com/hook' },
+        },
+      ]);
+      const calls = Array.from({ length: 17 }, (_, index) =>
+        hookRequest(`call-${index}`),
+      );
+      try {
+        const admitted = await Promise.all(
+          calls.map((call) => instance.control('runtime-session', call)),
+        );
+        expect(
+          admitted.slice(0, 16).every((view) => view.state === 'running'),
+        ).toBe(true);
+        const refused = admitted[16];
+        expect(refused).toMatchObject({
+          state: 'settled',
+          result: { success: false, outcome: 'non_blocking_error' },
+        });
+        expect(await settled(instance, calls[16].operationId)).toEqual(refused);
+        expect(execute).toHaveBeenCalledTimes(16);
+        for (let index = 17; index < 4096; index++)
+          expect(
+            (
+              await instance.control(
+                'runtime-session',
+                hookRequest(`call-${index}`),
+              )
+            ).result?.success,
+          ).toBe(false);
+        expect(install).toHaveBeenCalledTimes(4096);
+        release();
+        const original = await settled(instance, calls[0].operationId);
+        expect(original.result?.success).toBe(true);
+        expect(await instance.control('runtime-session', calls[0])).toEqual(
+          original,
+        );
+        expect(await instance.control('runtime-session', calls[16])).toEqual(
+          refused,
+        );
+        for (let index = 4096; index < 4100; index++)
+          expect(
+            await instance.control(
+              'runtime-session',
+              hookRequest(`call-${index}`),
+            ),
+          ).toMatchObject({
+            state: 'settled',
+            result: {
+              success: false,
+              outcome: 'blocking',
+              output: {
+                continue: false,
+                decision: 'block',
+                ...(eventName === HookEventName.PermissionRequest
+                  ? {
+                      hookSpecificOutput: {
+                        decision: { behavior: 'deny', interrupt: true },
+                      },
+                    }
+                  : {}),
+              },
+            },
+          });
+        expect(install).toHaveBeenCalledTimes(4096);
+        expect(execute).toHaveBeenCalledTimes(16);
+        expect(instance.hasHolds('runtime-session')).toBe(false);
+        expect((await settled(instance, 'call-4096')).state).toBe(
+          'outcome_unknown',
+        );
+      } finally {
+        release();
+      }
+    },
+  );
+
+  it.each([
+    [HookType.Command, 'cancel'],
+    [HookType.Http, 'cancel'],
+    [HookType.Command, 'expire'],
+    [HookType.Http, 'expire'],
+  ] as const)(
+    'settles %s after %s during final owner lookup without dispatch',
+    async (type, action) => {
+      let lookups = 0;
+      let release!: () => void;
+      const lookup = new Promise<void>((resolve) => (release = resolve));
+      const hook: ManagedHookDefinition = {
+        ...definition(),
+        ...(type === HookType.Http
+          ? { config: { type, url: 'https://example.com/hook' } }
+          : {}),
+      };
+      const instance = new ManagedHookRuntime(
+        { ...key, workspaceGeneration: '1' },
+        async () => {
+          if (++lookups === 2) await lookup;
+          return directory;
+        },
+        {
+          version: 1,
+          catalogs: [
+            {
+              ...pin,
+              tenantId: key.tenantId,
+              workspaceId: key.workspaceId,
+              hooks: [hook],
+            },
+          ],
+        },
+      );
+      runtimes.push(instance);
+      const http = vi.spyOn(HttpHookRunner.prototype, 'execute');
+      const call = request();
+      await instance.control('runtime-session', call);
+      expect(lookups).toBe(2);
+      if (action === 'cancel')
+        await instance.control('runtime-session', {
+          kind: 'hook-cancel',
+          sessionKey: key,
+          operationId: 'cancel',
+          targetOperationId: 'execution',
+        });
+      else vi.spyOn(Date, 'now').mockReturnValue(call.grant.expiresAt + 1);
+      release();
+      expect(await settled(instance)).toMatchObject({
+        state: 'settled',
+        result: {
+          outcome: action === 'cancel' ? 'cancelled' : 'non_blocking_error',
+        },
+      });
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+      expect(http).not.toHaveBeenCalled();
+      await expect(readFile(path.join(directory, 'counter'))).rejects.toThrow();
+    },
+  );
+
+  it.skipIf(!hasCgroup)(
+    'executes once in the resolved directory and replays the original receipt',
+    async () => {
+      const instance = runtime();
+      const call = request();
+      await Promise.all([
+        instance.control('runtime-session', call),
+        instance.control('runtime-session', call),
+      ]);
+      const result = await settled(instance);
+      expect(result).toMatchObject({
+        state: 'settled',
+        result: { success: true, outcome: 'success' },
+      });
+      expect(await instance.control('runtime-session', call)).toEqual(result);
+      expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe('x');
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+      await expect(
+        instance.control('runtime-session', {
+          ...call,
+          input: { ...call.input, timestamp: 'changed' },
+        }),
+      ).rejects.toThrow('operation_conflict');
+    },
+  );
+  it.skipIf(!hasCgroup)(
+    'keeps async ownership until descendants finish after their shell exits',
+    async () => {
+      const instance = runtime([
+        {
+          ...definition(),
+          async: true,
+          config: {
+            type: HookType.Command,
+            command: '(sleep 0.2; printf x >> counter) >/dev/null 2>&1 &',
+            timeout: 5000,
+          },
+        },
+      ]);
+      expect((await instance.control('runtime-session', request())).state).toBe(
+        'running',
+      );
+      expect(instance.hasHolds('runtime-session')).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(instance.hasHolds('runtime-session')).toBe(true);
+      expect((await settled(instance)).state).toBe('settled');
+      expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe('x');
+    },
+  );
+  it('retains a not-started receipt when command isolation is unavailable', async () => {
+    vi.stubEnv('QWEN_MANAGED_HOOK_CGROUP_ROOT', '');
+    const instance = runtime();
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toEqual({
+      operationId: call.operationId,
+      state: 'settled',
+      error: { code: 'managed_hook_command_isolation_unavailable' },
+    });
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    expect(
+      await instance.control('runtime-session', {
+        kind: 'hook-cancel',
+        sessionKey: key,
+        operationId: 'cancel',
+        targetOperationId: call.operationId,
+      }),
+    ).toEqual(receipt);
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    await expect(readFile(path.join(directory, 'counter'))).rejects.toThrow();
+  });
+  it('hides deployment recipes from catalogs', async () => {
+    const instance = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Command,
+          name: 'display',
+          command: 'private-command',
+          env: { SECRET: 'private-secret' },
+        },
+      },
+    ]);
+    const view = await instance.control('runtime-session', {
+      kind: 'hook-catalog',
+      pin,
+      operationId: 'catalog',
+      sessionKey: key,
+    });
+    expect(view.catalog?.hooks[0].config).toEqual({
+      type: 'command',
+      name: 'display',
+    });
+    expect(JSON.stringify(view)).not.toContain('private-');
+  });
+  it('rejects inactive, cross-workspace, cross-session, expired and wrongly scoped calls', async () => {
+    const instance = runtime();
+    const call = request();
+    await expect(
+      runtime(undefined, false).control('runtime-session', call),
+    ).rejects.toThrow('session_unavailable');
+    await expect(instance.control('other-runtime', call)).rejects.toThrow(
+      'session_unavailable',
+    );
+    await expect(
+      instance.control('runtime-session', {
+        ...call,
+        sessionKey: { ...key, workspaceId: 'other' },
+      }),
+    ).rejects.toThrow('scope_conflict');
+    await expect(
+      instance.control('runtime-session', {
+        ...call,
+        input: { ...call.input, session_id: 'other' },
+      }),
+    ).rejects.toThrow('managed_hook_invalid');
+    for (const grant of [
+      { ...call.grant, domain: 'mcp_operation' },
+      { ...call.grant, operationId: 'other' },
+      { ...call.grant, workspaceGeneration: 'old' },
+      { ...call.grant, expiresAt: Date.now() - 1 },
+      {
+        ...call.grant,
+        resourceScope: { ...call.grant.resourceScope, phases: ['discover'] },
+      },
+    ])
+      await expect(
+        instance.control('runtime-session', { ...call, grant }),
+      ).rejects.toThrow('grant_invalid');
+    await expect(readFile(path.join(directory, 'counter'))).rejects.toThrow();
+  });
+  it('retains unknown HTTP sends and never resends the same effect', async () => {
+    const execute = vi
+      .spyOn(HttpHookRunner.prototype, 'execute')
+      .mockResolvedValue({
+        hookConfig: { type: HookType.Http, url: 'https://example.com/hook' },
+        eventName: HookEventName.PreToolUse,
+        success: true,
+        outcome: 'non_blocking_error',
+        duration: 1,
+        output: { continue: true },
+      });
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: HookType.Http, url: 'https://example.com/hook' },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    expect((await settled(instance)).state).toBe('outcome_unknown');
+    await instance.control('runtime-session', call);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+  });
+  it('settles received HTTP failures so the logical fail policy can decide', async () => {
+    vi.spyOn(HttpHookRunner.prototype, 'execute').mockResolvedValue({
+      hookConfig: { type: HookType.Http, url: 'https://example.com/hook' },
+      eventName: HookEventName.PreToolUse,
+      success: true,
+      outcome: 'non_blocking_error',
+      httpRequestState: 'response_received',
+      duration: 1,
+      output: { continue: true },
+    });
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: HookType.Http, url: 'https://example.com/hook' },
+      },
+    ]);
+    await instance.control('runtime-session', request());
+    expect(await settled(instance)).toMatchObject({
+      state: 'settled',
+      result: { outcome: 'non_blocking_error' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
+
+  it.each(['response', 'timeout', 'lost-reply', 'shutdown'])(
+    'waits for HTTP completion evidence after cancel (%s)',
+    async (completion) => {
+      let response!: ServerResponse;
+      let calls = 0;
+      let started!: () => void;
+      const dispatched = new Promise<void>((resolve) => (started = resolve));
+      const server = createServer((req, res) => {
+        req.resume();
+        response = res;
+        calls++;
+        started();
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: `http://127.0.0.1:${address.port}/hook`,
+            timeout: completion === 'timeout' ? 1 : 60,
+          },
+        },
+      ]);
+      const call = request();
+      try {
+        await instance.control('runtime-session', call);
+        await dispatched;
+        expect(
+          await instance.control('runtime-session', {
+            kind: 'hook-cancel',
+            sessionKey: key,
+            operationId: 'cancel',
+            targetOperationId: call.operationId,
+          }),
+        ).toMatchObject({ state: 'running' });
+        expect(instance.hasHolds('runtime-session')).toBe(true);
+        if (completion === 'response') {
+          response.writeHead(200, { 'Content-Type': 'application/json' });
+          response.end('{"continue":false}');
+        } else if (completion === 'lost-reply') response.destroy();
+        else if (completion === 'shutdown') await instance.close();
+        const receipt = await settled(instance);
+        if (completion === 'response')
+          expect(receipt).toMatchObject({
+            state: 'settled',
+            result: { outcome: 'success', output: { continue: false } },
+          });
+        else expect(receipt.state).toBe('outcome_unknown');
+        expect(instance.hasHolds('runtime-session')).toBe(
+          completion !== 'response',
+        );
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(calls).toBe(1);
+      } finally {
+        await instance.close();
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it('settles an HTTP runner construction failure without dispatch or replay', async () => {
+    const execute = vi.spyOn(HttpHookRunner.prototype, 'execute');
+    const instance = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Http,
+          url: String.raw`https://example.com/\.[`,
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: false, outcome: 'non_blocking_error' },
+    });
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    expect(execute).not.toHaveBeenCalled();
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
+
+  it.skipIf(!hasCgroup)(
+    'settles cancellation only after the execution cgroup has drained',
+    async () => {
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Command,
+            command: 'printf start > started; sleep 30',
+            timeout: 60_000,
+          },
+        },
+      ]);
+      await instance.control('runtime-session', request());
+      await vi.waitFor(async () =>
+        expect(await readFile(path.join(directory, 'started'), 'utf8')).toBe(
+          'start',
+        ),
+      );
+      await instance.control('runtime-session', {
+        kind: 'hook-cancel',
+        operationId: 'cancel',
+        sessionKey: key,
+        targetOperationId: 'execution',
+      });
+      expect(await settled(instance)).toMatchObject({
+        state: 'settled',
+        result: { outcome: 'cancelled' },
+      });
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+    },
+  );
+  it('reconstructs trusted handlers and reports missing exports without dispatch', async () => {
+    const modulePath = path.join(directory, 'handler.mjs');
+    await writeFile(
+      modulePath,
+      'export const registered = { handlerRevision: 2, callback: async input => ({continue: true, systemMessage: input.cwd}) };',
+    );
+    const hook: ManagedHookDefinition = {
+      ...definition(),
+      config: { type: 'function', timeout: 1000 },
+      handler: {
+        handlerId: 'registered',
+        handlerRevision: 2,
+        modulePath,
+        exportName: 'registered',
+      },
+    };
+    const instance = runtime([hook]);
+    await instance.control('runtime-session', request());
+    expect(await settled(instance)).toMatchObject({
+      state: 'settled',
+      result: { output: { systemMessage: directory } },
+    });
+    const missing = runtime([
+      { ...hook, handler: { ...hook.handler!, exportName: 'missing' } },
+    ]);
+    await missing.control('runtime-session', request());
+    expect(await settled(missing)).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_handler_unavailable' },
+    });
+  });
+  it.each([
+    'resolve-on-abort',
+    'reject-on-abort',
+    'ignore-abort',
+    'finish-after-timeout',
+  ])(
+    'keeps function interruption proof tied to callback completion (%s)',
+    async (behavior) => {
+      const modulePath = path.join(directory, 'cancel-handler.mjs');
+      await writeFile(
+        modulePath,
+        `
+        import { appendFileSync } from 'node:fs';
+        import { setTimeout as delay } from 'node:timers/promises';
+        let finish;
+        export const release = () => finish();
+        export const registered = { handlerRevision: 1, callback: async (input, context) => {
+          appendFileSync(input.cwd + '/counter', 'started\\n');
+          try {
+            await new Promise((resolve, reject) => {
+              finish = resolve;
+              if (${JSON.stringify(behavior)} === 'finish-after-timeout') setTimeout(resolve, 50);
+              else if (${JSON.stringify(behavior)} !== 'ignore-abort') {
+                const stop = () => ${JSON.stringify(behavior)} === 'reject-on-abort'
+                  ? reject(new DOMException('cancelled', 'AbortError')) : resolve();
+                context.signal.addEventListener('abort', stop, { once: true });
+                if (context.signal.aborted) stop();
+              }
+            });
+            return { continue: true };
+          } finally {
+            await delay(10);
+            appendFileSync(input.cwd + '/counter', 'settled\\n');
+          }
+        }};
+      `,
+      );
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: 'function',
+            timeout: behavior === 'finish-after-timeout' ? 10 : 8000,
+          },
+          handler: {
+            handlerId: 'cancel-handler',
+            handlerRevision: 1,
+            modulePath,
+            exportName: 'registered',
+          },
+        },
+      ]);
+      const call = request();
+      await instance.control('runtime-session', call);
+      await vi.waitFor(async () => {
+        const trace = await readFile(path.join(directory, 'counter'), 'utf8');
+        if (behavior === 'finish-after-timeout')
+          expect(trace).toContain('started\n');
+        else expect(trace).toBe('started\n');
+      });
+      if (behavior !== 'finish-after-timeout')
+        await instance.control('runtime-session', {
+          kind: 'hook-cancel',
+          sessionKey: key,
+          operationId: 'cancel',
+          targetOperationId: call.operationId,
+        });
+      const receipt = await settled(instance);
+      if (behavior === 'ignore-abort') {
+        expect(receipt.state).toBe('outcome_unknown');
+        expect(instance.hasHolds('runtime-session')).toBe(true);
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
+          'started\n',
+        );
+        const module = (await import(pathToFileURL(modulePath).href)) as {
+          release: () => void;
+        };
+        module.release();
+        await vi.waitFor(async () => {
+          expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
+            'started\nsettled\n',
+          );
+        });
+      } else {
+        expect(receipt).toMatchObject({
+          state: 'settled',
+          result: {
+            success: false,
+            outcome:
+              behavior === 'finish-after-timeout' ? 'timeout' : 'cancelled',
+          },
+        });
+        if (behavior === 'finish-after-timeout')
+          // The callback-phase timeout is a real result, not an evaluation
+          // failure receipt: pins that the import floor let evaluation finish.
+          expect(receipt.error?.code).toBeUndefined();
+        expect(instance.hasHolds('runtime-session')).toBe(false);
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
+          'started\nsettled\n',
+        );
+      }
+    },
+  );
+
+  it('fails a function handler whose module never settles within its timeout', async () => {
+    const modulePath = path.join(directory, 'stuck-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 50 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    const startedAt = Date.now();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    // Bounds receipt latency: this case's operative budget is the 500ms floor,
+    // so it only catches budgets over 2s; the manifest-timeout direction above
+    // the floor is pinned by the 'manifest timeout governs' case below.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    // An abandoned evaluation is not a failed import and must not produce the
+    // not_started_proven certification.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    // The evaluation is still live and never settles, so the hold stays.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('keeps admitting operations after abandoned evaluations release their slots', async () => {
+    const modulePath = path.join(directory, 'stuck-admission-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const stuck = Array.from({ length: MANAGED_HOOK_MAX_RUNNING }, (_, index) =>
+      request(`stuck-${index}`),
+    );
+    await Promise.all(
+      stuck.map((call) => instance.control('runtime-session', call)),
+    );
+    for (const call of stuck) {
+      expect(await settled(instance, call.operationId)).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      });
+    }
+    // All evaluations are abandoned but still live, so the holds are all
+    // retained while the admission slots are free again.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    const next = request('after-fences');
+    await instance.control('runtime-session', next);
+    const receipt = await settled(instance, next.operationId);
+    // Widening the admission filter to count held evaluations turns this into
+    // the quota refusal, which answers with a result and no error code.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(receipt.result).toBeUndefined();
+  });
+  it('fails fast when the handler module itself rejects', async () => {
+    const modulePath = path.join(directory, 'broken-handler.mjs');
+    await writeFile(
+      modulePath,
+      `throw new Error('boom');
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'broken',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    const startedAt = Date.now();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_handler_unavailable' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('settles without a hold when pathToFileURL throws before evaluation starts', async () => {
+    const modulePath = path.join(directory, 'unc-handler.mjs');
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'unc',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    // Windows UNC shapes pass manifest validation and then throw here.
+    urlMock.throwOnPathToFileURL = true;
+    const call = request();
+    try {
+      await instance.control('runtime-session', call);
+      const receipt = await settled(instance);
+      expect(receipt).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_handler_unavailable' },
+      });
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+      expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    } finally {
+      urlMock.throwOnPathToFileURL = false;
+    }
+  });
+  it('settles a handler module that rejects with a non-Error value', async () => {
+    const modulePath = path.join(directory, 'null-reject-handler.mjs');
+    await writeFile(
+      modulePath,
+      `throw Object.create(null);
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'null-reject',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    // The serve path installs no process-level unhandledRejection handler, so
+    // record them here: without a total settle path and a terminal handler on
+    // the import's derived promise, this rejection escapes and Node exits.
+    const rejections: unknown[] = [];
+    const recordRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', recordRejection);
+    try {
+      const call = request();
+      await instance.control('runtime-session', call);
+      const receipt = await settled(instance);
+      expect(receipt).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_handler_unavailable' },
+      });
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+      expect(await instance.control('runtime-session', call)).toEqual(receipt);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', recordRejection);
+    }
+  });
+  it('lets a slow-but-finite module evaluation finish inside its floor', async () => {
+    const modulePath = path.join(directory, 'slow-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 30));
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'slow',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt.error?.code).toBeUndefined();
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: true },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('lets the manifest timeout govern evaluation above the floor', async () => {
+    const modulePath = path.join(directory, 'cold-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 1500));
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 5000 },
+        handler: {
+          handlerId: 'cold',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    // Evaluation lands between the floor and the manifest timeout, so a bare
+    // floor at the budget site turns this red.
+    expect(receipt.error?.code).toBeUndefined();
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: true },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('releases the hold once an over-budget evaluation finishes', async () => {
+    const modulePath = path.join(directory, 'over-budget-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       await new Promise((resolve) => setTimeout(resolve, 900));
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'over',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The fence is not terminal: once the evaluation definitively ends the
+    // receipt republishes what is then provable — the callback never ran —
+    // as a timeout outcome, so the Harness can reconcile the record instead
+    // of tombstoning the Session for the worker's lifetime.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          result: {
+            success: false,
+            outcome: 'timeout',
+            duration: 0,
+            notStarted: true,
+          },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    // An evaluation that finishes late never dispatches its callback into a
+    // settled occurrence.
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+  });
+  it('republishes an over-budget evaluation that later rejects as handler unavailable', async () => {
+    const modulePath = path.join(directory, 'late-reject-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 900));
+       throw new Error('boom');
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'late-reject',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(receipt.result).toBeUndefined();
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The reject arm republishes the one thing then provable — the handler is
+    // unavailable — instead of keeping the stale evaluation-timeout fence for
+    // the worker's lifetime. hasHolds cannot witness this: it clears either
+    // way, so the republished receipt's code is the discriminator.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          error: { code: 'managed_hook_handler_unavailable' },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
+  it('fences a stuck module evaluation cancelled mid-evaluation without wedging close', async () => {
+    const modulePath = path.join(directory, 'stuck-cancel-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    await vi.waitFor(async () => {
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'probe',
+        targetOperationId: call.operationId,
+      });
+      expect(view.state).toBe('running');
+    });
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    const receipt = await settled(instance);
+    // The cancel abandoned a module evaluation that is still running, so the
+    // abort is not completion evidence: the receipt carries no result and the
+    // host fences the execution as outcome_unknown instead of committing a
+    // definite cancellation.
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_abandoned' },
+    });
+    expect(receipt.result).toBeUndefined();
+    // The abandoned evaluation never finishes, so the hold stays reported
+    // rather than released.
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    await instance.close();
+  });
+
+  it('clears an abandoned-evaluation fence once the module finishes loading', async () => {
+    const modulePath = path.join(directory, 'cold-cancel-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       await new Promise((resolve) => setTimeout(resolve, 300));
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'cold',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    await vi.waitFor(async () => {
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'probe',
+        targetOperationId: call.operationId,
+      });
+      expect(view.state).toBe('running');
+    });
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    // The cancel lands while the module is still evaluating, so the receipt is
+    // fenced rather than certified, and the hold stays.
+    const fenced = await settled(instance);
+    expect(fenced).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_abandoned' },
+    });
+    expect(fenced.result).toBeUndefined();
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The fence is not terminal. Once the evaluation definitively ends the
+    // receipt republishes what is then provable — the callback never ran — so
+    // the Harness can reconcile the record instead of tombstoning the Session
+    // for the worker's lifetime.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          result: { outcome: 'cancelled', duration: 0, notStarted: true },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+    await instance.close();
+  });
+
+  it('marks a pre-dispatch cancel as a proven non-execution', async () => {
+    const modulePath = path.join(directory, 'pre-dispatch-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    // Park the execution after the module has evaluated: the second
+    // sessionDirectory read is the last await before the dispatch check.
+    let releaseDirectory: ((value: string) => void) | undefined;
+    let directories = 0;
+    const instance = new ManagedHookRuntime(
+      { ...key, workspaceGeneration: '1' },
+      (id) => {
+        directories++;
+        if (directories === 2)
+          return new Promise<string>((resolve) => {
+            releaseDirectory = resolve;
+          });
+        return Promise.resolve(
+          id === 'runtime-session' ? directory : undefined,
+        );
+      },
+      {
+        version: 1,
+        catalogs: [
+          {
+            ...pin,
+            tenantId: key.tenantId,
+            workspaceId: key.workspaceId,
+            hooks: [
+              {
+                ...definition(),
+                config: { type: 'function', timeout: 5000 },
+                handler: {
+                  handlerId: 'pre-dispatch',
+                  handlerRevision: 1,
+                  modulePath,
+                  exportName: 'registered',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    );
+    runtimes.push(instance);
+    const call = request();
+    await instance.control('runtime-session', call);
+    // Parked at the post-import directory read: the module has evaluated
+    // and the callback wrapper is built, but nothing has dispatched.
+    await vi.waitFor(() => expect(releaseDirectory).toBeDefined());
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    releaseDirectory!(directory);
+    // The callback provably never dispatched, so the receipt carries the
+    // notStarted marker the Harness fence classifier requires.
+    expect(await settled(instance)).toMatchObject({
+      state: 'settled',
+      result: {
+        success: false,
+        outcome: 'cancelled',
+        duration: 0,
+        notStarted: true,
+      },
+    });
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+  });
+
+  it('keeps oversized output as a bounded failure receipt without replay', async () => {
+    const modulePath = path.join(directory, 'large-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       export const registered = { handlerRevision: 1, callback: async input => {
+         appendFileSync(input.cwd + '/counter', 'x');
+         return { systemMessage: 'x'.repeat(70 * 1024) };
+       } };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 1000 },
+        handler: {
+          handlerId: 'registered',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: false, outcome: 'non_blocking_error' },
+    });
+    expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThan(1024);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe('x');
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
+  it('uses native source ordering and identity while keeping session hooks independent', async () => {
+    const base = definition();
+    const instance = runtime([
+      { ...base, hookId: 'system', source: HooksConfigSource.System },
+      { ...base, hookId: 'user', source: HooksConfigSource.User },
+      { ...base, hookId: 'project', source: HooksConfigSource.Project },
+      {
+        ...base,
+        hookId: 'untrusted',
+        source: HooksConfigSource.Project,
+        sourceTrusted: false,
+      },
+      { ...base, hookId: 'duplicate', source: HooksConfigSource.Project },
+      {
+        ...base,
+        hookId: 'session',
+        source: HooksConfigSource.Session,
+        owner: { sessionId: key.sessionId, agentId: null },
+      },
+    ]);
+    const view = await instance.control('runtime-session', {
+      kind: 'hook-catalog',
+      pin,
+      sessionKey: key,
+      operationId: 'catalog',
+    });
+    expect(view.catalog!.hooks.map((hook) => hook.hookId)).toEqual([
+      'project',
+      'user',
+      'system',
+      'session',
+    ]);
+    expect(
+      new Set(view.catalog!.hooks.slice(0, 3).map((hook) => hook.plannerKey))
+        .size,
+    ).toBe(1);
+    expect(view.catalog!.hooks.at(-1)!.plannerKey).toBeUndefined();
+  });
+
+  it.skipIf(!hasCgroup)(
+    'passes only the Session environment view and explicitly scoped variables to commands',
+    async () => {
+      vi.stubEnv('MANAGED_HOOK_AMBIENT_SECRET', 'ambient-secret');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Command,
+            command:
+              'printf "%s|%s|%s" "$HOME" "$SCOPED" "$MANAGED_HOOK_AMBIENT_SECRET"',
+            env: { SCOPED: 'allowed' },
+          },
+        },
+      ]);
+      await instance.control('runtime-session', request());
+      expect((await settled(instance)).result?.stdout).toBe(
+        `${directory}|allowed|`,
+      );
+      vi.unstubAllEnvs();
+    },
+  );
+
+  it('restores handler context and runs the deployment success callback once', async () => {
+    const modulePath = path.join(directory, 'context-handler.mjs');
+    const counter = path.join(directory, 'success-counter');
+    await writeFile(
+      modulePath,
+      `import {appendFileSync} from 'node:fs'; export const registered = {
+      handlerRevision:1,
+      callback: async (_input, context) => ({systemMessage:JSON.stringify({messages:context.messages,id:context.toolUseID})}),
+      onHookSuccess: () => appendFileSync(${JSON.stringify(counter)}, 'x'),
+    };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 1000 },
+        handler: {
+          handlerId: 'context',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const original = request();
+    const call = {
+      ...original,
+      input: {
+        ...original.input,
+        messages: [{ role: 'user', content: 'hello' }],
+        tool_use_id: 'tool',
+      },
+    };
+    await instance.control('runtime-session', call);
+    const result = await settled(instance);
+    expect(JSON.parse(result.result!.output!.systemMessage!)).toEqual({
+      messages: [{ role: 'user', content: 'hello' }],
+      id: 'tool',
+    });
+    await instance.control('runtime-session', call);
+    expect(await readFile(counter, 'utf8')).toBe('x');
+  });
+
+  it('refuses worker model calls and never executes on a cold lookup', async () => {
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: HookType.Prompt, prompt: 'Should this continue?' },
+      },
+    ]);
+    await expect(
+      instance.control('runtime-session', request()),
+    ).rejects.toThrow('requires_harness');
+    expect(
+      await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'lookup',
+        targetOperationId: 'execution',
+      }),
+    ).toEqual({ operationId: 'execution', state: 'outcome_unknown' });
+  });
+});

@@ -127,9 +127,11 @@ Rules:
 - Optional fields: `completionWindow` (default `24h`, max `14d`),
   `maxOutputTokens` (set it when outputs can be long — a truncated item can
   only be retried with a larger limit), `expectedOutputTokensPerItem`
-  (improves the cost estimate), `maxCostUsd` (an estimate gate: `run` and
-  `retry` refuse to submit when the estimate exceeds it — it is NOT a cap on
-  the bill, and only works when `check` reports unit prices).
+  (improves the cost estimate), `maxCostUsd` (`run` and `retry` refuse to
+  submit when the worst case at the request caps exceeds it; it needs unit
+  prices from `check`, a `maxOutputTokens`, and thinking off or a
+  `thinking_budget` — otherwise the run is refused, so only set it when the
+  user asked for a hard budget).
 - Do NOT set `enableThinking` unless the user asked for a thinking mode:
   the executor freezes the thinking mode, sampling parameters and output
   limit from the user's current settings, so Batch runs the same way their

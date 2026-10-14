@@ -27,8 +27,8 @@ then an exact registered match wins, then a single case-insensitive match
 resolves. A name that matches several registered tools only by case resolves to
 none of them — registration order decides nothing — and both halves refuse it:
 `tool_search` reports it as ambiguous and lists the spellings that do resolve,
-`tool_call` refuses and asks for the exact name. A tool that was never reviewed
-in this session still resolves by name.
+`tool_call` refuses and asks for the exact name. Name resolution alone does not
+permit invocation: the caller must retain a `tool_search` schema block and a review established from its complete schema.
 
 When `tool_search` returns a tool, it records a fingerprint of that tool's
 invocation contract — its MCP server (empty for a built-in), the name in its
@@ -43,6 +43,21 @@ of the fingerprint: shipped deferred tools rebuild it from mutable state on
 every `schema` access (`web_search` interpolates the current month, `read_file`
 the effective input modalities), so hashing that prose would refuse calls whose
 parameters still match the reviewed schema.
+
+At invocation, review evidence is reconstructed from the active agent chat, or
+the initialized primary chat outside an agent run. This uses the existing agent
+execution frame rather than treating a registry instance as a conversation owner.
+An inherited history can establish a review in a new registry; independent chats
+sharing a registry cannot lend or erase each other's resident schema evidence.
+A truncated block may retain only the fingerprint already reviewed by that same chat; a fresh or independent chat cannot establish a review from the fragment. Removing the entire block from the caller's history makes the bridge refuse again.
+Query and missing-name echoes escape tag delimiters so they cannot establish
+schema evidence by containing a forged `<function>` block.
+
+Schema results bypass generic character, line, and batch output truncation:
+neither a partial JSON block nor a persisted-output preview establishes a review.
+The existing `max_results` limit bounds a search to 20 schemas. A single large
+schema is returned in full and still consumes the model's context budget; the
+normal request context limits remain applicable.
 
 The existing deferred-tools startup reminder carries the compact live catalog
 (names and short descriptions). Do not embed that catalog in either bridge
@@ -83,12 +98,15 @@ In direct tool mode, disabling `tools.toolSearch` also disables `tool_call`;
 the existing fallback declares ordinary deferred schemas eagerly. Tools demoted
 by `tools.eager` stay hidden unless separately revealed, and a per-session
 warning explains that the bridge is unavailable; a direct call by name still
-undergoes normal validation and permission checks. CodeModeOnly instead hides
-both bridge tools, keeps full nested schemas for callable deferred tools in
-`exec`, and skips deferred reminders and this warning. Permission allowlists
+undergoes normal validation and permission checks. CodeModeOnly instead
+discovers deferred schemas through top-level `tool_search` and invokes them
+through `exec`; `tool_call` stays hidden. It skips deferred reminders and this
+warning. When search is unavailable in the current scope, `exec` includes all
+allowed tool signatures. Permission allowlists
 keep both bridge tools registered unless an explicit deny rule removes them.
 
-An explicit subagent `tools` list does not implicitly add the bridge tools.
+In direct tool mode, an explicit subagent `tools` list does not implicitly add
+the bridge tools (Code Mode adds `tool_search` beside `exec`).
 Naming an ordinary deferred target declares it directly, but `tools.eager`
 demotion still applies. Using discovery and bridge invocation together needs the target and both bridge
 tools in the allowed surface; existing subagent exclusions and deny rules still win.
@@ -103,13 +121,10 @@ in the same `tool_call` bucket as a malformed envelope.
 
 ## Known limitations
 
-`tool_call` records no per-session presentation mark. A hidden tool whose schema
-never entered the active model context is still invocable by name, because the
-startup reminder already lists every hidden deferred tool's name and
-description, and only a tool `tool_search` returned in this session carries a
-fingerprint to compare against. The declaration check therefore narrows the
-name-only authorization boundary instead of closing it; the presentation-mark
-half of the precondition proposed in #6721 remains open in #11321.
+Review evidence is a schema-availability check, not a permission grant. A hidden
+tool without its own retained schema review is refused even when the startup
+catalog lists its name. Existing permission checks still decide whether
+the reviewed tool may execute.
 
 A change limited to a tool's `description` is not detected, deliberately: those
 getters must keep recomputing so a long-lived process is not stale across a
@@ -121,12 +136,7 @@ with arguments written against the previous connection. Telling a connection
 identity apart from a name label needs a channel the registry does not have
 today; it is tracked in the #11321 discussion rather than approximated here.
 
-Review records live on the registry instance, survive `/clear`, and are never
-pruned. An entry can only match the same server, schema name and parameter
-schema, so a stale one either still describes the live tool or makes `tool_call`
-ask for a fresh review. Pruning on removal would invert that: a dropped entry
-reads as "never reviewed" and passes a replacement through. The map is bounded
-by the distinct tool names reviewed in the process.
+Review fingerprints are cached per chat, but the caller's current history is authoritative at invocation. `/clear` clears all reviews; compaction and history replacement remove reviews whose blocks are no longer present. A surviving truncated block retains only that chat's prior fingerprint, so another chat's re-review cannot authorize a changed parameter contract or MCP server. Those changes still require the caller to obtain a fresh `tool_search` result.
 
 ## Verification
 
@@ -145,3 +155,8 @@ by the distinct tool names reviewed in the process.
   and reviewed as two tools when both spellings are named explicitly.
 - A hidden tool whose recorded fingerprint no longer matches the live one is
   refused until `tool_search` returns it again.
+- A chat retaining a truncated schema still refuses a changed parameter contract or MCP server after another chat reviews the replacement.
+- Inherited and shared-registry chats use their own resident schema evidence;
+  a task-only chat cannot borrow a parent's review.
+- A schema larger than the generic output budgets remains complete and callable
+  after per-tool truncation and batch finalization.

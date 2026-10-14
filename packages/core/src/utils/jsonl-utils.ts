@@ -232,6 +232,12 @@ async function readLinesWithIntegrityInternal<T = unknown>(
         if (budget === 'records' && results.length >= count) break;
         results.push(obj);
       }
+      if (
+        (budget === 'records' && results.length >= count) ||
+        (budget === 'lines' && scannedLines >= count)
+      ) {
+        break;
+      }
     }
 
     options.signal?.throwIfAborted();

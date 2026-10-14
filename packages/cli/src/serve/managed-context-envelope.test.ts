@@ -591,6 +591,57 @@ describe('Managed context envelope contract', () => {
     expect(installations.installed('session-2')).toBeUndefined();
   });
 
+  it('rechecks admission after verification and preserves original receipts after seal', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    let open = true;
+    const refused = await installations.install(
+      installationRequest,
+      async () => {
+        queueMicrotask(() => {
+          open = false;
+        });
+        return true;
+      },
+      () => open,
+    );
+    expect(refused).toEqual({
+      status: 409,
+      code: 'managed_context_unavailable',
+    });
+    expect(
+      installations.installed(installationRequest['sessionId'] as string),
+    ).toBeUndefined();
+    open = true;
+    const original = await installations.install(
+      installationRequest,
+      anyDirectory,
+      () => open,
+    );
+    open = false;
+    expect(
+      await installations.install(
+        installationRequest,
+        async () => {
+          throw new Error('Unexpected verify');
+        },
+        () => open,
+      ),
+    ).toEqual(original);
+    expect(
+      await installations.install(
+        {
+          ...installationRequest,
+          operationId: 'op-new',
+          sessionId: 'session-new',
+        },
+        async () => {
+          throw new Error('Unexpected verify');
+        },
+        () => open,
+      ),
+    ).toEqual({ status: 409, code: 'managed_context_unavailable' });
+  });
+
   it('checks the operation and the Session again after the verification', async () => {
     const installations = new ManagedContextInstallations(boot);
     let release!: () => void;

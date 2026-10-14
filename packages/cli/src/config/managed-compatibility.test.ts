@@ -5,15 +5,36 @@
  */
 
 import * as fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
+import nodeOs from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describeTree as describeTreeUnder } from '../test-utils/describe-tree.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
 import {
   evaluateManagedCompatibility,
   type ManagedCompatibilityRuntime,
 } from './managed-compatibility.js';
+
+const compatibilityLog = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) =>
+        tag === 'MANAGED_COMPATIBILITY'
+          ? { ...actual.createDebugLogger(tag), warn: compatibilityLog.warn }
+          : actual.createDebugLogger(tag),
+    };
+  },
+);
 
 describe('evaluateManagedCompatibility', () => {
   let root: string;
@@ -28,6 +49,7 @@ describe('evaluateManagedCompatibility', () => {
   };
 
   beforeEach(() => {
+    compatibilityLog.warn.mockClear();
     root = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-compat-')),
     );
@@ -62,6 +84,7 @@ describe('evaluateManagedCompatibility', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -81,29 +104,7 @@ describe('evaluateManagedCompatibility', () => {
       storeDir: path.join(qwenHome, 'extension-store'),
     });
 
-  // Every entry under the root with its bytes and identity.
-  const describeTree = (): string[] => {
-    const lines: string[] = [];
-    const walk = (directory: string) => {
-      for (const entry of fs.readdirSync(directory).sort()) {
-        const entryPath = path.join(directory, entry);
-        const stats = fs.lstatSync(entryPath, { bigint: true });
-        const identity = `${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}`;
-        if (stats.isDirectory()) {
-          lines.push(`${path.relative(root, entryPath)}/ ${identity}`);
-          walk(entryPath);
-        } else {
-          lines.push(
-            `${path.relative(root, entryPath)} ${identity} ${
-              stats.isFile() ? fs.readFileSync(entryPath, 'utf8') : 'link'
-            }`,
-          );
-        }
-      }
-    };
-    walk(root);
-    return lines;
-  };
+  const describeTree = () => describeTreeUnder(root);
 
   // Every evaluation must leave the tree and the process environment exactly
   // as it found them, whatever it answers.
@@ -213,6 +214,19 @@ describe('evaluateManagedCompatibility', () => {
     [
       'an MCP server command',
       () => writeJson(userSettings(), { mcp: { serverCommand: 'demo' } }),
+      'an MCP server command is configured',
+    ],
+    [
+      // A host's process.env returns nothing for a name like an array index,
+      // so the host keeps `$0` as it is.
+      'an MCP server command with a placeholder a host keeps',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: { ...runtime.environment, '0': '' },
+        };
+        writeJson(userSettings(), { mcp: { serverCommand: '$0' } });
+      },
       'an MCP server command is configured',
     ],
     [
@@ -343,7 +357,167 @@ describe('evaluateManagedCompatibility', () => {
           environment: undefined as unknown as NodeJS.ProcessEnv,
         };
       },
-      'the settings could not be read',
+      'the home directory or the environment could not be read',
+    ],
+    [
+      'an environment that cannot be read',
+      () => {
+        const environment = { ...runtime.environment };
+        Object.defineProperty(environment, 'QWEN_HOME', {
+          enumerable: true,
+          get() {
+            throw new Error('unreadable');
+          },
+        });
+        runtime = { ...runtime, environment };
+      },
+      'the home directory or the environment could not be read',
+    ],
+    [
+      // The environment is read before the home directory is checked.
+      'an environment that cannot be read, with a relative home directory',
+      () => {
+        vi.stubEnv('HOME', 'home');
+        vi.stubEnv('USERPROFILE', 'home');
+        const environment = { ...runtime.environment };
+        Object.defineProperty(environment, 'QWEN_HOME', {
+          enumerable: true,
+          get() {
+            throw new Error('unreadable');
+          },
+        });
+        runtime = { ...runtime, environment };
+      },
+      'the home directory or the environment could not be read',
+    ],
+    [
+      // A session host would receive QWEN_HOME=alt=home, a relative path.
+      'a variable name that contains =',
+      () => {
+        vi.stubEnv('HOME', root);
+        vi.stubEnv('USERPROFILE', root);
+        const { QWEN_HOME: _home, ...environment } = runtime.environment;
+        runtime = {
+          ...runtime,
+          environment: { ...environment, 'QWEN_HOME=alt': 'home' },
+        };
+      },
+      'the home directory or the environment could not be read',
+    ],
+    [
+      'a home directory that does not exist',
+      () => {
+        vi.stubEnv('HOME', path.join(root, 'missing'));
+        vi.stubEnv('USERPROFILE', path.join(root, 'missing'));
+      },
+      'the home directory or the environment could not be read',
+    ],
+    [
+      // The home directory is read before the locations are checked.
+      'a home directory that does not exist, with a relative QWEN_HOME',
+      () => {
+        vi.stubEnv('HOME', path.join(root, 'missing'));
+        vi.stubEnv('USERPROFILE', path.join(root, 'missing'));
+        runtime = {
+          ...runtime,
+          environment: { ...runtime.environment, QWEN_HOME: 'qwen-home' },
+        };
+      },
+      'the home directory or the environment could not be read',
+    ],
+    [
+      'a relative QWEN_HOME',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: { ...runtime.environment, QWEN_HOME: 'qwen-home' },
+        };
+      },
+      'a settings location in the environment depends on the working directory',
+    ],
+    [
+      // Spawn passes on inherited keys too.
+      'an inherited relative QWEN_HOME',
+      () => {
+        vi.stubEnv('HOME', root);
+        vi.stubEnv('USERPROFILE', root);
+        const { QWEN_HOME: _home, ...environment } = runtime.environment;
+        runtime = {
+          ...runtime,
+          environment: Object.assign(
+            Object.create({ QWEN_HOME: 'qwen-home' }) as NodeJS.ProcessEnv,
+            environment,
+          ),
+        };
+      },
+      'a settings location in the environment depends on the working directory',
+    ],
+    [
+      'a relative system settings path',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: {
+            ...runtime.environment,
+            QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
+              'system',
+              'settings.json',
+            ),
+          },
+        };
+      },
+      'a settings location in the environment depends on the working directory',
+    ],
+    [
+      // The system paths are used as they are, so `~` is not the home here.
+      'a system defaults path that starts with ~',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: {
+            ...runtime.environment,
+            QWEN_CODE_SYSTEM_DEFAULTS_PATH: '~/system-defaults.json',
+          },
+        };
+      },
+      'a settings location in the environment depends on the working directory',
+    ],
+    [
+      // Only `~`, `~/` and `~\` expand against the home directory.
+      'a QWEN_HOME that starts with ~ and a name',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: { ...runtime.environment, QWEN_HOME: '~qh' },
+        };
+      },
+      'a settings location in the environment depends on the working directory',
+    ],
+    [
+      // A session host receives 123 as the relative path "123".
+      'a settings location whose string form is relative',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: {
+            ...runtime.environment,
+            QWEN_HOME: 123 as unknown as string,
+          },
+        };
+      },
+      'a settings location in the environment depends on the working directory',
+    ],
+    [
+      // The location is checked before the settings are read.
+      'a relative location with settings that cannot be read',
+      () => {
+        runtime = {
+          ...runtime,
+          environment: { ...runtime.environment, QWEN_HOME: 'qwen-home' },
+        };
+        fs.writeFileSync(workspaceSettings(), '{ "ui": ');
+      },
+      'a settings location in the environment depends on the working directory',
     ],
     [
       'unreadable settings',
@@ -382,6 +556,303 @@ describe('evaluateManagedCompatibility', () => {
     await arrange();
 
     await expect(evaluate()).resolves.toEqual({ status: 'unknown', reason });
+  });
+
+  it.each([
+    ['~/qwen-home', ''],
+    ['~\\qwen-home', ''],
+    ['~', 'qwen-home'],
+  ])(
+    'reads a QWEN_HOME of %s from the home directory',
+    async (location, homeBelowRoot) => {
+      const home = path.join(root, homeBelowRoot);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      runtime = {
+        ...runtime,
+        environment: { ...runtime.environment, QWEN_HOME: location },
+      };
+      fs.mkdirSync(path.join(qwenHome, 'extensions', 'demo'), {
+        recursive: true,
+      });
+
+      await expect(evaluate()).resolves.toEqual({
+        status: 'deferred',
+        reason: 'extensions are installed',
+      });
+    },
+  );
+
+  it.each<[string, string | undefined]>([
+    ['an unset', undefined],
+    ['an empty', ''],
+  ])('reads the home directory for %s QWEN_HOME', async (_name, value) => {
+    vi.stubEnv('HOME', root);
+    vi.stubEnv('USERPROFILE', root);
+    const { QWEN_HOME: _home, ...environment } = runtime.environment;
+    runtime = {
+      ...runtime,
+      environment:
+        value === undefined
+          ? environment
+          : { ...environment, QWEN_HOME: value },
+    };
+    fs.mkdirSync(path.join(root, '.qwen', 'extensions', 'demo'), {
+      recursive: true,
+    });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'extensions are installed',
+    });
+  });
+
+  it('reads an empty system defaults path as unset', async () => {
+    runtime = {
+      ...runtime,
+      environment: {
+        ...runtime.environment,
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: '',
+      },
+    };
+    // Unset, the defaults sit beside the system settings file.
+    writeJson(systemDefaults(), { mcpServers: { demo: { command: 'demo' } } });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'MCP servers are configured in settings',
+    });
+  });
+
+  // Settings loading resolves the home directory for the user directory and to
+  // tell whether the workspace is the home directory.
+  it.each<[string, string, () => NodeJS.ProcessEnv]>([
+    ['a relative home directory without QWEN_HOME', 'home', () => ({})],
+    [
+      'a relative home directory with a QWEN_HOME under ~',
+      'home',
+      () => ({ QWEN_HOME: '~/qwen-home' }),
+    ],
+    [
+      'a relative home directory with an absolute QWEN_HOME',
+      'home',
+      () => ({ QWEN_HOME: qwenHome }),
+    ],
+    ['an empty home directory without QWEN_HOME', '', () => ({})],
+    [
+      'an empty home directory with a QWEN_HOME under ~',
+      '',
+      () => ({ QWEN_HOME: '~/qwen-home' }),
+    ],
+  ])('reports %s as unknown', async (_name, home, locations) => {
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    const { QWEN_HOME: _home, ...environment } = runtime.environment;
+    runtime = { ...runtime, environment: { ...environment, ...locations() } };
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'unknown',
+      // libuv rejects a USERPROFILE shorter than three characters instead of
+      // falling back to the user profile, so on Windows os.homedir() throws
+      // for an empty one.
+      reason:
+        home === '' && process.platform === 'win32'
+          ? 'the home directory or the environment could not be read'
+          : 'a settings location in the environment depends on the working directory',
+    });
+  });
+
+  it('logs why the home directory or the environment could not be read', async () => {
+    const environment = { ...runtime.environment };
+    Object.defineProperty(environment, 'QWEN_HOME', {
+      enumerable: true,
+      get() {
+        throw new Error('unreadable');
+      },
+    });
+    runtime = { ...runtime, environment };
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'unknown',
+      reason: 'the home directory or the environment could not be read',
+    });
+    expect(compatibilityLog.warn).toHaveBeenCalledWith(
+      'The home directory or the environment could not be read:',
+      expect.objectContaining({
+        message:
+          'The environment variable "QWEN_HOME" cannot be read: unreadable',
+      }),
+    );
+  });
+
+  it('reads the environment once', async () => {
+    // Read again, QWEN_HOME would name a relative directory.
+    let reads = 0;
+    const { QWEN_HOME: _home, ...environment } = runtime.environment;
+    runtime = {
+      ...runtime,
+      environment: {
+        ...environment,
+        get QWEN_HOME() {
+          reads += 1;
+          return reads === 1 ? qwenHome : 'qwen-home';
+        },
+      },
+    };
+    fs.mkdirSync(path.join(qwenHome, 'extensions', 'demo'), {
+      recursive: true,
+    });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'extensions are installed',
+    });
+    expect(reads).toBe(1);
+  });
+
+  it('reports a home directory that cannot be looked up as unknown', async () => {
+    // As on Windows for a USERPROFILE shorter than three characters. Builtin
+    // named exports follow the module object only after a sync.
+    const homedir = nodeOs.homedir;
+    nodeOs.homedir = () => {
+      throw new Error('no home directory');
+    };
+    syncBuiltinESMExports();
+    try {
+      await expect(evaluate()).resolves.toEqual({
+        status: 'unknown',
+        reason: 'the home directory or the environment could not be read',
+      });
+    } finally {
+      nodeOs.homedir = homedir;
+      syncBuiltinESMExports();
+    }
+  });
+
+  // Runs `check` as if on Windows. Only the platform checks change: paths
+  // still follow the host's own rules.
+  const onWindows = async (check: () => Promise<void>) => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      await check();
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  };
+
+  // A path to a place that exists, which Windows counts as fully qualified:
+  // Linux and macOS read `//x` as `/x`, and Windows reads it as a UNC path.
+  const windowsPath = (location: string) =>
+    process.platform === 'win32' ? location : `/${location}`;
+  const stubWindowsHome = () => {
+    vi.stubEnv('HOME', windowsPath(root));
+    vi.stubEnv('USERPROFILE', windowsPath(root));
+  };
+  // System settings paths with a drive root that do not exist, so that the
+  // platform's own defaults are not read.
+  const windowsSystemPaths = {
+    QWEN_CODE_SYSTEM_SETTINGS_PATH: 'C:\\qwen-system\\settings.json',
+    QWEN_CODE_SYSTEM_DEFAULTS_PATH: 'C:\\qwen-system\\system-defaults.json',
+  };
+
+  it.each<[string, NodeJS.ProcessEnv]>([
+    ['a rooted path without a drive', { QWEN_HOME: '/qwen-home' }],
+    ['a rooted path with a backslash', { QWEN_HOME: '\\qwen-home' }],
+    ['a drive-relative path', { QWEN_HOME: 'C:qwen-home' }],
+    [
+      'a system path without a drive',
+      { QWEN_CODE_SYSTEM_SETTINGS_PATH: '/etc/qwen/settings.json' },
+    ],
+    ['a relative path spelled in lower case', { qwen_home: 'qwen-home' }],
+    [
+      'a system settings path spelled in lower case',
+      { qwen_code_system_settings_path: 'qwen-settings.json' },
+    ],
+    [
+      'a system defaults path spelled in mixed case',
+      { Qwen_Code_System_Defaults_Path: 'qwen-defaults.json' },
+    ],
+  ])('reports %s on Windows as unknown', async (_name, environment) => {
+    // Only the location under test: the test tree's own paths have no drive
+    // and would count on Windows too, and so would a home without one.
+    stubWindowsHome();
+    runtime = { ...runtime, environment };
+
+    await onWindows(async () => {
+      await expect(evaluate()).resolves.toEqual({
+        status: 'unknown',
+        reason:
+          'a settings location in the environment depends on the working directory',
+      });
+    });
+  });
+
+  it('reads a value that is not a string as the string a session host receives', async () => {
+    // Read as unset, QWEN_HOME would give the home directory's .qwen instead.
+    vi.stubEnv('HOME', root);
+    vi.stubEnv('USERPROFILE', root);
+    runtime = {
+      ...runtime,
+      environment: {
+        ...runtime.environment,
+        QWEN_HOME: [qwenHome] as unknown as string,
+      },
+    };
+    fs.mkdirSync(path.join(qwenHome, 'extensions', 'demo'), {
+      recursive: true,
+    });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'extensions are installed',
+    });
+  });
+
+  it('does not count a Windows location with a drive root', async () => {
+    stubWindowsHome();
+    runtime = {
+      ...runtime,
+      environment: { QWEN_HOME: 'C:\\qwen-home', ...windowsSystemPaths },
+    };
+
+    await onWindows(async () => {
+      await expect(evaluate()).resolves.toEqual({ status: 'compatible' });
+    });
+  });
+
+  it('reads a location spelled in another case on Windows', async () => {
+    stubWindowsHome();
+    runtime = {
+      ...runtime,
+      environment: { qwen_home: windowsPath(qwenHome), ...windowsSystemPaths },
+    };
+    fs.mkdirSync(path.join(qwenHome, 'extensions', 'demo'), {
+      recursive: true,
+    });
+
+    await onWindows(async () => {
+      await expect(evaluate()).resolves.toEqual({
+        status: 'deferred',
+        reason: 'extensions are installed',
+      });
+    });
+  });
+
+  it('reports a home directory without a drive on Windows as unknown', async () => {
+    // The tree's root has no drive elsewhere; on Windows, drop its drive.
+    const home = process.platform === 'win32' ? root.slice(2) : root;
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    runtime = { ...runtime, environment: {} };
+
+    await onWindows(async () => {
+      await expect(evaluate()).resolves.toEqual({
+        status: 'unknown',
+        reason:
+          'a settings location in the environment depends on the working directory',
+      });
+    });
   });
 
   it('reports an invalid approval mode in settings even when the session requests one', async () => {

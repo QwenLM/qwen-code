@@ -1,0 +1,630 @@
+{
+  "contract": "managed-automation-slots/1",
+  "timezones": [
+    "UTC",
+    "Asia/Shanghai",
+    "Asia/Urumqi",
+    "Etc/GMT+8",
+    "America/New_York",
+    "Europe/Paris",
+    "Australia/Lord_Howe",
+    "America/Santiago",
+    "Pacific/Apia"
+  ],
+  "rules": [
+    "Slots are whole UTC minutes in (after, until]; after is exclusive and until inclusive.",
+    "Each UTC minute instant is read in the zone and matched under Vixie day semantics: when neither day field starts with *, the day matches when either field does; otherwise both must.",
+    "7 in the day-of-week field is Sunday; N/step runs from N to the field maximum.",
+    "A wall-clock minute a DST gap skipped fires once, at the first instant after the gap.",
+    "A wall-clock minute a DST fold repeats fires once, at its first instant.",
+    "When the window holds more than limit slots the oldest are cut and truncated is true."
+  ],
+  "cases": [
+    {
+      "id": "utc-every-minute",
+      "cron": "* * * * *",
+      "timezone": "UTC",
+      "after": "2026-01-05T10:00:30Z",
+      "until": "2026-01-05T10:03:10Z",
+      "limit": 1000,
+      "note": "after is exclusive and need not be a whole minute; until is inclusive",
+      "slots": [
+        "2026-01-05T10:01:00Z",
+        "2026-01-05T10:02:00Z",
+        "2026-01-05T10:03:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "utc-hourly-boundary",
+      "cron": "0 * * * *",
+      "timezone": "UTC",
+      "after": "2026-01-05T10:00:00Z",
+      "until": "2026-01-05T12:00:00Z",
+      "limit": 1000,
+      "note": "a slot equal to after is covered; a slot equal to until fires",
+      "slots": ["2026-01-05T11:00:00Z", "2026-01-05T12:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "utc-step-from-value",
+      "cron": "5/15 * * * *",
+      "timezone": "UTC",
+      "after": "2026-01-05T09:59:00Z",
+      "until": "2026-01-05T11:00:00Z",
+      "limit": 1000,
+      "note": "N/step runs from N to the field maximum",
+      "slots": [
+        "2026-01-05T10:05:00Z",
+        "2026-01-05T10:20:00Z",
+        "2026-01-05T10:35:00Z",
+        "2026-01-05T10:50:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "utc-list-and-range",
+      "cron": "0 9-10,22 * * *",
+      "timezone": "UTC",
+      "after": "2026-01-04T23:00:00Z",
+      "until": "2026-01-05T23:00:00Z",
+      "limit": 1000,
+      "slots": [
+        "2026-01-05T09:00:00Z",
+        "2026-01-05T10:00:00Z",
+        "2026-01-05T22:00:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "utc-dow-sunday-7",
+      "cron": "30 6 * * 7",
+      "timezone": "UTC",
+      "after": "2026-01-03T00:00:00Z",
+      "until": "2026-01-12T00:00:00Z",
+      "limit": 1000,
+      "note": "7 is Sunday; 2026-01-04 and 2026-01-11 are Sundays",
+      "slots": ["2026-01-04T06:30:00Z", "2026-01-11T06:30:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "utc-vixie-or-day-fields",
+      "cron": "0 0 1 * 1",
+      "timezone": "UTC",
+      "after": "2026-05-31T00:00:00Z",
+      "until": "2026-06-09T00:00:00Z",
+      "limit": 1000,
+      "note": "neither day field is wild: the 1st OR a Monday (2026-06-01 is both; 2026-06-08 is a Monday)",
+      "slots": ["2026-06-01T00:00:00Z", "2026-06-08T00:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "utc-vixie-and-when-dom-wild",
+      "cron": "0 0 * * 1",
+      "timezone": "UTC",
+      "after": "2026-05-31T00:00:00Z",
+      "until": "2026-06-09T00:00:00Z",
+      "limit": 1000,
+      "note": "day-of-month wild: Mondays only",
+      "slots": ["2026-06-01T00:00:00Z", "2026-06-08T00:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "utc-vixie-and-when-dow-step",
+      "cron": "0 0 1 * */2",
+      "timezone": "UTC",
+      "after": "2026-05-31T00:00:00Z",
+      "until": "2026-06-09T00:00:00Z",
+      "limit": 1000,
+      "note": "a day-of-week field starting with * is wild: the 1st AND an even weekday (2026-06-01 is Monday=1: no fire)",
+      "slots": [],
+      "truncated": false
+    },
+    {
+      "id": "utc-impossible-date",
+      "cron": "0 0 31 2 *",
+      "timezone": "UTC",
+      "after": "2026-02-01T00:00:00Z",
+      "until": "2026-03-02T00:00:00Z",
+      "limit": 1000,
+      "note": "never fires",
+      "slots": [],
+      "truncated": false
+    },
+    {
+      "id": "utc-leap-day",
+      "cron": "0 12 29 2 *",
+      "timezone": "UTC",
+      "after": "2028-02-28T00:00:00Z",
+      "until": "2028-03-01T00:00:00Z",
+      "limit": 1000,
+      "slots": ["2028-02-29T12:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "utc-limit-keeps-newest",
+      "cron": "* * * * *",
+      "timezone": "UTC",
+      "after": "2026-01-05T10:00:00Z",
+      "until": "2026-01-05T10:10:00Z",
+      "limit": 3,
+      "note": "the oldest slots are cut; truncated is reported",
+      "slots": [
+        "2026-01-05T10:08:00Z",
+        "2026-01-05T10:09:00Z",
+        "2026-01-05T10:10:00Z"
+      ],
+      "truncated": true
+    },
+    {
+      "id": "utc-empty-window",
+      "cron": "* * * * *",
+      "timezone": "UTC",
+      "after": "2026-01-05T10:00:00Z",
+      "until": "2026-01-05T10:00:00Z",
+      "limit": 10,
+      "slots": [],
+      "truncated": false
+    },
+    {
+      "id": "shanghai-daily",
+      "cron": "30 8 * * *",
+      "timezone": "Asia/Shanghai",
+      "after": "2026-01-04T00:00:00Z",
+      "until": "2026-01-06T00:00:00Z",
+      "limit": 1000,
+      "note": "08:30 CST is 00:30Z",
+      "slots": ["2026-01-04T00:30:00Z", "2026-01-05T00:30:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "urumqi-fixed-offset",
+      "cron": "0 0 * * *",
+      "timezone": "Asia/Urumqi",
+      "after": "2026-01-04T00:00:00Z",
+      "until": "2026-01-06T00:00:00Z",
+      "limit": 1000,
+      "note": "UTC+6 without DST",
+      "slots": ["2026-01-04T18:00:00Z", "2026-01-05T18:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "etc-gmt-plus-8",
+      "cron": "0 0 * * *",
+      "timezone": "Etc/GMT+8",
+      "after": "2026-01-04T00:00:00Z",
+      "until": "2026-01-06T00:00:00Z",
+      "limit": 1000,
+      "note": "POSIX sign: Etc/GMT+8 is UTC-8",
+      "slots": ["2026-01-04T08:00:00Z", "2026-01-05T08:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "new-york-spring-gap-shift",
+      "cron": "30 2 * * *",
+      "timezone": "America/New_York",
+      "after": "2026-03-07T00:00:00Z",
+      "until": "2026-03-10T00:00:00Z",
+      "limit": 1000,
+      "note": "2026-03-08 02:30 does not exist; it fires once at 07:00Z, the first instant after the gap",
+      "slots": [
+        "2026-03-07T07:30:00Z",
+        "2026-03-08T07:00:00Z",
+        "2026-03-09T06:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "new-york-spring-gap-dedup",
+      "cron": "*/15 * * * *",
+      "timezone": "America/New_York",
+      "after": "2026-03-08T06:30:00Z",
+      "until": "2026-03-08T07:30:00Z",
+      "limit": 1000,
+      "note": "the four skipped quarter hours collapse into the 07:00Z slot that 03:00 EDT fires anyway",
+      "slots": [
+        "2026-03-08T06:45:00Z",
+        "2026-03-08T07:00:00Z",
+        "2026-03-08T07:15:00Z",
+        "2026-03-08T07:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "new-york-spring-gap-only-skipped",
+      "cron": "15 2 * * *",
+      "timezone": "America/New_York",
+      "after": "2026-03-08T06:30:00Z",
+      "until": "2026-03-08T07:30:00Z",
+      "limit": 1000,
+      "note": "only a skipped minute matches: one slot at 07:00Z",
+      "slots": ["2026-03-08T07:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "new-york-fall-fold-once",
+      "cron": "30 1 * * *",
+      "timezone": "America/New_York",
+      "after": "2026-10-31T00:00:00Z",
+      "until": "2026-11-02T12:00:00Z",
+      "limit": 1000,
+      "note": "2026-11-01 01:30 happens twice; only the first instant (05:30Z) fires",
+      "slots": [
+        "2026-10-31T05:30:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-02T06:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "new-york-fall-fold-half-hours",
+      "cron": "*/30 * * * *",
+      "timezone": "America/New_York",
+      "after": "2026-11-01T04:30:00Z",
+      "until": "2026-11-01T07:00:00Z",
+      "limit": 1000,
+      "note": "06:00Z and 06:30Z repeat 01:00 and 01:30 and are skipped",
+      "slots": [
+        "2026-11-01T05:00:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-01T07:00:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "new-york-summer-daily",
+      "cron": "0 9 * * 1-5",
+      "timezone": "America/New_York",
+      "after": "2026-06-05T00:00:00Z",
+      "until": "2026-06-09T00:00:00Z",
+      "limit": 1000,
+      "note": "weekdays at 09:00 EDT (13:00Z); the weekend fires nothing",
+      "slots": ["2026-06-05T13:00:00Z", "2026-06-08T13:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "paris-spring-gap",
+      "cron": "30 2 * * *",
+      "timezone": "Europe/Paris",
+      "after": "2026-03-28T00:00:00Z",
+      "until": "2026-03-30T00:00:00Z",
+      "limit": 1000,
+      "note": "2026-03-29 02:30 CET does not exist; it fires at 01:00Z",
+      "slots": ["2026-03-28T01:30:00Z", "2026-03-29T01:00:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "paris-fall-fold",
+      "cron": "30 2 * * *",
+      "timezone": "Europe/Paris",
+      "after": "2026-10-24T00:00:00Z",
+      "until": "2026-10-26T00:00:00Z",
+      "limit": 1000,
+      "note": "2026-10-25 02:30 happens twice; only 00:30Z fires",
+      "slots": ["2026-10-24T00:30:00Z", "2026-10-25T00:30:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "lord-howe-half-hour-gap",
+      "cron": "15 2 * * *",
+      "timezone": "Australia/Lord_Howe",
+      "after": "2026-10-03T00:00:00Z",
+      "until": "2026-10-05T00:00:00Z",
+      "limit": 1000,
+      "note": "a 30-minute gap on 2026-10-04 (02:00 +10:30 -> 02:30 +11); 02:15 fires at 15:30Z",
+      "slots": ["2026-10-03T15:30:00Z", "2026-10-04T15:15:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "lord-howe-half-hour-fold",
+      "cron": "45 1 * * *",
+      "timezone": "Australia/Lord_Howe",
+      "after": "2026-04-04T00:00:00Z",
+      "until": "2026-04-06T00:00:00Z",
+      "limit": 1000,
+      "note": "a 30-minute fold on 2026-04-05 (02:00 +11 -> 01:30 +10:30); 01:45 fires once at 14:45Z",
+      "slots": ["2026-04-04T14:45:00Z", "2026-04-05T15:15:00Z"],
+      "truncated": false
+    },
+    {
+      "id": "santiago-southern-fold",
+      "cron": "30 23 * * *",
+      "timezone": "America/Santiago",
+      "after": "2026-04-03T00:00:00Z",
+      "until": "2026-04-06T00:00:00Z",
+      "limit": 1000,
+      "note": "2026-04-04 23:30 happens twice (00:00 -> 23:00 Saturday); once per day",
+      "slots": [
+        "2026-04-03T02:30:00Z",
+        "2026-04-04T02:30:00Z",
+        "2026-04-05T02:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "santiago-southern-gap",
+      "cron": "30 0 * * *",
+      "timezone": "America/Santiago",
+      "after": "2026-09-05T00:00:00Z",
+      "until": "2026-09-08T00:00:00Z",
+      "limit": 1000,
+      "note": "2026-09-06 00:30 does not exist (00:00 -> 01:00); it fires at the first instant after the gap",
+      "slots": [
+        "2026-09-05T04:30:00Z",
+        "2026-09-06T04:00:00Z",
+        "2026-09-07T03:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "apia-dateline-shift-daily-noon",
+      "cron": "0 12 * * *",
+      "timezone": "Pacific/Apia",
+      "after": "2011-12-27T00:00:00Z",
+      "until": "2012-01-03T00:00:00Z",
+      "limit": 1000,
+      "note": "local 2011-12-30 never occurs (the 2011-12-29 -> 2011-12-31 date-line jump); the 12:00 of the skipped day fires at 2011-12-30T10:00Z, the first valid instant after it",
+      "slots": [
+        "2011-12-27T22:00:00Z",
+        "2011-12-28T22:00:00Z",
+        "2011-12-29T22:00:00Z",
+        "2011-12-30T10:00:00Z",
+        "2011-12-30T22:00:00Z",
+        "2011-12-31T22:00:00Z",
+        "2012-01-01T22:00:00Z",
+        "2012-01-02T22:00:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "apia-dateline-gap-dedup",
+      "cron": "30 12 * * *",
+      "timezone": "Pacific/Apia",
+      "after": "2011-12-28T00:00:00Z",
+      "until": "2012-01-01T00:00:00Z",
+      "limit": 1000,
+      "note": "every 12:30 of the skipped 2011-12-30 collapses into the same 2011-12-30T10:00Z first instant, and exactly one slot is kept",
+      "slots": [
+        "2011-12-28T22:30:00Z",
+        "2011-12-29T22:30:00Z",
+        "2011-12-30T10:00:00Z",
+        "2011-12-30T22:30:00Z",
+        "2011-12-31T22:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "apia-dateline-gap-only-skipped",
+      "cron": "0 0 30 12 *",
+      "timezone": "Pacific/Apia",
+      "after": "2011-12-28T00:00:00Z",
+      "until": "2012-01-02T00:00:00Z",
+      "limit": 1000,
+      "note": "only a minute inside the whole skipped day matches: one slot at the first instant after it",
+      "slots": ["2011-12-30T10:00:00Z"],
+      "truncated": false
+    }
+  ],
+  "wallClocks": [
+    {
+      "instant": "2026-03-08T06:59:00Z",
+      "timezone": "UTC",
+      "year": 2026,
+      "month": 3,
+      "day": 8,
+      "hour": 6,
+      "minute": 59,
+      "weekday": 0,
+      "offsetMinutes": 0
+    },
+    {
+      "instant": "2026-03-08T06:59:00Z",
+      "timezone": "America/New_York",
+      "year": 2026,
+      "month": 3,
+      "day": 8,
+      "hour": 1,
+      "minute": 59,
+      "weekday": 0,
+      "offsetMinutes": -300
+    },
+    {
+      "instant": "2026-03-08T06:59:00Z",
+      "timezone": "Australia/Lord_Howe",
+      "year": 2026,
+      "month": 3,
+      "day": 8,
+      "hour": 17,
+      "minute": 59,
+      "weekday": 0,
+      "offsetMinutes": 660
+    },
+    {
+      "instant": "2026-03-08T06:59:00Z",
+      "timezone": "Etc/GMT+8",
+      "year": 2026,
+      "month": 3,
+      "day": 7,
+      "hour": 22,
+      "minute": 59,
+      "weekday": 6,
+      "offsetMinutes": -480
+    },
+    {
+      "instant": "2026-03-08T07:00:00Z",
+      "timezone": "UTC",
+      "year": 2026,
+      "month": 3,
+      "day": 8,
+      "hour": 7,
+      "minute": 0,
+      "weekday": 0,
+      "offsetMinutes": 0
+    },
+    {
+      "instant": "2026-03-08T07:00:00Z",
+      "timezone": "America/New_York",
+      "year": 2026,
+      "month": 3,
+      "day": 8,
+      "hour": 3,
+      "minute": 0,
+      "weekday": 0,
+      "offsetMinutes": -240
+    },
+    {
+      "instant": "2026-03-08T07:00:00Z",
+      "timezone": "Australia/Lord_Howe",
+      "year": 2026,
+      "month": 3,
+      "day": 8,
+      "hour": 18,
+      "minute": 0,
+      "weekday": 0,
+      "offsetMinutes": 660
+    },
+    {
+      "instant": "2026-03-08T07:00:00Z",
+      "timezone": "Etc/GMT+8",
+      "year": 2026,
+      "month": 3,
+      "day": 7,
+      "hour": 23,
+      "minute": 0,
+      "weekday": 6,
+      "offsetMinutes": -480
+    },
+    {
+      "instant": "2026-11-01T05:30:00Z",
+      "timezone": "UTC",
+      "year": 2026,
+      "month": 11,
+      "day": 1,
+      "hour": 5,
+      "minute": 30,
+      "weekday": 0,
+      "offsetMinutes": 0
+    },
+    {
+      "instant": "2026-11-01T05:30:00Z",
+      "timezone": "America/New_York",
+      "year": 2026,
+      "month": 11,
+      "day": 1,
+      "hour": 1,
+      "minute": 30,
+      "weekday": 0,
+      "offsetMinutes": -240
+    },
+    {
+      "instant": "2026-11-01T05:30:00Z",
+      "timezone": "Australia/Lord_Howe",
+      "year": 2026,
+      "month": 11,
+      "day": 1,
+      "hour": 16,
+      "minute": 30,
+      "weekday": 0,
+      "offsetMinutes": 660
+    },
+    {
+      "instant": "2026-11-01T05:30:00Z",
+      "timezone": "Etc/GMT+8",
+      "year": 2026,
+      "month": 10,
+      "day": 31,
+      "hour": 21,
+      "minute": 30,
+      "weekday": 6,
+      "offsetMinutes": -480
+    },
+    {
+      "instant": "2026-11-01T06:30:00Z",
+      "timezone": "UTC",
+      "year": 2026,
+      "month": 11,
+      "day": 1,
+      "hour": 6,
+      "minute": 30,
+      "weekday": 0,
+      "offsetMinutes": 0
+    },
+    {
+      "instant": "2026-11-01T06:30:00Z",
+      "timezone": "America/New_York",
+      "year": 2026,
+      "month": 11,
+      "day": 1,
+      "hour": 1,
+      "minute": 30,
+      "weekday": 0,
+      "offsetMinutes": -300
+    },
+    {
+      "instant": "2026-11-01T06:30:00Z",
+      "timezone": "Australia/Lord_Howe",
+      "year": 2026,
+      "month": 11,
+      "day": 1,
+      "hour": 17,
+      "minute": 30,
+      "weekday": 0,
+      "offsetMinutes": 660
+    },
+    {
+      "instant": "2026-11-01T06:30:00Z",
+      "timezone": "Etc/GMT+8",
+      "year": 2026,
+      "month": 10,
+      "day": 31,
+      "hour": 22,
+      "minute": 30,
+      "weekday": 6,
+      "offsetMinutes": -480
+    },
+    {
+      "instant": "2026-07-01T12:00:00Z",
+      "timezone": "UTC",
+      "year": 2026,
+      "month": 7,
+      "day": 1,
+      "hour": 12,
+      "minute": 0,
+      "weekday": 3,
+      "offsetMinutes": 0
+    },
+    {
+      "instant": "2026-07-01T12:00:00Z",
+      "timezone": "America/New_York",
+      "year": 2026,
+      "month": 7,
+      "day": 1,
+      "hour": 8,
+      "minute": 0,
+      "weekday": 3,
+      "offsetMinutes": -240
+    },
+    {
+      "instant": "2026-07-01T12:00:00Z",
+      "timezone": "Australia/Lord_Howe",
+      "year": 2026,
+      "month": 7,
+      "day": 1,
+      "hour": 22,
+      "minute": 30,
+      "weekday": 3,
+      "offsetMinutes": 630
+    },
+    {
+      "instant": "2026-07-01T12:00:00Z",
+      "timezone": "Etc/GMT+8",
+      "year": 2026,
+      "month": 7,
+      "day": 1,
+      "hour": 4,
+      "minute": 0,
+      "weekday": 3,
+      "offsetMinutes": -480
+    }
+  ]
+}

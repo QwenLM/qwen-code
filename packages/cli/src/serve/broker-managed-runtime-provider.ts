@@ -16,6 +16,7 @@ import type {
 } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import {
   managedToolDigest,
+  parseManagedToolInvocationReference,
   type ManagedToolInvocationReference,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
@@ -35,6 +36,11 @@ import {
   sameManagedRuntimeIdentity,
   type ManagedRuntimePrepareRequest,
 } from './managed-runtime-protocol.js';
+import {
+  parseManagedRuntimeProviderOperation,
+  parseManagedRuntimeProviderResult,
+  type ManagedRuntimeProviderControl,
+} from './managed-runtime-provider-protocol.js';
 
 export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 1 as const;
 export const MANAGED_RUNTIME_BROKER_ROUTE_PREFIX =
@@ -93,9 +99,12 @@ class BrokerResponseError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly retryable?: boolean,
+    reason?: string,
     readonly abandoned = false,
   ) {
-    super(`Managed Runtime Broker returned HTTP ${status}.`);
+    super(
+      `Managed Runtime Broker returned HTTP ${status}.${reason ? ` ${reason}` : ''}`,
+    );
     this.name = 'BrokerResponseError';
   }
 }
@@ -216,6 +225,8 @@ function executionIdempotencyKey(
     .update(reference.callId)
     .update('\0')
     .update(reference.argsDigest)
+    .update('\0')
+    .update(reference.invocationId)
     .digest('hex');
 }
 
@@ -535,6 +546,7 @@ export class ManagedRuntimeBrokerClient {
     if (!response.ok) {
       let code: string | undefined;
       let retryable: boolean | undefined;
+      let reason: string | undefined;
       let abandoned = false;
       try {
         const text = await readBoundedResponseText(
@@ -549,6 +561,29 @@ export class ManagedRuntimeBrokerClient {
           !body['code'].includes('\0')
         ) {
           code = body['code'];
+        }
+        // The Broker's envelope is error, code and retryable, plus details
+        // when there are any (a terminal ABANDONED answer carries them).
+        const details = body['details'];
+        if (
+          code !== undefined &&
+          typeof body['retryable'] === 'boolean' &&
+          Object.keys(body).filter((key) => key !== 'details').length === 3 &&
+          (details === undefined ||
+            (details !== null &&
+              typeof details === 'object' &&
+              !Array.isArray(details))) &&
+          response.headers
+            .get('content-type')
+            ?.split(';')[0]
+            .trim()
+            .toLowerCase() === 'application/json' &&
+          typeof body['error'] === 'string' &&
+          body['error'].length > 0 &&
+          body['error'].length <= 4096 &&
+          !body['error'].includes('\0')
+        ) {
+          reason = body['error'];
         }
         if (typeof body['retryable'] === 'boolean') {
           retryable = body['retryable'];
@@ -567,6 +602,7 @@ export class ManagedRuntimeBrokerClient {
         response.status,
         code,
         retryable,
+        reason,
         abandoned,
       );
     }
@@ -913,16 +949,26 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         );
       }
     };
-    const control = (operation: Record<string, unknown>) => {
-      assertEntry(operation['kind'] === 'history');
-      return this.client.control(
-        entry.request.sessionId,
-        entry.harnessSessionId,
-        operation,
-        AbortSignal.any([
-          this.lifetime.signal,
-          AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
-        ]),
+    const control = async (operation: ManagedRuntimeProviderControl) => {
+      assertEntry(operation.kind === 'history');
+      const session = {
+        harnessSessionId: entry.harnessSessionId,
+        runtimeSessionId: entry.request.sessionId,
+        turnKind: entry.request.turnKind,
+      };
+      const parsed = parseManagedRuntimeProviderOperation(operation, session);
+      return parseManagedRuntimeProviderResult(
+        parsed,
+        await this.client.control(
+          entry.request.sessionId,
+          entry.harnessSessionId,
+          parsed,
+          AbortSignal.any([
+            this.lifetime.signal,
+            AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+          ]),
+        ),
+        session,
       );
     };
     const ensureExecution = (
@@ -1075,6 +1121,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     entry: BrokerEntry,
     reference: ManagedToolInvocationReference,
   ): void {
+    parseManagedToolInvocationReference(reference);
     if (reference.sessionId !== entry.request.sessionId) {
       throw new ManagedRuntimeProviderError(
         'managed_runtime_identity_conflict',

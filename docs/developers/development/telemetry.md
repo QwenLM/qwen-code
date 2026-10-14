@@ -752,7 +752,7 @@ The following events are logged:
   - **Attributes**: `trigger` ("auto"/"manual"), `status` ("updated"/"noop"/"failed"/"cancelled"), `deduped_entries` (int), `touched_topics_count` (int), `touched_topics` (string), `duration_ms` (int)
 
 - `qwen-code.memory.recall`: Memory recall operation completed.
-  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int)
+  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int), `selector_skipped` (bool, optional — set for structured-mode recalls that made a skip decision, so not on the empty-query/empty-corpus short circuit; false when the selector runs, including when the #13003 knob is off)
 
 #### Prompt Suggestion & Speculation Events
 
@@ -873,10 +873,10 @@ A resumed Goal can contribute multiple stop observations, each containing its li
   - **Attributes**: `trigger`, `status`
 
 - `qwen-code.memory.recall.count` (Counter, Int): Auto-memory recall operations.
-  - **Attributes**: `strategy` ("none"/"heuristic"/"model")
+  - **Attributes**: `strategy` ("none"/"heuristic"/"model"), `selector_skipped` (bool, optional — attached only for structured-mode recalls while the #13003 skip-selector knob is on)
 
 - `qwen-code.memory.recall.duration` (Histogram, ms): Recall duration.
-  - **Attributes**: `strategy`
+  - **Attributes**: `strategy`, `selector_skipped` (bool, optional — same conditions as the counter)
 
 #### API Request Breakdown
 

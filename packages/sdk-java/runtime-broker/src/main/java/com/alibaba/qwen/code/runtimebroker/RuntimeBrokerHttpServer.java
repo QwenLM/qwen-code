@@ -4,14 +4,18 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
@@ -21,8 +25,8 @@ import java.util.function.Function;
 /**
  * Private HTTP face of the merged Runtime Broker for a Hosted Harness.
  *
- * <p>Immediate and durable deferred dispatch share the original execution
- * journal. Operator resolution remains unavailable.
+ * <p>Immediate raw-tool dispatch and durable raw-tool or provider dispatch
+ * share the original execution journal. Operator resolution is unavailable.
  */
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
@@ -34,9 +38,29 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
             RuntimeBrokerService service) throws IOException {
+        this(address, token, service, false);
+    }
+
+    /**
+     * The face authenticates with one global Bearer token over plaintext
+     * HTTP, so by default it only binds a loopback address. Serving beyond
+     * loopback requires {@code allowNonLoopback} and a deployment that
+     * terminates TLS and authorizes callers in front.
+     */
+    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
+            RuntimeBrokerService service, boolean allowNonLoopback)
+            throws IOException {
         if (address == null || service == null) {
             throw new IllegalArgumentException(
                     "address and service are required");
+        }
+        InetAddress bind = address.getAddress();
+        if (!allowNonLoopback && (bind == null || !bind.isLoopbackAddress())) {
+            throw new IllegalArgumentException("Runtime Broker serves one"
+                    + " global token over plaintext HTTP and refuses a"
+                    + " non-loopback listen address (" + address
+                    + "); pass allowNonLoopback only behind a TLS-terminating"
+                    + " layer that authorizes callers");
         }
         this.authorization = ("Bearer "
                 + BrokerValues.requireId(token, "token"))
@@ -86,8 +110,22 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 requireProtocol(body);
                 JsonCodec.requiredString(body, "requestId", "warm request");
                 String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "warm request");
-                complete(exchange, service.warm(sessionId), ignored -> Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true));
+                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), record -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true,
+                        "scope", Map.of("tenantId", record.getRequest().getScope().getTenantId(),
+                                "workspaceId", record.getRequest().getScope().getWorkspaceId(),
+                                "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
+                                "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
+                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange, "lifecycle authorization");
+                requireProtocol(body);
+                String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "lifecycle authorization");
+                String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "lifecycle authorization");
+                complete(exchange, service.authorizeLifecycle(sessionId, lifecycleAuthority(exchange)),
+                        ignored -> envelope(sessionId, runtimeSessionId, "authorized", true));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -121,6 +159,19 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
+    private static RuntimeLifecycleAuthority lifecycleAuthority(HttpExchange exchange) {
+        String operation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.OPERATION_HEADER);
+        String generation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.GENERATION_HEADER);
+        if (operation == null && generation == null) {
+            return null;
+        }
+        try {
+            return new RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
+        } catch (RuntimeException error) {
+            throw new RuntimeBrokerException(400, "runtime_lifecycle_authority_invalid", "Invalid lifecycle authority", false);
+        }
+    }
+
     private void acquire(HttpExchange exchange) throws IOException {
         Map<String, Object> body = requestBody(exchange, "acquire request");
         requireProtocol(body);
@@ -131,19 +182,47 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 "runtimeSessionId", "acquire request");
         String turnKind = JsonCodec.requiredString(body, "turnKind",
                 "acquire request");
-        complete(exchange, service.acquire(harnessSessionId, runtimeSessionId,
-                turnKind), record -> {
-                    Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
-                            runtimeSessionId, "acquired", true));
-                    RuntimeScope scope = record.getSession().getScope();
-                    response.put("scope", Map.of("tenantId", scope.getTenantId(),
-                            "workspaceId", scope.getWorkspaceId(), "capabilityDigest", scope.getCapabilityDigest()));
-                    return response;
-                });
+        CompletionStage<RuntimeSessionRecord> acquisition;
+        if (body.containsKey("recoveryBindingId")) {
+            acquisition = service.acquireRecovery(harnessSessionId, runtimeSessionId,
+                    JsonCodec.requiredString(body, "recoveryBindingId", "acquire request"),
+                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")), lifecycleAuthority(exchange));
+        } else {
+            acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind, lifecycleAuthority(exchange));
+        }
+        complete(exchange, acquisition, record -> {
+            Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
+                    runtimeSessionId, "acquired", true));
+            RuntimeScope scope = record.getSession().getScope();
+            response.put("scope", Map.of("tenantId", scope.getTenantId(),
+                    "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                    "capabilityDigest", scope.getCapabilityDigest()));
+            response.put("runtime", Map.of("bindingId", record.getBindingId(),
+                    "generation", Long.toString(record.getRuntimeGeneration())));
+            return response;
+        });
     }
 
     private void toolSession(HttpExchange exchange, String suffix)
             throws IOException {
+        if ("POST".equals(exchange.getRequestMethod()) && suffix.endsWith(":publisher")) {
+            String runtimeSessionId = pathId(suffix.substring(0, suffix.length() - ":publisher".length()));
+            Map<String, Object> body = requestBody(exchange, "publisher request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId", "publisher request");
+            String harnessSessionId = JsonCodec.requiredString(body, "harnessSessionId", "publisher request");
+            if (!runtimeSessionId.equals(JsonCodec.requiredString(body, "runtimeSessionId", "publisher request"))) {
+                throw new RuntimeBrokerException(409, "runtime_session_conflict", "Runtime Session identity differs", false);
+            }
+            complete(exchange, service.installPublisher(harnessSessionId, runtimeSessionId,
+                    requiredObject(body, "publisher", "publisher request")), result -> {
+                        Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
+                                "installed", result.get("installed"));
+                        response.put("bindingGeneration", result.get("bindingGeneration"));
+                        return response;
+                    });
+            return;
+        }
         if ("POST".equals(exchange.getRequestMethod())
                 && suffix.endsWith("/control")) {
             String runtimeSessionId = pathId(suffix.substring(0,
@@ -157,7 +236,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             Map<String, Object> operation = requiredObject(body, "operation",
                     "control request");
             complete(exchange, service.control(harnessSessionId,
-                    runtimeSessionId, operation), result -> envelope(
+                    runtimeSessionId, operation, lifecycleAuthority(exchange)), result -> envelope(
                             harnessSessionId, runtimeSessionId, "result",
                             result));
             return;
@@ -172,8 +251,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             JsonCodec.requiredString(body, "requestId", "release request");
             String harnessSessionId = JsonCodec.requiredString(body,
                     "harnessSessionId", "release request");
-            complete(exchange, service.release(harnessSessionId,
-                    runtimeSessionId), released -> envelope(harnessSessionId,
+            boolean drain = Boolean.TRUE.equals(body.get("drain"));
+            CompletionStage<Boolean> release = body.containsKey("cleanupBindingId")
+                    ? service.releaseOriginal(harnessSessionId, runtimeSessionId,
+                            JsonCodec.requiredString(body, "cleanupBindingId", "release request"),
+                            Long.parseLong(JsonCodec.requiredString(body, "cleanupGeneration", "release request")), lifecycleAuthority(exchange), drain)
+                    : service.release(harnessSessionId, runtimeSessionId, drain, lifecycleAuthority(exchange));
+            complete(exchange, release, released -> envelope(harnessSessionId,
                             runtimeSessionId, "released", released));
             return;
         }
@@ -194,15 +278,37 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         String callId = JsonCodec.requiredString(body, "toolCallId", "execution request");
         String digest = JsonCodec.requiredString(body, "requestDigest", "execution request");
         Map<String, Object> reference = requiredObject(body, "reference", "execution request");
+        if (body.containsKey("toolProtocol")
+                && (!prepare || !"v3".equals(body.get("toolProtocol")))) {
+            throw new RuntimeBrokerException(400, "runtime_reference_invalid",
+                    "Unsupported execution protocol selection", false);
+        }
+        if (prepare) {
+            Set<String> preparedFields = new LinkedHashSet<>(Set.of("protocolVersion", "requestId",
+                    "idempotencyKey", "harnessSessionId", "runtimeSessionId", "turnId", "toolCallId",
+                    "requestDigest", "reference"));
+            if (body.containsKey("toolProtocol")) {
+                preparedFields.add("toolProtocol");
+                preparedFields.add("publicationId");
+            }
+            if (!body.keySet().equals(preparedFields)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "Prepared execution fields are invalid.", false);
+            }
+        }
         if (prepare && (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !callId.equals(reference.get("callId"))
-                || !digest.equals(reference.get("argsDigest")))) {
+                || (!"v3".equals(body.get("toolProtocol"))
+                        && !digest.equals(reference.get("argsDigest"))))) {
             throw new RuntimeBrokerException(409, "runtime_reference_conflict",
                     "Execution envelope differs from its reference", false);
         }
         complete(exchange, prepare
-                        ? service.prepareExecution(harnessSessionId, runtimeSessionId, idempotencyKey, reference)
+                        ? service.prepareExecution(harnessSessionId, runtimeSessionId, idempotencyKey,
+                        reference, "v3".equals(body.get("toolProtocol")) ? digest : null,
+                        "v3".equals(body.get("toolProtocol"))
+                                ? JsonCodec.requiredString(body, "publicationId", "execution request") : null)
                         : service.createExecution(harnessSessionId, runtimeSessionId, idempotencyKey, reference),
                 record -> executionEnvelope(harnessSessionId,
                         runtimeSessionId, record));
@@ -210,19 +316,59 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     private void execution(HttpExchange exchange, String suffix)
             throws IOException {
+        if ("POST".equals(exchange.getRequestMethod()) && suffix.endsWith(":acknowledge")) {
+            String executionCallId = pathId(suffix.substring(0, suffix.length() - ":acknowledge".length()));
+            Map<String, Object> body = requestBody(exchange, "acknowledge request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId", "acknowledge request");
+            String harnessSessionId = JsonCodec.requiredString(body, "harnessSessionId", "acknowledge request");
+            String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "acknowledge request");
+            complete(exchange, service.acknowledgeExecution(harnessSessionId, runtimeSessionId, executionCallId,
+                    requiredObject(body, "receipt", "acknowledge request")), result -> {
+                        Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
+                                "executionCallId", executionCallId);
+                        response.put("status", result);
+                        response.put("acknowledged", true);
+                        return response;
+                    });
+            return;
+        }
         if ("POST".equals(exchange.getRequestMethod())
                 && suffix.endsWith(":start")) {
             String executionCallId = pathId(suffix.substring(0, suffix.length() - ":start".length()));
             Map<String, Object> body = requestBody(exchange, "start request");
             requireProtocol(body);
+            Set<String> fields = new LinkedHashSet<>(List.of("protocolVersion", "requestId",
+                    "harnessSessionId", "runtimeSessionId"));
+            if (body.containsKey("payloadJson")) {
+                fields.add("payloadJson");
+                // A publication grant travels only with a raw-tool payload.
+                if (body.containsKey("publicationId")) {
+                    fields.add("publicationId");
+                }
+                if (body.containsKey("publicationToken")) {
+                    fields.add("publicationToken");
+                }
+            }
+            if (!body.keySet().equals(fields)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "Start request fields are invalid.", false);
+            }
             JsonCodec.requiredString(body, "requestId", "start request");
             String harnessSessionId = JsonCodec.requiredString(body, "harnessSessionId", "start request");
             String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "start request");
-            if (!(body.get("payloadJson") instanceof String payload)) {
-                throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson is required", false);
+            if (body.containsKey("payloadJson") && !(body.get("payloadJson") instanceof String)) {
+                throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson must be a string", false);
             }
-            complete(exchange, service.startExecution(harnessSessionId, runtimeSessionId, executionCallId, payload),
-                    record -> executionEnvelope(harnessSessionId, runtimeSessionId, record));
+            complete(exchange, (body.containsKey("payloadJson")
+                            ? service.startExecution(harnessSessionId, runtimeSessionId, executionCallId,
+                                    (String) body.get("payloadJson"),
+                                    body.get("publicationId") instanceof String publicationId ? publicationId : null,
+                                    body.get("publicationToken") instanceof String publicationToken
+                                            ? publicationToken : null)
+                            : service.startExecution(harnessSessionId, runtimeSessionId, executionCallId))
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false, false)),
+                    observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
         if ("POST".equals(exchange.getRequestMethod())
@@ -237,10 +383,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "harnessSessionId", "cancel request");
             String runtimeSessionId = JsonCodec.requiredString(body,
                     "runtimeSessionId", "cancel request");
-            complete(exchange, service.cancelExecution(harnessSessionId,
-                    runtimeSessionId, executionCallId),
-                    record -> executionEnvelope(harnessSessionId,
-                            runtimeSessionId, record));
+            complete(exchange, service.cancelExecution(harnessSessionId, runtimeSessionId, executionCallId)
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false, false)),
+                    observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
         if ("POST".equals(exchange.getRequestMethod())
@@ -257,13 +402,79 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (query.containsKey("afterSeq")) {
                 parseSequence(query.get("afterSeq"));
             }
-            complete(exchange, service.getExecution(harnessSessionId,
-                    runtimeSessionId, executionCallId),
-                    record -> executionEnvelope(harnessSessionId,
-                            runtimeSessionId, record));
+            String reconcile = query.getOrDefault("reconcile", "false");
+            if (!"true".equals(reconcile) && !"false".equals(reconcile)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "reconcile must be true or false.", false);
+            }
+            complete(exchange, service.getExecution(harnessSessionId, runtimeSessionId, executionCallId)
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record,
+                            Boolean.parseBoolean(reconcile), true)),
+                    observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
         throw notFound();
+    }
+
+    private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
+            String runtimeSessionId, ToolExecutionRecord record,
+            boolean reconcile, boolean coolable) {
+        // A lost dispatch is asked of the original Runtime when it can answer;
+        // a tool v2 reference keeps its UNKNOWN unless reconciliation is requested.
+        if (record.getState() != ToolExecutionRecord.State.UNKNOWN
+                || (!reconcile && !record.observableAfterLoss())) {
+            return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        }
+        // An explicit reconcile asks the Runtime every time, and a mutation's
+        // own response never serves the cooldown cache; only pure polling
+        // reuses a cooled answer.
+        CompletionStage<ExecutionReconciliation> observation =
+                reconcile || !coolable
+                        ? service.reconcileExecution(harnessSessionId,
+                                runtimeSessionId, record.getExecutionCallId())
+                        : service.observeExecution(harnessSessionId,
+                                runtimeSessionId, record.getExecutionCallId());
+        if (reconcile) {
+            return observation;
+        }
+        // The automatic ask is best-effort: when the original Runtime cannot be asked
+        // or cannot answer, whatever the reason, the record's own UNKNOWN
+        // stands rather than the error of the attempt.
+        return observation.handle((reconciled, error) -> {
+            if (error == null) {
+                return reconciled;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof Error) {
+                throw new CompletionException(cause);
+            }
+            return new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null);
+        });
+    }
+
+    private static Map<String, Object> observedExecutionEnvelope(String harnessSessionId,
+            String runtimeSessionId, ExecutionReconciliation observation) {
+        ToolExecutionRecord record = observation.getRecord();
+        String state = observation.getRuntimeState();
+        // A provider call the worker still holds as prepared was never
+        // started, and nothing dispatches it a second time: it stays UNKNOWN
+        // for the caller, who would otherwise wait for it for ever.
+        boolean neverStarted = "prepared".equals(state)
+                && ProviderRuntimeProtocol.isReference(record.getReference());
+        if (record.getState() == ToolExecutionRecord.State.UNKNOWN && !neverStarted
+                && ("prepared".equals(state) || "executing".equals(state)
+                    || "cancel_requested".equals(state))) {
+            Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
+                    "executionCallId", record.getExecutionCallId());
+            Map<String, Object> observedStatus = status(record);
+            observedStatus.put("state", state);
+            observedStatus.put("cancelRequested", record.isCancelRequested() || "cancel_requested".equals(state));
+            response.put("status", observedStatus);
+            return response;
+        }
+        return executionEnvelope(harnessSessionId, runtimeSessionId, record);
     }
 
     private void authorize(HttpExchange exchange) {
@@ -286,10 +497,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private static void requireProtocol(Map<String, Object> body) {
-        Object version = body.get("protocolVersion");
-        if (!(version instanceof Number)
-                || ((Number) version).intValue() != 1
-                || ((Number) version).doubleValue() != 1.0d) {
+        if (!Long.valueOf(1L).equals(
+                BrokerValues.exactLong(body.get("protocolVersion")))) {
             throw new RuntimeBrokerException(409,
                     "runtime_broker_protocol_conflict",
                     "Runtime Broker protocol version changed.", false);
@@ -432,6 +641,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 runtimeSessionId, "executionCallId",
                 record.getExecutionCallId());
         response.put("status", status(record));
+        response.put("runtimeBindingId", record.getBindingId());
+        response.put("bindingGeneration", Long.toString(record.getRuntimeGeneration()));
         return response;
     }
 
@@ -450,7 +661,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         return status;
     }
 
-    private static String wireState(ToolExecutionRecord.State state) {
+    // Package-private for the H0c contract test, which pins this mapping to
+    // the wire statuses the Harness replays.
+    static String wireState(ToolExecutionRecord.State state) {
         switch (state) {
             case PREPARED:
                 return "prepared";

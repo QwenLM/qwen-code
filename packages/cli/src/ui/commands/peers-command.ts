@@ -29,6 +29,9 @@ import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import {
   crossSessionMessagingOffScope,
   type CrossSessionMessagingOffScope,
+  crossSessionMessagingSuppression,
+  type CrossSessionMessagingSuppression,
+  isCrossSessionMessagingActive,
   isCrossSessionMessagingEnabled,
 } from '../../peerMessaging/enabled.js';
 import { t } from '../../i18n/index.js';
@@ -313,14 +316,33 @@ export const peersCommand: SlashCommand = {
       // absent when the session failed to register or the socket failed to
       // bind (path too long, unwritable runtime dir).
       const settings = context.services.settings;
-      if (!isCrossSessionMessagingEnabled(settings?.merged)) {
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: describeMessagingOff(
-            settings ? crossSessionMessagingOffScope(settings) : undefined,
-          ),
-        };
+      const runtime = context.services.config;
+      // The setting is not the whole gate: `--bare` and `--safe-mode` turn
+      // messaging off for the session whatever it says, and the same
+      // predicate is what interactive startup binds the inbox on. Reading
+      // the setting alone would call a deliberately off session "on, no
+      // inbox" and hand it a bind failure to explain.
+      if (!isCrossSessionMessagingActive(settings?.merged, runtime)) {
+        // Name every cause that actually fired instead of guessing: a
+        // suppression is a startup flag no settings edit can undo, while the
+        // setting being off has a scope-shaped remedy. When both are in
+        // force, naming only the flag sends the user to a restart that
+        // leaves messaging off and never names the cause that outlives it.
+        const suppression = crossSessionMessagingSuppression(runtime);
+        const offScope = settings
+          ? crossSessionMessagingOffScope(settings)
+          : undefined;
+        const off = describeMessagingOff(offScope);
+        let content: string;
+        if (!suppression) {
+          content = off;
+        } else if (isCrossSessionMessagingEnabled(settings?.merged)) {
+          content = describeMessagingSuppressed(suppression);
+        } else {
+          // The setting leads: it is the cause a settings edit can fix.
+          content = `${off} ${describeSuppressionAlso(suppression)}`;
+        }
+        return { type: 'message', messageType: 'info', content };
       }
       const failure = getLastPeerInboxFailure();
       // A platform with no inbox transport is not a fault in this session,
@@ -510,4 +532,54 @@ function describeMessagingOff(
     default:
       return 'Cross-session messaging is off because of the "agents.crossSessionMessaging" setting (only true, or leaving it unset, turns it on). Remove that entry, then restart.';
   }
+}
+
+/**
+ * The user-visible name of each suppression, with both channels that reach
+ * it: the flag and the environment variable are named together because a
+ * user who only set the latter would otherwise not recognize the cause.
+ */
+const SUPPRESSION_PROSE = {
+  'safe-mode': {
+    mode: 'safe mode',
+    channels: '--safe-mode, or QWEN_CODE_SAFE_MODE',
+    effect: 'which closes the surfaces other processes can reach',
+  },
+  bare: {
+    mode: 'bare mode',
+    channels: '--bare, or QWEN_CODE_SIMPLE',
+    effect: 'which skips implicit startup work',
+  },
+} as const;
+
+/**
+ * Why a session whose setting is on still has no inbox: a startup flag
+ * closed the surface, and no settings edit can undo it.
+ *
+ * Kept apart from {@link describeMessagingOff} rather than folded into its
+ * scope union: that one answers "which settings file turned it off", and a
+ * startup flag is not a file.
+ */
+function describeMessagingSuppressed(
+  suppression: CrossSessionMessagingSuppression,
+): string {
+  const { mode, channels, effect } = SUPPRESSION_PROSE[suppression];
+  return `Cross-session messaging is off: this session runs in ${mode} (${channels}), ${effect}. The "agents.crossSessionMessaging" setting cannot turn it back on; restart without ${mode}.`;
+}
+
+/**
+ * The same suppression as a *second* cause, for a session whose setting is
+ * off too — a follow-on sentence, not another {@link describeMessagingOff}
+ * lead-in.
+ *
+ * Its remedy has to differ from the single-cause one: "restart without the
+ * flag" is precisely the restart that leaves this user with messaging still
+ * off, because their own settings entry is the cause that survives it. So
+ * the sentence says both fixes are needed instead of naming one.
+ */
+function describeSuppressionAlso(
+  suppression: CrossSessionMessagingSuppression,
+): string {
+  const { mode, channels, effect } = SUPPRESSION_PROSE[suppression];
+  return `This session also runs in ${mode} (${channels}), ${effect}, so fixing the setting alone will not bring messaging back: restart without ${mode} as well.`;
 }

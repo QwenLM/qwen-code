@@ -108,14 +108,8 @@ public final class RuntimeProvisionSeed {
             throw new IllegalStateException(
                     "Runtime provision seed is invalid");
         }
-        Object rawEpoch = value.get("epoch");
-        if (!(rawEpoch instanceof Number)) {
-            throw new IllegalStateException(
-                    "Runtime provision seed is invalid");
-        }
-        Number number = (Number) rawEpoch;
-        long parsedEpoch = number.longValue();
-        if (number.doubleValue() != parsedEpoch) {
+        Long parsedEpoch = BrokerValues.exactLong(value.get("epoch"));
+        if (parsedEpoch == null) {
             throw new IllegalStateException(
                     "Runtime provision seed is invalid");
         }

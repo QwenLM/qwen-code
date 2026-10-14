@@ -72,7 +72,9 @@ class ProcessCrashFaultGateTest {
                 execution));
         assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.bindings.findById(bindingId).getState());
-        assertEquals("runtime_broker_runtime_lost", broker.warm(HARNESS).code());
+        BrokerProcess.Reply warm = broker.warm(HARNESS);
+        assertEquals("runtime_broker_runtime_lost", warm.code(),
+                () -> warm.message() + rig.logs());
         assertEquals(bindingId, rig.activeBinding().getBindingId());
         assertEquals("ABANDONED", broker.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
@@ -112,6 +114,7 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
         rig.awaitDispatchLapse(execution);
+        ToolExecutionRecord beforeTakeover = rig.execution(execution);
         second.acquire(HARNESS, SESSION).requireOk();
         // Before reuse, the restarted Broker re-proves the worker's identity:
         // once as the provisioner observes it, once as the service adopts it.
@@ -127,11 +130,18 @@ class ProcessCrashFaultGateTest {
                 adopted.getLease().getEndpoint());
         assertTrue(second.workers().isEmpty());
 
-        // A same-key retry fences the lapsed claim instead of replaying it.
+        ToolExecutionRecord afterTakeover = rig.execution(execution);
+        if (window == Window.BEFORE_COMMIT) {
+            assertEquals(ToolExecutionRecord.State.SETTLED, afterTakeover.getState());
+            assertEquals(beforeTakeover.getVersion() + 1, afterTakeover.getVersion());
+            assertEquals(beforeTakeover.getDispatchOwner(), afterTakeover.getDispatchOwner());
+            assertEquals(beforeTakeover.getDispatchGeneration(), afterTakeover.getDispatchGeneration());
+        }
+        // A retry returns the scan's receipt or fences an unresolved lapsed claim.
         JSONObject retried = second.create(HARNESS, SESSION, "key-1",
                 FaultGateRig.shell("call-1", SLOW)).object();
         assertEquals(execution, retried.getString("executionCallId"));
-        assertEquals("UNKNOWN", retried.getString("state"));
+        assertEquals(afterTakeover.isSettled() ? "SETTLED" : "UNKNOWN", retried.getString("state"));
 
         if (window == Window.AFTER_CLAIM) {
             // The worker never saw the call, so it has no evidence to give.
@@ -145,7 +155,8 @@ class ProcessCrashFaultGateTest {
         } else {
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION,
                     execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "reconciliation from evidence");
+                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
+                    "reconciliation from evidence");
             ToolExecutionRecord settled = rig.execution(execution);
             assertEquals("success", settled.getExecutionStatus());
             Map<String, Object> status = new HttpRuntimeTransport().status(
@@ -162,13 +173,11 @@ class ProcessCrashFaultGateTest {
     }
 
     /**
-     * Pins today's production behaviour. {@link LocalProcessRuntimeProvisioner}
+     * Pins the default ephemeral behaviour. {@link LocalProcessRuntimeProvisioner}
      * keeps worker ownership in memory, so a restarted Broker observes its
      * worker as UNKNOWN until the reconciliation deadline: the binding is
      * neither adopted nor retired, and the orphaned worker keeps running.
-     * Recoverable local-process provisioning is follow-up work in the
-     * runtime-binding reconciliation design; this gate flips to adoption
-     * when it lands.
+     * DurableLocalRuntimeFaultGateTest covers the explicitly enabled durable mode.
      */
     @Test
     void theProductionProvisionerCannotAdoptAfterARestart()
@@ -227,13 +236,19 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
 
-        BrokerProcess.Reply acquire = second.acquire(HARNESS, SESSION);
+        BrokerProcess.Reply acquire = FaultGateRig.await(
+                () -> second.acquire(HARNESS, SESSION),
+                reply -> !"runtime_provision_fenced".equals(reply.code())
+                        && !"runtime_broker_reconcile_timeout".equals(reply.code()),
+                "original Runtime loss after recovery fencing");
         assertFalse(acquire.ok());
-        assertEquals("runtime_broker_runtime_lost", acquire.code());
+        assertEquals("runtime_broker_runtime_lost", acquire.code(),
+                () -> acquire.message() + rig.logs());
         assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.activeBinding().getState());
-        assertEquals("runtime_broker_runtime_lost",
-                second.warm(HARNESS).code());
+        BrokerProcess.Reply warm = second.warm(HARNESS);
+        assertEquals("runtime_broker_runtime_lost", warm.code(),
+                () -> warm.message() + rig.logs());
         assertEquals("runtime_reconciliation_required",
                 second.release(HARNESS, SESSION).code());
         assertEquals("ABANDONED", second.reconcile(HARNESS, SESSION,

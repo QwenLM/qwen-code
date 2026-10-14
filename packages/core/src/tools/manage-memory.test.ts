@@ -88,6 +88,21 @@ describe('ManageMemoryTool', () => {
     });
   });
 
+  it('does not refresh the tree when remember changes no files', async () => {
+    const { config } = createConfig();
+    vi.mocked(runManagedRememberByAgent).mockResolvedValue({
+      summary: 'No memory files updated.',
+      filesTouched: [],
+      touchedScopes: [],
+    });
+
+    await new ManageMemoryTool(config)
+      .build({ action: 'remember', content: 'Already stored.' })
+      .execute(new AbortController().signal);
+
+    expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+  });
+
   it('delegates forget to MemoryManager and refreshes changed memory', async () => {
     const { config, forget } = createConfig();
     forget.mockResolvedValue({

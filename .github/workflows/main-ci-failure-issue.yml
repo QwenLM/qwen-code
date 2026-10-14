@@ -13,7 +13,16 @@ on:
     # to surface a regression as it lands; a failure there files an issue with
     # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
     # one per red merge, not per red nightly only.
-    workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']
+    # 'SDK Java' is on the list for its post-merge push run. Its path filter
+    # watches the SDK's embedding surfaces too (packages/cli/src/serve/**,
+    # packages/acp-bridge/**, packages/cli/src/acp-integration/**), so it
+    # fires on roughly half of recent merges to `main`, not only on SDK
+    # changes — and that run is the only signal when a merge result is broken
+    # in a way neither PR could see: two green branches whose Flyway
+    # migrations claim one version collide only after both land (#12940: main
+    # red for two hours while three more merges stacked on it). It has no
+    # scheduled run, so the push arm covers it.
+    workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']
     types: ['completed']
     # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
     # completes on every pull request, and without this each of those would
@@ -26,10 +35,11 @@ defaults:
     shell: 'bash'
 
 jobs:
-  # Split in two so the job holding the bot PAT still checks out nothing and runs
-  # no repository code. This job works out WHICH tests broke — the dedupe key —
-  # from the failed run's logs, using read-only scopes and the workflow token,
-  # and hands the finished title and body to the privileged job as outputs.
+  # The job holding the bot PAT is split off so it still checks out nothing
+  # and runs no repository code. This job works out WHICH tests broke — the
+  # dedupe key — from the failed run's logs, using read-only scopes and the
+  # workflow token, and hands the finished title and body to the privileged
+  # job as outputs.
   analyze:
     name: 'Identify the failing tests'
     if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI')) }}"
@@ -38,6 +48,9 @@ jobs:
     permissions:
       # Read the job logs of the triggering run.
       actions: 'read'
+      # Read the failed jobs' annotations: an infrastructure-only failure (the
+      # runner lost the server, the disk filled) is rerun, not filed.
+      checks: 'read'
       contents: 'read'
       # Find an issue that already tracks this failure.
       issues: 'read'
@@ -45,6 +58,7 @@ jobs:
       issue_number: '${{ steps.plan.outputs.issue_number }}'
       title: '${{ steps.plan.outputs.title }}'
       body: '${{ steps.plan.outputs.body }}'
+      infra_only: '${{ steps.infra.outputs.infra_only }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -101,6 +115,57 @@ jobs:
               rm -f "${log_dir}/${job_id}.log"
             fi
           done
+
+      - name: 'Detect infrastructure-only failures'
+        id: 'infra'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          # Keep in sync with qwen-autofix.yml's INFRA_FAILURE_SIGNATURES — a
+          # test pins the equality. There the same annotation class auto-reruns
+          # a PR's red check; here it suppresses the per-commit issue.
+          # Full rationale → qwen-autofix.md#af-076
+          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired'
+        run: |-
+          jobs_json="${RUNNER_TEMP}/run-jobs.json"
+
+          # A failed job whose annotations carry an infrastructure signature
+          # died with the runner, not with the code, and clears on a re-run.
+          # Only when EVERY failed job matches — and only on the first
+          # attempt, so a persistent break still files once the rerun re-fails
+          # — does the run get a rerun instead of an issue. Every read fails
+          # CLOSED: an unfetchable or unannotated job, an empty failure list,
+          # and a later attempt all file exactly as before.
+          infra_only=false
+          if [[ "${RUN_ATTEMPT}" == '1' ]]; then
+            total=0
+            infra=0
+            while IFS=$'\t' read -r job_id check_run_id; do
+              total=$((total + 1))
+              annotations=''
+              if [[ -n "${check_run_id}" ]]; then
+                annotations="$(
+                  gh api --paginate \
+                    "repos/${REPO}/check-runs/${check_run_id}/annotations" \
+                    --jq '[.[].message] | join("\n")' 2>/dev/null || true
+                )"
+              fi
+              if grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${annotations}"; then
+                infra=$((infra + 1))
+              else
+                echo "Failed job ${job_id} carries no infrastructure annotation; the run gets an issue."
+              fi
+            done < <(
+              jq -r '.jobs[] | select(.conclusion == "failure") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
+                "${jobs_json}" 2>/dev/null
+            )
+            if [[ "${total}" -gt 0 && "${infra}" -eq "${total}" ]]; then
+              infra_only=true
+            fi
+          fi
+          echo "infra_only=${infra_only}"
+          echo "infra_only=${infra_only}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Plan the issue'
         id: 'plan'
@@ -178,12 +243,41 @@ jobs:
             echo "${delim}"
           } >> "${GITHUB_OUTPUT}"
 
-  # Every GitHub write happens here, as the autofix bot. This job deliberately
-  # checks out nothing and runs no repository code: it only consumes the title
-  # and body the job above produced.
+  # An all-infrastructure failure has no code signal to file: the runner died,
+  # not the code, and the run's green legs already exonerate the tree. Rerun
+  # its failed jobs once (analyze gates this to attempt 1) and file nothing;
+  # if the break is real or the pool stays sick, the rerun's own completion
+  # re-enters this workflow at attempt 2 and the issue is filed then.
+  rerun_infra:
+    name: 'Rerun infrastructure-only failures'
+    needs: 'analyze'
+    if: "${{ needs.analyze.outputs.infra_only == 'true' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      actions: 'write'
+    steps:
+      - name: 'Rerun the failed jobs of the triggering run'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+        run: |-
+          gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
+          echo "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
+
+  # Every ISSUE write happens here, as the autofix bot — the one other write
+  # is rerun_infra's rerun, which holds no PAT. This job deliberately checks
+  # out nothing and runs no repository code: it only consumes the title and
+  # body the job above produced.
   file_issue:
     name: 'Create autofix issue'
-    needs: 'analyze'
+    needs: ['analyze', 'rerun_infra']
+    # always() because rerun_infra is SKIPPED on the ordinary path and a
+    # skipped need is not a success: file when the run is not
+    # infrastructure-only, and file when the rerun itself could not be
+    # dispatched — the issue is then the only record of a red main.
+    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.
