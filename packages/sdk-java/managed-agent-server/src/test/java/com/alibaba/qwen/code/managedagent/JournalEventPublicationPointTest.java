@@ -72,14 +72,15 @@ class JournalEventPublicationPointTest {
         String session = "pubpoint-" + UUID.randomUUID();
         String storage = "storage-" + UUID.randomUUID();
         String base = "/internal/managed-session-store/v1/sessions/" + session;
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key,"
                 + " agent_id, status, created_at, updated_at,"
                 + " workspace_storage_id, workspace_id, workspace_generation,"
                 + " cwd_relative, context_config_ref, context_revision,"
-                + " workspace_config_ref, workspace_policy_ref) VALUES (?, ?,"
-                + " 'qwen-code', 'ACTIVE', 1, 1, ?, 'workspace', 1, '.', ?, 1,"
+                + " workspace_config_ref, workspace_policy_ref) VALUES (?, ?, ?, ?,"
+                + " 'qwen-code', 'ACTIVE', 1, 1, ?, ?, 1, '.', ?, 1,"
                 + " ?, ?)",
-                TENANT, session, storage,
+                TENANT, session, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(TENANT),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(session), storage, WORKSPACE,
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
