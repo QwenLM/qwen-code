@@ -445,25 +445,54 @@ describe('standalone-update', () => {
     }
 
     async function serveArchive(
-      options: { badChecksum?: boolean; runnable?: boolean } = {},
+      options: {
+        badChecksum?: boolean;
+        runnable?: boolean;
+        runtime?: 'node' | 'bun';
+      } = {},
     ) {
+      const archiveFilename =
+        options.runtime === 'bun'
+          ? 'qwen-code-linux-x64-opentui-preview.tar.gz'
+          : filename;
       const fixture = path.join(tempDir, 'fixture');
       fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
       fs.writeFileSync(
         path.join(fixture, 'qwen-code', 'manifest.json'),
-        JSON.stringify({ target: 'linux-x64', version: '1.2.3' }),
+        JSON.stringify({
+          target: 'linux-x64',
+          version: '1.2.3',
+          ...(options.runtime ? { runtime: options.runtime } : {}),
+        }),
       );
       if (options.runnable) {
-        fs.mkdirSync(path.join(fixture, 'qwen-code', 'node', 'bin'), {
-          recursive: true,
-        });
+        fs.mkdirSync(
+          path.join(fixture, 'qwen-code', options.runtime ?? 'node', 'bin'),
+          {
+            recursive: true,
+          },
+        );
         fs.mkdirSync(path.join(fixture, 'qwen-code', 'lib'));
         fs.writeFileSync(
-          path.join(fixture, 'qwen-code', 'node', 'bin', 'node'),
+          path.join(
+            fixture,
+            'qwen-code',
+            options.runtime ?? 'node',
+            'bin',
+            options.runtime ?? 'node',
+          ),
           '#!/bin/sh\nprintf "1.2.3\\n"\n',
           { mode: 0o755 },
         );
-        fs.writeFileSync(path.join(fixture, 'qwen-code', 'lib', 'cli.js'), '');
+        fs.writeFileSync(
+          path.join(
+            fixture,
+            'qwen-code',
+            'lib',
+            options.runtime === 'bun' ? 'cli-entry.js' : 'cli.js',
+          ),
+          '',
+        );
       }
       const archivePath = path.join(tempDir, 'release.tar.gz');
       await tar.c({ gzip: true, cwd: fixture, file: archivePath }, [
@@ -474,15 +503,72 @@ describe('standalone-update', () => {
         ? '0'.repeat(64)
         : createHash('sha256').update(archive).digest('hex');
       mockFetch.mockImplementation(async (url: string) => {
-        if (url.endsWith(`/${filename}`)) {
+        if (url.endsWith(`/${archiveFilename}`)) {
           return new Response(new Uint8Array(archive));
         }
         if (url.endsWith('/SHA256SUMS')) {
-          return new Response(`${checksum}  ${filename}\n`);
+          return new Response(`${checksum}  ${archiveFilename}\n`);
         }
         return new Response('', { status: 404 });
       });
     }
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps the Bun preview runtime through activation and rollback',
+      async () => {
+        const installed = path.join(tempDir, 'installed');
+        fs.mkdirSync(installed, { recursive: true });
+        const oldManifest = JSON.stringify({
+          target: 'linux-x64',
+          runtime: 'bun',
+          version: '1.0.0',
+        });
+        fs.writeFileSync(path.join(installed, 'manifest.json'), oldManifest);
+        await serveArchive({ runnable: true, runtime: 'bun' });
+        const prepared = await prepareStandaloneUpdate(installed, '1.2.3');
+        expect(mockFetch.mock.calls[0][0]).toContain(
+          'qwen-code-linux-x64-opentui-preview.tar.gz',
+        );
+        expect(await prepared.activate()).toBe('done');
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
+          ).runtime,
+        ).toBe('bun');
+        expect(rollbackStandaloneUpdate(installed)).toEqual({ ok: true });
+        expect(
+          fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
+        ).toBe(oldManifest);
+      },
+    );
+
+    it('rejects a runtime switch while a verified update is prepared', async () => {
+      const installed = path.join(tempDir, 'installed');
+      fs.mkdirSync(installed, { recursive: true });
+      fs.writeFileSync(
+        path.join(installed, 'manifest.json'),
+        JSON.stringify({
+          target: 'linux-x64',
+          runtime: 'bun',
+          version: '1.0.0',
+        }),
+      );
+      await serveArchive({ runnable: true, runtime: 'bun' });
+      const prepared = await prepareStandaloneUpdate(installed, '1.2.3');
+      const switched = JSON.stringify({
+        target: 'linux-x64',
+        runtime: 'node',
+        version: '1.0.0',
+      });
+      fs.writeFileSync(path.join(installed, 'manifest.json'), switched);
+      await expect(prepared.activate()).rejects.toThrow(
+        'changed during download',
+      );
+      expect(
+        fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
+      ).toBe(switched);
+      expect(fs.existsSync(`${installed}.old`)).toBe(false);
+    });
 
     it.skipIf(process.platform === 'win32')(
       'prepares a verified archive without changing the installation, then activates offline',

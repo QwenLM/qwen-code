@@ -5,6 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import * as installationInfo from '../../utils/installationInfo.js';
 import {
   checkForUpdates,
   checkForUpdatesDetailed,
@@ -598,5 +599,63 @@ describe('classifyUpdateCheckError', () => {
       'registry',
     );
     expect(classifyUpdateCheckError('not-an-error')).toBe('registry');
+  });
+});
+
+describe('standalone update lookup', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it('reads stable and nightly tags without invoking npm', async () => {
+    vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+      packageManager: installationInfo.PackageManager.STANDALONE,
+      isGlobal: true,
+      isStandalone: true,
+    });
+    vi.stubEnv('npm_config_registry', 'https://registry.example.test/custom/');
+    const fetch = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({ latest: '1.2.3', nightly: '1.3.0-nightly.1' }),
+          ),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const run = vi.fn();
+    for (const tag of ['latest', 'nightly'] as const) {
+      expect(
+        await fetchGlobalNpmUpdateInfo(
+          '@qwen-code/qwen-code',
+          '1.0.0',
+          tag,
+          run,
+        ),
+      ).toMatchObject({
+        latest: tag === 'latest' ? '1.2.3' : '1.3.0-nightly.1',
+      });
+    }
+    expect(run).not.toHaveBeenCalled();
+    expect(String(fetch.mock.calls[0][0])).toBe(
+      'https://registry.example.test/custom/-/package/%40qwen-code%2Fqwen-code/dist-tags',
+    );
+  });
+
+  it('surfaces registry failures instead of reporting up to date', async () => {
+    vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+      packageManager: installationInfo.PackageManager.STANDALONE,
+      isGlobal: true,
+      isStandalone: true,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('', { status: 503 })),
+    );
+    await expect(
+      fetchGlobalNpmUpdateInfo('@qwen-code/qwen-code', '1.0.0', 'latest'),
+    ).rejects.toThrow('HTTP 503');
   });
 });
