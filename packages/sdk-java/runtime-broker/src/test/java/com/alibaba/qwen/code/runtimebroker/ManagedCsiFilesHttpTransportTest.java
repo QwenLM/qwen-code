@@ -143,4 +143,61 @@ class ManagedCsiFilesHttpTransportTest {
             server.stop(0);
         }
     }
+
+    @Test
+    void executionHttpUsesTheWorkerBodyLimitWhileKeepingOriginalCredentials() throws Exception {
+        var fixture = ManagedCsiFilesProtocolTest.fixtures();
+        var request = ManagedCsiFilesProtocolTest.request(fixture);
+        var seed = ManagedCsiFilesProtocolTest.seed(fixture);
+        var boot = map(fixture.get("executionBoot5"));
+        var context = map(boot.get("context"));
+        var binding = new ContextBinding((String) context.get("tenantId"), (String) context.get("workspaceId"),
+                Long.parseLong((String) context.get("workspaceGeneration")), (String) context.get("storageId"), ".",
+                CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1);
+        var text = new AtomicReference<>("中".repeat(25000));
+        var errors = new ConcurrentLinkedQueue<Throwable>();
+        var calls = new AtomicInteger();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext(CsiNativeReadbackProtocol.EXECUTE_PATH, exchange -> {
+            try {
+                calls.incrementAndGet();
+                assertEquals("Bearer " + seed.getToken(), exchange.getRequestHeaders().getFirst("Authorization"));
+                assertEquals(seed.getLeaseId(), exchange.getRequestHeaders().getFirst("X-Qwen-Managed-Lease-Id"));
+                assertEquals(Long.toString(seed.getEpoch()), exchange.getRequestHeaders().getFirst("X-Qwen-Managed-Lease-Epoch"));
+                var incoming = CsiNativeReadbackProtocol.request(exchange.getRequestBody().readAllBytes());
+                assertEquals("execution", incoming.get("subject"));
+                var response = new java.util.LinkedHashMap<>(incoming);
+                response.put("state", "settled");
+                response.put("result", CsiNativeReadbackProtocolTest.executionResult(text.get()));
+                byte[] bytes = JsonCodec.encode(response);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.getResponseHeaders().set("X-Qwen-Managed-Runtime-Incarnation", seed.getGatewayIncarnation());
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            } catch (Throwable error) {
+                errors.add(error);
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try (var client = java.net.http.HttpClient.newHttpClient()) {
+            var transport = new HttpRuntimeTransport(client);
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            assertTrue(BrokerValues.sameJsonMap(CsiNativeReadbackProtocolTest.executionResult(text.get()),
+                    transport.csiFileExecute(lease, request, seed, boot, binding, "execution").toCompletableFuture().join()));
+            int overhead = JsonCodec.encode(CsiNativeReadbackProtocolTest.executionResult("")).length;
+            text.set("x".repeat(CsiNativeReadbackProtocol.EXECUTION_RESULT_LIMIT - overhead));
+            assertTrue(BrokerValues.sameJsonMap(CsiNativeReadbackProtocolTest.executionResult(text.get()),
+                    transport.csiFileExecute(lease, request, seed, boot, binding, "execution").toCompletableFuture().join()));
+            text.set(text.get() + "x");
+            assertThrows(CompletionException.class, () -> transport.csiFileExecute(lease, request, seed, boot, binding, "execution").toCompletableFuture().join());
+            assertEquals(3, calls.get());
+            assertEquals(List.of(), new ArrayList<>(errors));
+        } finally {
+            server.stop(0);
+        }
+    }
 }

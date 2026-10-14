@@ -361,7 +361,7 @@ public final class JdbcCsiFilesRetirementGuard {
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
         String product = connection.getMetaData().getDatabaseProductName();
         String index = "MySQL".equals(product) || "MariaDB".equals(product)
-                ? " FORCE INDEX (ix_ma_session_csi_guard)" : "";
+                ? " FORCE INDEX (ma_session_csi_guard_idx)" : "";
         try (PreparedStatement statement = statement(connection,
                 "SELECT csi_guard FROM ma_session" + index
                         + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {

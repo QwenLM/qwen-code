@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import java.time.Duration;
 import java.util.List;
@@ -65,10 +65,17 @@ public final class ToolPublicationCollector {
             return false;
         }
         try {
-            var page = jdbc.query("SELECT slot_key, capture_object_key AS object_key FROM ma_resource"
-                            + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ? ORDER BY slot_key LIMIT 100",
-                    (row, index) -> new ObjectKey(row.getString("slot_key"), row.getString("object_key")),
-                    claim.scope(), claim.publication(), claim.cursor());
+            var page =
+                    jdbc.query(
+                            "SELECT slot_key, capture_object_key AS object_key FROM ma_resource"
+                                    + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ?"
+                                    + " ORDER BY slot_key LIMIT 100",
+                            (row, index) ->
+                                    new ObjectKey(
+                                            row.getString("slot_key"), row.getString("object_key")),
+                            claim.scope(),
+                            claim.publication(),
+                            claim.cursor());
             if (page.stream().anyMatch(object -> object.key() != null)) {
                 objects.requireUnversioned();
             }
@@ -308,17 +315,25 @@ public final class ToolPublicationCollector {
             return false;
         }
         String cursor = page.isEmpty() ? claim.cursor() : page.getLast().slot();
-        var remaining = jdbc.query("SELECT 1 FROM ma_resource"
-                        + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ? LIMIT 1", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                claim.scope(), claim.publication(), cursor);
+        var remaining =
+                jdbc.query(
+                        "SELECT 1 FROM ma_resource WHERE scope_key = ? AND publication_id = ? AND"
+                                + " slot_key > ? LIMIT 1",
+                        (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                        claim.scope(),
+                        claim.publication(),
+                        cursor);
         if (!remaining.isEmpty()) {
-            jdbc.update("UPDATE ma_operation SET result_json = ?, updated_at = ? WHERE operation_key = ?"
-                            + " AND claim_generation = ?",
+            jdbc.update(
+                    "UPDATE ma_operation SET result_json = ?, updated_at = ? WHERE operation_key ="
+                            + " ? AND claim_generation = ?",
                     JSON.createObjectNode().put("version", 1).put("cursor", cursor).toString(), now,
                     operationKey(claim.scope(), claim.publication()), claim.generation());
             return true;
         }
-        var capture = jdbc.query("SELECT * FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
+        var capture = jdbc.query(
+                                "SELECT * FROM ma_output_capture WHERE scope_key = ? AND"
+                                        + " publication_id = ? FOR UPDATE",
                 (result, index) -> ManagedSchemaRows.read(result), claim.scope(), claim.publication()).getFirst();
         long collected = ToolPublicationRetentionStore.number(capture, "capture_used_bytes")
                 + ToolPublicationRetentionStore.number(capture, "producer_used_bytes")
@@ -328,20 +343,34 @@ public final class ToolPublicationCollector {
                 + ToolPublicationRetentionStore.number(capture, "admission_held_bytes");
         jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'CAPTURE' AND owner_key = ?",
                 ManagedSchemaKeys.key("capture", claim.scope(), claim.publication()));
-        jdbc.update("UPDATE ma_resource SET inline_bytes = NULL, state = 'COLLECTED', capture_state = 'COLLECTED'"
-                        + " WHERE scope_key = ? AND publication_id = ? AND deletion_operation_key = ?",
+        jdbc.update(
+                "UPDATE ma_resource SET inline_bytes = NULL, state = 'COLLECTED', capture_state ="
+                        + " 'COLLECTED' WHERE scope_key = ? AND publication_id = ? AND"
+                        + " deletion_operation_key = ?",
                 claim.scope(), claim.publication(), operationKey(claim.scope(), claim.publication()));
         jdbc.update("UPDATE ma_output_capture SET retention_state = 'COLLECTED', collected_at = ?,"
-                        + " collected_bytes = ?, released_held_bytes = ?, capture_held_bytes = 0, producer_held_bytes = 0,"
-                        + " admission_held_bytes = 0, capture_used_bytes = 0, producer_used_bytes = 0, admission_used_bytes = 0"
-                        + " WHERE scope_key = ? AND publication_id = ?",
+                        + " collected_bytes = ?, released_held_bytes = ?, capture_held_bytes = 0,"
+                    + " producer_held_bytes = 0, admission_held_bytes = 0, capture_used_bytes = 0,"
+                    + " producer_used_bytes = 0, admission_used_bytes = 0 WHERE scope_key = ? AND"
+                    + " publication_id = ?",
                 now, collected, released, claim.scope(), claim.publication());
-        jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED', claim_owner = NULL, claim_until = NULL,"
-                        + " completed_at = ?, updated_at = ?, available_at = -1, result_json = ? WHERE operation_key = ?"
-                        + " AND claim_generation = ?", now, now, JSON.createObjectNode().put("version", 1)
-                        .put("cursor", cursor).put("collectedBytes", collected).put("releasedHeldBytes", released).toString(),
-                operationKey(claim.scope(), claim.publication()), claim.generation());
-        jdbc.update("DELETE FROM ma_read_lease WHERE tenant_key = ? AND session_key = ? AND expires_at <= ?",
+        jdbc.update(
+                "UPDATE ma_operation SET state = 'SUCCEEDED', claim_owner = NULL, claim_until ="
+                    + " NULL, completed_at = ?, updated_at = ?, available_at = -1, result_json = ?"
+                    + " WHERE operation_key = ? AND claim_generation = ?",
+                now,
+                now,
+                JSON.createObjectNode()
+                        .put("version", 1)
+                        .put("cursor", cursor)
+                        .put("collectedBytes", collected)
+                        .put("releasedHeldBytes", released)
+                        .toString(),
+                operationKey(claim.scope(), claim.publication()),
+                claim.generation());
+        jdbc.update(
+                "DELETE FROM ma_read_lease WHERE tenant_key = ? AND session_key = ? AND expires_at"
+                        + " <= ?",
                 ToolPublicationRetentionStore.hash(claim.tenant()), ToolPublicationRetentionStore.hash(claim.session()),
                 ToolPublicationRetentionStore.now(jdbc));
         return true;

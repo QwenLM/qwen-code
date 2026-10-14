@@ -478,7 +478,8 @@ public final class JdbcCsiActivationAdmission {
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (ResultSet head = statement.executeQuery()) {
-                require(head.next() && original.request().getScope().getWorkspaceId().equals(head.getString("workspace_id"))
+                require(head.next() && original.request().getIsolationKey().equals(head.getString("harness_session_id"))
+                        && original.request().getScope().getWorkspaceId().equals(head.getString("workspace_id"))
                         && "ACTIVE".equals(head.getString("state")) && head.getLong("writer_generation") > 0
                         && head.getInt("storage_version") == 1
                         && head.getLong("compacted_through_revision") == 0
@@ -592,14 +593,15 @@ public final class JdbcCsiActivationAdmission {
                 && (activation == null ? original.firstActivationJournalRevision() == null
                         : Objects.equals(original.firstActivationJournalRevision(), 2L)));
         try (PreparedStatement statement = read.statement(connection,
-                "SELECT latest_checkpoint_resource_id FROM ma_session_head"
+                "SELECT latest_checkpoint_resource_id, harness_session_id FROM ma_session_head"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'")) {
             statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
             statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (ResultSet row = statement.executeQuery()) {
-                require(row.next() && Objects.equals(prefix.checkpointResourceId(), row.getString("latest_checkpoint_resource_id")));
+                require(row.next() && original.request().getIsolationKey().equals(row.getString("harness_session_id"))
+                        && Objects.equals(prefix.checkpointResourceId(), row.getString("latest_checkpoint_resource_id")));
             }
         }
         return new History(genesis, lastUuid, activation, prefix, revision, sequence, digest);

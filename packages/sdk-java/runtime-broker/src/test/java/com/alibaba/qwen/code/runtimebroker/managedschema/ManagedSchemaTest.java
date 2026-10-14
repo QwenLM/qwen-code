@@ -28,7 +28,7 @@ class ManagedSchemaTest {
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(35, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(34, ManagedSchemaCatalog.tables(connection).size());
         }
     }
 
@@ -474,7 +474,7 @@ class ManagedSchemaTest {
     @Test
     void originalAndK2DomainsHaveOnlyRealTargetDestinations() throws Exception {
         var inventory = ManagedSchemaMapping.inventory();
-        assertEquals(66, inventory.size());
+        assertEquals(65, inventory.size());
         try (var source = getClass().getResourceAsStream("/original-managed-table-inventory.tsv")) {
             String original =
                     new String(
@@ -487,7 +487,7 @@ class ManagedSchemaTest {
                             .collect(java.util.stream.Collectors.toSet());
             assertEquals(63, originalNames.size());
             var expectedNames = new java.util.HashSet<>(originalNames);
-            expectedNames.addAll(Set.of("qwen_csi_resource_read", "managed_workspace_csi_source", "managed_workspace_csi_physical"));
+            expectedNames.addAll(Set.of("managed_workspace_csi_source", "managed_workspace_csi_physical"));
             assertEquals(expectedNames, inventory.keySet());
         }
         assertTrue(

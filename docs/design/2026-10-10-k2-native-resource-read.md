@@ -82,10 +82,15 @@ it is not converted, quarantined or assigned fresh authority.
 
 ## Durable record
 
-An additive migration creates `qwen_csi_resource_read`; do not rewrite published
-Flyway migrations or backfill authority. Each admitted request receives a fresh
-UUID, also used by its ephemeral `qwen_output_read_lease` row. Persist these
-values from the locked database, not caller-supplied origin JSON:
+Native reads use main's canonical `ma_request_receipt` table, namespace
+`SESSION_COMMAND`, operation `CSI_RESOURCE_READ`, and scope `SESSION`. The
+receipt key is `key("csi-read", readId)` and its scope key is
+`key("csi-read", tenant, session)`. Each request receives a fresh UUID, also used
+by its ephemeral `ma_read_lease` row. Initial JSON has 23 closed fields; completion
+adds only `ended_at` and `outcome_code`. The request digest remains the SHA256
+of the initial raw JSON. Preserve published Flyway migrations and never backfill
+authority. Persist these values from the locked database, not caller-supplied
+origin JSON:
 
 - Tenant, Workspace, Session and original request key, binding ID, Runtime
   generation and admission binding version.

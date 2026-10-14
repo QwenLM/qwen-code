@@ -193,7 +193,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         }
         var expected = CsiNativeReadbackProtocol.executeRequest(boot, request, binding, executionId);
         return post(lease, CsiNativeReadbackProtocol.EXECUTE_PATH,
-                encodeToolRequest(expected, CsiNativeReadbackProtocol.REQUEST_LIMIT), 64 * 1024,
+                encodeToolRequest(expected, CsiNativeReadbackProtocol.REQUEST_LIMIT), CsiNativeReadbackProtocol.EXECUTION_RESPONSE_LIMIT,
                 seed.getGatewayIncarnation()).thenApply(bytes -> CsiNativeReadbackProtocol.executeResult(bytes, expected));
     }
 

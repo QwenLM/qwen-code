@@ -11,17 +11,25 @@ not qualify application retirement, physical release, or safe volume reuse.
 Main consolidates the legacy tables into 32 `ma_*` tables with 704 columns.
 K2's old table names, row ownership rules, journal keys, and component snapshot
 format cannot be retained through aliases. The fresh initializer rejects a
-legacy database; this change adds no migration, backfill, or compatibility view.
+legacy database; the additive K2 migration provides no legacy backfill or compatibility view.
 
 ## Schema and row identity
 
-The K2 schema has 35 tables and 770 columns. Application inventory covers 34
-tables and 764 columns; the six-column `ma_csi_physical` companion is inspected
-separately. The new tables are `ma_csi_resource_read`, `ma_csi_source`, and
-`ma_csi_physical`. Typed fields on existing rows preserve the runtime request
-pin, native execution authorization, first activation revision, and application
-retirement progress. `ma_session.csi_guard` is generated from the private tool
-profile or the durable runtime request pin.
+Main's published V1 remains exactly 32 tables and 704 columns. V2 adds four
+private CSI authority columns; K2 V3 adds eleven application progress columns,
+`ma_csi_source` (19 columns), and `ma_csi_physical` (six columns), without
+rewriting V1 or V2. The effective schema has 34 tables and 744 columns.
+Application inventory covers 33 tables and 738 columns; the physical companion
+is inspected separately. `ma_session.csi_guard` is generated from the private
+tool profile or the durable runtime request pin.
+
+Native resource read evidence uses the existing `ma_request_receipt`, namespace
+`SESSION_COMMAND`, operation `CSI_RESOURCE_READ`, and the actual
+`key("csi-read", readId)` primary key. Its closed JSON has 23 admission fields
+and 25 completion fields. Inventory checks the complete outer row, the initial
+request digest, and the original resource/journal/writer association. OPEN and
+UNKNOWN receipts block application retirement. There is no separate native
+read table or synthesized compatibility row.
 
 Identities use the canonical VARBINARY columns and strict UTF-8 decoding. Opaque
 actor keys remain bytes. Hashes and primary keys follow the actual producer:

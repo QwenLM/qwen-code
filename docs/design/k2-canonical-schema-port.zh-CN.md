@@ -9,15 +9,21 @@
 
 主干将旧表合并为 32 张 `ma_*` 表、704 个字段。K2 的旧表名、行归属规则、
 日志键和组件快照格式不能通过别名保留。全新初始化器拒绝旧数据库；本次变更
-不添加迁移、回填或兼容视图。
+新增 K2 迁移不提供旧结构回填或兼容视图。
 
 ## 数据库结构与行身份
 
-K2 结构包含 35 张表、770 个字段。应用清单覆盖 34 张表、764 个字段；
-六字段的 `ma_csi_physical` 伴随表单独检查。新增表是
-`ma_csi_resource_read`、`ma_csi_source` 和 `ma_csi_physical`。现有行上的
-类型化字段保留运行时请求固定值、原生执行授权、首次激活版本和应用退役进度。
+主干已发布的 V1 保持原始字节，包含 32 张表、704 个字段。V2 增加四个私有
+CSI 权限字段；K2 的 V3 增加十一个应用进度字段、`ma_csi_source`（19 字段）
+及 `ma_csi_physical`（六字段），不重写 V1 或 V2。最终结构包含 34 张表、
+744 个字段。应用清单覆盖 33 张表、738 个字段，物理伴随表单独检查。
 `ma_session.csi_guard` 由私有工具配置或持久运行时请求固定值生成。
+
+原生资源读取证据使用现有 `ma_request_receipt`，namespace 为 `SESSION_COMMAND`，
+operation 为 `CSI_RESOURCE_READ`，真实主键为 `key("csi-read", readId)`。
+JSON 入场时有明确的 23 字段，完成时有 25 字段。库存核对完整外层 row、初始
+request digest，以及原 resource/journal/writer 关联。OPEN 和 UNKNOWN 回执
+阻断应用退役。不存在独立原生读取表或拼造的兼容 row。
 
 身份使用标准 VARBINARY 字段并严格按 UTF-8 解码。不透明 actor 键保持为字节。
 散列和主键遵循实际生产者：会话范围为 `ManagedSchemaKeys.key(tenant, session)`，

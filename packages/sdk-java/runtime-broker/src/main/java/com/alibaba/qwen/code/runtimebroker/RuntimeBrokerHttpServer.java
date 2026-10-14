@@ -710,14 +710,16 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         if (bytes.length > MAXIMUM_REQUEST_BYTES) {
             throw tooLarge();
         }
-        if (strict) {
+        Map<String, Object> body = JsonCodec.parseObject(bytes, context);
+        if (strict && (!"execution request".equals(context)
+                || body.containsKey("inputBytesBase64") || body.containsKey("toolDefinitionBytesBase64"))) {
             try {
                 CsiNativeActivationProof.readObject(bytes);
             } catch (RuntimeException invalid) {
                 throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Execution JSON is invalid", false);
             }
         }
-        return JsonCodec.parseObject(bytes, context);
+        return body;
     }
 
     private static RuntimeBrokerException tooLarge() {

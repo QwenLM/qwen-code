@@ -20,7 +20,7 @@ Broker scope/request/execution 散列、CSI alias/physical 散列和 token 散�
 
 无关 owner 必须由真实父对象和领域链证明。共享 tenant guard、Workspace/access、storage alias 和 mode 回执先检查原始引用，再赋予明确上下文角色。原 TASK/公共活动、旧 action/extension、capture/publication、automation、channel 和恢复/迁移在第一条原生文件路径中仍不支持。原生文件历史仅通过真实 journal/resource/嵌入投影链接受。
 
-## 标准结构明确清单（34 表、764 列）
+## 标准结构明确清单（33 表、738 列）
 
 应用清单为 `qwen-csi-application-inventory/2`，组件 checkpoint 为 `qwen-csi-retirement-inventory/2`，拒绝版本 1。准确字段名、顺序、JDBC 类型和主键由 `WorkspaceCsiApplicationInventory` 声明；全新 DDL 为 `runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql`。目录验证和检查使用同一真实 JDBC Connection，不添加兼容视图、别名或旧数据回填。
 
@@ -30,7 +30,6 @@ Broker scope/request/execution 散列、CSI alias/physical 散列和 token 散�
 | `ma_artifact`            | 9      | `artifact_id`                                                            |
 | `ma_channel_binding`     | 9      | `tenant_id, channel_id, route_id`                                        |
 | `ma_channel_instance`    | 12     | `tenant_id, channel_id`                                                  |
-| `ma_csi_resource_read`   | 26     | `read_id`                                                                |
 | `ma_csi_source`          | 19     | `binding_id`                                                             |
 | `ma_delivery`            | 32     | `delivery_key`                                                           |
 | `ma_event_stream`        | 15     | `tenant_id, session_id, stream_kind, stream_id`                          |
@@ -61,7 +60,7 @@ Broker scope/request/execution 散列、CSI alias/physical 散列和 token 散�
 | `ma_workspace`           | 29     | `tenant_id, workspace_id`                                                |
 | `ma_workspace_access`    | 4      | `tenant_id, workspace_id, actor_id`                                      |
 
-`ma_csi_physical` 是独立六字段伴随表，主键为 `retirement_id`。完整全新结构因此包含 35 表、770 列。其类型化读端在应用闭包后使用同一 Connection 执行，不能向应用基线添加物理权限。
+`ma_csi_physical` 是独立六字段伴随表，主键为 `retirement_id`。完整全新结构因此包含 34 表、744 列。其类型化读端在应用闭包后使用同一 Connection 执行，不能向应用基线添加物理权限。
 
 ## 必要 prefix 与生产者 gate
 

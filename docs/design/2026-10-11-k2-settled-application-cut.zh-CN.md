@@ -69,9 +69,9 @@ Binding-only control writer 先发现 identity，再在原 binding lock 前进�
 
 使用有界、显式原 schema catalogue，不写反射全数据库 framework。每张表明确独立 discovery predicate、sorted key、supported values 或 any-row BLOCKED、producer 与 empty-set insertion fence。Aggregate current evidence 的 MAX_ROWS=4096、MAX_BYTES=32 MiB；超限、不明 association 阻断。以 raw original Session/binding/harness/runtime identity 与独立派生 scope hash 做 OR discovery，不只查 live state、不用隐藏损坏/孤儿 child 的 parent inner join。
 
-接受集合覆盖原 Session/creation/config/request pin；registration/holder/intent/slot/binding/control fence；唯一原 logical Runtime Session；全部 execution/native authorization/result/receipt/message/file-history membership；whole journal 与全部 resource/ref；全部 publication operation/object/seal/unmatched ACK；每条原生 `ma_csi_resource_read`；output read lease、PUT attempt、output retirement/retention/quarantine/GC 字段；不支持的 extension/task/action/automation occurrence+command/child/channel/recovery/migration history。正常 private CREATE 的 exact command/scope、值为零的 consumer progress、唯一 session.created public event 是有效创建事实，不授予任意 public history 权限。不支持 secondary row 或 configured provider/MCP/Hook/Shell/approval 阻断首条路径。Global definition 必须 pin 或明确不相关，不虚构 empty collection。
+接受集合覆盖原 Session/creation/config/request pin；registration/holder/intent/slot/binding/control fence；唯一原 logical Runtime Session；全部 execution/native authorization/result/receipt/message/file-history membership；whole journal 与全部 resource/ref；全部 publication operation/object/seal/unmatched ACK；`ma_request_receipt` 中每条原生 `CSI_RESOURCE_READ` 回执；output read lease、PUT attempt、output retirement/retention/quarantine/GC 字段；不支持的 extension/task/action/automation occurrence+command/child/channel/recovery/migration history。正常 private CREATE 的 exact command/scope、值为零的 consumer progress、唯一 session.created public event 是有效创建事实，不授予任意 public history 权限。不支持 secondary row 或 configured provider/MCP/Hook/Shell/approval 阻断首条路径。Global definition 必须 pin 或明确不相关，不虚构 empty collection。
 
-在 journal/resource chain 与其中 embedded snapshot projection 中验证合法 native file_history。首条路径中任何原相关 `ma_session_record` 行（包括 domain=file_history）均阻塞：当前 RECORD_BODIES 没有 file_history projector，只有非空 projected body 才调用 applyRevision。[显式库存附录](2026-10-11-k2-settled-application-cut-inventory.zh-CN.md) 列出当前 34 表/764 列应用目录、独立发现、真实主键/namespace 及 producer gate；该覆盖只有静态检查，仍需运行资格化。
+在 journal/resource chain 与其中 embedded snapshot projection 中验证合法 native file_history。首条路径中任何原相关 `ma_session_record` 行（包括 domain=file_history）均阻塞：当前 RECORD_BODIES 没有 file_history projector，只有非空 projected body 才调用 applyRevision。[显式库存附录](2026-10-11-k2-settled-application-cut-inventory.zh-CN.md) 列出当前 33 表/738 列应用目录、独立发现、真实主键/namespace 及 producer gate；该覆盖只有静态检查，仍需运行资格化。
 
 Automation create 当前先 claim command，之后 downstream private Harness 才拒绝。必须在实际 Session-bound claim transaction 内按真实持久 target 增加 current private exclusion，并保留 rollback；service snapshot check 不足。保留普通 command idempotency 与 existing-schedule control。Command schema 无 Session 列，orphan command 要独立 request/key/result provenance 关联；不能把不明 tenant command 悄悄声明为无关。Child/channel bare store 的实际 caller 已拒绝或新建另一 ordinary Session 时，不报告未确认的可达 new-entry 缺口；不支持历史仍独立发现并阻断。
 
@@ -110,3 +110,9 @@ CUT 后 finalize 在 DB lock 外接收相同持久 cut。Readback 用不可变 c
 ## 后续门槛
 
 来源资格化的 ACK node collector、连续 pre-CREATE runtime/cgroup custody、真实 CSI NodeUnpublish completion、atomic physical RELEASED、monotonic volume reuse、public selection 是后续工作。既有 loongcollector 诊断或对缺失物理事实的签名不能替代来源。申请 privileged deployment 前先准备具体 source adapter/deployment artifact。设计及计划测试都不声称尚未实际验收的应用或物理完成。
+
+## 主干大结果格式兼容
+
+原生执行结果完整读取上限为 1 MiB，HTTP response 保留额外 16 KiB 封装容量。原工具 outcome 允许 64 KiB inline，或使用明确的 `managed-tool-outcome-chunks` manifest 与 `managed-tool-outcome-part` 分片，按原描述重组成超过 64 KiB、至多 4 MiB 的完整 JSON。已有消息分片使用同一库存 owner 校验；两种格式各自保留原 decoder 的数量、长度、digest 与 UTF-8 检查。
+
+Live 库存在一轮真实表扫描结束后重组完整内容，再将其中的类型化引用送入原发现闭包。最终验证只有成功完整 manifest 覆盖的 raw part 可以存在。Retained 扫描先处理 manifest，再处理分片；每个成员核对原 Tenant/Workspace/Session/scope、真实主键及完整 descriptor。缺失、重复、篡改、跨 owner、孤立分片和未声明格式均拒绝。完整重组不会授予执行、writer、安装或物理权限。

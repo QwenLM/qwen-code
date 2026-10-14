@@ -20,7 +20,7 @@ Discovery uses independent OR predicates over all states, then expands the origi
 
 An unrelated owner must be proven from its actual parent/domain chain. Shared tenant guards, Workspace/access rows, storage aliases and mode receipts have explicit context roles after checking original references. Original TASK/public activity, legacy action/extension activity, capture/publication work, automation, channels and recovery/migration remain unsupported in this first native file lane. Native file history is accepted only through its real journal/resource/embedded projection chain.
 
-## Explicit canonical catalogue (34 tables, 764 columns)
+## Explicit canonical catalogue (33 tables, 738 columns)
 
 Application inventory is `qwen-csi-application-inventory/2`; the component checkpoint is `qwen-csi-retirement-inventory/2`. Version 1 is refused. The exact column names, order, JDBC kinds and primary keys are declared in `WorkspaceCsiApplicationInventory`; the fresh DDL is `runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql`. Catalog validation uses the same actual JDBC Connection as inspection. There are no compatibility views, aliases or legacy backfills.
 
@@ -30,7 +30,6 @@ Application inventory is `qwen-csi-application-inventory/2`; the component check
 | `ma_artifact`            | 9       | `artifact_id`                                                            |
 | `ma_channel_binding`     | 9       | `tenant_id, channel_id, route_id`                                        |
 | `ma_channel_instance`    | 12      | `tenant_id, channel_id`                                                  |
-| `ma_csi_resource_read`   | 26      | `read_id`                                                                |
 | `ma_csi_source`          | 19      | `binding_id`                                                             |
 | `ma_delivery`            | 32      | `delivery_key`                                                           |
 | `ma_event_stream`        | 15      | `tenant_id, session_id, stream_kind, stream_id`                          |
@@ -61,7 +60,7 @@ Application inventory is `qwen-csi-application-inventory/2`; the component check
 | `ma_workspace`           | 29      | `tenant_id, workspace_id`                                                |
 | `ma_workspace_access`    | 4       | `tenant_id, workspace_id, actor_id`                                      |
 
-`ma_csi_physical` is a separate six-column companion with primary key `retirement_id`. The full fresh schema therefore has 35 tables and 770 columns. Its typed reader runs on the same Connection after application closure and cannot add physical authority to an application baseline.
+`ma_csi_physical` is a separate six-column companion with primary key `retirement_id`. The full fresh schema therefore has 34 tables and 744 columns. Its typed reader runs on the same Connection after application closure and cannot add physical authority to an application baseline.
 
 ## Necessary prefix and producer gates
 

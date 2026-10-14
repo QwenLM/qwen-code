@@ -148,7 +148,7 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                 owner.setAutoCommit(false);
                 try {
                     try (var query = owner.prepareStatement("SELECT csi_guard FROM ma_session"
-                            + " FORCE INDEX (ix_ma_session_csi_guard)"
+                            + " FORCE INDEX (ma_session_csi_guard_idx)"
                             + " WHERE tenant_id = 'tenant' AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
                         query.setString(1, session);
                         try (var rows = query.executeQuery()) {
@@ -230,7 +230,7 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                     result.put(table, JSON.valueToTree(rows));
                 }
                 assertThat(result).containsKeys("ma_session",
-                        "ma_session_head", "ma_operation", "ma_csi_resource_read");
+                        "ma_session_head", "ma_operation", "ma_request_receipt");
                 return result;
             });
         }

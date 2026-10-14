@@ -24,6 +24,8 @@ public interface RuntimeBindingRepository {
                 "Runtime repository does not support atomic Session retirement", false);
     }
 
+
+
     /** Existing idempotency receipts remain readable after admission closes. */
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);

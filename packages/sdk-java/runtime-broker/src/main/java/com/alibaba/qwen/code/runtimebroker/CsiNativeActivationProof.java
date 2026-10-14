@@ -34,6 +34,7 @@ import java.util.function.Function;
 
 /** Original private CSI activation and bounded conversation proof. */
 public final class CsiNativeActivationProof {
+    private static final int MAX_TOOL_OUTCOME_BYTES = 4 * 1024 * 1024;
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
             "type", "subtype", "cwd", "version", "managedSession");
@@ -330,9 +331,8 @@ public final class CsiNativeActivationProof {
                 && payload.path("resultRef").isNull() && payload.path("resources").isArray() && payload.path("resources").isEmpty()
                 && number(payload.get("historyRevision")) == previousSequence + 1);
         JsonNode ref = payload.path("toolOutcomeRef");
-        byte[] bytes = reference(ref, "managed-tool-outcome", resources);
-        require(bytes.length <= 64 * 1024 && text(ref, "digest").equals(text(metadata, "contentDigest")));
-        JsonNode body = readObject(bytes);
+        require(text(ref, "digest").equals(text(metadata, "contentDigest")));
+        JsonNode body = toolOutcomeBody(ref, resources);
         closed(body, Set.of("schemaVersion", "executionCallId", "envelope", "history"));
         require(number(body.get("schemaVersion")) == 1 && execution.equals(id(body, "executionCallId")));
         JsonNode history = body.path("history");
@@ -356,8 +356,14 @@ public final class CsiNativeActivationProof {
     static JsonNode convertedResult(JsonNode result, FunctionCall call) {
         closed(result, result.has("error") ? Set.of("executionStatus", "responseParts", "error")
                 : Set.of("executionStatus", "responseParts"));
+        require(utf8(canonical(result)).length <= CsiNativeReadbackProtocol.EXECUTION_RESULT_LIMIT);
         String status = text(result, "executionStatus");
         require(Set.of("success", "error").contains(status) && result.path("responseParts").isArray());
+        JsonNode error = result.get("error");
+        if (error != null) {
+            closed(error, error.has("type") ? Set.of("message", "type") : Set.of("message"));
+            error.forEach(value -> require(value.isTextual() && !value.textValue().isEmpty()));
+        }
         List<String> texts = new ArrayList<>();
         var media = JSON.createArrayNode();
         for (JsonNode part : result.path("responseParts")) {
@@ -383,16 +389,10 @@ public final class CsiNativeActivationProof {
         if ("success".equals(status)) {
             response.put("output", output);
         } else {
-            String fallback = result.has("error") ? text(result.path("error"), "message") : "Runtime tool " + status + ".";
+            String fallback = error != null ? error.path("message").textValue() : "Runtime tool " + status + ".";
             response.put("error", !CsiNativeToolReservation.trim(output).isEmpty() && !"Tool execution succeeded.".equals(output) ? output : fallback);
         }
-        if (result.has("error")) {
-            JsonNode error = result.path("error");
-            closed(error, error.has("type") ? Set.of("message", "type") : Set.of("message"));
-            text(error, "message");
-            if (error.has("type")) {
-                text(error, "type");
-            }
+        if (error != null) {
             response.set("runtimeError", error);
         }
         if (!media.isEmpty()) {
@@ -1154,6 +1154,34 @@ public final class CsiNativeActivationProof {
                 throw invalid();
             }
         }
+    }
+
+    /** Reassembles the bounded outcome; the reader must enforce the resource owner's scope. */
+    public static JsonNode toolOutcomeBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
+        if ("managed-tool-outcome".equals(ref.path("kind").textValue())) {
+            byte[] bytes = reference(ref, "managed-tool-outcome", resources);
+            require(bytes.length <= 64 * 1024);
+            return readObject(bytes);
+        }
+        byte[] manifestBytes = reference(ref, "managed-tool-outcome-chunks", resources);
+        require(manifestBytes.length <= 64 * 1024);
+        JsonNode manifest = readObject(manifestBytes);
+        closed(manifest, Set.of("parts"));
+        JsonNode parts = manifest.path("parts");
+        require(parts.isArray() && parts.size() > 1 && parts.size() <= 69);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        Set<String> ids = new HashSet<>();
+        for (int index = 0; index < parts.size(); index++) {
+            JsonNode part = parts.get(index);
+            require(ids.add(id(part, "resourceId")));
+            byte[] content = reference(part, "managed-tool-outcome-part", resources);
+            require(content.length > 0 && content.length <= 60 * 1024
+                    && (index == parts.size() - 1 || content.length == 60 * 1024)
+                    && bytes.size() + content.length <= MAX_TOOL_OUTCOME_BYTES);
+            bytes.writeBytes(content);
+        }
+        require(bytes.size() > 64 * 1024);
+        return readObject(bytes.toByteArray());
     }
 
     /** Reassembles the declared message format; the reader must enforce the resource owner's scope. */

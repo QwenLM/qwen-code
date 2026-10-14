@@ -123,20 +123,27 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    private static byte[] invalidNativeUtf8() {
+        byte[] bytes = "{\"inputBytesBase64\":\"e30=\",\"x\":\"!\"}".getBytes(StandardCharsets.UTF_8);
+        bytes[bytes.length - 3] = (byte) 0xff;
+        return bytes;
+    }
+
     @Test
     void strictPrepareAndPrivateBatchReadRefuseAmbiguousJsonBeforeAdmission() throws Exception {
         try (Fixture fixture = new Fixture()) {
             for (String route : List.of("/executions:prepare", "/executions:read-batch")) {
                 for (byte[] bytes : List.of(
-                        "{\"protocolVersion\":1,\"protocolVersion\":1}".getBytes(StandardCharsets.UTF_8),
-                        "{} {}".getBytes(StandardCharsets.UTF_8),
-                        new byte[] {'{', '"', 'x', '"', ':', '"', (byte) 0xff, '"', '}'})) {
+                        "{\"inputBytesBase64\":\"e30=\",\"protocolVersion\":1,\"protocolVersion\":1}".getBytes(StandardCharsets.UTF_8),
+                        "{\"inputBytesBase64\":\"e30=\"} {}".getBytes(StandardCharsets.UTF_8),
+                        invalidNativeUtf8())) {
                     HttpRequest request = HttpRequest.newBuilder(fixture.uri(route))
                             .header("Authorization", "Bearer secret").header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofByteArray(bytes)).build();
                     HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
                     assertEquals(400, response.statusCode(), response.body());
-                    assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+                    assertTrue(response.body().contains("runtime_broker_invalid_request")
+                            || response.body().contains("runtime_broker_invalid_json"), response.body());
                 }
             }
             assertEquals(0, fixture.transport.executions.get());

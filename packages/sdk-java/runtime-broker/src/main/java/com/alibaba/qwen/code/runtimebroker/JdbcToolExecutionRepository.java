@@ -3,15 +3,16 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import javax.sql.DataSource;
 
@@ -92,9 +93,12 @@ public final class JdbcToolExecutionRepository
     public static List<ToolExecutionRecord> findHarnessExecutions(Connection connection,
             String tenantId, String harnessSessionId) throws SQLException {
         List<ToolExecutionRecord> result = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement("SELECT e.*, b.isolation_class, b.isolation_key FROM ma_tool_execution e"
-                + " JOIN ma_runtime_binding b ON b.binding_id = e.binding_id"
-                + " WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        "SELECT e.*, b.isolation_class, b.isolation_key FROM ma_tool_execution e"
+                                + " JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE"
+                                + " b.tenant_id = ? AND e.harness_session_id = ? ORDER BY"
+                                + " e.execution_call_id_hash FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet rows = statement.executeQuery()) {
@@ -103,7 +107,11 @@ public final class JdbcToolExecutionRepository
                     if (!harnessSessionId.equals(record.getHarnessSessionId())
                             || !"session".equals(rows.getString("isolation_class"))
                             || !harnessSessionId.equals(rows.getString("isolation_key"))) {
-                        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Execution scope differs", false);
+                        throw new RuntimeBrokerException(
+                                409,
+                                "workspace_close_identity_unverified",
+                                "Execution scope differs",
+                                false);
                     }
                     result.add(record);
                 }
@@ -332,7 +340,7 @@ public final class JdbcToolExecutionRepository
                 updateExecution(connection, unknown);
                 return null;
             }
-            if (continuation != null && !continuation.legacy()) {
+            if (continuation != null) {
                 JdbcCsiExecutionAdmission.requireDispatch(connection, continuation.original(), current);
             }
             ToolExecutionRecord claimed = current.withDispatch(ownerId,
@@ -514,19 +522,18 @@ public final class JdbcToolExecutionRepository
             return null;
         }
         var original = scope.original();
+        if (JdbcCsiExecutionAdmission.legacyReference(hint)) {
+            throw new RuntimeBrokerException(409, "csi_native_execution_unavailable",
+                    "Private CSI execution requires original native resources.", false);
+        }
         JdbcCsiActivationAdmission.requireExecution(original, hint);
         JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
         var runtime = JdbcRuntimeSessionRepository.selectSession(connection, original.request().getScope(),
                 hint.getRuntimeSessionId(), true);
         original.requireSession(runtime);
-        var continuation = new CsiContinuation(original, scope.progress(), scope.head(), runtime,
-                JdbcCsiExecutionAdmission.legacyReference(hint));
+        var continuation = new CsiContinuation(original, scope.progress(), scope.head(), runtime);
         continuation.require(hint);
-        if (continuation.legacy()) {
-            JdbcCsiExecutionAdmission.requireLegacyContinuation(connection, original);
-        } else {
-            JdbcCsiExecutionAdmission.verifyRelated(connection, original);
-        }
+        JdbcCsiExecutionAdmission.verifyRelated(connection, original);
         requireCsiCurrentTime(connection, continuation);
         return continuation;
     }
@@ -550,14 +557,13 @@ public final class JdbcToolExecutionRepository
 
     private record CsiContinuation(JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiApplicationProgress.Continuation progress, JdbcCsiActivationAdmission.NativeHead head,
-            RuntimeSessionRecord runtime, boolean legacy) {
+            RuntimeSessionRecord runtime) {
         void require(ToolExecutionRecord execution) {
             JdbcCsiActivationAdmission.requireExecution(original, execution);
             RuntimeAdmission.requireSession(runtime, execution);
             if (!"deferred".equals(execution.getReference().get("dispatchMode"))
-                    || !(legacy ? JdbcCsiExecutionAdmission.legacyReference(execution)
-                            : execution.getReference().keySet().equals(Set.of("dispatchMode", "sessionId", "promptId", "callId", "argsDigest",
-                                    "batchId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef")))
+                    || !execution.getReference().keySet().equals(Set.of("dispatchMode", "sessionId", "promptId", "callId", "argsDigest",
+                                    "batchId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef"))
                     || !execution.getRequestDigest().matches("sha256:[0-9a-f]{64}")) {
                 throw csiContinuationUnavailable();
             }
@@ -580,34 +586,45 @@ public final class JdbcToolExecutionRepository
         if (session == null || limit < 1 || limit > 100) {
             throw new IllegalArgumentException("session and limit in [1, 100] are required");
         }
-        String after = afterExecutionCallId == null ? ""
-                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            String sql = "SELECT " + EXECUTION_COLUMNS + " FROM ma_tool_execution "
-                    + "WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_key = ? "
-                    + "AND harness_session_id = ? AND execution_call_id_hash > ? "
-                    + "AND execution_state IN ('EXECUTING', 'CANCEL_REQUESTED', 'UNKNOWN') "
-                    + "ORDER BY execution_call_id_hash LIMIT ?";
-            try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
-                statement.setLong(2, session.getRuntimeGeneration());
-                statement.setString(3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
-                JdbcRepositorySupport.setIdentity(statement, 4, session.getSession().getHarnessSessionId());
-                statement.setString(5, after);
-                statement.setInt(6, limit);
-                List<ToolExecutionRecord> records = new ArrayList<>();
-                try (ResultSet result = statement.executeQuery()) {
-                    while (result.next()) {
-                        ToolExecutionRecord record = mapExecution(result);
-                        if (!record.belongsTo(session)) {
-                            throw new IllegalStateException("Execution scan ownership differs");
+        String after =
+                afterExecutionCallId == null
+                        ? ""
+                        : JdbcRepositorySupport.valueKey(
+                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    String sql =
+                            "SELECT "
+                                    + EXECUTION_COLUMNS
+                                    + " FROM ma_tool_execution WHERE binding_id = ? AND"
+                                    + " runtime_generation = ? AND runtime_session_key = ? AND"
+                                    + " harness_session_id = ? AND execution_call_id_hash > ? AND"
+                                    + " execution_state IN ('EXECUTING', 'CANCEL_REQUESTED',"
+                                    + " 'UNKNOWN') ORDER BY execution_call_id_hash LIMIT ?";
+                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                        JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
+                        statement.setLong(2, session.getRuntimeGeneration());
+                        statement.setString(
+                                3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                        JdbcRepositorySupport.setIdentity(
+                                statement, 4, session.getSession().getHarnessSessionId());
+                        statement.setString(5, after);
+                        statement.setInt(6, limit);
+                        List<ToolExecutionRecord> records = new ArrayList<>();
+                        try (ResultSet result = statement.executeQuery()) {
+                            while (result.next()) {
+                                ToolExecutionRecord record = mapExecution(result);
+                                if (!record.belongsTo(session)) {
+                                    throw new IllegalStateException(
+                                            "Execution scan ownership differs");
+                                }
+                                records.add(record);
+                            }
                         }
-                        records.add(record);
+                        return List.copyOf(records);
                     }
-                }
-                return List.copyOf(records);
-            }
-        });
+                });
     }
 
     @Override
@@ -616,57 +633,70 @@ public final class JdbcToolExecutionRepository
         if (session == null || limit < 1 || limit > 100) {
             throw new IllegalArgumentException("session and limit in [1, 100] are required");
         }
-        String after = afterExecutionCallId == null ? ""
-                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            List<ToolExecutionRecord> matches = new ArrayList<>();
-            String cursor = after;
-            // The dispatch mode lives in the reference payload, so SQL
-            // pages the ownership-and-state window and the filter runs row
-            // by row; the scan stops as soon as a page of matches is full
-            // or the window is exhausted, keeping "short page means done".
-            for (;;) {
-                String sql = "SELECT " + EXECUTION_COLUMNS + " FROM ma_tool_execution "
-                        + "WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_key = ? "
-                        + "AND harness_session_id = ? AND execution_call_id_hash > ? "
-                        + "AND execution_state NOT IN ('SETTLED', 'ABANDONED') "
-                        + "ORDER BY execution_call_id_hash LIMIT ?";
-                List<ToolExecutionRecord> batch = new ArrayList<>();
-                try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                    JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
-                    statement.setLong(2, session.getRuntimeGeneration());
-                    statement.setString(3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
-                    JdbcRepositorySupport.setIdentity(statement, 4, session.getSession().getHarnessSessionId());
-                    statement.setString(5, cursor);
-                    statement.setInt(6, limit);
-                    try (ResultSet result = statement.executeQuery()) {
-                        while (result.next()) {
-                            ToolExecutionRecord record = mapExecution(result);
-                            if (!record.belongsTo(session)) {
-                                throw new IllegalStateException("Execution scan ownership differs");
+        String after =
+                afterExecutionCallId == null
+                        ? ""
+                        : JdbcRepositorySupport.valueKey(
+                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    List<ToolExecutionRecord> matches = new ArrayList<>();
+                    String cursor = after;
+                    // The dispatch mode lives in the reference payload, so SQL
+                    // pages the ownership-and-state window and the filter runs row
+                    // by row; the scan stops as soon as a page of matches is full
+                    // or the window is exhausted, keeping "short page means done".
+                    for (; ; ) {
+                        String sql =
+                                "SELECT "
+                                        + EXECUTION_COLUMNS
+                                        + " FROM ma_tool_execution WHERE binding_id = ? AND"
+                                        + " runtime_generation = ? AND runtime_session_key = ? AND"
+                                        + " harness_session_id = ? AND execution_call_id_hash > ?"
+                                        + " AND execution_state NOT IN ('SETTLED', 'ABANDONED')"
+                                        + " ORDER BY execution_call_id_hash LIMIT ?";
+                        List<ToolExecutionRecord> batch = new ArrayList<>();
+                        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                            JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
+                            statement.setLong(2, session.getRuntimeGeneration());
+                            statement.setString(
+                                    3,
+                                    JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                            JdbcRepositorySupport.setIdentity(
+                                    statement, 4, session.getSession().getHarnessSessionId());
+                            statement.setString(5, cursor);
+                            statement.setInt(6, limit);
+                            try (ResultSet result = statement.executeQuery()) {
+                                while (result.next()) {
+                                    ToolExecutionRecord record = mapExecution(result);
+                                    if (!record.belongsTo(session)) {
+                                        throw new IllegalStateException(
+                                                "Execution scan ownership differs");
+                                    }
+                                    batch.add(record);
+                                }
                             }
-                            batch.add(record);
                         }
-                    }
-                }
-                if (batch.isEmpty()) {
-                    return List.copyOf(matches);
-                }
-                for (ToolExecutionRecord record : batch) {
-                    if (ManagedHoldFamily.of(record) != null) {
-                        matches.add(record);
-                        if (matches.size() == limit) {
+                        if (batch.isEmpty()) {
                             return List.copyOf(matches);
                         }
+                        for (ToolExecutionRecord record : batch) {
+                            if (ManagedHoldFamily.of(record) != null) {
+                                matches.add(record);
+                                if (matches.size() == limit) {
+                                    return List.copyOf(matches);
+                                }
+                            }
+                        }
+                        if (batch.size() < limit) {
+                            return List.copyOf(matches);
+                        }
+                        cursor =
+                                JdbcRepositorySupport.valueKey(
+                                        batch.get(batch.size() - 1).getExecutionCallId());
                     }
-                }
-                if (batch.size() < limit) {
-                    return List.copyOf(matches);
-                }
-                cursor = JdbcRepositorySupport.valueKey(
-                        batch.get(batch.size() - 1).getExecutionCallId());
-            }
-        });
+                });
     }
 
     @Override
@@ -680,31 +710,38 @@ public final class JdbcToolExecutionRepository
         String after = afterExecutionCallId == null ? ""
                 : JdbcRepositorySupport.valueKey(BrokerValues.requireWellFormed(
                         BrokerValues.requireId(afterExecutionCallId, "cursor"), "cursor"));
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            String sql = "SELECT " + EXECUTION_COLUMNS + " FROM ma_tool_execution "
-                    + "WHERE binding_id = ? AND runtime_generation = ? "
-                    + "AND execution_call_id_hash > ? "
-                    + "ORDER BY execution_call_id_hash LIMIT ?";
-            try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                JdbcRepositorySupport.setIdentity(statement, 1, id);
-                statement.setLong(2, runtimeGeneration);
-                statement.setString(3, after);
-                statement.setInt(4, limit);
-                List<ToolExecutionRecord> records = new ArrayList<>();
-                try (ResultSet result = statement.executeQuery()) {
-                    while (result.next()) {
-                        ToolExecutionRecord record = mapExecution(result);
-                        BrokerValues.requireWellFormed(record.getExecutionCallId(), "executionCallId");
-                        if (!id.equals(record.getBindingId())
-                                || runtimeGeneration != record.getRuntimeGeneration()) {
-                            throw new IllegalStateException("Execution inventory ownership differs");
+        return JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    String sql =
+                            "SELECT "
+                                    + EXECUTION_COLUMNS
+                                    + " FROM ma_tool_execution "
+                                    + "WHERE binding_id = ? AND runtime_generation = ? "
+                                    + "AND execution_call_id_hash > ? "
+                                    + "ORDER BY execution_call_id_hash LIMIT ?";
+                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                        JdbcRepositorySupport.setIdentity(statement, 1, id);
+                        statement.setLong(2, runtimeGeneration);
+                        statement.setString(3, after);
+                        statement.setInt(4, limit);
+                        List<ToolExecutionRecord> records = new ArrayList<>();
+                        try (ResultSet result = statement.executeQuery()) {
+                            while (result.next()) {
+                                ToolExecutionRecord record = mapExecution(result);
+                                BrokerValues.requireWellFormed(
+                                        record.getExecutionCallId(), "executionCallId");
+                                if (!id.equals(record.getBindingId())
+                                        || runtimeGeneration != record.getRuntimeGeneration()) {
+                                    throw new IllegalStateException(
+                                            "Execution inventory ownership differs");
+                                }
+                                records.add(record);
+                            }
                         }
-                        records.add(record);
+                        return List.copyOf(records);
                     }
-                }
-                return List.copyOf(records);
-            }
-        });
+                });
     }
 
     @Override
@@ -775,10 +812,10 @@ public final class JdbcToolExecutionRepository
             java.util.Set<String> excludingExecutionCallIds)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT binding_id, runtime_session_id, execution_call_id FROM ma_tool_execution "
-                        + "WHERE binding_id = ? AND runtime_generation = ? "
-                        + "AND runtime_session_key = ? "
-                        + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')")) {
+                        "SELECT binding_id, runtime_session_id, execution_call_id FROM"
+                            + " ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ? AND execution_state NOT IN ('SETTLED',"
+                            + " 'ABANDONED')")) {
             JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
             statement.setLong(2, runtimeGeneration);
             statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
@@ -786,7 +823,8 @@ public final class JdbcToolExecutionRepository
                 while (result.next()) {
                     if (bindingId.equals(result.getString("binding_id"))
                             && runtimeSessionId.equals(result.getString("runtime_session_id"))
-                            && !excludingExecutionCallIds.contains(result.getString("execution_call_id"))) {
+                            && !excludingExecutionCallIds.contains(
+                                    result.getString("execution_call_id"))) {
                         return true;
                     }
                 }

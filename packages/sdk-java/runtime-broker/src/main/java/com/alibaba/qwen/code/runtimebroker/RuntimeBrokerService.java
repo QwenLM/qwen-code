@@ -326,6 +326,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     || !harnessSessionId.equals(binding.getRequest().getIsolationKey())) {
                 return failed(conflict("workspace_close_identity_unverified", "Saved resource scope differs"));
             }
+            if (JdbcCsiFilesRetirementGuard.isProfile(binding.getRequest().getScope())) {
+                return failed(JdbcCsiFilesRetirementGuard.releaseUnavailable());
+            }
             work = work.thenCompose(ignored -> {
                 bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), harnessSessionId, authority);
                 if (binding.getState() == RuntimeBindingRecord.State.RELEASED) {
@@ -1460,6 +1463,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             if (ManagedHoldFamily.of(current) != null) {
                                 throw conflict("runtime_execution_conflict",
                                         "A background process settles only on stop evidence");
+                            }
+                            if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                                    && current.getAuthorizedDispatchGeneration() != null) {
+                                throw conflict("csi_execution_cancel_unavailable",
+                                        "An authorized private CSI execution does not support cancellation");
                             }
                             requested = requestCancel(current);
                             if (isPreparedProviderCancellation(requested)) {

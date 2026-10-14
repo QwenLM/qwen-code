@@ -88,4 +88,32 @@ class CsiNativeReadbackProtocolTest {
         assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.request(new byte[16385]));
         assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.request(new byte[] {(byte) 0xff}));
     }
+
+    @Test
+    void acceptsWorkerSizedUnicodeResultsAndRejectsAnOverLimitBodyOrForeignSubject() throws Exception {
+        var fixture = JsonCodec.parseObject(Files.readAllBytes(Path.of(
+                "../../cli/src/serve/contracts/managed-csi-native-readback-v1.fixtures.json")), "fixture");
+        var value = ((List<?>) fixture.get("valid")).stream().map(ManagedCsiFilesProtocolTest::map)
+                .filter(row -> "execute-read-only".equals(row.get("name"))).findFirst().orElseThrow();
+        var request = CsiNativeReadbackProtocol.request(ManagedCsiFilesProtocolTest.map(value.get("request")));
+        int overhead = JsonCodec.encode(executionResult("")).length;
+        for (String text : List.of("small", "中".repeat(25000), "x".repeat(CsiNativeReadbackProtocol.EXECUTION_RESULT_LIMIT - overhead))) {
+            var response = new LinkedHashMap<>(request);
+            response.put("state", "settled");
+            response.put("result", executionResult(text));
+            assertTrue(BrokerValues.sameJsonMap(executionResult(text), CsiNativeReadbackProtocol.executeResult(JsonCodec.encode(response), request)));
+        }
+        var response = new LinkedHashMap<>(request);
+        response.put("state", "settled");
+        response.put("result", executionResult("x".repeat(CsiNativeReadbackProtocol.EXECUTION_RESULT_LIMIT - overhead + 1)));
+        assertTrue(JsonCodec.encode(response).length < CsiNativeReadbackProtocol.EXECUTION_RESPONSE_LIMIT);
+        assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.executeResult(JsonCodec.encode(response), request));
+        response.put("result", executionResult("small"));
+        response.put("subject", "foreign-execution");
+        assertThrows(IllegalArgumentException.class, () -> CsiNativeReadbackProtocol.executeResult(JsonCodec.encode(response), request));
+    }
+
+    static Map<String, Object> executionResult(String text) {
+        return Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", text)));
+    }
 }

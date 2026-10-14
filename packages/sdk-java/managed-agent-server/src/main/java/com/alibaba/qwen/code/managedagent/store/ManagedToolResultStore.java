@@ -1,27 +1,29 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.LinkedHashMap;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Repository;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
 public class ManagedToolResultStore {
@@ -67,7 +69,9 @@ public class ManagedToolResultStore {
             JsonNode event = record.path("managedSession");
             if ("managed_session_event_v1".equals(record.path("subtype").asText())
                     && "tool.receipt".equals(event.path("kind").asText())) {
-                require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
+                require(
+                        index < eventCount
+                                && event.path("sequence").asLong(-1) == firstSequence + index,
                         "Tool receipt has an invalid journal position");
                 events.add(event);
             }
@@ -80,7 +84,9 @@ public class ManagedToolResultStore {
         for (JsonNode event : events) {
             Source source = source(tenant, workspace, session, revision, event);
             Source prior = sources.putIfAbsent(source.id(), source);
-            require(prior == null || prior.sourceDigest().equals(source.sourceDigest()), "Tool receipt source changed");
+            require(
+                    prior == null || prior.sourceDigest().equals(source.sourceDigest()),
+                    "Tool receipt source changed");
         }
         if (sources.isEmpty()) {
             return;
@@ -93,15 +99,22 @@ public class ManagedToolResultStore {
                 sources.keySet().toArray());
         for (var row : existing) {
             Source source = sources.remove((String) row.get("operation_id"));
-            require(source.sourceDigest().equals(row.get("request_digest")), "Tool receipt source changed");
+            require(
+                    source.sourceDigest().equals(row.get("request_digest")),
+                    "Tool receipt source changed");
         }
         if (!sources.isEmpty()) {
             long createdAt = now();
             String sourceScope = scope(tenant, session);
             List<Object[]> rows = new ArrayList<>();
             for (Source source : sources.values()) {
-                String executionKey = identity("execution", source.executionCallId().isEmpty()
-                        ? "sequence:" + source.receiptSequence() : source.executionCallId()).substring(10);
+                String executionKey =
+                        identity(
+                                        "execution",
+                                        source.executionCallId().isEmpty()
+                                                ? "sequence:" + source.receiptSequence()
+                                                : source.executionCallId())
+                                .substring(10);
                 rows.add(new Object[] {
                         ManagedSchemaKeys.operationKey(OperationKind.TOOL_RESULT_PROJECTION, sourceScope,
                                 executionKey, source.id()), sourceScope, sourceScope, ManagedSchemaKeys.identity(source.id()),
@@ -109,11 +122,13 @@ public class ManagedToolResultStore {
                         executionKey, executionKey, JSON.valueToTree(source).toString(), source.sourceDigest(),
                         createdAt, createdAt});
             }
-            jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
-                    + " tenant_id, workspace_id, session_id, target_kind, target_key, execution_key,"
-                    + " request_json, request_digest, phase, state, created_at, updated_at)"
-                    + " VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?,"
-                    + " 'PROJECTING', 'PENDING', ?, ?)", rows);
+            jdbc.batchUpdate(
+                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
+                        + " operation_kind, operation_id, tenant_id, workspace_id, session_id,"
+                        + " target_kind, target_key, execution_key, request_json, request_digest,"
+                        + " phase, state, created_at, updated_at) VALUES (?, ?, ?,"
+                        + " 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?,"
+                        + " 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
     }
 
@@ -347,9 +362,16 @@ public class ManagedToolResultStore {
     }
 
     public void verifySource(Source source) {
-        var rows = jdbc.query("SELECT record_bytes, record_digest FROM ma_session_journal_tx"
-                        + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND journal_revision = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                source.tenantId(), source.workspaceId(), source.sessionId(), source.journalRevision());
+        var rows =
+                jdbc.query(
+                        "SELECT record_bytes, record_digest FROM ma_session_journal_tx WHERE"
+                                + " tenant_id = ? AND workspace_id = ? AND session_id = ? AND"
+                                + " journal_revision = ?",
+                        (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                        source.tenantId(),
+                        source.workspaceId(),
+                        source.sessionId(),
+                        source.journalRevision());
         require(rows.size() == 1, "Original receipt journal is missing");
         byte[] bytes = (byte[]) rows.getFirst().get("record_bytes");
         require(ToolPublicationContract.sha256(bytes).equals(rows.getFirst().get("record_digest")),
@@ -363,7 +385,9 @@ public class ManagedToolResultStore {
                     && event.path("sequence").asLong(-1) == source.receiptSequence()) {
                 Source original = source(source.tenantId(), source.workspaceId(), source.sessionId(),
                         source.journalRevision(), event);
-                require(original.sourceDigest().equals(source.sourceDigest()), "Original receipt source changed");
+                require(
+                        original.sourceDigest().equals(source.sourceDigest()),
+                        "Original receipt source changed");
                 matches++;
             }
         }
@@ -373,7 +397,8 @@ public class ManagedToolResultStore {
     public boolean complete(Claim claim, Projection projection, String currentPolicyVersion) {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             var candidate = resultRow(claim.source().id());
-            if (candidate == null) {
+            if (candidate == null || !"LEASED".equals(candidate.get("state"))
+                    || ((Number) candidate.get("claim_generation")).longValue() != claim.generation()) {
                 return false;
             }
             ToolPublicationRetentionStore.lockTenant(jdbc, (String) candidate.get("tenant_id"));
@@ -464,69 +489,118 @@ public class ManagedToolResultStore {
     }
 
     private void verifyCatalog(Source source, Projection projection) {
-        var rows = jdbc.query("SELECT state, producer_phase, binding_digest, admission_resource_id,"
-                        + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture"
-                        + " WHERE scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                ToolPublicationDataStore.scope(source.sessionKey()), source.tenantId(), source.workspaceId(), source.sessionId(), projection.publicationId());
+        var rows =
+                jdbc.query(
+                        "SELECT state, producer_phase, binding_digest, admission_resource_id,"
+                            + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1"
+                            + " ELSE 0 END AS quarantine_mark FROM ma_output_capture WHERE"
+                            + " scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id"
+                            + " = ? AND publication_id = ? FOR UPDATE",
+                        (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                        ToolPublicationDataStore.scope(source.sessionKey()),
+                        source.tenantId(),
+                        source.workspaceId(),
+                        source.sessionId(),
+                        projection.publicationId());
         require(rows.size() == 1, "Original publication disappeared");
         var row = rows.getFirst();
-        require(ToolPublicationContract.bindingDigest(projection.binding()).equals(row.get("binding_digest")),
+        require(
+                ToolPublicationContract.bindingDigest(projection.binding())
+                        .equals(row.get("binding_digest")),
                 "Original publication binding changed");
         if (projection.descriptor().path("execution_status").asText().equals("not_started")) {
             require("NOT_STARTED".equals(row.get("state")), "Original not-started proof changed");
         } else {
-            require("REFERENCED".equals(row.get("producer_phase"))
-                            && source.outcomeRef().path("resourceId").asText().equals(row.get("admission_resource_id"))
-                            && ((Number) row.get("receipt_sequence")).longValue() == source.receiptSequence()
-                            && ((Number) row.get("receipt_revision")).longValue() == source.journalRevision(),
+            require(
+                    "REFERENCED".equals(row.get("producer_phase"))
+                            && source.outcomeRef()
+                                    .path("resourceId")
+                                    .asText()
+                                    .equals(row.get("admission_resource_id"))
+                            && ((Number) row.get("receipt_sequence")).longValue()
+                                    == source.receiptSequence()
+                            && ((Number) row.get("receipt_revision")).longValue()
+                                    == source.journalRevision(),
                     "Original publication receipt changed");
             if (((Number) row.get("quarantine_mark")).intValue() != 0
-                    && (!projection.artifacts().isEmpty() || projection.descriptor().has("preview"))) {
+                    && (!projection.artifacts().isEmpty()
+                            || projection.descriptor().has("preview"))) {
                 throw new IllegalStateException("Publication was quarantined during projection");
             }
         }
     }
 
     public Optional<JsonNode> findResult(String tenant, String session, String itemId) {
-        return jdbc.query("SELECT result_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND scope_key = ?"
-                        + " AND tenant_id = ? AND session_id = ? AND item_id = ? AND state = 'READY'",
+        return jdbc.query(
+                        "SELECT result_json FROM ma_operation WHERE operation_kind ="
+                            + " 'TOOL_RESULT_PROJECTION' AND scope_key = ? AND tenant_id = ? AND"
+                            + " session_id = ? AND item_id = ? AND state = 'READY'",
                 (r, n) -> parse(r.getString(1)), scope(tenant, session), tenant, session, itemId).stream().findFirst();
     }
 
     public Optional<Artifact> findArtifact(String tenant, String session, String artifactId) {
-        return jdbc.query("SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r"
-                        + " ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
-                        + " AND a.artifact_id = ? AND r.state = 'READY'", this::artifact,
-                scope(tenant, session), tenant, session, artifactId).stream().findFirst();
+        return jdbc
+                .query(
+                        "SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r ON"
+                            + " r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id ="
+                            + " a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND"
+                            + " r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
+                        this::artifact,
+                        scope(tenant, session),
+                        tenant,
+                        session,
+                        artifactId)
+                .stream()
+                .findFirst();
     }
 
     public ArtifactPage listArtifacts(String tenant, String session, Long watermark, Long beforeSequence,
             String beforeId, int limit) {
-        require(limit >= 1 && limit <= 100 && (beforeSequence == null) == (beforeId == null), "Invalid artifact page");
-        long through = watermark == null ? jdbc.queryForObject("SELECT COALESCE(MAX(creation_sequence), 0)"
-                + " FROM ma_artifact WHERE scope_key = ?", Long.class, scope(tenant, session)) : watermark;
+        require(
+                limit >= 1 && limit <= 100 && (beforeSequence == null) == (beforeId == null),
+                "Invalid artifact page");
+        long through =
+                watermark == null
+                        ? jdbc.queryForObject(
+                                "SELECT COALESCE(MAX(creation_sequence), 0)"
+                                        + " FROM ma_artifact WHERE scope_key = ?",
+                                Long.class,
+                                scope(tenant, session))
+                        : watermark;
         require(through >= 0, "Invalid artifact watermark");
         List<Object> args = new ArrayList<>(List.of(scope(tenant, session), tenant, session, through));
         String cursor = "";
         if (beforeSequence != null) {
-            cursor = " AND (a.creation_sequence < ? OR (a.creation_sequence = ? AND a.artifact_id < ?))";
+            cursor =
+                    " AND (a.creation_sequence < ? OR (a.creation_sequence = ? AND a.artifact_id <"
+                            + " ?))";
             args.add(beforeSequence);
             args.add(beforeSequence);
             args.add(beforeId);
         }
         args.add(limit + 1);
-        List<Artifact> rows = jdbc.query("SELECT a.*, r.request_json FROM ma_artifact a"
-                        + " JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ?"
-                        + " AND r.tenant_id = ? AND r.session_id = ? AND a.creation_sequence <= ?"
-                        + " AND r.state = 'READY'" + cursor
-                        + " ORDER BY a.creation_sequence DESC, a.artifact_id DESC LIMIT ?", this::artifact, args.toArray());
+        List<Artifact> rows =
+                jdbc.query(
+                        "SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r ON"
+                            + " r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id ="
+                            + " a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND"
+                            + " r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
+                                + cursor
+                                + " ORDER BY a.creation_sequence DESC, a.artifact_id DESC LIMIT ?",
+                        this::artifact,
+                        args.toArray());
         return new ArtifactPage(List.copyOf(rows.subList(0, Math.min(rows.size(), limit))), through, rows.size() > limit);
     }
 
     private Artifact artifact(ResultSet row, int index) throws SQLException {
-        return new Artifact(parse(row.getString("descriptor_json")), readSource(row.getString("request_json")),
-                row.getString("publication_id"), parse(row.getString("binding_json")),
-                parse(row.getString("manifest_ref_json")), row.getString("stream_id"), row.getLong("creation_sequence"));
+        return new Artifact(
+                parse(row.getString("descriptor_json")),
+                readSource(row.getString("request_json")),
+                row.getString("publication_id"),
+                parse(row.getString("binding_json")),
+                parse(row.getString("manifest_ref_json")),
+                row.getString("stream_id"),
+                row.getLong("creation_sequence"));
     }
 
     public static String identity(String prefix, String... values) {
@@ -545,20 +619,45 @@ public class ManagedToolResultStore {
 
     private static Source source(String tenant, String workspace, String session, long revision, JsonNode event) {
         JsonNode key = event.path("sessionKey");
-        require(tenant.equals(key.path("tenantId").asText()) && workspace.equals(key.path("workspaceId").asText())
-                        && session.equals(key.path("sessionId").asText()) && event.path("sequence").asLong(-1) > 0,
+        require(
+                tenant.equals(key.path("tenantId").asText())
+                        && workspace.equals(key.path("workspaceId").asText())
+                        && session.equals(key.path("sessionId").asText())
+                        && event.path("sequence").asLong(-1) > 0,
                 "Receipt scope or sequence conflicts");
         JsonNode payload = event.path("payload");
         String execution = payload.path("executionCallId").asText();
         JsonNode outcome = canonical(payload.path("toolOutcomeRef"));
         JsonNode result = canonical(payload.path("resultRef"));
         JsonNode resources = canonical(payload.path("resources"));
-        String identityKey = execution.isEmpty() ? "sequence:" + event.path("sequence").asText() : execution;
+        String identityKey =
+                execution.isEmpty() ? "sequence:" + event.path("sequence").asText() : execution;
         String id = identity("result", "1", tenant, workspace, session, identityKey);
-        String digest = identity("source", tenant, workspace, session, execution, Long.toString(revision),
-                event.path("sequence").asText(), outcome.toString(), result.toString(), resources.toString()).substring(7);
-        return new Source(id, tenant, workspace, session, execution, revision, event.path("sequence").asLong(),
-                outcome, result, resources, digest);
+        String digest =
+                identity(
+                                "source",
+                                tenant,
+                                workspace,
+                                session,
+                                execution,
+                                Long.toString(revision),
+                                event.path("sequence").asText(),
+                                outcome.toString(),
+                                result.toString(),
+                                resources.toString())
+                        .substring(7);
+        return new Source(
+                id,
+                tenant,
+                workspace,
+                session,
+                execution,
+                revision,
+                event.path("sequence").asLong(),
+                outcome,
+                result,
+                resources,
+                digest);
     }
 
     private static JsonNode canonical(JsonNode value) {

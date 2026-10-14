@@ -65,8 +65,12 @@ publication read，此新原生边界在对象 I/O 前拒绝它；不转换、�
 
 ## 持久记录
 
-新增 migration 创建 `qwen_csi_resource_read`，不修改已发布 Flyway migration，
-不回填权限。每次入场生成全新 UUID，也用作临时 `qwen_output_read_lease` 的 ID。
+原生读取使用主干标准 `ma_request_receipt` 表，namespace 为 `SESSION_COMMAND`，
+operation 为 `CSI_RESOURCE_READ`，scope 为 `SESSION`。回执主键是
+`key("csi-read", readId)`，scope key 是 `key("csi-read", tenant, session)`。
+每次入场生成全新 UUID，也用作临时 `ma_read_lease` 的 ID。初始 JSON 为明确的
+23 字段；完成仅新增 `ended_at` 和 `outcome_code`，request digest 始终是初始
+原始 JSON 的 SHA256。不修改已发布 Flyway migration，不回填权限。
 从锁定数据库保存以下值，不采信调用者提供的 origin JSON：
 
 - Tenant、Workspace、Session、原 request key、binding ID、Runtime generation

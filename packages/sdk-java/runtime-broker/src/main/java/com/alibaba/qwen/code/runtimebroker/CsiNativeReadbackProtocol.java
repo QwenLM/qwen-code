@@ -17,6 +17,8 @@ public final class CsiNativeReadbackProtocol {
     public static final String EXECUTE_PATH = ManagedCsiFilesProtocol.PREFIX + "/execute";
     public static final int REQUEST_LIMIT = 16 * 1024;
     public static final int RESPONSE_LIMIT = 8 * 1024 * 1024;
+    public static final int EXECUTION_RESULT_LIMIT = 1024 * 1024;
+    public static final int EXECUTION_RESPONSE_LIMIT = EXECUTION_RESULT_LIMIT + 16 * 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> REQUEST = Set.of("protocolVersion", "requestId", "action", "identity",
             "context", "installedContext", "subject");
@@ -41,7 +43,7 @@ public final class CsiNativeReadbackProtocol {
     public static Map<String, Object> executeResult(byte[] bytes, Map<String, Object> request) {
         request(request);
         require("execute".equals(request.get("action")));
-        var value = ManagedCsiFilesProtocol.parse(bytes, 64 * 1024);
+        var value = ManagedCsiFilesProtocol.parse(bytes, EXECUTION_RESPONSE_LIMIT);
         var fields = new HashSet<>(REQUEST);
         fields.addAll(Set.of("state", "result"));
         closed(value, fields);
@@ -50,6 +52,7 @@ public final class CsiNativeReadbackProtocol {
         }
         require("settled".equals(value.get("state")));
         var result = map(value.get("result"));
+        require(JsonCodec.encode(result).length <= EXECUTION_RESULT_LIMIT);
         closed(result, result.containsKey("error") ? Set.of("executionStatus", "responseParts", "error")
                 : Set.of("executionStatus", "responseParts"));
         require(Set.of("success", "error", "cancelled", "not_started").contains(result.get("executionStatus")));

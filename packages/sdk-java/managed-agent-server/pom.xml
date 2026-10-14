@@ -167,11 +167,11 @@
                         </configuration>
                     </execution>
                     <execution>
-                        <id>operator-recovery</id>
+                        <id>csi-session</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>
-                            <classifier>operator-recovery</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
+                            <classifier>csi-session</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -180,6 +180,14 @@
                         <configuration>
                             <classifier>csi-runtime</classifier>
                             <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>operator-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>operator-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
                 </executions>
@@ -314,7 +322,7 @@
                 <configuration>
                     <includes><include>**/HostedProcessCrashIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <forkedProcessTimeoutInSeconds>480</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>720</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

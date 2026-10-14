@@ -412,8 +412,12 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(resource.bytes()).isEqualTo(jdbc.queryForObject("SELECT inline_bytes"
                 + " FROM ma_resource WHERE resource_id = ?", byte[].class, checkpoint));
         assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", sessionId)).isEqualTo(head);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_resource_read"
-                + " WHERE resource_id = ? AND state = 'RETURNED' AND outcome_code = 'verified'", Long.class, checkpoint)).isEqualTo(1);
+        var readRows = jdbc.queryForList("SELECT result_json FROM ma_request_receipt"
+                + " WHERE namespace = 'SESSION_COMMAND' AND operation = 'CSI_RESOURCE_READ' AND state = 'RETURNED'");
+        assertThat(readRows).hasSize(1);
+        var readEvidence = new ObjectMapper().readTree((String) readRows.getFirst().get("result_json"));
+        assertThat(readEvidence.path("resource_id").textValue()).isEqualTo(checkpoint);
+        assertThat(readEvidence.path("outcome_code").textValue()).isEqualTo("verified");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Long.class)).isZero();
         var before = allRows();
         String definition = nativeFixture.path("commits").get(0).path("request").path("resources").get(0).path("resourceId").textValue();
@@ -439,7 +443,7 @@ class WorkspaceCsiNativeActivationGate {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session",
-                "ma_session_head", "ma_csi_resource_read");
+                "ma_session_head", "ma_request_receipt");
         return rows;
     }
 

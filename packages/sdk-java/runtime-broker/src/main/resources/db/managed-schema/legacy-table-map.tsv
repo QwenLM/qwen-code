@@ -64,6 +64,5 @@ qwen_managed_automation_occurrence	ma_schedule_occurrence
 qwen_managed_automation_command	ma_request_receipt
 
 # K2 persistence domains added after the canonical main baseline.
-qwen_csi_resource_read	ma_csi_resource_read
 managed_workspace_csi_source	ma_csi_source
 managed_workspace_csi_physical	ma_csi_physical

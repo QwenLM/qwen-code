@@ -90,7 +90,7 @@ class ManagedAgentCsiMutationMySqlIT {
                     var before = allTables(jdbc, json);
                     originalLock.setAutoCommit(false);
                     try (var query = originalLock.prepareStatement("SELECT csi_guard FROM ma_session"
-                            + " FORCE INDEX (ix_ma_session_csi_guard)"
+                            + " FORCE INDEX (ma_session_csi_guard_idx)"
                             + " WHERE tenant_id = 'tenant' AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
                         query.setQueryTimeout(5);
                         query.setString(1, original.sessionId());
@@ -139,7 +139,7 @@ class ManagedAgentCsiMutationMySqlIT {
             result.put(table, json.valueToTree(rows));
         }
         assertThat(result).containsKeys("ma_session",
-                "ma_session_head", "ma_csi_resource_read");
+                "ma_session_head", "ma_request_receipt");
         return result;
     }
 }

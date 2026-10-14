@@ -12,7 +12,7 @@ final class ManagedLegacySessionGuard {
         return Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection -> {
             String product = connection.getMetaData().getDatabaseProductName();
             String index = "MySQL".equals(product) || "MariaDB".equals(product)
-                    ? " FORCE INDEX (ix_ma_session_csi_guard)" : "";
+                    ? " FORCE INDEX (ma_session_csi_guard_idx)" : "";
             try (var statement = connection.prepareStatement("SELECT csi_guard FROM ma_session" + index
                     + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
                 statement.setQueryTimeout(10);
@@ -27,6 +27,12 @@ final class ManagedLegacySessionGuard {
 
     static void requireLegacyMutation(JdbcTemplate jdbc, String tenantId, String sessionId) {
         if (isPrivate(jdbc, tenantId, sessionId)) {
+            throw new ApiException(HttpStatus.CONFLICT, "csi_managed_mutation_unavailable",
+                    "The private CSI Session does not admit legacy Managed Agent mutations.");
+        }
+    }
+    static void requireLegacyMutation(boolean privateSession) {
+        if (privateSession) {
             throw new ApiException(HttpStatus.CONFLICT, "csi_managed_mutation_unavailable",
                     "The private CSI Session does not admit legacy Managed Agent mutations.");
         }

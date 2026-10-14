@@ -28,8 +28,6 @@ CREATE TABLE ma_session (
     agent_revision VARCHAR(128) NOT NULL DEFAULT '1',
     approval_mode VARCHAR(32) NOT NULL DEFAULT 'yolo',
     tool_profile VARCHAR(64) DEFAULT 'hosted-workspace-files/1',
-    runtime_request_key VARCHAR(64),
-    csi_guard BOOLEAN GENERATED ALWAYS AS (CASE WHEN tool_profile = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL THEN TRUE ELSE FALSE END),
     creator_actor_key VARBINARY(2048) NULL,
     owner_actor_key VARBINARY(2048) NULL,
     parent_session_id VARBINARY(512) NULL,
@@ -54,8 +52,6 @@ CREATE TABLE ma_session (
     CONSTRAINT uq_ma_session_hash UNIQUE (tenant_key, session_key),
     CONSTRAINT uq_ma_session_scope UNIQUE (session_scope_key)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE UNIQUE INDEX ix_ma_session_csi_guard ON ma_session (tenant_id, session_id, csi_guard);
 
 CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, updated_at, session_id);
 
@@ -601,19 +597,7 @@ CREATE TABLE ma_operation (
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
     completed_at BIGINT,
-    progress_format VARCHAR(64),
-    progress_version BIGINT,
-    progress_stage VARCHAR(16),
-    settlement_deadline_ms BIGINT,
-    frozen_request_bytes LONGBLOB,
-    frozen_request_sha256 CHAR(64),
-    cut_bytes LONGBLOB,
-    cut_sha256 CHAR(64),
-    finalize_receipt_bytes LONGBLOB,
-    finalize_receipt_sha256 CHAR(64),
-    csi_retirement_target_key CHAR(64) GENERATED ALWAYS AS (CASE WHEN operation_kind = 'CSI_RETIREMENT' THEN target_key ELSE NULL END),
     PRIMARY KEY (operation_key),
-    CONSTRAINT uq_ma_csi_retirement_target UNIQUE (csi_retirement_target_key, target_revision),
     CONSTRAINT uq_ma_operation_identity UNIQUE (scope_key, operation_kind, target_key, operation_id),
     CONSTRAINT uq_ma_publication_operation UNIQUE (scope_key, publication_id, publication_command_id),
     CONSTRAINT uq_ma_operation_public_request UNIQUE (scope_key, operation_kind, target_key, actor_digest, idempotency_digest),
@@ -800,7 +784,6 @@ CREATE TABLE ma_runtime_binding (
     last_health_at DATETIME(6),
     last_reconciled_at DATETIME(6),
     last_active_at DATETIME(6) NOT NULL,
-    first_activation_journal_revision BIGINT,
     CONSTRAINT uq_runtime_binding_generation
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
@@ -862,7 +845,6 @@ CREATE TABLE ma_tool_execution (
     loss_evidence_id VARBINARY(2048),
     authorized_dispatch_generation BIGINT,
     authorized_binding_version BIGINT,
-    native_authorization_json LONGTEXT,
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session
@@ -1115,81 +1097,6 @@ CREATE INDEX ix_ma_operation_result_due ON ma_operation (operation_kind, state, 
 CREATE INDEX ix_ma_operation_result_lease ON ma_operation (operation_kind, state, claim_until, operation_id);
 
 CREATE INDEX ix_ma_hook_definition ON ma_session_record (session_scope_key, hook_definition_hash, record_kind);
-
-CREATE TABLE ma_csi_resource_read (
-    read_id CHAR(36) NOT NULL,
-    tenant_id VARBINARY(512) NOT NULL,
-    workspace_id VARBINARY(2048) NOT NULL,
-    session_id VARBINARY(512) NOT NULL,
-    request_key CHAR(64) NOT NULL,
-    binding_id VARBINARY(2048) NOT NULL,
-    runtime_generation BIGINT NOT NULL,
-    binding_version BIGINT NOT NULL,
-    writer_id VARBINARY(2048) NOT NULL,
-    writer_generation BIGINT NOT NULL,
-    writer_token_hash CHAR(64) NOT NULL,
-    journal_revision BIGINT NOT NULL,
-    activation_id VARBINARY(2048),
-    activation_epoch BIGINT NOT NULL,
-    resource_id VARBINARY(2048) NOT NULL,
-    kind VARBINARY(2048) NOT NULL,
-    schema_version INT NOT NULL,
-    byte_length BIGINT NOT NULL,
-    sha256 CHAR(64) NOT NULL,
-    storage_kind VARCHAR(32) NOT NULL,
-    resource_state VARCHAR(32) NOT NULL,
-    state VARCHAR(16) NOT NULL,
-    started_at BIGINT NOT NULL,
-    delivery_expires_at BIGINT NOT NULL,
-    ended_at BIGINT,
-    outcome_code VARCHAR(128),
-    PRIMARY KEY (read_id),
-    CONSTRAINT ck_ma_csi_read_state CHECK ((CASE state WHEN 'OPEN' THEN 4 WHEN 'RETURNED' THEN 8 WHEN 'UNKNOWN' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
-    CONSTRAINT ck_ma_csi_read_end CHECK (
-        (state = 'RETURNED' AND ended_at IS NOT NULL)
-        OR (state IN ('OPEN', 'UNKNOWN') AND ended_at IS NULL)
-    )
-) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_ma_csi_read_binding ON ma_csi_resource_read (binding_id, runtime_generation, state, read_id);
-
-CREATE TABLE ma_csi_source (
-    binding_id VARBINARY(2048) NOT NULL,
-    runtime_generation BIGINT NOT NULL,
-    physical_key CHAR(64) NOT NULL,
-    reservation_id CHAR(36) NOT NULL,
-    reservation_revision BIGINT NOT NULL,
-    configuration_json LONGTEXT NOT NULL,
-    phase VARCHAR(16) NOT NULL,
-    record_version BIGINT NOT NULL,
-    arm_bytes LONGBLOB NOT NULL,
-    arm_sequence BIGINT NOT NULL,
-    arm_hash CHAR(64) NOT NULL,
-    pod_uid CHAR(36),
-    gated_spec_sha256 CHAR(64),
-    bound_bytes LONGBLOB,
-    bound_sequence BIGINT,
-    bound_hash CHAR(64),
-    publication_bytes LONGBLOB,
-    publication_sequence BIGINT,
-    publication_hash CHAR(64),
-    PRIMARY KEY (binding_id)
-) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_ma_csi_source_physical ON ma_csi_source (physical_key);
-
-CREATE TABLE ma_csi_physical (
-    retirement_id CHAR(36) NOT NULL,
-    binding_id VARBINARY(2048) NOT NULL,
-    physical_key CHAR(64) NOT NULL,
-    record_version BIGINT NOT NULL,
-    record_bytes LONGBLOB NOT NULL,
-    record_sha256 CHAR(64) NOT NULL,
-    PRIMARY KEY (retirement_id)
-) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-
-CREATE UNIQUE INDEX uq_ma_csi_physical_binding ON ma_csi_physical (binding_id);
-CREATE INDEX ix_ma_csi_physical_key ON ma_csi_physical (physical_key);
 
 
 -- Runtime history cleanup uses these predicates without scanning active families.

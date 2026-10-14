@@ -855,8 +855,8 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
-        assertThat(snapshot.tables()).hasSize(34);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(764);
+        assertThat(snapshot.tables()).hasSize(33);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(738);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1054,15 +1054,9 @@ class WorkspaceCsiApplicationInventoryTest {
         }
         insertExecution("foreign", "SETTLED", "foreign-binding", "foreign-session", brokerHash(session));
         for (String state : List.of("OPEN", "UNKNOWN", "RETURNED")) {
-            jdbc.update("INSERT INTO ma_csi_resource_read (read_id, tenant_id, workspace_id, session_id, request_key, binding_id,"
-                    + " runtime_generation, binding_version, writer_id, writer_generation, writer_token_hash, journal_revision,"
-                    + " activation_id, activation_epoch, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
-                    + " resource_state, state, started_at, delivery_expires_at, ended_at, outcome_code)"
-                    + " VALUES (?, 'tenant', 'workspace', ?, ?, ?, ?, 1, 'writer', 1, ?, 1, 'activation', 1, 'resource',"
-                    + " 'inventory-fixture', 1, ?, ?, 'MYSQL_INLINE', 'REFERENCED', ?, 1, 3, ?, ?)",
-                    state, session, binding.getRequest().requestKey(), binding.getBindingId(), binding.getGeneration(),
-                    "a".repeat(64), resource.length, sha(resource), state, state.equals("RETURNED") ? 2L : null,
-                    state.equals("RETURNED") ? "verified" : null);
+            insertReadReceipt(UUID.randomUUID().toString(), state, "inventory-fixture", resource.length, sha(resource),
+                    "activation", 3, "RETURNED".equals(state) ? 2L : null,
+                    "RETURNED".equals(state) ? "verified" : "UNKNOWN".equals(state) ? "jdbc_fetch_unknown" : null);
         }
         var snapshot = inspect();
         for (String table : List.of("ma_session_head", "ma_session_journal_tx",
@@ -1073,14 +1067,15 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_session_journal_tx").rows().getFirst().binary("record_bytes")).isEqualTo(record);
         assertThat(snapshot.table("ma_resource").rows().getFirst().binary("inline_bytes")).isEqualTo(resource);
         assertThat(snapshot.table("ma_tool_execution").rows()).hasSize(8);
-        assertThat(snapshot.table("ma_csi_resource_read").rows()).hasSize(3);
+        assertThat(snapshot.table("ma_request_receipt").rows().stream()
+                .filter(row -> "CSI_RESOURCE_READ".equals(row.text("operation")))).hasSize(3);
         var settled = snapshot.table("ma_tool_execution").rows().stream()
                 .filter(row -> row.text("execution_call_id").equals("SETTLED")).findFirst().orElseThrow();
         assertThat(settled.fields()).hasSize(28);
         assertThat(settled.text("native_authorization_json")).isEqualTo("{}");
         assertThat(settled.key()).containsExactly(settled.cell("execution_call_id_hash"));
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_tool_execution"));
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_csi_resource_read"));
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt"));
         assertThat(snapshot.rowCount()).isEqualTo(snapshot.tables().stream().mapToInt(table -> table.rows().size()).sum());
         assertThat(snapshot.byteCount()).isEqualTo(snapshot.tables().stream()
                 .flatMap(table -> table.rows().stream()).mapToLong(row -> row.bytes().length).sum());
@@ -1179,7 +1174,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var valueOnly = WorkspaceCsiApplicationInventory.expectedImage(observed.tables());
         var restored = WorkspaceCsiApplicationInventory.restoreCanonical(valueOnly.bytes());
         assertThat(restored.bytes()).isEqualTo(valueOnly.bytes());
-        assertThat(restored.tables()).hasSize(34);
+        assertThat(restored.tables()).hasSize(33);
         assertThat(restored.rowCount()).isEqualTo(observed.rowCount());
         assertThat(observed.blockers()).isNotEmpty();
         byte[] trailing = java.util.Arrays.copyOf(valueOnly.bytes(), valueOnly.bytes().length + 1);
@@ -1537,7 +1532,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var result = readKeys(expected, queries);
         assertThat(result.blockers()).isEmpty();
         assertThat(result.bytes()).isEqualTo(expected.bytes());
-        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).hasSize(34);
+        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).hasSize(33);
         assertThat(queries).noneMatch(sql -> sql.contains("FOR UPDATE"));
         assertThat(queries).anyMatch(sql -> sql.startsWith("SELECT t.* FROM ma_storage_owner t WHERE 1 = 0"));
         assertThat(queries).noneMatch(sql -> sql.contains("storage_key = ?") || sql.contains("physical_key = ?"));
@@ -1649,8 +1644,9 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("unsupported_historical_payload"));
     }
 
-    @Test
-    void referencedReaderReassemblesSplitUtf8BeforeCheckingMessageReferences() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"message", "tool-outcome"})
+    void referencedReaderReassemblesSplitUtf8BeforeCheckingReferences(String format) throws Exception {
         var expected = historicalKeys();
         jdbc.update("DELETE FROM ma_storage_owner");
         byte[] body = new ObjectMapper().createObjectNode().put("padding", "a" + "\uD83D\uDE00".repeat(18000))
@@ -1659,15 +1655,15 @@ class WorkspaceCsiApplicationInventoryTest {
         byte[] last = java.util.Arrays.copyOfRange(body, first.length, body.length);
         assertThatThrownBy(() -> StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
                 .decode(java.nio.ByteBuffer.wrap(first))).isInstanceOf(java.nio.charset.CharacterCodingException.class);
-        foreignResource("a-part", "managed-message-part", first);
-        foreignResource("b-part", "managed-message-part", last);
+        foreignResource("a-part", "managed-" + format + "-part", first);
+        foreignResource("b-part", "managed-" + format + "-part", last);
         var manifest = new ObjectMapper().createObjectNode();
         var parts = manifest.putArray("parts");
         for (var entry : Map.of("a-part", first, "b-part", last).entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
-            parts.addObject().put("resourceId", entry.getKey()).put("kind", "managed-message-part").put("schemaVersion", 1)
+            parts.addObject().put("resourceId", entry.getKey()).put("kind", "managed-" + format + "-part").put("schemaVersion", 1)
                     .put("byteLength", entry.getValue().length).put("digest", sha(entry.getValue()));
         }
-        foreignResource("z-manifest", "managed-message-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
+        foreignResource("z-manifest", "managed-" + format + "-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
         var found = readReferences(expected);
         assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_resource")
                 && blocker.code().equals("extra_historical_reference"));
@@ -1676,13 +1672,54 @@ class WorkspaceCsiApplicationInventoryTest {
                 .put("sessionId", "foreign-session").toString().getBytes(StandardCharsets.UTF_8);
         jdbc.update("DELETE FROM ma_resource");
         byte[] end = java.util.Arrays.copyOfRange(unrelated, first.length, unrelated.length);
-        foreignResource("a-part", "managed-message-part", first);
-        foreignResource("b-part", "managed-message-part", end);
+        foreignResource("a-part", "managed-" + format + "-part", first);
+        foreignResource("b-part", "managed-" + format + "-part", end);
         ((com.fasterxml.jackson.databind.node.ObjectNode) parts.get(1)).put("byteLength", end.length).put("digest", sha(end));
-        foreignResource("z-manifest", "managed-message-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
+        foreignResource("z-manifest", "managed-" + format + "-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(readReferences(expected).blockers()).isEmpty();
+        byte[] validManifest = manifest.toString().getBytes(StandardCharsets.UTF_8);
+        parts.set(1, parts.get(0).deepCopy());
+        byte[] repeated = manifest.toString().getBytes(StandardCharsets.UTF_8);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE resource_id = X'7a2d6d616e6966657374'",
+                repeated, repeated.length, sha(repeated));
+        assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE resource_id = X'7a2d6d616e6966657374'",
+                validManifest, validManifest.length, sha(validManifest));
+        jdbc.update("UPDATE ma_resource SET tenant_id = 'changed' WHERE resource_id = X'612d70617274'");
+        assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
+        jdbc.update("UPDATE ma_resource SET tenant_id = 'foreign' WHERE resource_id = X'612d70617274'");
         jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'7a2d6d616e6966657374'");
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
+    }
+
+    @Test
+    void liveInventoryExpandsCompleteOutcomeBytesAndRefusesAnOrphanPart() throws Exception {
+        byte[] body = new ObjectMapper().createObjectNode().put("padding", "a" + "\uD83D\uDE00".repeat(18000))
+                .put("sessionId", session).toString().getBytes(StandardCharsets.UTF_8);
+        byte[] first = java.util.Arrays.copyOfRange(body, 0, 60 * 1024);
+        byte[] last = java.util.Arrays.copyOfRange(body, first.length, body.length);
+        var manifest = new ObjectMapper().createObjectNode();
+        var parts = manifest.putArray("parts");
+        for (var entry : Map.of("a-part", first, "b-part", last).entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+            parts.addObject().put("resourceId", entry.getKey()).put("kind", "managed-tool-outcome-part").put("schemaVersion", 1)
+                    .put("byteLength", entry.getValue().length).put("digest", sha(entry.getValue()));
+            nativeChunkResource(entry.getKey(), "managed-tool-outcome-part", entry.getValue());
+        }
+        nativeChunkResource("z-manifest", "managed-tool-outcome-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
+        var complete = inspect();
+        assertThat(complete.table("ma_resource").rows()).hasSize(3);
+        assertThat(complete.blockers()).noneMatch(blocker -> blocker.code().equals("malformed_native_resource")
+                || blocker.code().equals("invalid_native_chunks"));
+        jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'7a2d6d616e6966657374'");
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_resource")
+                && blocker.code().equals("invalid_original_association"));
+    }
+
+    private void nativeChunkResource(String id, String kind, byte[] bytes) {
+        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
+                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,publish_command_id,state,created_at)"
+                        + " VALUES (?,?,'tenant','workspace',?,?,?,1,?,?,'MYSQL_INLINE',?,'publish','REFERENCED',CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.resourceKey(sessionScope(), id), sessionScope(), session, id, kind, bytes.length, sha(bytes), bytes);
     }
 
     private void foreignResource(String id, String kind, byte[] bytes) {
@@ -1801,12 +1838,8 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void referencedReaderFindsReadLeaseAliasesUsingVerifiedOriginalReadIds() throws Exception {
         String readId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ma_csi_resource_read (read_id, tenant_id, workspace_id, session_id, request_key, binding_id,"
-                + " runtime_generation, binding_version, writer_id, writer_generation, writer_token_hash, journal_revision, activation_epoch,"
-                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, resource_state, state, started_at, delivery_expires_at, ended_at)"
-                + " VALUES (?, 'tenant', 'workspace', ?, ?, ?, 1, 1, 'writer', 1, ?, 1, 1, 'resource', 'managed-root', 1, 2, ?,"
-                + " 'MYSQL_INLINE', 'REFERENCED', 'RETURNED', 1, 2, 2)", readId, session, binding.getRequest().requestKey(),
-                binding.getBindingId(), "a".repeat(64), sha("{}".getBytes(StandardCharsets.UTF_8)));
+        insertReadReceipt(readId, "RETURNED", "managed-root", 2, sha("{}".getBytes(StandardCharsets.UTF_8)),
+                null, 2, 2L, "verified");
         var expected = historicalKeys();
         jdbc.update("DELETE FROM ma_storage_owner");
         String unrelated = UUID.randomUUID().toString();
@@ -1818,6 +1851,58 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_read_lease")
                 && blocker.code().equals("extra_historical_reference"));
         assertThat(found.table("ma_read_lease").rows()).isEmpty();
+    }
+
+    @Test
+    void nativeReceiptAliasesClosedJsonAndInitialDigestRemainMandatory() throws Exception {
+        String id = UUID.randomUUID().toString();
+        insertReadReceipt(id, "RETURNED", "managed-root", 2, sha("{}".getBytes(StandardCharsets.UTF_8)),
+                null, 3, 2L, "verified");
+        var original = jdbc.queryForMap("SELECT * FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'");
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt")
+                && blocker.code().equals("invalid_typed_association"));
+        String body = (String) original.get("result_json");
+        var unknown = new ObjectMapper().readTree(body).deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) unknown).put("unexpected", "value");
+        var coerced = new ObjectMapper().readTree(body).deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) coerced).put("binding_version", "1");
+        for (Object[] fault : List.of(
+                new Object[]{"b".repeat(64), body, original.get("request_digest")},
+                new Object[]{original.get("scope_key"), unknown.toString(), original.get("request_digest")},
+                new Object[]{original.get("scope_key"), coerced.toString(), original.get("request_digest")},
+                new Object[]{original.get("scope_key"), body, sha(body.getBytes(StandardCharsets.UTF_8))})) {
+            jdbc.update("UPDATE ma_request_receipt SET scope_key = ?, result_json = ?, request_digest = ?"
+                    + " WHERE receipt_key = ?", fault[0], fault[1], fault[2], original.get("receipt_key"));
+            var refused = inspect();
+            assertThat(refused.blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt")
+                    && blocker.code().equals("invalid_typed_association"));
+            assertThat(refused.blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt")
+                    && blocker.code().equals("invalid_native_read_receipt"));
+            assertThat(jdbc.queryForList("SELECT * FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'")).hasSize(1);
+        }
+    }
+
+    private void insertReadReceipt(String id, String state, String kind, long length, String contentDigest,
+            String activation, long expires, Long ended, String outcome) {
+        var value = new ObjectMapper().createObjectNode()
+                .put("read_id", id).put("tenant_id", "tenant").put("workspace_id", "workspace").put("session_id", session)
+                .put("request_key", binding.getRequest().requestKey()).put("binding_id", binding.getBindingId())
+                .put("runtime_generation", binding.getGeneration()).put("binding_version", 1)
+                .put("writer_id", "writer").put("writer_generation", 1).put("writer_token_hash", "a".repeat(64))
+                .put("journal_revision", 1).put("activation_id", activation).put("activation_epoch", 1)
+                .put("resource_id", "resource").put("kind", kind).put("schema_version", 1).put("byte_length", length)
+                .put("sha256", contentDigest).put("storage_kind", "MYSQL_INLINE").put("resource_state", "REFERENCED")
+                .put("started_at", 1).put("delivery_expires_at", expires);
+        String requestDigest = sha(value.toString().getBytes(StandardCharsets.UTF_8));
+        if (!"OPEN".equals(state)) { value.put("ended_at", ended).put("outcome_code", outcome); }
+        jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
+                        + "idempotency_key,idempotency_digest,request_digest,operation,state,session_id,result_json,created_at,updated_at)"
+                        + " VALUES (?,'SESSION_COMMAND',?,'tenant','SESSION',?,?,?,?,?,'CSI_RESOURCE_READ',?,?,?,1,?)",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("csi-read", id),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant"),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("csi-read", "tenant", session), session,
+                id, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(id), requestDigest,
+                state, session, value.toString(), ended == null ? 1L : ended);
     }
 
     private WorkspaceCsiApplicationInventory.Snapshot readReferences(WorkspaceCsiApplicationInventory.Snapshot expected) throws Exception {
