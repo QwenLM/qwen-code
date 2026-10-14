@@ -110,7 +110,10 @@ public final class StoreModels {
     }
 
     public record RenameDelivery(String tenantId, String sessionId,
-            String idempotencyKey, String title, long revision, int attemptCount) {
+            String idempotencyKey, String title, long revision, int attemptCount, long claimGeneration) {
+        public RenameDelivery(String tenantId, String sessionId, String idempotencyKey, String title, long revision, int attemptCount) {
+            this(tenantId, sessionId, idempotencyKey, title, revision, attemptCount, 0);
+        }
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
@@ -221,6 +224,8 @@ public final class StoreModels {
             long firstSequence, long lastSequence, long createdAt,
             long updatedAt, long revision, List<ItemPartRecord> content) {
     }
+
+    public record SnapshotPage(List<ItemRecord> items, boolean hasMore, String nextCursor, long coveredSequence) {}
 
     public record SnapshotRecord(String tenantId, String sessionId,
             long version, long coveredSequence, List<ItemRecord> items,

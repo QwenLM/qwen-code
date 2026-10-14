@@ -7,6 +7,7 @@
 import {
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
+  confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
 
 import {
@@ -1465,6 +1466,7 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private cleanupOwed = false;
+  private retiredOwnerResults = false;
   private uncertain = false;
   // Agent calls never write a `tool.intent` (the Broker pipeline they
   // bypass owns that marker), so completeHookResults needs the admitted
@@ -1988,6 +1990,64 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
+    if (
+      !saved?.pendingTurn &&
+      !saved?.pendingUndo &&
+      !this.hooks &&
+      !this.mcp &&
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE
+    ) {
+      this.uncertain = true;
+      try {
+        const authorization =
+          await this.session.authority.harnessRunAuthorization();
+        const items =
+          authorization.status === 'runnable'
+            ? authorization.checkpoint.tools?.items
+            : undefined;
+        if (
+          authorization.status === 'runnable' &&
+          authorization.checkpoint.identity.promptId === this.promptId &&
+          authorization.checkpoint.continuation.phase === 'results_ready' &&
+          items &&
+          items.length > 0 &&
+          items.every(
+            (item) =>
+              item.state === 'settled' &&
+              ['read_file', 'write_file', 'edit', 'glob'].includes(
+                item.toolName,
+              ),
+          ) &&
+          (saved ||
+            items.every((item) =>
+              ['read_file', 'glob'].includes(item.toolName),
+            )) &&
+          (await canSettleHostedFileHistory(this.session, {
+            pendingUndo: null,
+            pendingTurn: this.promptId,
+            pendingMessageId: items.at(-1)!.modelMessageId,
+          })) === null
+        ) {
+          for (const item of items)
+            await this.session.resources.read(item.outcomeRef!);
+          if (
+            await confirmReplacedHostedTurnOwner(
+              this.session,
+              this.promptId,
+              this.broker,
+              this.options,
+            )
+          ) {
+            this.retiredOwnerResults = true;
+            this.cleanupOwed = true;
+            this.uncertain = false;
+            return;
+          }
+        }
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+    }
     await this.acquire(true, signal);
     this.uncertain = false;
   }
@@ -1996,6 +2056,12 @@ export class HostedWorkspaceToolTurn {
     recovering = false,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.retiredOwnerResults) {
+      this.uncertain = false;
+      throw new Error(
+        'The original Runtime was retired. Submit remaining tool work in a new Turn.',
+      );
+    }
     this.uncertain = true;
     let waitAborted = false;
     try {
@@ -6824,11 +6890,12 @@ export class HostedWorkspaceToolTurn {
   async finish(): Promise<void> {
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
-    if (!this.acquired) return;
+    if (!this.acquired && !this.retiredOwnerResults) return;
     try {
       if (this.hookStopReason)
         await this.harness.settleHookStoppedRuntimeContinuation();
       else await this.harness.settleConsumedRuntimeContinuation();
+      if (!this.acquired) return;
       // Physical release follows the durable Turn terminal on the G3 stack.
       if (!this.mcp && !this.hooks && !this.cleanupOwed)
         await this.broker.release();
