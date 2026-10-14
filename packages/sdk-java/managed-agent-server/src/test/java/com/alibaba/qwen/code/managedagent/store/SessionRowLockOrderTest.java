@@ -130,7 +130,9 @@ class SessionRowLockOrderTest {
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
             "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
+            "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
+            "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
             "ToolPublicationRetentionStore.java",
@@ -155,7 +157,10 @@ class SessionRowLockOrderTest {
     // and the staged-placement delegation entered through the merge:
     // MessageDigest.digest at line ~352 names the local digest/1 on the
     // untypeable receiver, and the lockStagedPlacement/2 delegator names
-    // only itself; both candidates are JSON/delegation only.
+    // only itself; both candidates are JSON/delegation only. Main's private
+    // CSI work (#13996) adds the same shapes: data-source probes, the
+    // publication-placement lock delegator and the runtime-access record's
+    // accessors, none of which reaches either side.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
@@ -181,7 +186,8 @@ class SessionRowLockOrderTest {
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.storedTransaction/1")),
+                            Set.of("ManagedSessionStore.storedTransaction/1",
+                                    "ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedSnapshotStore.java",
                             Set.of("ItemReader.read/3",
                                     "ManagedSnapshotStore.decode/1",
@@ -211,6 +217,7 @@ class SessionRowLockOrderTest {
                     Map.entry("ToolPublicationDataStore.java",
                             Set.of("ToolPublicationDataStore.hash/1",
                                     "ToolPublicationDataStore.lockOriginalSettledResult/3",
+                                    "ToolPublicationDataStore.lockPublicationPlacement/2",
                                     "ToolPublicationDataStore.lockStagedPlacement/2",
                                     "ToolPublicationDataStore.requireStagedCall/2",
                                     "ToolPublicationDataStore.usesDataSource/1",
@@ -231,6 +238,10 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
+                    Map.entry("WorkspaceCsiRuntimeAccess.java",
+                            Set.of("WorkspaceCsiRuntimeAccess.attest/3",
+                                    "WorkspaceCsiRuntimeAccess.request/0",
+                                    "WorkspaceCsiRuntimeAccess.unavailable/0")),
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
                             Set.of("WorkspaceCsiWorkerAckStore.decode/1",
                                     "WorkspaceCsiWorkerAckStore.hash/1")),
@@ -336,7 +347,12 @@ class SessionRowLockOrderTest {
                 "abandonSessionRename", "claimRename",
                 // Main's internal child close (#14069) locks the child's
                 // session row before its operation-row work.
-                "beginChildClose");
+                "beginChildClose",
+                // Main's private CSI Session entries (#13996) lock the
+                // session row through the legacy-guarded helper or their
+                // own creation INSERT.
+                "insertCsiSessionCommand", "replayChildSessionCommand",
+                "requireCsiRequest");
         // The comparison population is pinned as exactly as the locker set:
         // a locker that loses its turn-row access must shrink this set
         // loudly instead of silently dropping out of the ordering
@@ -348,7 +364,8 @@ class SessionRowLockOrderTest {
                         "beginTaskCancelOperation", "completeOperation",
                         "completeSessionMutation", "unarchiveWorkspaceSession",
                         "beginSessionRename", "completeSessionRename",
-                        "abandonSessionRename", "claimRename");
+                        "abandonSessionRename", "claimRename",
+                        "replayChildSessionCommand", "requireCsiRequest");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
         // never enters `lockers`, so this assertion — not the violation
@@ -366,7 +383,7 @@ class SessionRowLockOrderTest {
                         "findReplayFloorTargets", "findTurn",
                         "findTurnSummary", "hasActiveTurn",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand",
+                        "insertChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
