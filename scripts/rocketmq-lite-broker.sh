@@ -10,7 +10,9 @@
 #
 #   scripts/rocketmq-lite-broker.sh start   download (cached), configure, boot,
 #                                           create the LITE topic and groups,
-#                                           write $RMQ_WORK_DIR/broker.env
+#                                           write $RMQ_WORK_DIR/broker.env;
+#                                           a start that fails part way stops
+#                                           what it launched
 #   scripts/rocketmq-lite-broker.sh stop    stop every process it started
 #   scripts/rocketmq-lite-broker.sh admin … run mqadmin against the NameServer
 #
@@ -67,6 +69,12 @@ die() {
   log "$*"
   exit 1
 }
+
+# The components this start launched, newest first, and whether the RAM disk
+# was absent before it: a start that fails part way stops exactly these on
+# exit, and never a process that was running before it.
+STARTED=""
+RAMDISK_BEFORE=1
 
 java_env() {
   [ -n "${RMQ_JAVA_HOME}" ] || die "set RMQ_JAVA_HOME (or JAVA_HOME) to a JDK 17"
@@ -189,6 +197,7 @@ launch() {
       fi
       if grep -q "${ready}" "${RMQ_WORK_DIR}/logs/${name}.out" 2> /dev/null; then
         echo "${listener} ${port}" > "${RMQ_WORK_DIR}/${name}.pid"
+        STARTED="${name} ${STARTED}"
         log "${name} is up on 127.0.0.1:${port}"
         return 0
       fi
@@ -229,11 +238,27 @@ admin() {
   "${ROCKETMQ_HOME}/bin/mqadmin" "$@" -n "127.0.0.1:${RMQ_NAMESRV_PORT}"
 }
 
+# Runs on exit while start is in flight: a failed start leaves nothing it
+# launched behind, so a retry finds its ports free.
+roll_back_start() {
+  local status=$?
+  [ "${status}" -ne 0 ] || return 0
+  if [ -n "${STARTED}" ]; then
+    log "start failed; stopping what it started: ${STARTED}"
+    # shellcheck disable=SC2086 # component names, split on purpose
+    stop_components ${STARTED}
+  fi
+  if [ "${RAMDISK_BEFORE}" -eq 0 ] && [ -d /Volumes/RAMDisk ]; then
+    diskutil eject /Volumes/RAMDisk > /dev/null 2>&1 ||
+      log "/Volumes/RAMDisk is still in use; left mounted"
+  fi
+}
+
 start() {
   java_env
+  trap roll_back_start EXIT
   if [ "$(uname -s)" = "Darwin" ] && [ ! -d /Volumes/RAMDisk ]; then
-    mkdir -p "${RMQ_WORK_DIR}"
-    touch "${RMQ_WORK_DIR}/created-ramdisk"
+    RAMDISK_BEFORE=0
   fi
   [ -x "${ROCKETMQ_HOME}/bin/mqbroker" ] || download
   java_env
@@ -281,13 +306,18 @@ RMQ_NAMESRV=127.0.0.1:${RMQ_NAMESRV_PORT}
 RMQ_TOPIC=${RMQ_TOPIC}
 RMQ_NORMAL_TOPIC=${RMQ_NORMAL_TOPIC}
 EOF
+  if [ "${RAMDISK_BEFORE}" -eq 0 ] && [ -d /Volumes/RAMDisk ]; then
+    touch "${RMQ_WORK_DIR}/created-ramdisk"
+  fi
+  trap - EXIT
   log "ready: endpoints 127.0.0.1:${RMQ_PROXY_GRPC_PORT}, topic ${RMQ_TOPIC}"
   log "note: the proxy (${RMQ_PROXY_GRPC_PORT}, ${RMQ_PROXY_REMOTING_PORT}) and the broker HA port listen on every interface"
 }
 
-stop() {
+# Stops the named components through their pid files.
+stop_components() {
   local name pid port
-  for name in proxy broker namesrv; do
+  for name in "$@"; do
     [ -s "${RMQ_WORK_DIR}/${name}.pid" ] || continue
     read -r pid port < "${RMQ_WORK_DIR}/${name}.pid"
     # A stale file may name a PID the system has since reused: stop only the
@@ -305,6 +335,9 @@ stop() {
     kill -9 "${pid}" 2> /dev/null || true
     rm -f "${RMQ_WORK_DIR}/${name}.pid"
   done
+}
+
+eject_ramdisk() {
   if [ -f "${RMQ_WORK_DIR}/created-ramdisk" ] && [ -d /Volumes/RAMDisk ]; then
     if diskutil eject /Volumes/RAMDisk > /dev/null 2>&1; then
       rm -f "${RMQ_WORK_DIR}/created-ramdisk"
@@ -312,6 +345,11 @@ stop() {
       log "/Volumes/RAMDisk is still in use; left mounted"
     fi
   fi
+}
+
+stop() {
+  stop_components proxy broker namesrv
+  eject_ramdisk
 }
 
 case "${1:-}" in
