@@ -44,7 +44,7 @@ class ManagedRuntimeRetentionGuardTest {
     @BeforeEach
     void setup() {
         source = dataSource();
-        Flyway.configure().dataSource(source).load().migrate();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
         jdbc = new JdbcTemplate(source);
     }
 
@@ -61,36 +61,39 @@ class ManagedRuntimeRetentionGuardTest {
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
         var retired = retire(bindings, request("child"));
         var receipt = retired.getDrainReceipt();
-        jdbc.update("INSERT INTO qwen_managed_child_result_relay (tenant_id, parent_session_id, child_run_id,"
-                + " creation_key, child_session_id, state, created_at, updated_at)"
-                + " VALUES ('tenant', 'parent', 'run', 'creation', 'child', 'orphaned', 1, 1)");
+        jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, tenant_id, delivery_id, source_session_id,"
+                + " source_scope_key, payload_json, transport_state, reception_state, consumption_state, created_at, updated_at)"
+                + " VALUES (?, 'CHILD_RESULT', 'tenant', 'run', 'child', ?, '{}', 'orphaned', 'orphaned', 'orphaned', 1, 1)",
+                "a".repeat(64), "b".repeat(64));
         var retention = new JdbcRuntimeRetention(source, bindings, guard);
         assertThat(retention.sweep(Duration.ofDays(30), 1, null).bindingsDeleted()).isZero();
         assertThat(bindings.findById(retired.getBindingId()).getDrainReceipt()).isEqualTo(receipt);
         projection();
         assertThat(retention.sweep(Duration.ofDays(30), 1, null).bindingsDeleted()).isZero();
         assertThat(bindings.findById(retired.getBindingId()).getGeneration()).isEqualTo(retired.getGeneration());
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'cancelled', settled_at = 2");
+        jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled', settled_at = 2");
         assertThat(retention.sweep(Duration.ofDays(30), 1, null).bindingsDeleted()).isEqualTo(1);
         assertThat(bindings.findById(retired.getBindingId())).isNull();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_child_result_relay", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_delivery", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record", Integer.class)).isEqualTo(1);
     }
 
     @Test
     void aDifferentRawIdentityCannotEndChildProtection() throws Exception {
         child();
         projection();
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'cancelled', settled_at = 2");
+        jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled', settled_at = 2");
         var binding = mock(RuntimeBindingRecord.class);
         when(binding.getRequest()).thenReturn(request("child"));
         try (var connection = source.getConnection()) {
             assertThat(guard.bindingReferenced(connection, binding)).isFalse();
             for (String column : java.util.List.of("tenant_id", "session_id", "domain", "record_id")) {
-                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = UPPER(" + column + ")");
+                String original = jdbc.queryForObject("SELECT " + column + " FROM ma_session_record",
+                        (row, index) -> row.getString(1));
+                jdbc.update("UPDATE ma_session_record SET " + column + " = ?", original.toUpperCase(java.util.Locale.ROOT));
                 assertThat(guard.bindingReferenced(connection, binding)).as(column).isTrue();
-                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = LOWER(" + column + ")");
+                jdbc.update("UPDATE ma_session_record SET " + column + " = ?", original);
             }
         }
     }
@@ -112,7 +115,7 @@ class ManagedRuntimeRetentionGuardTest {
 
     @Test
     void aCsiReservationWithNoHolderStillRetainsItsExactBinding() throws Exception {
-        jdbc.update("INSERT INTO managed_workspace_execution_lease"
+        jdbc.update("INSERT INTO ma_storage_owner"
                 + " (storage_key, storage_kind, binding_id, runtime_generation) VALUES (?, 'CSI', 'binding', 4)",
                 "a".repeat(64));
         try (var connection = source.getConnection()) {
@@ -124,12 +127,10 @@ class ManagedRuntimeRetentionGuardTest {
 
     @Test
     void localHolderAndCsiRetirementRetainBindings() throws Exception {
-        jdbc.update("INSERT INTO managed_workspace_execution_lease"
+        jdbc.update("INSERT INTO ma_storage_owner"
                 + " (storage_key, holder_key, binding_id, runtime_generation, runtime_session_id)"
                 + " VALUES (?, ?, 'local', 1, 'session')", "a".repeat(64), "b".repeat(64));
-        jdbc.update("INSERT INTO managed_workspace_csi_retirement"
-                + " (retirement_id, binding_id, runtime_generation, physical_key, phase, identity_json)"
-                + " VALUES (?, 'csi', 2, ?, 'DRAINING', '{}')", UUID.randomUUID().toString(), "c".repeat(64));
+        operation("CSI_RETIREMENT", "csi-retirement", "csi", 2);
         try (var connection = source.getConnection()) {
             assertThat(guard.bindingReferenced(connection, binding("local", 1))).isTrue();
             assertThat(guard.bindingReferenced(connection, binding("csi", 2))).isTrue();
@@ -148,7 +149,7 @@ class ManagedRuntimeRetentionGuardTest {
         publication(brokerHash);
         try (var connection = source.getConnection()) {
             assertThat(guard.executionReferenced(connection, call)).isFalse();
-            jdbc.update("UPDATE qwen_tool_publication SET execution_key = ?, retention_state = 'COLLECTED'", rawHash);
+            jdbc.update("UPDATE ma_output_capture SET execution_key = ?, retention_state = 'COLLECTED'", rawHash);
             assertThat(guard.executionReferenced(connection, call)).isTrue();
             assertThat(guard.executionReferenced(connection, "other")).isFalse();
         }
@@ -159,17 +160,50 @@ class ManagedRuntimeRetentionGuardTest {
         try (Connection connection = source.getConnection()) {
             connection.setAutoCommit(false);
             String hash = ToolPublicationContract.sha256("call".getBytes(StandardCharsets.UTF_8));
-            try (var insert = connection.prepareStatement("INSERT INTO managed_workspace_csi_worker_ack"
-                    + " (retirement_id, execution_call_id_hash, execution_call_id, evidence_json,"
-                    + " evidence_digest, recorded_at_epoch_micros) VALUES (?, ?, 'call', '{}', ?, 1)")) {
-                insert.setString(1, UUID.randomUUID().toString());
+            insertOperation(connection, "CSI_RETIREMENT", "retirement", "binding", 1);
+            try (var insert = connection.prepareStatement("INSERT INTO ma_operation_work"
+                    + " (operation_key, work_kind, target_key, target_id, tenant_id, state, payload_json, created_at, updated_at)"
+                    + " VALUES (?, 'CSI_WORKER_ACK', ?, 'call', 'tenant', 'COMPLETE', '{}', 1, 1)")) {
+                insert.setString(1, operationKey("CSI_RETIREMENT", "retirement"));
                 insert.setString(2, hash);
-                insert.setString(3, "a".repeat(64));
                 insert.executeUpdate();
             }
             assertThat(guard.executionReferenced(connection, "call")).isTrue();
             connection.rollback();
             assertThat(guard.executionReferenced(connection, "call")).isFalse();
+        }
+    }
+
+    @Test
+    void sharedWorkReferencesRequireTheCsiOperationAndAckKinds() throws Exception {
+        operation("CSI_RETIREMENT", "retirement", "binding", 4);
+        String hash = ToolPublicationContract.sha256("call".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id,"
+                + " state, payload_json, created_at, updated_at) VALUES (?, 'EXECUTION_ACK', ?, 'call', 'tenant',"
+                + " 'COMPLETE', '{}', 1, 1)", operationKey("CSI_RETIREMENT", "retirement"), hash);
+        try (var connection = source.getConnection()) {
+            assertThat(guard.executionReferenced(connection, "call")).isFalse();
+            jdbc.update("UPDATE ma_operation_work SET work_kind = 'CSI_WORKER_ACK'");
+            assertThat(guard.executionReferenced(connection, "call")).isTrue();
+            jdbc.update("UPDATE ma_operation SET operation_kind = 'WORKSPACE_OPERATOR_RECOVERY'");
+            assertThat(guard.executionReferenced(connection, "call")).isFalse();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+            jdbc.update("UPDATE ma_operation SET operation_kind = 'CSI_RETIREMENT', target_revision = 5");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isTrue();
+        }
+    }
+
+    @Test
+    void anActionVariantCannotBeMistakenForAnUnsettledBackgroundRun() throws Exception {
+        backgroundEvidence();
+        try (var connection = source.getConnection()) {
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
+            jdbc.update("UPDATE ma_session_record SET record_kind = 'ACTION', action_id = 'action',"
+                    + " action_version = 1, options_json = '{}'");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+            jdbc.update("UPDATE ma_session_record SET record_kind = 'DOMAIN'");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
         }
     }
 
@@ -183,7 +217,7 @@ class ManagedRuntimeRetentionGuardTest {
             String harness = "root-" + isolation;
             String runtime = "runtime-" + isolation;
             var retired = retire(bindings, request(isolation.equals("session") ? harness : null));
-            jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at)"
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at)"
                     + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 1, 1)", harness);
             projection("tenant", harness, "background_shell");
             var old = Instant.parse("2000-01-01T00:00:00Z");
@@ -206,7 +240,7 @@ class ManagedRuntimeRetentionGuardTest {
             assertThat(bindings.findById(retired.getBindingId())).isNotNull();
             var replacement = bindings.findOrCreate(retired.getRequest());
             assertThat(replacement.getGeneration()).isEqualTo(retired.getGeneration() + 1);
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'failed', settled_at = 2"
+            jdbc.update("UPDATE ma_session_record SET task_state = 'failed', settled_at = 2"
                     + " WHERE session_id = ?", harness);
             var collected = retention.sweep(Duration.ofDays(30), 100, null);
             assertThat(collected.executionsDeleted()).isEqualTo(2);
@@ -215,7 +249,7 @@ class ManagedRuntimeRetentionGuardTest {
             assertThat(bindings.findById(retired.getBindingId())).isNull();
             assertThat(executions.findByExecutionCallId(isolation + "-call:process")).isNull();
             assertThat(bindings.findById(replacement.getBindingId())).isNotNull();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record"
                     + " WHERE session_id = ?", Integer.class, harness)).isEqualTo(1);
         }
     }
@@ -228,17 +262,17 @@ class ManagedRuntimeRetentionGuardTest {
             assertThat(guard.bindingReferenced(connection, binding)).isTrue();
             assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isFalse();
             for (String column : java.util.List.of("tenant_id", "workspace_id", "session_id", "domain", "task_kind")) {
-                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = CONCAT(" + column + ", ' ')");
+                jdbc.update("UPDATE ma_session_record SET " + column + " = CONCAT(" + column + ", ' ')");
                 assertThat(guard.bindingReferenced(connection, binding)).as(column).isFalse();
-                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = TRIM(" + column + ")");
+                jdbc.update("UPDATE ma_session_record SET " + column + " = TRIM(" + column + ")");
             }
-            jdbc.update("UPDATE qwen_tool_execution SET binding_id = 'binding '");
+            jdbc.update("UPDATE ma_tool_execution SET binding_id = 'binding '");
             assertThat(guard.bindingReferenced(connection, binding)).isFalse();
-            jdbc.update("UPDATE qwen_tool_execution SET binding_id = 'binding', execution_call_id = 'call:PROCESS'");
+            jdbc.update("UPDATE ma_tool_execution SET binding_id = 'binding', execution_call_id = 'call:PROCESS'");
             assertThat(guard.bindingReferenced(connection, binding)).isFalse();
-            jdbc.update("UPDATE qwen_tool_execution SET execution_call_id = 'call'");
+            jdbc.update("UPDATE ma_tool_execution SET execution_call_id = 'call'");
             assertThat(guard.bindingReferenced(connection, binding)).isFalse();
-            jdbc.update("UPDATE qwen_tool_execution SET execution_call_id = 'call:process'");
+            jdbc.update("UPDATE ma_tool_execution SET execution_call_id = 'call:process'");
             assertThat(guard.bindingReferenced(connection, binding)).isTrue();
         }
     }
@@ -248,7 +282,7 @@ class ManagedRuntimeRetentionGuardTest {
         backgroundEvidence();
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            try (var update = connection.prepareStatement("UPDATE qwen_managed_session_extension_record SET settled_at = 2")) {
+            try (var update = connection.prepareStatement("UPDATE ma_session_record SET settled_at = 2")) {
                 update.executeUpdate();
             }
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
@@ -260,20 +294,20 @@ class ManagedRuntimeRetentionGuardTest {
     @Test
     void settledBackgroundVolumeWithOtherSessionNoiseDoesNotTimeoutTheGuard() throws Exception {
         backgroundEvidence();
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'succeeded', settled_at = 2");
+        jdbc.update("UPDATE ma_session_record SET task_state = 'succeeded', settled_at = 2");
         var executions = new JdbcToolExecutionRepository(source);
         assertThat(executions.settlePrepared(executions.findByExecutionCallId("call:process"),
                 Map.of("executionStatus", "success"), Instant.parse("2000-01-01T00:00:00Z"))).isNotNull();
-        duplicateBackgroundRows("qwen_tool_execution", "execution_call_id", "call:process", 2999, false);
-        duplicateBackgroundRows("qwen_managed_session_extension_record", "record_id", "run", 2999, false);
-        duplicateBackgroundRows("qwen_managed_session_extension_record", "record_id", "run", 20_000, true);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Long.class)).isEqualTo(3000L);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE execution_state = 'SETTLED'",
+        duplicateBackgroundRows("ma_tool_execution", "execution_call_id", "call:process", 2999, false);
+        duplicateBackgroundRows("ma_session_record", "record_id", "run", 2999, false);
+        duplicateBackgroundRows("ma_session_record", "record_id", "run", 20_000, true);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Long.class)).isEqualTo(3000L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE execution_state = 'SETTLED'",
                 Long.class)).isEqualTo(3000L);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record", Long.class)).isEqualTo(23_000L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record", Long.class)).isEqualTo(23_000L);
         try (var connection = source.getConnection()) {
             jdbc.execute(connection.getMetaData().getDatabaseProductName().equals("H2") ? "ANALYZE"
-                    : "ANALYZE TABLE qwen_tool_execution, qwen_managed_session_extension_record");
+                    : "ANALYZE TABLE ma_tool_execution, ma_session_record");
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
         }
     }
@@ -289,16 +323,16 @@ class ManagedRuntimeRetentionGuardTest {
             String ddl = connection.getMetaData().getDatabaseProductName().equals("H2")
                     ? "ALTER TABLE %s ALTER COLUMN %s VARCHAR_IGNORECASE(512)"
                     : "ALTER TABLE %s MODIFY %s VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
-            jdbc.execute(String.format(ddl, "qwen_tool_execution", "harness_session_id"));
-            jdbc.execute(String.format(ddl, "qwen_managed_session_extension_record", "session_id"));
-            var folded = jdbc.queryForList("SELECT DISTINCT harness_session_id FROM qwen_tool_execution", String.class);
+            jdbc.execute(String.format(ddl, "ma_tool_execution", "harness_session_id"));
+            jdbc.execute(String.format(ddl, "ma_session_record", "session_id"));
+            var folded = jdbc.queryForList("SELECT DISTINCT harness_session_id FROM ma_tool_execution", String.class);
             assertThat(folded).hasSize(1);
             String unsettled = folded.getFirst().equals("harness") ? "HARNESS" : "harness";
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'succeeded', settled_at = 2");
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'pending', settled_at = NULL"
+            jdbc.update("UPDATE ma_session_record SET task_state = 'succeeded', settled_at = 2");
+            jdbc.update("UPDATE ma_session_record SET task_state = 'pending', settled_at = NULL"
                     + " WHERE session_scope_key = ?", ManagedSessionStore.sessionScopeKey("tenant", unsettled));
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'succeeded', settled_at = 2");
+            jdbc.update("UPDATE ma_session_record SET task_state = 'succeeded', settled_at = 2");
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
         }
     }
@@ -322,7 +356,7 @@ class ManagedRuntimeRetentionGuardTest {
                     for (int index = 0; index < count; index++) {
                         String id = (noise ? "noise-" : "volume-") + index;
                         var row = new ArrayList<>(seed);
-                        if (table.equals("qwen_tool_execution")) {
+                        if (table.equals("ma_tool_execution")) {
                             String call = id + ":process";
                             row.set(columns.indexOf("execution_call_id"), call);
                             row.set(columns.indexOf("execution_call_id_hash"), brokerHash(call));
@@ -376,8 +410,36 @@ class ManagedRuntimeRetentionGuardTest {
         return retired;
     }
 
+    private static String operationKey(String kind, String id) {
+        return WorkspaceOperations.key(WorkspaceOperations.Kind.valueOf(kind), "tenant", id);
+    }
+
+    private void operation(String kind, String id, String binding, long generation) throws Exception {
+        try (var connection = source.getConnection()) {
+            insertOperation(connection, kind, id, binding, generation);
+        }
+    }
+
+    private static void insertOperation(Connection connection, String kind, String id, String binding, long generation)
+            throws Exception {
+        try (var insert = connection.prepareStatement("INSERT INTO ma_operation (operation_key, operation_id, scope_key,"
+                + " operation_kind, tenant_id, target_kind, target_key, target_id, target_revision, state, phase,"
+                + " request_digest, request_json, created_at, updated_at)"
+                + " VALUES (?, ?, ?, ?, 'tenant', 'RUNTIME_BINDING', ?, ?, ?, 'DRAINING', 'DRAINING', ?, '{}', 1, 1)")) {
+            insert.setString(1, operationKey(kind, id));
+            insert.setBytes(2, id.getBytes(StandardCharsets.UTF_8));
+            insert.setString(3, WorkspaceOperations.hash("tenant"));
+            insert.setString(4, kind);
+            insert.setString(5, WorkspaceOperations.hash(binding));
+            insert.setBytes(6, binding.getBytes(StandardCharsets.UTF_8));
+            insert.setLong(7, generation);
+            insert.setString(8, "a".repeat(64));
+            insert.executeUpdate();
+        }
+    }
+
     private void publication(String key) {
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                 + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
                 + " token_hash, state, capture_bytes, producer_bytes, admission_bytes)"
                 + " VALUES (?, ?, 'tenant', 'workspace', 'session', 'publication', ?, 'capture',"
@@ -400,7 +462,7 @@ class ManagedRuntimeRetentionGuardTest {
     }
 
     private static String childSql() {
-        return "INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+        return "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
                 + " parent_session_id, parent_child_run_id, root_session_id, child_depth)"
                 + " VALUES ('tenant', 'child', 'qwen-code', 'CLOSED', 1, 1, 'parent', 'run', 'parent', 1)";
     }
@@ -410,7 +472,7 @@ class ManagedRuntimeRetentionGuardTest {
     private void projection() { projection("tenant", "parent", "child_agent"); }
 
     private void projection(String tenant, String session, String kind) {
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id,"
                 + " workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id,"
                 + " task_kind, task_state, runtime_state, delivery_target, delivery_state, created_at)"
                 + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', 'run', ?, 1, 'resource',"

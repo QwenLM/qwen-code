@@ -123,7 +123,7 @@ public final class JdbcRuntimeRetention {
                         && (row.leaseUntil() == null || !row.leaseUntil().isAfter(now))
                         && JdbcRepositorySupport.valueKey(row.callId()).equals(row.key())
                         && !references.executionReferenced(connection, row.callId())) {
-                    delete(connection, "DELETE FROM qwen_tool_execution WHERE execution_call_id_hash = ? AND record_version = ?",
+                    delete(connection, "DELETE FROM ma_tool_execution WHERE execution_call_id_hash = ? AND record_version = ?",
                             row.key(), row.version());
                     executions++;
                 } else {
@@ -150,9 +150,9 @@ public final class JdbcRuntimeRetention {
                     && JdbcRepositorySupport.scopeKey(binding.getRequest().getScope()).equals(row.scopeKey())
                     && !sessionReferenced(connection, binding, row.id())) {
                 try (PreparedStatement statement = statement(connection,
-                        "DELETE FROM qwen_runtime_session WHERE scope_key = ? AND runtime_session_id = ? AND record_version = ?")) {
+                        "DELETE FROM ma_runtime_session WHERE scope_key = ? AND runtime_session_id = ? AND record_version = ?")) {
                     statement.setString(1, row.scopeKey());
-                    statement.setString(2, row.id());
+                    JdbcRepositorySupport.setIdentity(statement, 2, row.id());
                     statement.setLong(3, row.version());
                     requireDeleted(statement);
                 }
@@ -170,8 +170,12 @@ public final class JdbcRuntimeRetention {
         int retired = 0;
         if (!hasChildren(connection, binding) && !operatorReferenced(connection, binding)
                 && !references.bindingReferenced(connection, binding)) {
-            delete(connection, "DELETE FROM qwen_runtime_binding WHERE binding_id = ? AND record_version = ?",
-                    binding.getBindingId(), binding.getVersion());
+            try (PreparedStatement deletion = statement(connection,
+                    "DELETE FROM ma_runtime_binding WHERE binding_id = ? AND record_version = ?")) {
+                JdbcRepositorySupport.setIdentity(deletion, 1, binding.getBindingId());
+                deletion.setLong(2, binding.getVersion());
+                requireDeleted(deletion);
+            }
             retired = 1;
         }
         return new BatchResult(afterBinding, 1, children, skipped, executions, sessions, retired);
@@ -195,14 +199,14 @@ public final class JdbcRuntimeRetention {
 
     private static Candidate candidate(Connection connection, Cursor cursor, Instant cutoff) throws SQLException {
         boolean resume = cursor != null && cursor.phase() != Phase.BINDINGS;
-        String sql = "SELECT binding_id, binding_state, last_active_at, tenant_id, request_key FROM qwen_runtime_binding "
+        String sql = "SELECT binding_id, binding_state, last_active_at, tenant_id, request_key FROM ma_runtime_binding "
                 + (resume ? "WHERE binding_id = ?" : "WHERE binding_state IN ('FAILED', 'RELEASED') AND last_active_at < ?"
                 + (cursor == null ? "" : " AND (binding_state > ? OR (binding_state = ? AND last_active_at > ?)"
                         + " OR (binding_state = ? AND last_active_at = ? AND binding_id > ?))")
                 + " ORDER BY binding_state, last_active_at, binding_id LIMIT 1");
         try (PreparedStatement statement = statement(connection, sql)) {
             if (resume) {
-                statement.setString(1, cursor.bindingId());
+                JdbcRepositorySupport.setIdentity(statement, 1, cursor.bindingId());
             } else {
                 JdbcRepositorySupport.setInstant(statement, 1, cutoff);
                 if (cursor != null) {
@@ -213,7 +217,7 @@ public final class JdbcRuntimeRetention {
                     statement.setString(4, lastActiveAt);
                     statement.setString(5, cursor.bindingState());
                     statement.setString(6, lastActiveAt);
-                    statement.setString(7, cursor.bindingId());
+                    JdbcRepositorySupport.setIdentity(statement, 7, cursor.bindingId());
                 }
             }
             try (ResultSet result = statement.executeQuery()) {
@@ -233,7 +237,7 @@ public final class JdbcRuntimeRetention {
 
     private static boolean lockSlot(Connection connection, Candidate candidate) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT active_binding_id FROM qwen_runtime_binding_slot WHERE request_key = ? FOR UPDATE")) {
+                "SELECT active_binding_id FROM ma_runtime_slot WHERE request_key = ? FOR UPDATE")) {
             statement.setString(1, candidate.requestKey());
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() && !candidate.bindingId().equals(result.getString("active_binding_id"));
@@ -242,21 +246,22 @@ public final class JdbcRuntimeRetention {
     }
 
     private static boolean operatorReferenced(Connection connection, RuntimeBindingRecord binding) throws SQLException {
-        return exists(connection, "SELECT 1 FROM managed_workspace_operator_recovery WHERE binding_id = ?"
-                + " AND runtime_generation = ? LIMIT 1", binding);
+        return exists(connection, "SELECT 1 FROM ma_operation WHERE operation_kind = 'WORKSPACE_OPERATOR_RECOVERY'"
+                + " AND target_kind = 'RUNTIME_BINDING' AND target_id = ?"
+                + " AND target_revision = ? LIMIT 1", binding);
     }
 
     private static boolean hasNonterminalChildren(Connection connection, RuntimeBindingRecord binding) throws SQLException {
-        return exists(connection, "SELECT 1 FROM qwen_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
+        return exists(connection, "SELECT 1 FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
                 + " AND session_state NOT IN ('RELEASED', 'FAILED') LIMIT 1", binding)
-                || exists(connection, "SELECT 1 FROM qwen_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                || exists(connection, "SELECT 1 FROM ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
                         + " AND execution_state NOT IN ('SETTLED', 'ABANDONED') LIMIT 1", binding);
     }
 
     private static boolean hasChildren(Connection connection, RuntimeBindingRecord binding) throws SQLException {
-        for (String table : List.of("qwen_tool_execution", "qwen_runtime_session")) {
+        for (String table : List.of("ma_tool_execution", "ma_runtime_session")) {
             try (PreparedStatement statement = statement(connection, "SELECT 1 FROM " + table + " WHERE binding_id = ? LIMIT 1")) {
-                statement.setString(1, binding.getBindingId());
+                JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
                 try (ResultSet result = statement.executeQuery()) {
                     if (result.next()) {
                         return true;
@@ -269,7 +274,7 @@ public final class JdbcRuntimeRetention {
 
     private static boolean exists(Connection connection, String sql, RuntimeBindingRecord binding) throws SQLException {
         try (PreparedStatement statement = statement(connection, sql)) {
-            statement.setString(1, binding.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
             try (ResultSet result = statement.executeQuery()) {
                 return result.next();
@@ -278,9 +283,9 @@ public final class JdbcRuntimeRetention {
     }
 
     private static boolean sessionReferenced(Connection connection, RuntimeBindingRecord binding, String id) throws SQLException {
-        try (PreparedStatement statement = statement(connection, "SELECT 1 FROM qwen_tool_execution WHERE binding_id = ?"
+        try (PreparedStatement statement = statement(connection, "SELECT 1 FROM ma_tool_execution WHERE binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_key = ? LIMIT 1")) {
-            statement.setString(1, binding.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
             statement.setString(3, JdbcRepositorySupport.valueKey(id));
             try (ResultSet result = statement.executeQuery()) {
@@ -293,11 +298,11 @@ public final class JdbcRuntimeRetention {
             String key, int limit) throws SQLException {
         List<Execution> rows = new ArrayList<>();
         try (PreparedStatement statement = statement(connection, "SELECT execution_state, execution_call_id_hash, execution_call_id,"
-                + " settled_at, abandoned_at, dispatch_owner, dispatch_lease_until, record_version FROM qwen_tool_execution"
+                + " settled_at, abandoned_at, dispatch_owner, dispatch_lease_until, record_version FROM ma_tool_execution"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND execution_state IN ('SETTLED', 'ABANDONED')"
                 + " AND (execution_state > ? OR (execution_state = ? AND execution_call_id_hash > ?))"
                 + " ORDER BY execution_state, execution_call_id_hash LIMIT ? FOR UPDATE")) {
-            statement.setString(1, binding.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
             statement.setString(3, state);
             statement.setString(4, state);
@@ -319,14 +324,14 @@ public final class JdbcRuntimeRetention {
             String key, int limit) throws SQLException {
         List<Session> rows = new ArrayList<>();
         try (PreparedStatement statement = statement(connection, "SELECT scope_key, runtime_session_id, last_active_at, record_version"
-                + " FROM qwen_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
+                + " FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
                 + " AND session_state IN ('RELEASED', 'FAILED') AND (scope_key > ? OR (scope_key = ? AND runtime_session_id > ?))"
                 + " ORDER BY scope_key, runtime_session_id LIMIT ? FOR UPDATE")) {
-            statement.setString(1, binding.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
             statement.setString(3, scope);
             statement.setString(4, scope);
-            statement.setString(5, key);
+            JdbcRepositorySupport.setIdentity(statement, 5, key);
             statement.setInt(6, limit);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {

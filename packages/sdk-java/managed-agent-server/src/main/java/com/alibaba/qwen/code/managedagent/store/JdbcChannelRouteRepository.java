@@ -1,166 +1,162 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
-/**
- * JDBC ledger of the H5 channel ingress route bindings. Times are the
- * database clock's epoch milliseconds, the store's convention, so
- * created_at and updated_at never depend on an application host's clock.
- */
+/** The ingress receipt fixes routing identity; its operation owns attachment admission. */
 public final class JdbcChannelRouteRepository implements ChannelRouteRepository {
-    private static final String COLUMNS = String.join(", ",
-            "tenant_id", "route_key", "channel_instance_id",
-            "account_generation", "platform_event_id", "semantic_revision",
-            "session_id", "sender_id", "chat_id", "thread_id", "state",
-            "input_id", "staged_attachment_refs_json", "created_at",
-            "updated_at");
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final RowMapper<ChannelRoute> MAPPER = (row, index) ->
-            new ChannelRoute(
-                    row.getString("tenant_id"),
-                    row.getString("route_key"),
-                    row.getString("channel_instance_id"),
-                    row.getLong("account_generation"),
-                    row.getString("platform_event_id"),
-                    row.getLong("semantic_revision"),
-                    row.getString("session_id"),
-                    row.getString("sender_id"),
-                    row.getString("chat_id"),
-                    row.getString("thread_id"),
-                    row.getString("state"),
-                    row.getString("input_id"),
-                    readRefs(row.getString("staged_attachment_refs_json")),
-                    row.getLong("created_at"),
-                    row.getLong("updated_at"));
-
+    private static final String SELECT = "SELECT o.* FROM ma_request_receipt r JOIN ma_operation o"
+            + " ON o.operation_key = r.result_operation_key AND o.operation_kind = 'CHANNEL_INGRESS'"
+            + " WHERE r.namespace = 'CHANNEL_INGRESS'";
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
 
     public JdbcChannelRouteRepository(JdbcTemplate jdbc) {
         if (jdbc == null) {
             throw new IllegalArgumentException("jdbc is required");
         }
         this.jdbc = jdbc;
+        this.transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
     @Override
     public ChannelRoute findOrCreate(ChannelRoute candidate) {
         requireCandidate(candidate);
-        try {
+        String route = ChannelRouteRepository.routeKey(candidate.tenantId(), candidate.channelInstanceId(),
+                candidate.accountGeneration(), candidate.platformEventId(), candidate.semanticRevision());
+        transactions.executeWithoutResult(status -> {
             long now = databaseNow();
-            jdbc.update("INSERT INTO qwen_managed_channel_route (" + COLUMNS
-                            + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    candidate.tenantId(),
-                    ChannelRouteRepository.routeKey(candidate.tenantId(),
-                            candidate.channelInstanceId(),
-                            candidate.accountGeneration(),
-                            candidate.platformEventId(),
-                            candidate.semanticRevision()),
-                    candidate.channelInstanceId(),
-                    candidate.accountGeneration(),
-                    candidate.platformEventId(),
-                    candidate.semanticRevision(),
-                    candidate.sessionId(),
-                    candidate.senderId(),
-                    candidate.chatId(),
-                    candidate.threadId(),
-                    candidate.state(),
-                    candidate.inputId(),
-                    writeRefs(candidate.stagedAttachmentRefs()),
-                    now, now);
-        } catch (DuplicateKeyException duplicate) {
-            // Ingress redelivery of one platform event: keep the first row.
-        }
-        Optional<ChannelRoute> stored = find(candidate.tenantId(),
-                ChannelRouteRepository.routeKey(candidate.tenantId(),
-                        candidate.channelInstanceId(),
-                        candidate.accountGeneration(),
-                        candidate.platformEventId(),
-                        candidate.semanticRevision()));
-        ChannelRoute row = stored.orElseThrow(() -> new IllegalStateException(
-                "channel route insert left no row"));
-        if (!row.channelInstanceId().equals(candidate.channelInstanceId())
-                || row.accountGeneration() != candidate.accountGeneration()
-                || !row.platformEventId().equals(candidate.platformEventId())
-                || row.semanticRevision() != candidate.semanticRevision()) {
+            String scope = ManagedSchemaKeys.key("CHANNEL", candidate.tenantId(), candidate.channelInstanceId());
+            String target = ManagedSchemaKeys.key(candidate.sessionId());
+            String operation = ManagedSchemaKeys.operationKey(OperationKind.CHANNEL_INGRESS, scope, target, route);
+            String receipt = ManagedSchemaKeys.receiptKey(ReceiptNamespace.CHANNEL_INGRESS, candidate.tenantId(),
+                    ReceiptScope.CHANNEL, candidate.channelInstanceId(), route);
+            var body = JSON.createObjectNode().put("version", 1).put("channelId", candidate.channelInstanceId())
+                    .put("accountGeneration", candidate.accountGeneration()).put("platformEventId", candidate.platformEventId())
+                    .put("semanticRevision", candidate.semanticRevision()).put("senderId", candidate.senderId());
+            if (candidate.chatId() != null) {
+                body.put("chatId", candidate.chatId());
+            }
+            if (candidate.threadId() != null) {
+                body.put("threadId", candidate.threadId());
+            }
+            body.set("stagedAttachmentRefs", JSON.valueToTree(candidate.stagedAttachmentRefs()));
+            String request = body.toString();
+            String digest = ManagedSchemaKeys.key(candidate.channelInstanceId(), Long.toString(candidate.accountGeneration()),
+                    candidate.platformEventId(), Long.toString(candidate.semanticRevision()));
+            int admitted = jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
+                            + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
+                            + " channel_id, account_generation, semantic_revision, session_id, state, result_operation_key,"
+                            + " created_at, updated_at) VALUES (?, 'CHANNEL_INGRESS', ?, ?, 'CHANNEL', ?, ?, ?, ?, ?,"
+                            + " ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)",
+                    receipt, ManagedSchemaKeys.key(candidate.tenantId()), candidate.tenantId(), scope,
+                    candidate.channelInstanceId(), route, ManagedSchemaKeys.key(route), digest,
+                    candidate.channelInstanceId(), candidate.accountGeneration(), candidate.semanticRevision(),
+                    candidate.sessionId(), operation, now, now);
+            if (admitted == 1) {
+                jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id,"
+                                + " session_id, target_kind, target_key, request_digest, request_json, result_json, phase, state,"
+                                + " created_at, updated_at) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
+                        candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
+                        "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
+            }
+        });
+        ChannelRoute saved = find(candidate.tenantId(), route).orElseThrow(() ->
+                new IllegalStateException("channel ingress receipt lost its operation"));
+        if (!candidate.channelInstanceId().equals(saved.channelInstanceId())
+                || candidate.accountGeneration() != saved.accountGeneration()
+                || !candidate.platformEventId().equals(saved.platformEventId())
+                || candidate.semanticRevision() != saved.semanticRevision()) {
             throw new IllegalStateException("channel route key collision");
         }
-        return row;
+        return saved;
     }
 
     @Override
     public Optional<ChannelRoute> find(String tenantId, String routeKey) {
         ChannelStoreSupport.requireId(tenantId, "tenantId");
         ChannelStoreSupport.requireId(routeKey, "routeKey");
-        return jdbc.query("SELECT " + COLUMNS
-                        + " FROM qwen_managed_channel_route"
-                        + " WHERE tenant_id = ? AND route_key = ?",
-                MAPPER, tenantId, routeKey).stream().findFirst();
-    }
-
-    @Override
-    public ChannelRoute admit(String tenantId, String routeKey,
-            String inputId) {
-        ChannelStoreSupport.requireId(tenantId, "tenantId");
-        ChannelStoreSupport.requireId(routeKey, "routeKey");
-        ChannelStoreSupport.requireId(inputId, "inputId");
-        int updated = jdbc.update("UPDATE qwen_managed_channel_route SET"
-                        + " state = 'admitted', input_id = ?, updated_at = ?"
-                        + " WHERE tenant_id = ? AND route_key = ?"
-                        + " AND state = 'staged'",
-                inputId, databaseNow(), tenantId, routeKey);
-        Optional<ChannelRoute> current = find(tenantId, routeKey);
-        if (updated == 1) {
-            return current.orElseThrow(() -> new IllegalStateException(
-                    "channel route admission left no row"));
+        List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.tenant_key = ? AND r.idempotency_digest = ?"
+                        + " AND r.tenant_id = ? AND r.idempotency_key = ?", this::row,
+                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(routeKey), tenantId, routeKey);
+        if (rows.size() > 1) {
+            throw new IllegalStateException("channel route key collision");
         }
-        return current.filter(row -> "admitted".equals(row.state())
-                && inputId.equals(row.inputId())).orElse(null);
+        return rows.stream().findFirst();
     }
 
     @Override
-    public RoutePage listByChannel(String tenantId, String channelInstanceId,
-            RouteCursor before, int limit) {
+    public ChannelRoute admit(String tenantId, String routeKey, String inputId) {
+        ChannelStoreSupport.requireId(inputId, "inputId");
+        ChannelRoute old = find(tenantId, routeKey).orElse(null);
+        if (old == null) {
+            return null;
+        }
+        String scope = ManagedSchemaKeys.key("CHANNEL", tenantId, old.channelInstanceId());
+        String operation = ManagedSchemaKeys.operationKey(OperationKind.CHANNEL_INGRESS, scope,
+                ManagedSchemaKeys.key(old.sessionId()), routeKey);
+        int changed = jdbc.update("UPDATE ma_operation SET state = 'admitted', phase = 'ADMITTED', result_json = ?,"
+                        + " updated_at = ? WHERE operation_key = ? AND operation_kind = 'CHANNEL_INGRESS' AND state = 'staged'",
+                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), operation);
+        ChannelRoute current = find(tenantId, routeKey).orElse(null);
+        return changed == 1 || current != null && "admitted".equals(current.state()) && inputId.equals(current.inputId())
+                ? current : null;
+    }
+
+    @Override
+    public RoutePage listByChannel(String tenantId, String channelInstanceId, RouteCursor before, int limit) {
         ChannelStoreSupport.requireId(tenantId, "tenantId");
         ChannelStoreSupport.requireId(channelInstanceId, "channelInstanceId");
         if (limit < 1 || limit > 100) {
             throw new IllegalArgumentException("limit must be in [1, 100]");
         }
-        List<Object> arguments = new ArrayList<>();
-        arguments.add(tenantId);
-        arguments.add(channelInstanceId);
+        List<Object> args = new ArrayList<>(List.of(ManagedSchemaKeys.key(tenantId), tenantId, channelInstanceId));
         String cursor = "";
         if (before != null) {
-            cursor = " AND (created_at < ? OR created_at = ?"
-                    + " AND route_key < ?)";
-            arguments.add(before.createdAt());
-            arguments.add(before.createdAt());
-            arguments.add(before.routeKey());
+            cursor = " AND (r.created_at < ? OR r.created_at = ? AND r.idempotency_key < ?)";
+            args.add(before.createdAt());
+            args.add(before.createdAt());
+            args.add(before.routeKey());
         }
-        arguments.add(limit + 1);
-        List<ChannelRoute> rows = jdbc.query("SELECT " + COLUMNS
-                        + " FROM qwen_managed_channel_route"
-                        + " WHERE tenant_id = ? AND channel_instance_id = ?" + cursor
-                        + " ORDER BY created_at DESC, route_key DESC LIMIT ?",
-                MAPPER, arguments.toArray());
-        boolean hasMore = rows.size() > limit;
-        return new RoutePage(hasMore ? rows.subList(0, limit) : rows, hasMore);
+        args.add(limit + 1);
+        List<ChannelRoute> rows = jdbc.query(SELECT + " AND r.tenant_key = ? AND r.tenant_id = ? AND r.channel_id = ?"
+                + cursor + " ORDER BY r.created_at DESC, r.idempotency_key DESC LIMIT ?", this::row, args.toArray());
+        boolean more = rows.size() > limit;
+        return new RoutePage(more ? rows.subList(0, limit) : rows, more);
+    }
+
+    private ChannelRoute row(java.sql.ResultSet row, int index) throws java.sql.SQLException {
+        JsonNode body = ManagedToolResultStore.parse(row.getString("request_json"));
+        JsonNode result = row.getString("result_json") == null ? JSON.createObjectNode()
+                : ManagedToolResultStore.parse(row.getString("result_json"));
+        List<String> refs = new ArrayList<>();
+        body.path("stagedAttachmentRefs").forEach(ref -> refs.add(ref.asText()));
+        return new ChannelRoute(row.getString("tenant_id"), row.getString("operation_id"), body.path("channelId").asText(),
+                body.path("accountGeneration").asLong(), body.path("platformEventId").asText(),
+                body.path("semanticRevision").asLong(), row.getString("session_id"), body.path("senderId").asText(),
+                nullable(body, "chatId"), nullable(body, "threadId"), row.getString("state"), nullable(result, "inputId"),
+                List.copyOf(refs), row.getLong("created_at"), row.getLong("updated_at"));
+    }
+
+    private static String nullable(JsonNode body, String field) {
+        return body.path(field).isTextual() ? body.path(field).asText() : null;
     }
 
     private long databaseNow() {
-        return jdbc.queryForObject(
-                "SELECT UNIX_TIMESTAMP(),"
-                        + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
-                (row, index) -> Math.addExact(
-                        Math.multiplyExact(row.getLong(1), 1000),
-                        row.getLong(2) / 1000));
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
     }
 
     private static void requireCandidate(ChannelRoute candidate) {
@@ -168,55 +164,19 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
             throw new IllegalArgumentException("candidate is required");
         }
         ChannelStoreSupport.requireId(candidate.tenantId(), "tenantId");
-        ChannelStoreSupport.requireId(candidate.channelInstanceId(),
-                "channelInstanceId");
-        ChannelStoreSupport.requireId(candidate.platformEventId(),
-                "platformEventId");
+        ChannelStoreSupport.requireId(candidate.channelInstanceId(), "channelInstanceId");
+        ChannelStoreSupport.requireId(candidate.platformEventId(), "platformEventId");
         ChannelStoreSupport.requireId(candidate.sessionId(), "sessionId");
         ChannelStoreSupport.requireId(candidate.senderId(), "senderId");
-        if (candidate.accountGeneration() < 1) {
-            throw new IllegalArgumentException(
-                    "accountGeneration must be positive");
+        if (candidate.accountGeneration() < 1 || candidate.semanticRevision() < 1) {
+            throw new IllegalArgumentException("generation and revision must be positive");
         }
-        if (candidate.semanticRevision() < 1) {
-            throw new IllegalArgumentException(
-                    "semanticRevision must be positive");
+        if (!ROUTE_STATES.contains(candidate.state())
+                || "admitted".equals(candidate.state()) == (candidate.inputId() == null)) {
+            throw new IllegalArgumentException("a staged route has no input; an admitted route requires it");
         }
-        if (!ROUTE_STATES.contains(candidate.state())) {
-            throw new IllegalArgumentException(
-                    "unknown route state " + candidate.state());
-        }
-        if ("admitted".equals(candidate.state())
-                == (candidate.inputId() == null)) {
-            throw new IllegalArgumentException(
-                    "an admitted route carries its input id; a staged route carries none");
-        }
-        if (candidate.stagedAttachmentRefs() == null
-                || candidate.stagedAttachmentRefs().size() > 100) {
-            throw new IllegalArgumentException(
-                    "stagedAttachmentRefs must hold at most 100 entries");
-        }
-    }
-
-    private static String writeRefs(List<String> refs) {
-        try {
-            return refs.isEmpty() ? null : JSON.writeValueAsString(refs);
-        } catch (JsonProcessingException error) {
-            throw new IllegalArgumentException(
-                    "staged attachment refs are not serializable", error);
-        }
-    }
-
-    private static List<String> readRefs(String json) {
-        if (json == null) {
-            return List.of();
-        }
-        try {
-            return JSON.readValue(json, new TypeReference<>() {
-            });
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException(
-                    "stored staged attachment refs are corrupt", error);
+        if (candidate.stagedAttachmentRefs() == null || candidate.stagedAttachmentRefs().size() > 100) {
+            throw new IllegalArgumentException("stagedAttachmentRefs must hold at most 100 entries");
         }
     }
 }

@@ -46,10 +46,10 @@ class JdbcRuntimeRetentionTest {
         Instant cutoff = databaseNow.minus(MAX_AGE);
         Fixture fixture = new Fixture(clockSource(Fixture.h2(), databaseNow));
         RuntimeBindingRecord boundary = fixture.binding("boundary", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
                 Timestamp.from(cutoff), boundary.getBindingId());
         RuntimeBindingRecord older = fixture.binding("older", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
                 Timestamp.from(cutoff.minusNanos(1000)), older.getBindingId());
         RuntimeBindingRecord completion = fixture.binding("completion", "legacy", false, "RELEASED");
         fixture.session(completion, "session", "RELEASED", cutoff);
@@ -88,11 +88,14 @@ class JdbcRuntimeRetentionTest {
         fixture.session(binding, "session", "RELEASED", OLD);
         fixture.execution(binding, "session", "settled", "SETTLED", OLD);
         fixture.execution(binding, "session", "abandoned", "ABANDONED", OLD);
-        fixture.execute("INSERT INTO qwen_runtime_harness_drain"
-                + " (tenant_key, harness_key, tenant_id, harness_session_id) VALUES (?, ?, ?, ?)",
+        fixture.execute("INSERT INTO ma_session_head"
+                + " (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, created_at, updated_at)"
+                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
-                "other-tenant", "other-harness");
-        fixture.execute("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, ?, ?)",
+                "other-tenant", "other-harness", "other-harness");
+        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
+                + " VALUES (?, ?, ?, ?, ?, ?)",
+                JdbcRuntimeBindingRepository.storageAliasKey("other-tenant", "other-storage"),
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 
@@ -104,11 +107,11 @@ class JdbcRuntimeRetentionTest {
         assertNull(fixture.executions.findByExecutionCallId("settled"));
         assertNull(fixture.executions.findByIdempotencyKey("settled-key"));
         assertNull(fixture.sessions.findHistorical("tenant-old", "harness", "session"));
-        assertEquals(0, fixture.count("qwen_tool_execution"));
-        assertEquals(1, fixture.count("qwen_runtime_binding_slot"));
-        assertEquals(1, fixture.count("qwen_runtime_placement_guard"));
-        assertEquals(1, fixture.count("qwen_runtime_harness_drain"));
-        assertEquals(1, fixture.count("qwen_runtime_storage_fence"));
+        assertEquals(0, fixture.count("ma_tool_execution"));
+        assertEquals(1, fixture.count("ma_runtime_slot"));
+        assertEquals(1, fixture.count("ma_tenant_guard"));
+        assertEquals(1, fixture.count("ma_session_head"));
+        assertEquals(1, fixture.count("ma_storage"));
         RuntimeBindingRecord next = fixture.bindings.findOrCreate(binding.getRequest());
         assertEquals(binding.getGeneration() + 1, next.getGeneration());
     }
@@ -153,9 +156,9 @@ class JdbcRuntimeRetentionTest {
             assertNull(fixture.executions.findByIdempotencyKey("expired-execution-key"));
             assertNull(fixture.sessions.findById(binding.getRequest().getScope(), "expired-session"));
             assertNull(fixture.bindings.findById(binding.getBindingId()));
-            assertEquals(0, fixture.count("qwen_tool_execution"));
-            assertEquals(0, fixture.count("qwen_runtime_session"));
-            assertEquals(0, fixture.count("qwen_runtime_binding"));
+            assertEquals(0, fixture.count("ma_tool_execution"));
+            assertEquals(0, fixture.count("ma_runtime_session"));
+            assertEquals(0, fixture.count("ma_runtime_binding"));
         }
     }
 
@@ -175,10 +178,10 @@ class JdbcRuntimeRetentionTest {
             fixture.binding(state, "legacy", false, state);
         }
         RuntimeBindingRecord recent = fixture.binding("recent", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = CURRENT_TIMESTAMP WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = CURRENT_TIMESTAMP WHERE binding_id = ?",
                 recent.getBindingId());
         RuntimeBindingRecord future = fixture.binding("future", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
                 Timestamp.from(FUTURE), future.getBindingId());
         RuntimeBindingRecord child = fixture.binding("child", "static", false, "RELEASED");
         fixture.session(child, "new-session", "FAILED", FUTURE);
@@ -188,9 +191,9 @@ class JdbcRuntimeRetentionTest {
         fixture.session(retainedSession, "recent-session", "RELEASED", FUTURE);
 
         assertEquals(List.of(0, 0, 0), fixture.complete(100, NO_REFERENCES));
-        assertEquals(10, fixture.count("qwen_runtime_binding"));
-        assertEquals(2, fixture.count("qwen_tool_execution"));
-        assertEquals(2, fixture.count("qwen_runtime_session"));
+        assertEquals(10, fixture.count("ma_runtime_binding"));
+        assertEquals(2, fixture.count("ma_tool_execution"));
+        assertEquals(2, fixture.count("ma_runtime_session"));
     }
 
     @Test
@@ -202,48 +205,48 @@ class JdbcRuntimeRetentionTest {
         fixture.binding("managed", "local-process", true, "FAILED");
         for (String column : List.of("provision_request_id", "provision_seed_ciphertext", "credential_key_id")) {
             RuntimeBindingRecord partial = fixture.binding(column, "legacy", false, "FAILED");
-            fixture.execute("UPDATE qwen_runtime_binding SET " + column + " = ? WHERE binding_id = ?",
+            fixture.execute("UPDATE ma_runtime_binding SET " + column + " = ? WHERE binding_id = ?",
                     "present", partial.getBindingId());
         }
 
         assertEquals(List.of(0, 0, 2), fixture.complete(100, NO_REFERENCES));
-        assertEquals(5, fixture.count("qwen_runtime_binding"));
+        assertEquals(5, fixture.count("ma_runtime_binding"));
     }
 
     @Test
     void corruptHistoricalEvidenceSkipsTheRowAndContinues() throws Exception {
         Fixture fixture = new Fixture();
         RuntimeBindingRecord corrupt = fixture.binding("corrupt", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET loss_evidence_json = ? WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET loss_evidence_json = ? WHERE binding_id = ?",
                 "{", corrupt.getBindingId());
         fixture.binding("healthy", "legacy", false, "RELEASED");
 
         assertEquals(List.of(0, 0, 1), fixture.complete(100, NO_REFERENCES));
-        assertEquals(1, fixture.count("qwen_runtime_binding"));
+        assertEquals(1, fixture.count("ma_runtime_binding"));
     }
 
     @Test
     void expiredClaimsAllowRetirementButIncompleteClaimsRetainEvidence() throws Exception {
         Fixture fixture = new Fixture();
         RuntimeBindingRecord expired = fixture.binding("expired", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET operation_owner = ?, operation_lease_until = ?, "
+        fixture.execute("UPDATE ma_runtime_binding SET operation_owner = ?, operation_lease_until = ?, "
                         + "operation_generation = 1 WHERE binding_id = ?", "owner", Timestamp.from(OLD), expired.getBindingId());
         fixture.session(expired, "expired-session", "RELEASED", OLD);
         fixture.execution(expired, "expired-session", "expired-result", "SETTLED", OLD);
-        fixture.execute("UPDATE qwen_tool_execution SET dispatch_owner = ?, dispatch_lease_until = ?, "
+        fixture.execute("UPDATE ma_tool_execution SET dispatch_owner = ?, dispatch_lease_until = ?, "
                         + "dispatch_generation = 1 WHERE execution_call_id = ?", "owner", Timestamp.from(OLD), "expired-result");
         RuntimeBindingRecord incomplete = fixture.binding("incomplete-operation", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET operation_owner = ?, operation_generation = 1 "
+        fixture.execute("UPDATE ma_runtime_binding SET operation_owner = ?, operation_generation = 1 "
                 + "WHERE binding_id = ?", "owner", incomplete.getBindingId());
         RuntimeBindingRecord dispatch = fixture.binding("incomplete-dispatch", "legacy", false, "RELEASED");
         fixture.session(dispatch, "partial-session", "RELEASED", OLD);
         fixture.execution(dispatch, "partial-session", "partial-result", "SETTLED", OLD);
-        fixture.execute("UPDATE qwen_tool_execution SET dispatch_owner = ?, dispatch_generation = 1 "
+        fixture.execute("UPDATE ma_tool_execution SET dispatch_owner = ?, dispatch_generation = 1 "
                 + "WHERE execution_call_id = ?", "owner", "partial-result");
 
         assertEquals(List.of(1, 1, 1), fixture.complete(100, NO_REFERENCES));
-        assertEquals(2, fixture.count("qwen_runtime_binding"));
-        assertEquals(1, fixture.count("qwen_tool_execution"));
+        assertEquals(2, fixture.count("ma_runtime_binding"));
+        assertEquals(1, fixture.count("ma_tool_execution"));
     }
 
     @Test
@@ -252,7 +255,7 @@ class JdbcRuntimeRetentionTest {
         fixture.binding("unproven", "local-process", true, "RELEASED");
         RuntimeBindingRecord drained = fixture.binding("drained", "local-process", true, "RELEASED");
         RuntimeResourceHandle drainHandle = fixture.handle(drained);
-        fixture.execute("UPDATE qwen_runtime_binding SET drain_requested = TRUE, drain_receipt_json = ? "
+        fixture.execute("UPDATE ma_runtime_binding SET drain_requested = TRUE, drain_receipt_json = ? "
                         + "WHERE binding_id = ?",
                 new RuntimeDrainReceipt(drained.getBindingId(), drained.getGeneration(),
                         drained.getProvisionSeed().getProvisionRequestId(), drainHandle, OLD).toJson(),
@@ -263,11 +266,11 @@ class JdbcRuntimeRetentionTest {
                 RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
         RuntimeRecoveryEvidence stop = fixture.evidence(stopped, stoppedHandle,
                 RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED);
-        fixture.execute("UPDATE qwen_runtime_binding SET loss_evidence_json = ?, stop_evidence_json = ? "
+        fixture.execute("UPDATE ma_runtime_binding SET loss_evidence_json = ?, stop_evidence_json = ? "
                         + "WHERE binding_id = ?", loss.toJson(), stop.toJson(), stopped.getBindingId());
         RuntimeBindingRecord onlyLoss = fixture.binding("loss-only", "local-process", true, "RELEASED");
         RuntimeResourceHandle lossHandle = fixture.handle(onlyLoss);
-        fixture.execute("UPDATE qwen_runtime_binding SET loss_evidence_json = ? WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET loss_evidence_json = ? WHERE binding_id = ?",
                 fixture.evidence(onlyLoss, lossHandle, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST).toJson(),
                 onlyLoss.getBindingId());
 
@@ -280,13 +283,13 @@ class JdbcRuntimeRetentionTest {
     void activeClaimsAndAnyNonterminalChildProtectTheirFamily() throws Exception {
         Fixture fixture = new Fixture();
         RuntimeBindingRecord operation = fixture.binding("operation", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE qwen_runtime_binding SET operation_owner = ?, operation_lease_until = ?, "
+        fixture.execute("UPDATE ma_runtime_binding SET operation_owner = ?, operation_lease_until = ?, "
                         + "operation_generation = 1 WHERE binding_id = ?",
                 "owner", Timestamp.from(FUTURE), operation.getBindingId());
         RuntimeBindingRecord dispatch = fixture.binding("dispatch", "legacy", false, "RELEASED");
         fixture.session(dispatch, "leased-session", "RELEASED", OLD);
         fixture.execution(dispatch, "leased-session", "leased-result", "SETTLED", OLD);
-        fixture.execute("UPDATE qwen_tool_execution SET dispatch_owner = ?, dispatch_lease_until = ?, "
+        fixture.execute("UPDATE ma_tool_execution SET dispatch_owner = ?, dispatch_lease_until = ?, "
                         + "dispatch_generation = 1 WHERE execution_call_id = ?",
                 "owner", Timestamp.from(FUTURE), "leased-result");
         for (String state : List.of("ACQUIRING", "READY", "RELEASING")) {
@@ -302,8 +305,8 @@ class JdbcRuntimeRetentionTest {
         }
 
         assertEquals(List.of(0, 0, 0), fixture.complete(100, NO_REFERENCES));
-        assertEquals(10, fixture.count("qwen_runtime_binding"));
-        assertEquals(14, fixture.count("qwen_tool_execution"));
+        assertEquals(10, fixture.count("ma_runtime_binding"));
+        assertEquals(14, fixture.count("ma_tool_execution"));
     }
 
     @Test
@@ -315,17 +318,16 @@ class JdbcRuntimeRetentionTest {
             fixture.session(binding, binding.getBindingId(), "RELEASED", OLD);
             fixture.execution(binding, binding.getBindingId(), binding.getBindingId(), "SETTLED", OLD);
         }
-        fixture.execute("INSERT INTO managed_workspace_operator_recovery (recovery_id, binding_id, "
-                        + "runtime_generation, storage_key, holder_key, runtime_session_id, provision_request_id, "
-                        + "resource_handle_json, runtime_lease_id, runtime_epoch, blocked_execution_call_id, "
-                        + "operator_id, reason, prepared_at, completed_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, "
-                        + "1, ?, ?, ?, ?, ?)",
-                UUID.randomUUID().toString(), recovery.getBindingId(), "storage", "holder", "session",
-                "request", "{}", "lease", "execution", "operator", "reason", Timestamp.from(OLD), Timestamp.from(OLD));
+        fixture.execute("INSERT INTO ma_operation (operation_key, operation_id, scope_key, operation_kind, tenant_id,"
+                + " target_kind, target_key, target_id, target_revision, state, phase, request_digest, request_json,"
+                + " created_at, updated_at) VALUES (?, ?, ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
+                + " ?, ?, 1, 'COMPLETED', 'COMPLETED', ?, '{}', 1, 1)",
+                "a".repeat(64), UUID.randomUUID().toString(), "b".repeat(64),
+                recovery.getRequest().getScope().getTenantId(), "c".repeat(64), recovery.getBindingId(), "d".repeat(64));
 
         assertEquals(List.of(0, 0, 0), fixture.complete(100, guard(Set.of("holder"), Set.of())));
-        assertEquals(2, fixture.count("qwen_runtime_binding"));
-        assertEquals(2, fixture.count("qwen_tool_execution"));
+        assertEquals(2, fixture.count("ma_runtime_binding"));
+        assertEquals(2, fixture.count("ma_tool_execution"));
     }
 
     @Test
@@ -346,7 +348,7 @@ class JdbcRuntimeRetentionTest {
         }
         assertEquals(List.of(0, 0, 1), fixture.complete(100, guard(protectedBindings, Set.of())));
         assertNull(fixture.bindings.findById("binding-100"));
-        assertEquals(100, fixture.count("qwen_runtime_binding"));
+        assertEquals(100, fixture.count("ma_runtime_binding"));
     }
 
     @Test
@@ -359,10 +361,10 @@ class JdbcRuntimeRetentionTest {
         for (String id : ids) {
             fixture.binding(id, "legacy", false, "RELEASED");
             // SQL literals preserve migrated microseconds even when the driver truncates Timestamp parameters.
-            fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = '2000-01-01 00:00:00.250001' "
+            fixture.execute("UPDATE ma_runtime_binding SET last_active_at = '2000-01-01 00:00:00.250001' "
                     + "WHERE binding_id = ?", id);
         }
-        fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = '2000-01-01 00:00:00.750003' "
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = '2000-01-01 00:00:00.750003' "
                 + "WHERE binding_id = ?", ids.getLast());
         JdbcRuntimeRetention retention = fixture.retention(guard(Set.of(ids.getFirst()), Set.of()));
         JdbcRuntimeRetention.Cursor cursor = null;
@@ -451,9 +453,9 @@ class JdbcRuntimeRetentionTest {
         Class<? extends Throwable> expectedFailure = fatal ? AssertionError.class : IllegalStateException.class;
         assertThrows(expectedFailure,
                 () -> fixture.retention(failing).sweep(MAX_AGE, 100, null));
-        assertEquals(2, fixture.count("qwen_tool_execution"));
-        assertEquals(1, fixture.count("qwen_runtime_session"));
-        assertEquals(1, fixture.count("qwen_runtime_binding"));
+        assertEquals(2, fixture.count("ma_tool_execution"));
+        assertEquals(1, fixture.count("ma_runtime_session"));
+        assertEquals(1, fixture.count("ma_runtime_binding"));
         assertEquals(List.of(2, 1, 1), fixture.complete(100, NO_REFERENCES));
     }
 
@@ -482,7 +484,7 @@ class JdbcRuntimeRetentionTest {
             assertEquals(List.of(1, 1, 1), List.of(left.get(0) + right.get(0),
                     left.get(1) + right.get(1), left.get(2) + right.get(2)));
         }
-        assertEquals(0, fixture.count("qwen_runtime_binding"));
+        assertEquals(0, fixture.count("ma_runtime_binding"));
     }
 
     static void verifyOnDatabase(DataSource source) throws Exception {
@@ -576,9 +578,9 @@ class JdbcRuntimeRetentionTest {
             nextId = id;
             RuntimeBindingRecord created = bindings.findOrCreate(request);
             nextId = id + "-next";
-            execute("UPDATE qwen_runtime_binding SET binding_state = ?, last_active_at = ? "
+            execute("UPDATE ma_runtime_binding SET binding_state = ?, last_active_at = ? "
                             + "WHERE binding_id = ?", state, Timestamp.from(OLD), created.getBindingId());
-            execute("UPDATE qwen_runtime_binding_slot SET active_binding_id = NULL WHERE request_key = ?",
+            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_key = ?",
                     JdbcRepositorySupport.requestKey(request));
             return bindings.findById(id);
         }
@@ -595,7 +597,7 @@ class JdbcRuntimeRetentionTest {
             executions.findOrCreate(ToolExecutionRecord.prepared(id, id + "-key", binding.getBindingId(),
                     binding.getGeneration(), "harness", session, "turn", "call", "digest",
                     Map.of("sessionId", session, "promptId", "turn", "callId", "call", "argsDigest", "digest")));
-            execute("UPDATE qwen_tool_execution SET execution_state = ?, cancel_requested = ?, execution_status = ?, "
+            execute("UPDATE ma_tool_execution SET execution_state = ?, cancel_requested = ?, execution_status = ?, "
                             + "result_json = ?, settled_at = ?, abandoned_at = ?, loss_evidence_id = ? "
                             + "WHERE execution_call_id = ?", state, "CANCEL_REQUESTED".equals(state),
                     "SETTLED".equals(state) ? "success" : null,
@@ -608,7 +610,7 @@ class JdbcRuntimeRetentionTest {
         RuntimeResourceHandle handle(RuntimeBindingRecord binding) throws SQLException {
             RuntimeResourceHandle handle = new RuntimeResourceHandle(binding.getRequest().getProvisionerKind(),
                     1, Map.of("worker", binding.getBindingId()));
-            execute("UPDATE qwen_runtime_binding SET resource_handle_version = ?, resource_handle_json = ? "
+            execute("UPDATE ma_runtime_binding SET resource_handle_version = ?, resource_handle_json = ? "
                     + "WHERE binding_id = ?", handle.getVersion(), handle.toJson(), binding.getBindingId());
             return handle;
         }

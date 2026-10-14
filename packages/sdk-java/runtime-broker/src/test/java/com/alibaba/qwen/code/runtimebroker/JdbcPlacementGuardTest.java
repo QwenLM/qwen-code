@@ -65,7 +65,7 @@ class JdbcPlacementGuardTest {
     }
 
     @Test
-    void managedIdentityComparisonsStayExactWithCaseInsensitiveDatabaseColumns() throws Exception {
+    void managedIdentityComparisonsStayExactWithPermissivePathColumn() throws Exception {
         RuntimeProvisionRequest existing = request("Tenant", "Workspace", "/Workspace", "Storage", "local-process");
         for (RuntimeProvisionRequest candidate : List.of(
                 request("tenant", "Workspace", "/Workspace", "Storage", "local-process"),
@@ -85,7 +85,7 @@ class JdbcPlacementGuardTest {
         for (String column : List.of("provision_request_id", "provision_seed_ciphertext", "credential_key_id")) {
             Fixture fixture = new Fixture(false);
             fixture.history(existing, RuntimeBindingRecord.State.FAILED, false, false, 0);
-            fixture.execute("UPDATE qwen_runtime_binding SET " + column + " = ? WHERE binding_id = ?", "present", "history");
+            fixture.execute("UPDATE ma_runtime_binding SET " + column + " = ? WHERE binding_id = ?", "present", "history");
             fixture.assertBlocked(candidate);
             assertEquals(0, fixture.decrypts.get());
         }
@@ -93,7 +93,7 @@ class JdbcPlacementGuardTest {
                 "runtime_credential_ciphertext", "runtime_credential_key_id")) {
             Fixture fixture = new Fixture(false);
             fixture.history(existing, RuntimeBindingRecord.State.RECOVERY_BLOCKED, true, false, 0);
-            fixture.execute("UPDATE qwen_runtime_binding SET " + column + " = ? WHERE binding_id = ?",
+            fixture.execute("UPDATE ma_runtime_binding SET " + column + " = ? WHERE binding_id = ?",
                     "runtime_epoch".equals(column) ? 1 : "present", "history");
             fixture.decrypts.set(0);
             fixture.assertBlocked(candidate);
@@ -162,15 +162,17 @@ class JdbcPlacementGuardTest {
         private final AtomicInteger decrypts = new AtomicInteger();
         private String nextId = "history";
 
-        Fixture(boolean caseInsensitive) {
-            this(h2(caseInsensitive));
+        Fixture(boolean caseInsensitive) throws SQLException {
+            this(h2());
+            if (caseInsensitive) {
+                execute("ALTER TABLE ma_runtime_binding ALTER COLUMN canonical_cwd VARCHAR_IGNORECASE(512)");
+            }
         }
 
-        private static DataSource h2(boolean caseInsensitive) {
+        private static DataSource h2() {
             JdbcDataSource dataSource = new JdbcDataSource();
             dataSource.setURL("jdbc:h2:mem:placement-" + UUID.randomUUID()
-                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
-                    + (caseInsensitive ? ";IGNORECASE=TRUE" : ""));
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
             return dataSource;
         }
 
@@ -200,12 +202,12 @@ class JdbcPlacementGuardTest {
                 seed = RuntimeProvisionSeed.create(created.getBindingId(), created.getGeneration());
                 ProtectedSecret protectedSeed = new AesGcmSecretProtector("key", new byte[32])
                         .protect("runtime-provision-seed:" + JdbcRepositorySupport.valueKey(created.getBindingId()), seed.encode());
-                execute("UPDATE qwen_runtime_binding SET provision_request_id = ?, provision_seed_ciphertext = ?, "
+                execute("UPDATE ma_runtime_binding SET provision_request_id = ?, provision_seed_ciphertext = ?, "
                                 + "credential_key_id = ? WHERE binding_id = ?",
                         seed.getProvisionRequestId(), protectedSeed.getCiphertext(), protectedSeed.getKeyId(),
                         created.getBindingId());
             } else if (!seeded) {
-                execute("UPDATE qwen_runtime_binding SET provision_request_id = NULL, provision_seed_ciphertext = NULL, "
+                execute("UPDATE ma_runtime_binding SET provision_request_id = NULL, provision_seed_ciphertext = NULL, "
                         + "credential_key_id = NULL WHERE binding_id = ?", created.getBindingId());
             }
             boolean durableReady = state == RuntimeBindingRecord.State.READY && request.requiresDurableIdentity();
@@ -213,7 +215,7 @@ class JdbcPlacementGuardTest {
                     ? new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:1234"),
                     seed.getToken(), seed.getLeaseId(), seed.getEpoch()) : null;
             if (lease != null) {
-                execute("UPDATE qwen_runtime_binding SET runtime_instance_id = ?, runtime_endpoint = ?, runtime_lease_id = ?, "
+                execute("UPDATE ma_runtime_binding SET runtime_instance_id = ?, runtime_endpoint = ?, runtime_lease_id = ?, "
                                 + "runtime_epoch = ? WHERE binding_id = ?", lease.getRuntimeInstanceId(),
                         lease.getEndpoint().toString(), lease.getLeaseId(), lease.getEpoch(), created.getBindingId());
             }
@@ -221,13 +223,13 @@ class JdbcPlacementGuardTest {
                     ? new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("worker", "history")) : null;
             long attested = durableReady ? Math.max(1, attestation) : attestation;
             if (handle != null) {
-                execute("UPDATE qwen_runtime_binding SET resource_handle_version = ?, resource_handle_json = ?, "
+                execute("UPDATE ma_runtime_binding SET resource_handle_version = ?, resource_handle_json = ?, "
                                 + "last_reconciled_at = CURRENT_TIMESTAMP WHERE binding_id = ?",
                         handle.getVersion(), handle.toJson(), created.getBindingId());
             }
-            execute("UPDATE qwen_runtime_binding SET binding_state = ?, attestation_generation = ? WHERE binding_id = ?",
+            execute("UPDATE ma_runtime_binding SET binding_state = ?, attestation_generation = ? WHERE binding_id = ?",
                     state.name(), attested, created.getBindingId());
-            execute("UPDATE qwen_runtime_binding_slot SET active_binding_id = NULL WHERE request_key = ?",
+            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_key = ?",
                     JdbcRepositorySupport.requestKey(request));
             nextId = "candidate";
             return new RuntimeBindingRecord(created.getBindingId(), request, seed, created.getGeneration(), state,

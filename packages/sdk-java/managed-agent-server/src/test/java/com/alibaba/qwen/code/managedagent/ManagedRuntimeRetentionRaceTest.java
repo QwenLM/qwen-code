@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
@@ -52,8 +53,8 @@ class ManagedRuntimeRetentionRaceTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     enum Reference {
-        PUBLICATION("qwen_tool_publication"), HOLDER("managed_workspace_execution_lease"),
-        OPERATOR("managed_workspace_operator_recovery"), CSI_RETIREMENT("managed_workspace_csi_retirement");
+        PUBLICATION("ma_output_capture"), HOLDER("ma_storage_owner"),
+        OPERATOR("ma_operation"), CSI_RETIREMENT("ma_operation");
         final String table;
         Reference(String table) { this.table = table; }
     }
@@ -77,7 +78,8 @@ class ManagedRuntimeRetentionRaceTest {
                                         && first.compareAndSet(true, false)) {
                                     assertThat(connection.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
                                     // Establish a real table-read snapshot before the writer commits.
-                                    try (var query = connection.prepareStatement("SELECT COUNT(*) FROM " + reference.table);
+                                    try (var query = connection.prepareStatement("SELECT COUNT(*) FROM " + reference.table
+                                            + (reference == Reference.HOLDER ? " WHERE binding_id IS NOT NULL" : ""));
                                             var rows = query.executeQuery()) {
                                         assertThat(rows.next()).isTrue();
                                         assertThat(rows.getInt(1)).isZero();
@@ -110,7 +112,7 @@ class ManagedRuntimeRetentionRaceTest {
             assertThat(fixture.count(reference.table)).isEqualTo(1);
             if (reference == Reference.CSI_RETIREMENT) {
                 // Retirement already pins the original family before any worker ACK can be created.
-                assertThat(fixture.count("managed_workspace_csi_worker_ack")).isZero();
+                assertThat(fixture.count("ma_operation_work")).isZero();
             }
         }
     }
@@ -120,7 +122,8 @@ class ManagedRuntimeRetentionRaceTest {
     void writersCannotCreateDanglingReferencesAfterTheSweepLocksTheRetiredBinding(Reference reference) throws Exception {
         var fixture = new Fixture(dataSource(), reference);
         fixture.retire();
-        fixture.jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        fixture.jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+                + " runtime_generation = NULL, runtime_session_id = NULL");
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var first = new AtomicBoolean(true);
@@ -204,8 +207,9 @@ class ManagedRuntimeRetentionRaceTest {
         Fixture(DataSource source, Reference reference) {
             this.source = source;
             this.reference = reference;
-            Flyway.configure().dataSource(source).load().migrate();
-            jdbc = new JdbcTemplate(source);
+            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+            jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+            WorkspaceTestStorage.register(jdbc, "tenant", "storage");
             var manager = new DataSourceTransactionManager(source);
             if (reference == Reference.PUBLICATION || reference == Reference.CSI_RETIREMENT) {
                 var registration = reference == Reference.CSI_RETIREMENT
@@ -264,17 +268,27 @@ class ManagedRuntimeRetentionRaceTest {
                     "handleKind", binding.getResourceHandle().getKind(), "handleVersion", binding.getResourceHandle().getVersion(),
                     "handle", JSON.valueToTree(binding.getResourceHandle().getValue()).toString(), "stoppedAt", OLD.toString())).toString() : null;
             // Age a completed lifecycle; production writers above still perform every reference admission check.
-            jdbc.update("UPDATE qwen_runtime_binding SET binding_state = 'RELEASED', last_active_at = ?, drain_requested = TRUE,"
+            jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'RELEASED', last_active_at = ?, drain_requested = TRUE,"
                     + " drain_receipt_json = ?, operation_owner = NULL, operation_lease_until = NULL", Timestamp.from(OLD), receipt);
-            jdbc.update("UPDATE qwen_runtime_binding_slot SET active_binding_id = NULL");
-            jdbc.update("UPDATE qwen_runtime_session SET session_state = 'RELEASED', last_active_at = ?", Timestamp.from(OLD));
-            jdbc.update("UPDATE qwen_tool_execution SET settled_at = ?,"
+            jdbc.update("UPDATE ma_runtime_slot SET active_binding_id = NULL");
+            jdbc.update("UPDATE ma_runtime_session SET session_state = 'RELEASED', last_active_at = ?", Timestamp.from(OLD));
+            jdbc.update("UPDATE ma_tool_execution SET settled_at = ?,"
                     + " dispatch_owner = NULL, dispatch_lease_until = NULL", Timestamp.from(OLD));
             if (reference == Reference.OPERATOR || reference == Reference.CSI_RETIREMENT) {
-                jdbc.update("DELETE FROM managed_workspace_execution_lease");
+                jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+                        + " runtime_generation = NULL, runtime_session_id = NULL");
             }
         }
 
-        long count(String table) { return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Long.class); }
+        long count(String table) {
+            String where = switch (table) {
+                case "ma_storage_owner" -> " WHERE binding_id IS NOT NULL";
+                case "ma_operation" -> " WHERE operation_kind = '" + (reference == Reference.OPERATOR
+                        ? "WORKSPACE_OPERATOR_RECOVERY" : "CSI_RETIREMENT") + "'";
+                case "ma_operation_work" -> " WHERE work_kind = 'CSI_WORKER_ACK'";
+                default -> "";
+            };
+            return jdbc.queryForObject("SELECT COUNT(*) FROM " + table + where, Long.class);
+        }
     }
 }

@@ -521,7 +521,7 @@ public class SessionLifecycleCoordinator {
                 .findLiveScopes(tenantId, sessionId)) {
             ScopeEvidence body;
             try {
-                String text = childScopes.readResource(tenantId,
+                String text = childScopes.readResource(tenantId, sessionId,
                         scope.recordResourceId());
                 if (text == null) {
                     body = new ScopeEvidence(null, null, null, null);

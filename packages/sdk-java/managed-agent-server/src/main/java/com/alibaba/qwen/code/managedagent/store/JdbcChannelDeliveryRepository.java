@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -14,9 +17,10 @@ import org.springframework.jdbc.core.RowMapper;
  */
 public final class JdbcChannelDeliveryRepository
         implements ChannelDeliveryRepository {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String COLUMNS = String.join(", ",
-            "tenant_id", "channel_instance_id", "delivery_id", "segment_id",
-            "segment_ordinal", "state", "provider_receipt", "created_at",
+            "tenant_id", "channel_id AS channel_instance_id", "delivery_id", "segment_id",
+            "segment_ordinal", "transport_state AS state", "provider_receipt_json", "created_at",
             "updated_at");
     private static final RowMapper<ChannelDelivery> MAPPER = (row, index) ->
             new ChannelDelivery(
@@ -26,7 +30,7 @@ public final class JdbcChannelDeliveryRepository
                     row.getString("segment_id"),
                     row.getInt("segment_ordinal"),
                     row.getString("state"),
-                    row.getString("provider_receipt"),
+                    receipt(row.getString("provider_receipt_json")),
                     row.getLong("created_at"),
                     row.getLong("updated_at"));
 
@@ -44,16 +48,17 @@ public final class JdbcChannelDeliveryRepository
         requireCandidate(candidate);
         try {
             long now = databaseNow();
-            jdbc.update("INSERT INTO qwen_managed_channel_delivery (" + COLUMNS
-                            + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    candidate.tenantId(),
-                    candidate.channelInstanceId(),
-                    candidate.deliveryId(),
-                    candidate.segmentId(),
-                    candidate.ordinal(),
-                    candidate.state(),
-                    candidate.providerReceipt(),
-                    now, now);
+            jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, source_scope_key,"
+                            + " tenant_id, channel_id, delivery_id, segment_id, segment_ordinal,"
+                            + " transport_state, reception_state, consumption_state, provider_receipt_json,"
+                            + " payload_json, created_at, updated_at)"
+                            + " VALUES (?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
+                            + " 'NOT_APPLICABLE', ?, '{\"schemaVersion\":1}', ?, ?)",
+                    deliveryKey(candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId()),
+                    channelScope(candidate.tenantId(), candidate.channelInstanceId()),
+                    candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId(),
+                    candidate.segmentId(), candidate.ordinal(), candidate.state(),
+                    receiptJson(candidate.providerReceipt()), now, now);
         } catch (DuplicateKeyException duplicate) {
             // A retried create of one delivery: keep the first row.
         }
@@ -77,10 +82,11 @@ public final class JdbcChannelDeliveryRepository
         ChannelStoreSupport.requireId(channelInstanceId, "channelInstanceId");
         ChannelStoreSupport.requireId(deliveryId, "deliveryId");
         return jdbc.query("SELECT " + COLUMNS
-                        + " FROM qwen_managed_channel_delivery"
-                        + " WHERE tenant_id = ? AND channel_instance_id = ?"
+                        + " FROM ma_delivery"
+                        + " WHERE delivery_kind = 'CHANNEL' AND source_scope_key = ?"
+                        + " AND tenant_id = ? AND channel_id = ?"
                         + " AND delivery_id = ?",
-                MAPPER, tenantId, channelInstanceId, deliveryId).stream()
+                MAPPER, channelScope(tenantId, channelInstanceId), tenantId, channelInstanceId, deliveryId).stream()
                 .findFirst();
     }
 
@@ -97,18 +103,42 @@ public final class JdbcChannelDeliveryRepository
             throw new IllegalArgumentException("channel delivery cannot step "
                     + expectedState + " -> " + state);
         }
-        int updated = jdbc.update("UPDATE qwen_managed_channel_delivery SET"
-                        + " state = ?, provider_receipt = COALESCE(?,"
-                        + " provider_receipt), updated_at = ?"
-                        + " WHERE tenant_id = ? AND channel_instance_id = ?"
-                        + " AND delivery_id = ? AND state = ?",
-                state, providerReceipt, databaseNow(), tenantId,
-                channelInstanceId, deliveryId, expectedState);
+        List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_delivery"
+                        + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
+                        + " AND channel_id = ? AND delivery_id = ?",
+                Long.class, deliveryKey(tenantId, channelInstanceId, deliveryId), tenantId,
+                channelInstanceId, deliveryId);
+        if (generations.isEmpty()) {
+            return null;
+        }
+        return transition(tenantId, channelInstanceId, deliveryId, expectedState, state,
+                providerReceipt, generations.getFirst());
+    }
+
+    @Override
+    public ChannelDelivery transition(String tenantId, String channelInstanceId, String deliveryId,
+            String expectedState, String state, String providerReceipt, long claimGeneration) {
+        if (!ChannelDeliveryRepository.isLegalStep(expectedState, state)) {
+            throw new IllegalArgumentException("channel delivery cannot step " + expectedState + " -> " + state);
+        }
+        int updated = jdbc.update("UPDATE ma_delivery SET transport_state = ?,"
+                        + " provider_receipt_json = COALESCE(?, provider_receipt_json), updated_at = ?"
+                        + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
+                        + " AND channel_id = ? AND delivery_id = ? AND transport_state = ?"
+                        + " AND claim_generation = ?",
+                state, receiptJson(providerReceipt), databaseNow(),
+                deliveryKey(tenantId, channelInstanceId, deliveryId), tenantId,
+                channelInstanceId, deliveryId, expectedState, claimGeneration);
         Optional<ChannelDelivery> current = find(tenantId, channelInstanceId,
                 deliveryId);
         if (updated == 1) {
             return current.orElseThrow(() -> new IllegalStateException(
                     "channel delivery transition left no row"));
+        }
+        Long actualGeneration = jdbc.queryForObject("SELECT claim_generation FROM ma_delivery WHERE delivery_key = ?",
+                Long.class, deliveryKey(tenantId, channelInstanceId, deliveryId));
+        if (actualGeneration == null || actualGeneration != claimGeneration) {
+            return null;
         }
         return current.filter(row -> state.equals(row.state())
                 && (providerReceipt == null || providerReceipt.equals(
@@ -124,6 +154,7 @@ public final class JdbcChannelDeliveryRepository
             throw new IllegalArgumentException("limit must be in [1, 100]");
         }
         List<Object> arguments = new ArrayList<>();
+        arguments.add(channelScope(tenantId, channelInstanceId));
         arguments.add(tenantId);
         arguments.add(channelInstanceId);
         String cursor = "";
@@ -136,13 +167,48 @@ public final class JdbcChannelDeliveryRepository
         }
         arguments.add(limit + 1);
         List<ChannelDelivery> rows = jdbc.query("SELECT " + COLUMNS
-                        + " FROM qwen_managed_channel_delivery"
-                        + " WHERE tenant_id = ? AND channel_instance_id = ?" + cursor
+                        + " FROM ma_delivery"
+                        + " WHERE delivery_kind = 'CHANNEL' AND source_scope_key = ?"
+                        + " AND tenant_id = ? AND channel_id = ?" + cursor
                         + " ORDER BY created_at DESC, delivery_id DESC LIMIT ?",
                 MAPPER, arguments.toArray());
         boolean hasMore = rows.size() > limit;
         return new DeliveryPage(hasMore ? rows.subList(0, limit) : rows,
                 hasMore);
+    }
+
+    static String channelScope(String tenantId, String channelId) {
+        return ManagedSchemaKeys.key(tenantId, channelId);
+    }
+
+    static String deliveryKey(String tenantId, String channelId, String deliveryId) {
+        return ManagedSchemaKeys.key("CHANNEL", channelScope(tenantId, channelId), deliveryId);
+    }
+
+    private static String receiptJson(String receipt) {
+        if (receipt == null) {
+            return null;
+        }
+        try {
+            return JSON.writeValueAsString(receipt);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("Provider receipt cannot be encoded", exception);
+        }
+    }
+
+    private static String receipt(String encoded) {
+        if (encoded == null) {
+            return null;
+        }
+        try {
+            var receipt = JSON.readTree(encoded);
+            if (!receipt.isTextual()) {
+                throw new IllegalStateException("Channel provider receipt is not a string");
+            }
+            return receipt.textValue();
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("Channel provider receipt is invalid", exception);
+        }
     }
 
     private long databaseNow() {

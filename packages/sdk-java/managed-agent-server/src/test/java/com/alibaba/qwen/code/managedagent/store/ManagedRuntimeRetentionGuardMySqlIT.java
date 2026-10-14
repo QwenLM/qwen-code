@@ -67,6 +67,41 @@ class ManagedRuntimeRetentionGuardMySqlIT {
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
     }
 
+    @Test
+    void childLineageIsReadOnTheSweepConnection() throws Exception {
+        contract.childLineageIsReadOnTheSweepConnection();
+    }
+
+    @Test
+    void aCsiReservationWithNoHolderStillRetainsItsExactBinding() throws Exception {
+        contract.aCsiReservationWithNoHolderStillRetainsItsExactBinding();
+    }
+
+    @Test
+    void localHolderAndCsiRetirementRetainBindings() throws Exception {
+        contract.localHolderAndCsiRetirementRetainBindings();
+    }
+
+    @Test
+    void collectedPublicationUsesRawHashWithoutReadingItsPayload() throws Exception {
+        contract.collectedPublicationUsesRawHashWithoutReadingItsPayload();
+    }
+
+    @Test
+    void acknowledgementUsesRawHashAndSeesTheCallersUncommittedReference() throws Exception {
+        contract.acknowledgementUsesRawHashAndSeesTheCallersUncommittedReference();
+    }
+
+    @Test
+    void sharedWorkReferencesRequireTheCsiOperationAndAckKinds() throws Exception {
+        contract.sharedWorkReferencesRequireTheCsiOperationAndAckKinds();
+    }
+
+    @Test
+    void anActionVariantCannotBeMistakenForAnUnsettledBackgroundRun() throws Exception {
+        contract.anActionVariantCannotBeMistakenForAnUnsettledBackgroundRun();
+    }
+
     @AfterEach
     void removeTestSchema() {
         if (admin != null && schema != null) {
