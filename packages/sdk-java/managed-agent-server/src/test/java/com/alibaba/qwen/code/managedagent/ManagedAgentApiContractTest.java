@@ -1719,6 +1719,67 @@ class ManagedAgentApiContractTest {
                 ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
                         + "\"idempotencyKey\":\"contract-web-scope\"}")
                         .formatted(sessionId, childTask));
+
+        // H4f-b: a workflow task serves the same cancel on both surfaces,
+        // and its view advertises the action.
+        String workflowKey = "e".repeat(64);
+        jdbc.update("INSERT INTO ma_session_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, runtime_state,"
+                        + " delivery_target, delivery_state, created_at,"
+                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
+                        + " ?, 'child_run', 'run-contract-wf', ?, 1,"
+                        + " 'resource-run-contract-wf', 'workflow',"
+                        + " 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                workflowKey, tenant, sessionId, "f".repeat(64));
+        String workflowTask = "task_" + workflowKey;
+        JsonNode workflowView = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        workflowTask).header(TENANT, tenant), null));
+        assertThat(workflowView.get("action_capabilities").toString())
+                .isEqualTo("[\"cancel\"]");
+        // The child_agent cancel above stays open in this fixture, and the
+        // one open operation per Session rule spans task kinds.
+        assertThat(json(exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, workflowTask).header(TENANT,
+                        tenant).header(IDEMPOTENCY_KEY,
+                        "contract-workflow-blocked"), null))
+                .at("/error/code").asText())
+                .isEqualTo("session_operation_active");
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        JsonNode workflowAdmitted = json(exchange(drift, "cancelSessionTask",
+                202, post(cancelPath, sessionId, workflowTask)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-workflow-cancel"),
+                null));
+        assertThat(workflowAdmitted.get("type").asText())
+                .isEqualTo("task_cancel");
+        assertThat(workflowAdmitted.get("task_id").asText())
+                .isEqualTo(workflowTask);
+        assertThat(workflowAdmitted.get("replayed").asBoolean()).isFalse();
+        JsonNode workflowReplayed = json(exchange(drift, "cancelSessionTask",
+                202, post(cancelPath, sessionId, workflowTask)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-workflow-cancel"),
+                null));
+        assertThat(workflowReplayed.get("id").asText())
+                .isEqualTo(workflowAdmitted.get("id").asText());
+        assertThat(workflowReplayed.get("replayed").asBoolean()).isTrue();
+        JsonNode workflowWebShell = json(exchange(drift, "cancelWebShellTask",
+                202, post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-workflow-cancel\"}")
+                        .formatted(sessionId, workflowTask)));
+        assertThat(workflowWebShell.get("operationId").asText())
+                .isEqualTo(workflowAdmitted.get("id").asText());
+        assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**
