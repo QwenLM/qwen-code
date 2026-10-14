@@ -11,6 +11,8 @@ import {
 } from './quotaErrorDetection.js';
 import { AuthType } from './auth-type.js';
 import { getErrorMessage } from './errors.js';
+import { getHeaderValue } from './retryPolicy.js';
+import type { StructuredError } from '../core/turn.js';
 
 const RATE_LIMIT_MESSAGE_BY_AUTH = {
   [AuthType.USE_GEMINI]:
@@ -36,6 +38,46 @@ function getRateLimitMessage(authType?: AuthType): string {
 }
 
 const API_ERROR_PREFIX = '[API Error: ';
+
+const REQUEST_ID_HEADER = 'x-request-id';
+
+/**
+ * Upper bound on a provider-supplied request id. Real ids are UUIDs; the bound
+ * only keeps a misconfigured or hostile `x-request-id` from spilling an
+ * arbitrary-length string into the user-facing error line. Same idea as the
+ * bounded body excerpt in responses-http-error.ts.
+ */
+const MAX_REQUEST_ID_LENGTH = 128;
+
+/**
+ * Resolves a provider request id for an error, from either shape it arrives in:
+ *
+ * 1. `StructuredError.requestId` — already resolved upstream while the original
+ *    Error was still whole. This is the only shape the interactive and
+ *    non-interactive formatters ever see, because turn.ts discards the Error
+ *    when it builds the structured value.
+ * 2. a live SDK error carrying response headers — openai-node stamps
+ *    `x-request-id` onto every APIError. `getHeaderValue` is used rather than
+ *    bracket access because `APIError.headers` is a real `Headers` instance,
+ *    which has no own enumerable properties.
+ *
+ * Returns undefined when no id is available; `APIConnectionError` genuinely
+ * arrives without headers, so there is nothing to recover on that path.
+ */
+export function resolveApiErrorRequestId(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+
+  const resolved = (error as StructuredError & { requestId?: unknown })
+    .requestId;
+  const requestId =
+    typeof resolved === 'string' && resolved.trim()
+      ? resolved.trim()
+      : getHeaderValue(error, REQUEST_ID_HEADER)?.trim();
+
+  return requestId ? requestId.substring(0, MAX_REQUEST_ID_LENGTH) : undefined;
+}
 
 /**
  * Returns true when `value` is already in final user-facing form and must not
@@ -98,7 +140,14 @@ export function parseAndFormatApiError(
 
     const message =
       error instanceof Error ? getErrorMessage(error) : error.message;
-    let text = `[API Error: ${message}]`;
+    // The request id goes INSIDE the closing bracket on purpose: the
+    // isAlreadyFormatted() idempotency guard below keys off `endsWith(']')`, so
+    // a suffix after the bracket would make a second pass re-wrap the line into
+    // "[API Error: [API Error: ...]]".
+    const requestId = resolveApiErrorRequestId(error);
+    let text = requestId
+      ? `[API Error: ${message} (request_id: ${requestId})]`
+      : `[API Error: ${message}]`;
     if (error.status === 429) {
       text += getRateLimitMessage(authType);
     }

@@ -226,4 +226,102 @@ describe('parseAndFormatApiError', () => {
       expect(parseAndFormatApiError(raw)).toBe(`[API Error: ${raw}]`);
     });
   });
+
+  // Strict OpenAI-compatible backends (vLLM/SGLang) reject requests with a 400
+  // whose body openai-node fails to capture, so the CLI shows only
+  // "[API Error: 400 status code (no body)]" and the user has no traceable id
+  // to quote to their provider. The SDK does stamp `x-request-id` onto
+  // APIError.headers, so surface it on the user-facing line.
+  // See https://github.com/QwenLM/qwen-code/issues/14115
+  describe('request id surfacing', () => {
+    const REQUEST_ID = 'a30a1854-1925-4da8-8803-73fee2865116';
+    const BODYLESS = '400 status code (no body)';
+
+    it('appends an already-resolved StructuredError.requestId', () => {
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: REQUEST_ID,
+      };
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('reads x-request-id off a live error carrying a real Headers instance', () => {
+      // openai-node 5.x assigns a genuine `Headers` to APIError.headers, where
+      // bracket access (`headers['x-request-id']`) reads undefined.
+      const headers = new Headers();
+      headers.set('x-request-id', REQUEST_ID);
+      const error = Object.assign(new Error(BODYLESS), {
+        status: 400,
+        headers,
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it.each(['x-request-id', 'X-Request-Id'])(
+      'reads %s off a live error carrying a plain header record',
+      (headerName) => {
+        const error = Object.assign(new Error(BODYLESS), {
+          status: 400,
+          headers: { [headerName]: REQUEST_ID },
+        });
+
+        expect(parseAndFormatApiError(error)).toBe(
+          `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+        );
+      },
+    );
+
+    it('omits the suffix when no request id is available', () => {
+      const error: StructuredError = { message: BODYLESS, status: 400 };
+
+      expect(parseAndFormatApiError(error)).toBe(`[API Error: ${BODYLESS}]`);
+      expect(parseAndFormatApiError(new Error(BODYLESS))).toBe(
+        `[API Error: ${BODYLESS}]`,
+      );
+    });
+
+    it('keeps the 429 quota guidance after the request id', () => {
+      const error: StructuredError = {
+        message: 'Rate limit exceeded',
+        status: 429,
+        requestId: REQUEST_ID,
+      };
+
+      const result = parseAndFormatApiError(error, AuthType.USE_VERTEX_AI);
+
+      expect(result).toContain(
+        `[API Error: Rate limit exceeded (request_id: ${REQUEST_ID})]`,
+      );
+      expect(result).toContain(vertexMessage);
+    });
+
+    it('does not re-wrap a line that already carries a request id', () => {
+      const formatted = `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`;
+
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+      expect(parseAndFormatApiError({ message: formatted, status: 400 })).toBe(
+        formatted,
+      );
+    });
+
+    it('bounds an over-long provider-supplied request id', () => {
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: 'a'.repeat(5000),
+      };
+
+      const result = parseAndFormatApiError(error);
+
+      expect(result).toContain('(request_id: ');
+      expect(result.length).toBeLessThan(200);
+    });
+  });
 });
