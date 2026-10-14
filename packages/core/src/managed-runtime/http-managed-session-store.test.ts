@@ -3893,6 +3893,49 @@ describe('collectNestedResourceRefs', () => {
     };
   }
 
+  it('includes private file history admission refs without re-entering its predecessor', () => {
+    const ref = closureRef('managed-file_history', 'prepared');
+    const inputRef = closureRef('managed-tool-input', 'input');
+    const toolDefinitionRef = closureRef(
+      'managed-tool-definition',
+      'definition',
+    );
+    const intentRef = closureRef('managed-file_history', 'intent');
+    const previousRecordRef = closureRef('managed-file_history', 'previous');
+    const body = {
+      schemaVersion: 2,
+      profile: 'csi-files-retirement/1',
+      previousRecordRef,
+      preparation: {
+        stage: 'prepared',
+        intentRef,
+        invocations: [
+          { inputRef, toolDefinitionRef },
+          { inputRef, toolDefinitionRef },
+        ],
+      },
+    };
+    const nested = collectNestedResourceRefs(
+      ref,
+      Buffer.from(JSON.stringify(body)),
+    );
+    expect(nested).toHaveLength(3);
+    expect(nested).toEqual(
+      expect.arrayContaining([inputRef, toolDefinitionRef, intentRef]),
+    );
+    expect(nested).not.toContainEqual(previousRecordRef);
+    for (const ordinary of [
+      { snapshots: [] },
+      { ...body, preparation: null },
+      { ...body, schemaVersion: 1 },
+      { ...body, profile: 'ordinary' },
+    ]) {
+      expect(
+        collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(ordinary))),
+      ).toEqual([]);
+    }
+  });
+
   it('closes over every private outcome part and rejects malformed manifests', () => {
     const ref = closureRef('managed-tool-outcome-chunks', 'manifest');
     const parts = [

@@ -1833,6 +1833,21 @@ export function collectNestedResourceRefs(
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
+  if (ref.kind === 'managed-file_history') {
+    const record = asRecord(
+      parseManagedSessionRecordJson(
+        bytes.toString('utf8'),
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      ),
+      'file history',
+    );
+    // SQL admits preparation resources in this transaction; predecessor
+    // history already belongs to its original journal transaction.
+    return record['schemaVersion'] === 2 &&
+      record['profile'] === 'csi-files-retirement/1'
+      ? collectRefs([record['preparation']])
+      : [];
+  }
   if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
     return hostedRecoveryReferences(parseHostedRecoveryResource(bytes));
   }
@@ -1891,6 +1906,7 @@ function isReferenceContainer(kind: string): boolean {
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
       'managed-checkpoint',
+      'managed-file_history',
       'managed-action-options',
       'managed-hook-plan',
       'managed-hook-message-chunks',
