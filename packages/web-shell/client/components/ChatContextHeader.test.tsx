@@ -97,6 +97,26 @@ describe('ChatContextHeader', () => {
     ).toBeNull();
   });
 
+  it('lights the environment activity dot only while work is in progress', () => {
+    const idle = mount();
+    expect(
+      idle.querySelector('[data-testid="chat-header-environment-activity"]'),
+    ).toBeNull();
+
+    const running = mount({ environmentRunning: true });
+    const dot = running
+      .querySelector('button[aria-label="Toggle environment information"]')
+      ?.querySelector('[data-testid="chat-header-environment-activity"]');
+    expect(dot).not.toBeNull();
+    expect(
+      running.querySelectorAll(
+        '[data-testid="chat-header-environment-activity"]',
+      ),
+    ).toHaveLength(1);
+    // Decorative: the button keeps its own stable accessible name.
+    expect(dot?.getAttribute('aria-hidden')).toBe('true');
+  });
+
   it('toggles each available panel independently', () => {
     const onToggleEnvironment = vi.fn();
     const onToggleRightPanel = vi.fn();

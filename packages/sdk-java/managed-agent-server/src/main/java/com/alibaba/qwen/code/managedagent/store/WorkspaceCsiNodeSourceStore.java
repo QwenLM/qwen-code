@@ -96,7 +96,7 @@ public final class WorkspaceCsiNodeSourceStore {
                         && java.util.Arrays.equals(previous.arm().bytes(), evidence.bytes()));
                 return;
             }
-            jdbc.update("INSERT INTO managed_workspace_csi_source (binding_id, runtime_generation, physical_key,"
+            jdbc.update("INSERT INTO ma_csi_source (binding_id, runtime_generation, physical_key,"
                     + " reservation_id, reservation_revision, configuration_json, phase, record_version,"
                     + " arm_bytes, arm_sequence, arm_hash) VALUES (?, ?, ?, ?, ?, ?, 'ARMED', 1, ?, ?, ?)",
                     original.getBindingId(), original.getGeneration(), registration.physicalKey(), reservation.reservationId(),
@@ -119,7 +119,7 @@ public final class WorkspaceCsiNodeSourceStore {
         mutate(original, registration, reservation, connection -> {
             Association current = read(connection, original.getBindingId(), true);
             requireSame(current, expected);
-            require(jdbc.update("UPDATE managed_workspace_csi_source SET phase = 'BOUND', record_version = 2,"
+            require(jdbc.update("UPDATE ma_csi_source SET phase = 'BOUND', record_version = 2,"
                     + " pod_uid = ?, gated_spec_sha256 = ?, bound_bytes = ?, bound_sequence = ?, bound_hash = ?"
                     + " WHERE binding_id = ? AND phase = 'ARMED' AND record_version = 1", podUid, gatedSpecSha256,
                     evidence.bytes(), evidence.stream().head().sequence(), evidence.stream().head().hash(), original.getBindingId()) == 1);
@@ -135,7 +135,7 @@ public final class WorkspaceCsiNodeSourceStore {
         mutate(original, registration, reservation, connection -> {
             Association current = read(connection, original.getBindingId(), true);
             requireSame(current, expected);
-            require(jdbc.update("UPDATE managed_workspace_csi_source SET phase = 'PUBLISHED', record_version = 3,"
+            require(jdbc.update("UPDATE ma_csi_source SET phase = 'PUBLISHED', record_version = 3,"
                     + " publication_bytes = ?, publication_sequence = ?, publication_hash = ?"
                     + " WHERE binding_id = ? AND phase = 'BOUND' AND record_version = 2", evidence.bytes(),
                     evidence.stream().head().sequence(), evidence.stream().head().hash(), original.getBindingId()) == 1);
@@ -168,14 +168,14 @@ public final class WorkspaceCsiNodeSourceStore {
                     && Objects.equals(current.getOperationOwner(), original.getOperationOwner())
                     && current.getOperationGeneration() == original.getOperationGeneration()
                     && current.getOperationLeaseUntil() != null && current.getOperationLeaseUntil().isAfter(databaseNow()));
-            try (var alias = connection.prepareStatement("SELECT registration_json FROM managed_workspace_csi_registration WHERE alias_key = ? FOR UPDATE")) {
+            try (var alias = connection.prepareStatement("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE")) {
                 alias.setQueryTimeout(10);
                 alias.setString(1, registration.aliasKey());
                 try (var row = alias.executeQuery()) {
                     require(row.next() && registration.equals(decode(row.getString(1), WorkspaceCsiRegistration.class)) && !row.next());
                 }
             }
-            try (var holder = connection.prepareStatement("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE")) {
+            try (var holder = connection.prepareStatement("SELECT * FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
                 holder.setQueryTimeout(10);
                 holder.setString(1, registration.physicalKey());
                 try (var row = holder.executeQuery()) {
@@ -202,9 +202,9 @@ public final class WorkspaceCsiNodeSourceStore {
     }
 
     private static Association read(Connection connection, String bindingId, boolean lock) throws SQLException {
-        try (var statement = connection.prepareStatement("SELECT * FROM managed_workspace_csi_source WHERE binding_id = ?" + (lock ? " FOR UPDATE" : ""))) {
+        try (var statement = connection.prepareStatement("SELECT * FROM ma_csi_source WHERE binding_id = ?" + (lock ? " FOR UPDATE" : ""))) {
             statement.setQueryTimeout(10);
-            statement.setString(1, bindingId);
+            statement.setBytes(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(bindingId));
             try (var row = statement.executeQuery()) {
                 if (!row.next()) {
                     return null;

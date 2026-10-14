@@ -69,12 +69,12 @@ final class WorkspaceCsiApplicationHistory {
                     && DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()));
             var connection = WorkspaceCsiApplicationStore.bounded(target, started);
             var read = new WorkspaceCsiApplicationInventory.HistoricalScan(connection, started, this::readFrozenOwner);
-            var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(read, retirement);
+            var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(read, tenant, retirement);
             var binding = bindings.findByIdInReadOnlySnapshot(connection, owner.binding().text("binding_id"));
             require(binding != null && binding.getState() == RuntimeBindingRecord.State.RELEASED
                     && binding.isDrainRequested() && binding.getGeneration() == 1
                     && Objects.equals(binding.getVersion(), owner.binding().number("record_version"))
-                    && binding.getBindingId().equals(owner.retirement().text("binding_id"))
+                    && binding.getBindingId().equals(owner.retirement().text("target_id"))
                     && binding.getRequest().getScope().getTenantId().equals(tenant)
                     && binding.getRequest().getScope().getWorkspaceId().equals(workspace)
                     && binding.getRequest().getIsolationKey().equals(session));
@@ -85,7 +85,7 @@ final class WorkspaceCsiApplicationHistory {
             var result = readSavedApplication(read, binding, owner.retirement(), identityJson);
             result = WorkspaceCsiApplicationInventory.auditPhysicalCandidates(read, result);
             require(result.blockers().isEmpty());
-            require(Arrays.equals(owner.binding().bytes(), WorkspaceCsiApplicationImage.sole(result, "qwen_runtime_binding").bytes()));
+            require(Arrays.equals(owner.binding().bytes(), WorkspaceCsiApplicationImage.sole(result, "ma_runtime_binding").bytes()));
             require(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(10));
             return result;
         }));
@@ -100,7 +100,7 @@ final class WorkspaceCsiApplicationHistory {
         JsonNode metadata = WorkspaceCsiApplicationJson.object(body, 128 * 1024);
         long expectedRevision = number(metadata.get("expectedJournalRevision"));
         long expectedSequence = number(metadata.get("expectedCommittedSequence"));
-        var head = WorkspaceCsiApplicationImage.sole(baseline, "qwen_managed_session_journal_head");
+        var head = WorkspaceCsiApplicationImage.sole(baseline, "ma_session_head");
         scope(head, original);
         require(expectedRevision > 1 && expectedRevision < WorkspaceCsiApplicationInventory.MAX_ROWS
                 && Objects.equals(head.number("journal_revision"), expectedRevision)
@@ -112,7 +112,7 @@ final class WorkspaceCsiApplicationHistory {
                 && "active".equals(head.text("activation_phase"))
                 && Objects.equals(head.number("activation_epoch"), 1L)
                 && Objects.equals(head.number("activation_event_epoch"), 1L));
-        var transactions = baseline.table("qwen_managed_session_journal_tx").rows().stream()
+        var transactions = baseline.table("ma_session_journal_tx").rows().stream()
                 .filter(row -> row.membership() == Membership.ORIGINAL)
                 .sorted(Comparator.comparingLong(row -> row.number("journal_revision"))).toList();
         require(transactions.size() == expectedRevision);
@@ -190,14 +190,14 @@ final class WorkspaceCsiApplicationHistory {
         Map<String, Row> resources = new LinkedHashMap<>();
         Map<Long, Map<String, Row>> references = new LinkedHashMap<>();
         String sessionScope = ManagedSessionStore.sessionScopeKey(original.getScope().getTenantId(), original.getIsolationKey());
-        for (Row row : baseline.table("qwen_managed_session_resource").rows()) {
+        for (Row row : baseline.table("ma_resource").rows()) {
             if (row.membership() == Membership.ORIGINAL) {
                 scope(row, original);
                 require(sessionScope.equals(row.text("session_scope_key"))
                         && resources.put(row.text("resource_id"), row) == null);
             }
         }
-        for (Row row : baseline.table("qwen_managed_session_resource_ref").rows()) {
+        for (Row row : baseline.table("ma_resource_ref").rows()) {
             if (row.membership() == Membership.ORIGINAL) {
                 scope(row, original);
                 require(sessionScope.equals(row.text("session_scope_key")) && row.number("journal_revision") != null
@@ -255,15 +255,15 @@ final class WorkspaceCsiApplicationHistory {
             Map<String, Object> pinnedContext) {
         require(baseline != null && baseline.blockers().isEmpty() && original != null && original.request() != null
                 && proof != null && members != null && ceiling > 0 && ceiling <= original.version());
-        long maximumRevision = WorkspaceCsiApplicationImage.sole(baseline, "qwen_managed_session_journal_head").number("journal_revision");
+        long maximumRevision = WorkspaceCsiApplicationImage.sole(baseline, "ma_session_head").number("journal_revision");
         require(proof.predecessorSequence() == WorkspaceCsiApplicationImage.sole(baseline,
-                "qwen_managed_session_journal_head").number("committed_sequence"));
+                "ma_session_head").number("committed_sequence"));
         var prefix = proof.predecessorPrefix();
         var nativeRows = nativeRows(baseline, original.request(), maximumRevision);
-        var transactions = baseline.table("qwen_managed_session_journal_tx").rows().stream()
+        var transactions = baseline.table("ma_session_journal_tx").rows().stream()
                 .filter(row -> row.membership() == Membership.ORIGINAL).toList();
         Map<String, Row> executions = new LinkedHashMap<>();
-        for (Row row : baseline.table("qwen_tool_execution").rows()) {
+        for (Row row : baseline.table("ma_tool_execution").rows()) {
             if (row.membership() == Membership.ORIGINAL) {
                 require(executions.put(row.text("execution_call_id"), row) == null);
             }
@@ -383,28 +383,27 @@ final class WorkspaceCsiApplicationHistory {
                 && identityJson != null && binding != null && binding.isDrainRequested()
                 && binding.getGeneration() == 1 && retirement != null && "DRAINING".equals(retirement.text("phase"))
                 && "qwen-csi-application-retirement/1".equals(retirement.text("progress_format"))
-                && binding.getBindingId().equals(retirement.text("binding_id"))
-                && Objects.equals(retirement.number("runtime_generation"), binding.getGeneration()));
+                && binding.getBindingId().equals(retirement.text("target_id"))
+                && Objects.equals(retirement.number("target_revision"), binding.getGeneration()));
         Stage stage = Stage.valueOf(retirement.text("progress_stage"));
         boolean released = binding.getState() == RuntimeBindingRecord.State.RELEASED;
         require(stage != Stage.SETTLING && Objects.equals(retirement.number("progress_version"), stage.ordinal() + 1L)
                 && (released ? stage == Stage.DRAINED : binding.getState() == RuntimeBindingRecord.State.DRAINING));
-        var intent = WorkspaceCsiApplicationJson.typedObject(retirement.binary("identity_json"), 256 * 1024,
-                WorkspaceCsiReservationStore.Retirement.class);
-        require(intent != null && intent.operationId().equals(retirement.text("retirement_id"))
+        var intent = WorkspaceCsiApplicationInventory.retirement(retirement);
+        require(intent != null && intent.operationId().equals(retirement.text("operation_id"))
                 && intent.physicalKey().equals(retirement.text("physical_key")));
         byte[] frozen = payload(retirement, "frozen_request");
         byte[] cut = stagePayload(retirement, "cut", stage == Stage.CUT || stage == Stage.DRAINED);
         byte[] receipt = stagePayload(retirement, "finalize_receipt", stage == Stage.DRAINED);
         var baseline = WorkspaceCsiApplicationImage.baseline(frozen);
         var registration = WorkspaceCsiApplicationJson.typedObject(WorkspaceCsiApplicationImage.sole(baseline,
-                "managed_workspace_csi_registration").binary("registration_json"), 16 * 1024, WorkspaceCsiRegistration.class);
+                "ma_storage").binary("registration_json"), 16 * 1024, WorkspaceCsiRegistration.class);
         WorkspaceCsiReservationStore.requireRetainedIdentity(identityJson, intent, registration, binding);
-        var savedBinding = WorkspaceCsiApplicationImage.sole(baseline, "qwen_runtime_binding");
+        var savedBinding = WorkspaceCsiApplicationImage.sole(baseline, "ma_runtime_binding");
         var actual = new JdbcCsiFilesRetirementGuard.Original(binding.getRequest(), binding.getBindingId(), binding.getGeneration(),
                 binding.getState(), binding.isDrainRequested(), binding.getVersion(), savedBinding.number("first_activation_journal_revision"));
         require(WorkspaceCsiApplicationInventory.validateHistoricalBaseline(actual, intent, baseline).isEmpty());
-        var parent = WorkspaceCsiApplicationImage.sole(baseline, "managed_agent_session");
+        var parent = WorkspaceCsiApplicationImage.sole(baseline, "ma_session");
         var context = new ContextBinding(parent.text("tenant_id"), parent.text("workspace_id"), parent.number("workspace_generation"),
                 parent.text("workspace_storage_id"), parent.text("cwd_relative"), parent.text("context_config_ref"), parent.number("context_revision"));
         var envelope = WorkspaceCsiApplicationStore.savedEnvelope(binding, context, intent.operationId(), intent.sealedBindingVersion(), frozen);
@@ -444,14 +443,14 @@ final class WorkspaceCsiApplicationHistory {
         var handle = WorkspaceCsiApplicationJson.object(savedBinding.binary("resource_handle_json"), 256 * 1024);
         var pinnedContext = JdbcCsiExecutionAdmission.historicalGrantContext(binding.getRequest(), context, handle);
         verifyRetainedExecutions(baseline, actual, terminal, members, intent.sealedBindingVersion(), pinnedContext);
-        var retained = WorkspaceCsiApplicationImage.sole(current, "managed_workspace_csi_retirement");
+        var retained = WorkspaceCsiApplicationImage.sole(current, "ma_operation");
         require(Arrays.equals(retained.bytes(), retirement.bytes()));
         String writerHash = envelope.path("writerTokenSha256").textValue();
-        var head = WorkspaceCsiApplicationImage.sole(current, "qwen_managed_session_journal_head");
+        var head = WorkspaceCsiApplicationImage.sole(current, "ma_session_head");
         require(writerHash != null && writerHash.matches("[0-9a-f]{64}") && writerHash.equals(head.text("lease_token_hash")));
-        require(writerHash.equals(WorkspaceCsiApplicationImage.sole(baseline, "qwen_managed_session_journal_head").text("lease_token_hash")));
+        require(writerHash.equals(WorkspaceCsiApplicationImage.sole(baseline, "ma_session_head").text("lease_token_hash")));
         if (stage != Stage.FROZEN) {
-            var commits = current.table("qwen_managed_session_journal_tx").rows().stream()
+            var commits = current.table("ma_session_journal_tx").rows().stream()
                     .filter(row -> Objects.equals(row.number("journal_revision"), head.number("journal_revision"))).toList();
             require(commits.size() == 1 && writerHash.equals(commits.getFirst().text("writer_token_hash")));
         }

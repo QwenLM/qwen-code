@@ -46,11 +46,11 @@ class WorkspaceCsiInventoryMySqlIT {
             var fixture = new WorkspaceCsiCheckpointSnapshotStoreTest();
             fixture.initialize(source);
             var jdbc = new JdbcTemplate(source);
-            var original = jdbc.queryForMap("SELECT * FROM qwen_tool_execution");
+            var original = jdbc.queryForMap("SELECT * FROM ma_tool_execution");
             for (int index = 0; index < 101; index++) {
                 insert(jdbc, original, "before-" + index);
             }
-            String retirementId = jdbc.queryForObject("SELECT retirement_id FROM managed_workspace_csi_retirement", String.class);
+            String retirementId = jdbc.queryForObject("SELECT operation_id FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'", String.class);
             var pageRead = new CountDownLatch(1);
             var committed = new CountDownLatch(1);
             DataSource observing = pauseAfterExecutionPage(source, pageRead, committed);
@@ -65,7 +65,7 @@ class WorkspaceCsiInventoryMySqlIT {
                                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
                         tx.executeWithoutResult(status -> {
                             insert(jdbc, original, "after-snapshot");
-                            jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE'");
+                            jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE'");
                         });
                     } catch (InterruptedException error) {
                         Thread.currentThread().interrupt();
@@ -83,8 +83,8 @@ class WorkspaceCsiInventoryMySqlIT {
                 assertThat(next.path("executions").size()).isEqualTo(103);
                 assertThat(next.path("executions").toString()).contains("after-snapshot");
                 assertThat(next.path("sessionSnapshots").get(0).path("head").path("state").asText()).isEqualTo("ACTIVE");
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Integer.class)).isEqualTo(103);
-                assertThat(jdbc.queryForObject("SELECT phase FROM managed_workspace_csi_retirement", String.class)).isEqualTo("DRAINING");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Integer.class)).isEqualTo(103);
+                assertThat(jdbc.queryForObject("SELECT phase FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'", String.class)).isEqualTo("DRAINING");
             } finally {
                 committed.countDown();
             }
@@ -101,7 +101,7 @@ class WorkspaceCsiInventoryMySqlIT {
         row.put("execution_call_id_hash", hash);
         row.put("idempotency_key", id);
         row.put("idempotency_key_hash", hash);
-        jdbc.update("INSERT INTO qwen_tool_execution (" + String.join(",", row.keySet()) + ") VALUES ("
+        jdbc.update("INSERT INTO ma_tool_execution (" + String.join(",", row.keySet()) + ") VALUES ("
                 + String.join(",", Collections.nCopies(row.size(), "?")) + ")", row.values().toArray());
     }
 
@@ -118,7 +118,7 @@ class WorkspaceCsiInventoryMySqlIT {
                                 return result;
                             }
                             String sql = (String) arguments[0];
-                            if (!sql.contains("FROM qwen_tool_execution") || !sql.endsWith("LIMIT 100")) {
+                            if (!sql.contains("FROM ma_tool_execution") || !sql.endsWith("LIMIT 100")) {
                                 return result;
                             }
                             return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.PreparedStatement.class},

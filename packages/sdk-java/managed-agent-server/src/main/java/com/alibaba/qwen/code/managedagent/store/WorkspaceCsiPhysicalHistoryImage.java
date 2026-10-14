@@ -6,9 +6,7 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Snapshot;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationInventory.Table;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,10 +16,12 @@ import java.util.Set;
 /** Immutable original read set, independent of the shared holder and unrelated owners. */
 final class WorkspaceCsiPhysicalHistoryImage {
     private static final Map<String, Set<String>> CONTEXT = Map.of(
-            "qwen_runtime_placement_guard", Set.of("tenant_key", "tenant_id"),
-            "qwen_tool_publication_tenant", Set.of("tenant_key", "tenant_id"),
-            "managed_workspace_registry", Set.of("tenant_id", "workspace_id", "workspace_generation", "storage_id",
-                    "config_ref", "policy_ref", "state"));
+            "ma_tenant_guard", Set.of("tenant_key", "tenant_id", "guard_domain"),
+            "ma_workspace", Set.of("tenant_id", "workspace_id", "workspace_generation", "storage_id",
+                    "config_ref", "policy_ref", "state", "workspace_kind", "child_state", "parent_workspace_id",
+                    "parent_session_id", "child_run_id", "child_workspace_id", "parent_cwd_relative", "repository_relative",
+                    "child_cwd_relative", "base_commit", "result_commit", "parent_tree", "merged_tree", "finish_request",
+                    "outcome_code", "conflict_paths", "last_error"));
 
     private WorkspaceCsiPhysicalHistoryImage() { }
 
@@ -34,18 +34,18 @@ final class WorkspaceCsiPhysicalHistoryImage {
     }
 
     private static Snapshot project(Snapshot stage, boolean excludeHolder) {
-        var parent = WorkspaceCsiApplicationImage.sole(stage, "managed_agent_session");
+        var parent = WorkspaceCsiApplicationImage.sole(stage, "ma_session");
         require(parent.text("tenant_id") != null && parent.text("workspace_id") != null);
         List<Table> tables = new ArrayList<>();
         for (Table table : stage.tables()) {
             List<Row> rows = new ArrayList<>();
-            if (!excludeHolder || !"managed_workspace_execution_lease".equals(table.name())) {
+            if (!excludeHolder || !"ma_storage_owner".equals(table.name())) {
                 for (Row row : table.rows()) {
                     if (row.membership() == Membership.ORIGINAL) {
                         rows.add(row);
                     } else if (CONTEXT.containsKey(table.name())
                             && parent.text("tenant_id").equals(row.text("tenant_id"))
-                            && (!"managed_workspace_registry".equals(table.name())
+                            && (!"ma_workspace".equals(table.name())
                                     || parent.text("workspace_id").equals(row.text("workspace_id")))) {
                         require(row.membership() == Membership.CONTEXT);
                         rows.add(context(table.name(), row));
@@ -55,15 +55,16 @@ final class WorkspaceCsiPhysicalHistoryImage {
             tables.add(new Table(table.name(), table.columns(), table.primaryKey(), rows));
         }
         var result = WorkspaceCsiApplicationInventory.expectedImage(tables);
-        for (String name : CONTEXT.keySet()) {
-            require(result.table(name).rows().size() == 1
-                    && result.table(name).rows().getFirst().membership() == Membership.CONTEXT);
+        require(result.table("ma_workspace").rows().size() == 1
+                && result.table("ma_workspace").rows().getFirst().membership() == Membership.CONTEXT);
+        var guards = result.table("ma_tenant_guard").rows();
+        require(guards.size() == 2);
+        for (String domain : List.of("runtime_placement", "output_publication")) {
+            var found = guards.stream().filter(row -> domain.equals(row.text("guard_domain"))).toList();
+            require(found.size() == 1 && found.getFirst().membership() == Membership.CONTEXT
+                    && JdbcRuntimeBindingRepository.harnessDrainKey(parent.text("tenant_id")).equals(found.getFirst().text("tenant_key")));
         }
-        require(JdbcRuntimeBindingRepository.harnessDrainKey(parent.text("tenant_id"))
-                .equals(result.table("qwen_runtime_placement_guard").rows().getFirst().text("tenant_key"))
-                && CsiNativeActivationProof.sha256(parent.text("tenant_id").getBytes(StandardCharsets.UTF_8))
-                        .equals(result.table("qwen_tool_publication_tenant").rows().getFirst().text("tenant_key")));
-        var registry = result.table("managed_workspace_registry").rows().getFirst();
+        var registry = result.table("ma_workspace").rows().getFirst();
         require(parent.cell("workspace_generation").equals(registry.cell("workspace_generation"))
                 && parent.cell("workspace_storage_id").equals(registry.cell("storage_id"))
                 && parent.cell("workspace_config_ref").equals(registry.cell("config_ref"))

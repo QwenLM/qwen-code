@@ -51,8 +51,8 @@ public final class JdbcCsiFilesRetirementGuard {
                 || binding == null || !isProfile(binding.getRequest().getScope())) {
             throw unavailable();
         }
-        try (var statement = statement(connection, "SELECT * FROM qwen_runtime_binding WHERE binding_id = ?")) {
-            statement.setString(1, binding.getBindingId());
+        try (var statement = statement(connection, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             try (var row = statement.executeQuery()) {
                 if (!row.next()) {
                     throw unavailable();
@@ -114,8 +114,8 @@ public final class JdbcCsiFilesRetirementGuard {
         boolean profile;
         try (PreparedStatement statement = statement(connection,
                 "SELECT tenant_id, isolation_key, isolation_class, capability_digest"
-                        + " FROM qwen_runtime_binding WHERE binding_id = ?")) {
-            statement.setString(1, bindingId);
+                        + " FROM ma_runtime_binding WHERE binding_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     return null;
@@ -131,13 +131,8 @@ public final class JdbcCsiFilesRetirementGuard {
                 }
             }
         }
-        if (!hasTable(connection, "managed_agent_session")) {
-            if (profile || hasTable(connection, "qwen_tool_publication_tenant")
-                    || hasTable(connection, "managed_workspace_csi_registration")
-                    || hasTable(connection, "managed_workspace_csi_retirement")) {
-                throw unavailable();
-            }
-            return null;
+        if (!hasTable(connection, "ma_session")) {
+            throw unavailable();
         }
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
         boolean retained = lockRetentionRoot(connection, tenant);
@@ -168,8 +163,8 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static boolean lockRetentionRoot(Connection connection, String tenantId) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT tenant_id FROM qwen_tool_publication_tenant WHERE tenant_key = ? FOR UPDATE")) {
-            statement.setString(1, CsiNativeActivationProof.sha256(tenantId.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ? AND guard_domain = 'output_publication' FOR UPDATE")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId));
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     return false;
@@ -184,10 +179,10 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static void initializeRetentionRoot(Connection connection, String tenantId) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
+                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
                         + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
-            statement.setString(1, CsiNativeActivationProof.sha256(tenantId.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-            statement.setString(2, tenantId);
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId));
+            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
             statement.executeUpdate();
         }
         if (!lockRetentionRoot(connection, tenantId)) {
@@ -241,10 +236,10 @@ public final class JdbcCsiFilesRetirementGuard {
     private static List<Slot> lockSlots(Connection connection, String tenantId, String sessionId) throws SQLException {
         List<Slot> slots = new ArrayList<>();
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM qwen_runtime_binding_slot WHERE tenant_id = ? AND isolation_key = ?"
+                "SELECT * FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?"
                         + " ORDER BY request_key FOR UPDATE")) {
-            statement.setString(1, tenantId);
-            statement.setString(2, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     slots.add(new Slot(request(rows), rows.getString("request_key"),
@@ -258,23 +253,28 @@ public final class JdbcCsiFilesRetirementGuard {
     private static List<Binding> lockBindings(Connection connection, String tenantId, String sessionId,
             List<Slot> slots) throws SQLException {
         List<Binding> bindings = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("SELECT * FROM qwen_runtime_binding"
+        StringBuilder sql = new StringBuilder("SELECT * FROM ma_runtime_binding"
                 + " WHERE (tenant_id = ? AND isolation_key = ?)");
-        List<String> references = new ArrayList<>();
+        List<Object> references = new ArrayList<>();
         for (Slot slot : slots) {
             sql.append(" OR request_key = ?");
             references.add(slot.key());
             if (slot.activeBinding() != null) {
                 sql.append(" OR binding_id = ?");
-                references.add(slot.activeBinding());
+                references.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(slot.activeBinding()));
             }
         }
         sql.append(" ORDER BY request_key, binding_id FOR UPDATE");
         try (PreparedStatement statement = statement(connection, sql.toString())) {
-            statement.setString(1, tenantId);
-            statement.setString(2, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             for (int index = 0; index < references.size(); index++) {
-                statement.setString(index + 3, references.get(index));
+                Object value = references.get(index);
+                if (value instanceof byte[] bytes) {
+                    statement.setBytes(index + 3, bytes);
+                } else {
+                    statement.setString(index + 3, (String) value);
+                }
             }
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
@@ -330,12 +330,12 @@ public final class JdbcCsiFilesRetirementGuard {
     public static void requireSingleSession(Connection connection, Original original) throws SQLException {
         requireTransaction(connection);
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM qwen_runtime_session WHERE binding_id = ?"
+                "SELECT * FROM ma_runtime_session WHERE binding_id = ?"
                         + " OR (tenant_id = ? AND harness_session_id = ?)"
                         + " ORDER BY scope_key, runtime_session_id LIMIT 2 FOR UPDATE")) {
-            statement.setString(1, original.bindingId());
-            statement.setString(2, original.request().getScope().getTenantId());
-            statement.setString(3, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getIsolationKey());
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next()) {
                     if (!original.bindingId().equals(rows.getString("binding_id"))
@@ -361,12 +361,12 @@ public final class JdbcCsiFilesRetirementGuard {
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
         String product = connection.getMetaData().getDatabaseProductName();
         String index = "MySQL".equals(product) || "MariaDB".equals(product)
-                ? " FORCE INDEX (managed_session_csi_guard_idx)" : "";
+                ? " FORCE INDEX (ix_ma_session_csi_guard)" : "";
         try (PreparedStatement statement = statement(connection,
-                "SELECT csi_guard FROM managed_agent_session" + index
+                "SELECT csi_guard FROM ma_session" + index
                         + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
-            statement.setString(1, tenantId);
-            statement.setString(2, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;
@@ -377,9 +377,9 @@ public final class JdbcCsiFilesRetirementGuard {
                 "SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id,"
                         + " workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref, workspace_policy_ref"
-                        + " FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setString(1, tenantId);
-            statement.setString(2, sessionId);
+                        + " FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;

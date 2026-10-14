@@ -66,7 +66,7 @@ try {
   result = await (
     format === 'qwen-csi-session-retirement-boundary/1'
       ? inspectOriginalCsiRetirementBoundary
-      : format === 'qwen-csi-retirement-inventory/1'
+      : format === 'qwen-csi-retirement-inventory/2'
         ? inspectOriginalCsiInventory
         : format === 'qwen-csi-session-checkpoint-snapshot/1'
           ? inspectOriginalFileCheckpointCoverage

@@ -18,7 +18,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -194,10 +193,10 @@ public final class WorkspaceCsiApplicationStore {
             require(expected.rowCount() <= WorkspaceCsiApplicationInventory.MAX_ROWS - 3
                     && expected.bytes().length + body.length * 2L + 256 * 1024 < WorkspaceCsiApplicationInventory.MAX_BYTES);
             locked.authority().requireCurrentTime(target);
-            require(jdbc.update("UPDATE managed_workspace_csi_retirement SET progress_stage = 'FROZEN', progress_version = 2,"
-                            + " frozen_request_bytes = ?, frozen_request_sha256 = ? WHERE retirement_id = ?"
+            require(jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = 2,"
+                            + " frozen_request_bytes = ?, frozen_request_sha256 = ? WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT'"
                             + " AND progress_stage = 'SETTLING' AND progress_version = 1 AND frozen_request_bytes IS NULL",
-                    frozen, hash(frozen), retirement) == 1);
+                    frozen, hash(frozen), WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement)) == 1);
             locked.authority().requireCurrentTime(target);
             WorkspaceCsiApplicationImage.verify(inspect(target, locked), expected);
             return new Status(FORMAT, retirement, "FROZEN", 2, hash(frozen), null, null);
@@ -221,10 +220,10 @@ public final class WorkspaceCsiApplicationStore {
                     "frozenRequestSha256", frozenDigest, "baselineSha256", hash(WorkspaceCsiApplicationImage.baseline(authority.frozenBytes()).bytes()),
                     "preparedCommitSha256", hash(body), "writtenAt", writtenAt));
             authority.requireCurrentTime(target);
-            require(jdbc.update("UPDATE managed_workspace_csi_retirement SET progress_stage = 'CUT', progress_version = 3,"
-                            + " cut_bytes = ?, cut_sha256 = ? WHERE retirement_id = ? AND progress_stage = 'FROZEN'"
+            require(jdbc.update("UPDATE ma_operation SET progress_stage = 'CUT', progress_version = 3,"
+                            + " cut_bytes = ?, cut_sha256 = ? WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND progress_stage = 'FROZEN'"
                             + " AND progress_version = 2 AND frozen_request_sha256 = ? AND cut_bytes IS NULL",
-                    cut, hash(cut), retirement, frozenDigest) == 1);
+                    cut, hash(cut), WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), frozenDigest) == 1);
             authority.requireCurrentTime(target);
             WorkspaceCsiApplicationImage.verify(inspect(target, locked), WorkspaceCsiApplicationImage.expected(
                     WorkspaceCsiApplicationImage.baseline(authority.frozenBytes()), Stage.CUT, authority.frozenBytes(), cut, null));
@@ -267,13 +266,13 @@ public final class WorkspaceCsiApplicationStore {
             var response = CsiFileFinalizeProtocol.response(receipt, request);
             var envelope = envelope(locked);
             require(envelope.path("preCutObservationSha256").textValue().equals(response.get("preCutObservationSha256")));
-            require(jdbc.update("UPDATE managed_workspace_csi_retirement SET finalize_receipt_bytes = ?, finalize_receipt_sha256 = ?"
-                            + " WHERE retirement_id = ? AND progress_stage = 'CUT' AND progress_version = 3"
-                            + " AND cut_sha256 = ? AND finalize_receipt_bytes IS NULL", receipt, hash(receipt), retirement, cutDigest) == 1);
+            require(jdbc.update("UPDATE ma_operation SET finalize_receipt_bytes = ?, finalize_receipt_sha256 = ?"
+                            + " WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND progress_stage = 'CUT' AND progress_version = 3"
+                            + " AND cut_sha256 = ? AND finalize_receipt_bytes IS NULL", receipt, hash(receipt), WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), cutDigest) == 1);
             sessions.completeCsiApplication(target, authority, bindings, receipt);
-            require(jdbc.update("UPDATE managed_workspace_csi_retirement SET progress_stage = 'DRAINED', progress_version = 4"
-                            + " WHERE retirement_id = ? AND progress_stage = 'CUT' AND progress_version = 3"
-                            + " AND cut_sha256 = ? AND finalize_receipt_sha256 = ?", retirement, cutDigest, hash(receipt)) == 1);
+            require(jdbc.update("UPDATE ma_operation SET progress_stage = 'DRAINED', progress_version = 4"
+                            + " WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND progress_stage = 'CUT' AND progress_version = 3"
+                            + " AND cut_sha256 = ? AND finalize_receipt_sha256 = ?", WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), cutDigest, hash(receipt)) == 1);
             WorkspaceCsiApplicationImage.verify(inspect(target, locked), WorkspaceCsiApplicationImage.expected(
                     WorkspaceCsiApplicationImage.baseline(authority.frozenBytes()), Stage.DRAINED, authority.frozenBytes(), authority.cutBytes(), receipt));
             JdbcCsiApplicationRetirement.lock(target, tenant, session, authority.original().bindingId(), retirement);
@@ -308,7 +307,8 @@ public final class WorkspaceCsiApplicationStore {
     private Locked lock(Connection target, String tenant, String session, String workspace, String retirement) throws SQLException {
         require(tenant != null && session != null && workspace != null && retirement != null
                 && UUID.fromString(retirement).toString().equals(retirement));
-        var candidates = jdbc.queryForList("SELECT binding_id FROM managed_workspace_csi_retirement WHERE retirement_id = ?", String.class, retirement);
+        var candidates = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?",
+                String.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement), tenant, retirement);
         require(candidates.size() == 1);
         var authority = JdbcCsiApplicationRetirement.lock(target, tenant, session, candidates.getFirst(), retirement);
         require(workspace.equals(authority.original().request().getScope().getWorkspaceId()));
@@ -316,20 +316,19 @@ public final class WorkspaceCsiApplicationStore {
         require(binding != null && binding.getGeneration() == 1 && binding.getVersion() == authority.original().version()
                 && binding.getRequest().equals(authority.original().request()));
         WorkspaceCsiRuntimeIdentity.boot(binding);
-        WorkspaceCsiReservationStore.Retirement intent;
-        try {
-            intent = new ObjectMapper().readerFor(WorkspaceCsiReservationStore.Retirement.class)
-                    .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                    .readValue(jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement WHERE retirement_id = ?", String.class, retirement));
-        } catch (IOException error) {
-            throw unavailable();
-        }
+        var operations = jdbc.query("SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT'",
+                (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row),
+                WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, retirement));
+        require(operations.size() == 1);
+        WorkspaceCsiReservationStore.Retirement intent = WorkspaceCsiReservationStore.decodeRetirement(operations.getFirst(), new ObjectMapper()
+                .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS));
         Snapshot inventory = WorkspaceCsiApplicationInventory.inspect(target, authority.original(), intent);
         if (!inventory.blockers().isEmpty()) {
             throw new RuntimeBrokerException(409, "csi_application_inventory_blocked",
                     "The original CSI application inventory is incomplete or unsupported.", false);
         }
-        var parent = WorkspaceCsiApplicationImage.sole(inventory, "managed_agent_session");
+        var parent = WorkspaceCsiApplicationImage.sole(inventory, "ma_session");
         var context = new ContextBinding(tenant, workspace, parent.number("workspace_generation"), parent.text("workspace_storage_id"),
                 parent.text("cwd_relative"), parent.text("context_config_ref"), parent.number("context_revision"));
         if (authority.stage() != Stage.DRAINED) {
@@ -383,7 +382,7 @@ public final class WorkspaceCsiApplicationStore {
                 .equals(value.path("workerObserveRequest")));
         CsiFileFinalizeProtocol.response(observation, expected);
         var baseline = WorkspaceCsiApplicationImage.baseline(frozenBytes);
-        var head = WorkspaceCsiApplicationImage.sole(baseline, "qwen_managed_session_journal_head");
+        var head = WorkspaceCsiApplicationImage.sole(baseline, "ma_session_head");
         require(head.text("lease_token_hash").equals(value.path("writerTokenSha256").textValue())
                 && terminal.writerId().equals(head.text("writer_id")) && terminal.writerGeneration() == head.number("writer_generation")
                 && terminal.expectedJournalRevision() == head.number("journal_revision")

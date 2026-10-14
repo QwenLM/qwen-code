@@ -2,6 +2,7 @@
 
 [English](2026-10-11-k2-settled-application-cut.md) | [简体中文](2026-10-11-k2-settled-application-cut.zh-CN.md)
 
+[标准结构适配](k2-canonical-schema-port.zh-CN.md)取代原 migration/表/键描述，拒绝旧清单格式及旧数据库；历史验收不能资格化合并候选。
 状态：应用实现候选，尚未资格化。私有 generic 组件在 `446e6a93c4d5ce07d9d6091b4431112965e278f7` 通过有界本地验证，该结果不资格化此应用协议。关联 #13395、Draft PR #13526。这是退役交接中的应用部分；物理停止、CSI unpublish、release、卷复用和公开选择仍有独立验收门槛。
 
 ## 问题与首条支持路径
@@ -12,7 +13,7 @@
 
 ## 一个原退休权威
 
-在下一未发布 migration 为原 retirement row 增加 nullable application progress 列。保持 row.phase 与 identity_json 原字节 DRAINING，保持 binding、holder DRAINING，slot 保持占用及原 active binding 不变。Application format 为 qwen-csi-application-retirement/1。字段为 progress_format、progress_version、progress_stage、settlement_deadline_ms、frozen_request_bytes/sha256、cut_bytes/sha256、finalize_receipt_bytes/sha256。每个字段都有下文真实 coordinator、writer gate、finalizer 或 retry 消费者；不新增第二套 release ledger 或 caller completion boolean。
+在全新标准结构的 `ma_operation` CSI_RETIREMENT 行上保存类型化 nullable application progress。保持 row.phase 与 identity_json 原字节 DRAINING，保持 binding、holder DRAINING，slot 保持占用及原 active binding 不变。Application format 为 qwen-csi-application-retirement/1。字段为 progress_format、progress_version、progress_stage、settlement_deadline_ms、frozen_request_bytes/sha256、cut_bytes/sha256、finalize_receipt_bytes/sha256。每个字段都有下文真实 coordinator、writer gate、finalizer 或 retry 消费者；不新增第二套 release ledger 或 caller completion boolean。
 
 阶段为 SETTLING → FROZEN → CUT → DRAINED；精确 progress version 分别为 1、2、3、4，SQL authority 与 Hosted status reader 都核对该对应关系。BLOCKED 是保留最后持久阶段的报告条件。原 beginRetirement 中用溢出检查过的 DB startedAt + 300000 ms 固定 deadline，并与 intent insertion、binding seal、holder DRAINING 在原 Connection/commit 持久化 SETTLING/version 1。这是新格式五分钟的 application settlement 预算，与十秒 SQL transaction、三十秒 RPC 上限分别计算。更早的当前 writer/activation expiry 仍有效。旧行保留 NULL progress、不 backfill；缺失、部分、未知、损坏 progress 均阻断此应用路径。Retry 不初始化或后移 deadline。
 
@@ -68,9 +69,9 @@ Binding-only control writer 先发现 identity，再在原 binding lock 前进�
 
 使用有界、显式原 schema catalogue，不写反射全数据库 framework。每张表明确独立 discovery predicate、sorted key、supported values 或 any-row BLOCKED、producer 与 empty-set insertion fence。Aggregate current evidence 的 MAX_ROWS=4096、MAX_BYTES=32 MiB；超限、不明 association 阻断。以 raw original Session/binding/harness/runtime identity 与独立派生 scope hash 做 OR discovery，不只查 live state、不用隐藏损坏/孤儿 child 的 parent inner join。
 
-接受集合覆盖原 Session/creation/config/request pin；registration/holder/intent/slot/binding/control fence；唯一原 logical Runtime Session；全部 execution/native authorization/result/receipt/message/file-history membership；whole journal 与全部 resource/ref；全部 publication operation/object/seal/unmatched ACK；每条 V66 native read；output read lease、PUT attempt、output retirement/retention/quarantine/GC 字段；不支持的 extension/task/action/automation occurrence+command/child/channel/recovery/migration history。正常 private CREATE 的 exact command/scope、值为零的 consumer progress、唯一 session.created public event 是有效创建事实，不授予任意 public history 权限。不支持 secondary row 或 configured provider/MCP/Hook/Shell/approval 阻断首条路径。Global definition 必须 pin 或明确不相关，不虚构 empty collection。
+接受集合覆盖原 Session/creation/config/request pin；registration/holder/intent/slot/binding/control fence；唯一原 logical Runtime Session；全部 execution/native authorization/result/receipt/message/file-history membership；whole journal 与全部 resource/ref；全部 publication operation/object/seal/unmatched ACK；每条原生 `ma_csi_resource_read`；output read lease、PUT attempt、output retirement/retention/quarantine/GC 字段；不支持的 extension/task/action/automation occurrence+command/child/channel/recovery/migration history。正常 private CREATE 的 exact command/scope、值为零的 consumer progress、唯一 session.created public event 是有效创建事实，不授予任意 public history 权限。不支持 secondary row 或 configured provider/MCP/Hook/Shell/approval 阻断首条路径。Global definition 必须 pin 或明确不相关，不虚构 empty collection。
 
-在 journal/resource chain 与其中 embedded snapshot projection 中验证合法 native file_history。首条路径中任何原相关 qwen_managed_session_extension_record 行（包括 domain=file_history）均阻塞：当前 RECORD_BODIES 没有 file_history projector，只有非空 projected body 才调用 applyRevision。[显式库存附录](2026-10-11-k2-settled-application-cut-inventory.zh-CN.md) 列出当前全部62张产品表、独立发现 predicate、最终主键、真实 hash namespace 及 producer gate；该覆盖只有静态检查，仍需运行资格化。
+在 journal/resource chain 与其中 embedded snapshot projection 中验证合法 native file_history。首条路径中任何原相关 `ma_session_record` 行（包括 domain=file_history）均阻塞：当前 RECORD_BODIES 没有 file_history projector，只有非空 projected body 才调用 applyRevision。[显式库存附录](2026-10-11-k2-settled-application-cut-inventory.zh-CN.md) 列出当前 34 表/764 列应用目录、独立发现、真实主键/namespace 及 producer gate；该覆盖只有静态检查，仍需运行资格化。
 
 Automation create 当前先 claim command，之后 downstream private Harness 才拒绝。必须在实际 Session-bound claim transaction 内按真实持久 target 增加 current private exclusion，并保留 rollback；service snapshot check 不足。保留普通 command idempotency 与 existing-schedule control。Command schema 无 Session 列，orphan command 要独立 request/key/result provenance 关联；不能把不明 tenant command 悄悄声明为无关。Child/channel bare store 的实际 caller 已拒绝或新建另一 ordinary Session 时，不报告未确认的可达 new-entry 缺口；不支持历史仍独立发现并阻断。
 
@@ -104,7 +105,7 @@ CUT 后 finalize 在 DB lock 外接收相同持久 cut。Readback 用不可变 c
 
 实现前，用实际构建 Hosted/Main/Broker/worker、专属 MySQL 独立复现缺 owner barrier、续约吞错、native DRAINING writer/control version、terminal live 拒绝、fixed BLOCKED worker drain、完整 current inventory 缺口。确认 global CLI 无 private selector并注明有界 Java/Node fallback。保留原失败、exact loaded inputs、全表值、实际等待和独立资源清理。
 
-候选验收覆盖完整 settled Read/Write/Edit turn 后的 original freeze→durable exact request→atomic terminal/cut+SEALED→actual worker finalize→atomic logical RELEASED/DRAINED，文件效果与无关行不变，selected-owner isolation，task/renewal/metadata/read/PUT/control race，锁等待中过期，empty-set insert exclusion，unknown/orphan/unsupported blocker，每个 CAS rollback，crash/response-loss exact retry，原 active-only/cold/ordinary compatibility 与 migration old-row preservation。必须 build/typecheck/bundle、focused Java/Node test/static、独立全值 MySQL 验证及两轮干净 shipping audit。Native review 额度 HTTP403，无结论；保持 Draft 和 maintainer architecture review 开放。
+候选验收覆盖完整 settled Read/Write/Edit turn 后的 original freeze→durable exact request→atomic terminal/cut+SEALED→actual worker finalize→atomic logical RELEASED/DRAINED，文件效果与无关行不变，selected-owner isolation，task/renewal/metadata/read/PUT/control race，锁等待中过期，empty-set insert exclusion，unknown/orphan/unsupported blocker，每个 CAS rollback，crash/response-loss exact retry，原 active-only/cold/ordinary compatibility 与 全新结构拒绝旧数据库及保留像原字节验证。必须 build/typecheck/bundle、focused Java/Node test/static、独立全值 MySQL 验证及两轮干净 shipping audit。Native review 额度 HTTP403，无结论；保持 Draft 和 maintainer architecture review 开放。
 
 ## 后续门槛
 

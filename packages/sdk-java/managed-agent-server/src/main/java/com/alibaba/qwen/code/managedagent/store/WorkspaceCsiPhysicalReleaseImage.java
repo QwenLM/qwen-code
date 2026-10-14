@@ -20,9 +20,9 @@ final class WorkspaceCsiPhysicalReleaseImage {
 
     static Snapshot expected(Snapshot drained) {
         require(drained != null && drained.blockers().isEmpty());
-        Row binding = WorkspaceCsiApplicationImage.sole(drained, "qwen_runtime_binding");
-        Row slot = WorkspaceCsiApplicationImage.sole(drained, "qwen_runtime_binding_slot");
-        Row holder = WorkspaceCsiApplicationImage.sole(drained, "managed_workspace_execution_lease");
+        Row binding = WorkspaceCsiApplicationImage.sole(drained, "ma_runtime_binding");
+        Row slot = WorkspaceCsiApplicationImage.sole(drained, "ma_runtime_slot");
+        Row holder = WorkspaceCsiApplicationImage.sole(drained, "ma_storage_owner");
         require("DRAINING".equals(binding.text("binding_state")) && Boolean.TRUE.equals(binding.bool("drain_requested"))
                 && "CSI".equals(holder.text("storage_kind")) && "DRAINING".equals(holder.text("csi_phase"))
                 && binding.text("binding_id").equals(slot.text("active_binding_id"))
@@ -47,10 +47,10 @@ final class WorkspaceCsiPhysicalReleaseImage {
         Map<String, byte[]> bindingDelta = new LinkedHashMap<>();
         put(bindingDelta, "binding_state", "RELEASED");
         put(bindingDelta, "record_version", Math.addExact(binding.number("record_version"), 1L));
-        changes.put("qwen_runtime_binding", bindingDelta);
+        changes.put("ma_runtime_binding", bindingDelta);
         Map<String, byte[]> slotDelta = new LinkedHashMap<>();
         slotDelta.put("active_binding_id", null);
-        changes.put("qwen_runtime_binding_slot", slotDelta);
+        changes.put("ma_runtime_slot", slotDelta);
         Map<String, byte[]> holderDelta = new LinkedHashMap<>();
         put(holderDelta, "csi_phase", "RELEASED");
         put(holderDelta, "csi_revision", CsiOwnershipRevision.next(holder.number("csi_revision")));
@@ -58,7 +58,7 @@ final class WorkspaceCsiPhysicalReleaseImage {
                 "binding_id", "runtime_generation", "csi_provision_request_id")) {
             holderDelta.put(field, null);
         }
-        changes.put("managed_workspace_execution_lease", holderDelta);
+        changes.put("ma_storage_owner", holderDelta);
 
         List<Table> tables = new ArrayList<>();
         for (Table table : drained.tables()) {

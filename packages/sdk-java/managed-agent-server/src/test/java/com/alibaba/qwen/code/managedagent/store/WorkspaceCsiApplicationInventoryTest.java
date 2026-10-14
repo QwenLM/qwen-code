@@ -25,7 +25,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,19 +43,19 @@ class WorkspaceCsiApplicationInventoryTest {
     void setUp() {
         source = new DriverManagerDataSource("jdbc:h2:mem:application-inventory-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var json = new ObjectMapper();
         var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         var reservations = new WorkspaceCsiReservationStore(jdbc, manager, json);
         reservations.register(registration);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
@@ -81,6 +80,61 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void liveInventoryFindsForeignCanonicalResourceReferencesWithoutTheirParentSession() throws Exception {
+        String resource = ManagedSessionStore.resourceKey(sessionScope(), "original-resource");
+        byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
+                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
+                        + " VALUES (?,?,'tenant','workspace',?,'original-resource','managed-root',1,?,?,"
+                        + "'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6))",
+                resource, sessionScope(), session, bytes.length, sha(bytes), bytes);
+        new TransactionTemplate(new DataSourceTransactionManager(source)).executeWithoutResult(status ->
+                ToolPublicationRetentionStore.lockSession(jdbc, "foreign", "foreign-session"));
+        jdbc.update("INSERT INTO ma_message (tenant_id,session_id,item_id,turn_id,item_type,item_status,attributes_json,"
+                        + "first_sequence,last_sequence,created_at,updated_at,parts_json,body_resource_key)"
+                        + " VALUES ('foreign','foreign-session','item','turn','message','completed','{}',1,1,1,1,'[]',?)", resource);
+        jdbc.update("INSERT INTO ma_snapshot (tenant_id,session_id,snapshot_id,snapshot_version,covered_sequence,"
+                        + "projection_version,manifest_resource_key,manifest_sha256,item_count,state,created_at,retain_until)"
+                        + " VALUES ('foreign','foreign-session','snapshot',1,1,1,?,?,0,'PUBLISHED',1,2)", resource, sha(bytes));
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,artifact_refs_resource_key,updated_at)"
+                        + " VALUES ('foreign','foreign-session','SESSION','',?,1)", resource);
+        String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,"
+                        + "tenant_id,session_id,resource_id,created_at) VALUES (?,'MESSAGE',?,1,?,'foreign',"
+                        + "'foreign-session','original-resource',CURRENT_TIMESTAMP(6))", foreignScope, "a".repeat(64), resource);
+        var found = inspect();
+        for (String table : List.of("ma_message", "ma_snapshot", "ma_event_stream", "ma_resource_ref")) {
+            assertThat(found.blockers()).as(table).anyMatch(blocker -> blocker.table().equals(table)
+                    && blocker.code().equals("foreign_original_reference"));
+            assertThat(found.table(table).rows()).anyMatch(row -> "foreign".equals(row.text("tenant_id")));
+        }
+    }
+
+    @Test
+    void liveInventoryPreservesOtherActualCreateReceiptsAndRejectsTheirHashDrift() throws Exception {
+        var initial = inspect();
+        assertThat(initial.blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+        assertThat(initial.table("ma_request_receipt").rows()).filteredOn(row -> "SESSION_CREATE_MODE".equals(row.text("namespace")))
+                .allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.CONTEXT);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        transactions.executeWithoutResult(status -> ManagedReceipts.insert(jdbc,
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_MODE,
+                "foreign", com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope.TENANT,
+                "foreign", "reserved-only", com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("false"),
+                null, null, null, null, "RESERVED", null, false, 1));
+        var found = inspect();
+        assertThat(found.blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+        assertThat(found.table("ma_request_receipt").rows()).filteredOn(row -> "foreign".equals(row.text("tenant_id")))
+                .hasSize(1).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+        var before = found.table("ma_request_receipt").rows().stream().filter(row -> "foreign".equals(row.text("tenant_id")))
+                .findFirst().orElseThrow();
+        assertThat(inspect().table("ma_request_receipt").rows()).anyMatch(row -> java.util.Arrays.equals(row.bytes(), before.bytes()));
+        jdbc.update("UPDATE ma_request_receipt SET request_digest = ? WHERE receipt_key = ?", "broken", before.text("receipt_key"));
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt")
+                && blocker.code().equals("unresolved_candidate_owner"));
+    }
+
+    @Test
     void typedHistoricalOwnerReadsOnlyItsRealRetainedRowsAndRefusesMissingKeys() throws Exception {
         var expected = inspect();
         var queries = new java.util.ArrayList<String>();
@@ -89,17 +143,19 @@ class WorkspaceCsiApplicationInventoryTest {
             target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             try {
                 var observed = observedRead(target, queries);
-                var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(observed, intent.operationId(), System.nanoTime());
-                assertThat(owner.binding().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(expected, "qwen_runtime_binding").bytes());
+                var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(observed, "tenant", intent.operationId(), System.nanoTime());
+                assertThat(owner.binding().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(expected, "ma_runtime_binding").bytes());
                 assertThat(owner.retirement().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(expected,
-                        "managed_workspace_csi_retirement").bytes());
-                assertThat(queries).hasSize(2);
-                assertThat(queries.get(0)).contains("FROM managed_workspace_csi_retirement t WHERE retirement_id = ?");
-                assertThat(queries.get(1)).contains("FROM qwen_runtime_binding t WHERE binding_id = ?");
-                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(observed,
+                        "ma_operation").bytes());
+                var dataQueries = queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_")).toList();
+                assertThat(dataQueries).hasSize(2);
+                assertThat(dataQueries.get(0)).contains("FROM ma_operation t WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT'");
+                assertThat(dataQueries.get(1)).contains("FROM ma_runtime_binding t WHERE binding_id = ?");
+                assertThat(queries).anyMatch(sql -> sql.contains("INFORMATION_SCHEMA.COLUMNS"));
+                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(observed, "tenant",
                         UUID.randomUUID().toString(), System.nanoTime())).isInstanceOf(IllegalArgumentException.class);
                 int before = queries.size();
-                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(observed, intent.operationId(),
+                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(observed, "tenant", intent.operationId(),
                         System.nanoTime() - java.util.concurrent.TimeUnit.SECONDS.toNanos(11)))
                         .isInstanceOf(IllegalArgumentException.class);
                 assertThat(queries).hasSize(before);
@@ -107,12 +163,12 @@ class WorkspaceCsiApplicationInventoryTest {
                 target.rollback();
             }
         }
-        jdbc.update("DELETE FROM qwen_runtime_binding WHERE binding_id = ?", binding.getBindingId());
+        jdbc.update("DELETE FROM ma_runtime_binding WHERE binding_id = ?", binding.getBindingId());
         try (var target = source.getConnection()) {
             target.setAutoCommit(false);
             target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             try {
-                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(observedRead(target, queries),
+                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(observedRead(target, queries), "tenant",
                         intent.operationId(), System.nanoTime())).isInstanceOf(IllegalArgumentException.class);
             } finally {
                 target.rollback();
@@ -130,16 +186,16 @@ class WorkspaceCsiApplicationInventoryTest {
             target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             try {
                 var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime());
-                var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(read, intent.operationId());
-                WorkspaceCsiApplicationInventory.readHistoricalOwner(read, intent.operationId());
+                var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(read, "tenant", intent.operationId());
+                WorkspaceCsiApplicationInventory.readHistoricalOwner(read, "tenant", intent.operationId());
                 var current = WorkspaceCsiApplicationInventory.historicalScan(read, expected, Map.of());
                 assertThat(current.blockers()).isEmpty();
                 assertThat(current.bytes()).isEqualTo(control.bytes());
                 assertThat(current.rowCount()).isEqualTo(control.rowCount());
                 assertThat(current.byteCount()).isEqualTo(control.byteCount());
-                assertThat(owner.binding().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(current, "qwen_runtime_binding").bytes());
+                assertThat(owner.binding().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(current, "ma_runtime_binding").bytes());
                 int closingQueries = queries.size();
-                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(read, intent.operationId()))
+                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalOwner(read, "tenant", intent.operationId()))
                         .isInstanceOf(IllegalArgumentException.class);
                 assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.historicalScan(read, expected, Map.of()))
                         .isInstanceOf(IllegalArgumentException.class);
@@ -161,19 +217,19 @@ class WorkspaceCsiApplicationInventoryTest {
             try {
                 var observed = observedRead(target, new java.util.ArrayList<>());
                 var budget = new WorkspaceCsiApplicationInventory.HistoricalScan(observed, System.nanoTime());
-                var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(budget, intent.operationId());
+                var owner = WorkspaceCsiApplicationInventory.readHistoricalOwner(budget, "tenant", intent.operationId());
                 var result = WorkspaceCsiApplicationInventory.historicalScan(budget, empty, Map.of());
                 assertThat(result.rowCount()).isEqualTo(2);
                 assertThat(result.byteCount()).isEqualTo(owner.binding().bytes().length + owner.retirement().bytes().length);
                 var changed = new WorkspaceCsiApplicationInventory.HistoricalScan(observed, System.nanoTime());
-                WorkspaceCsiApplicationInventory.readHistoricalOwner(changed, intent.operationId());
+                WorkspaceCsiApplicationInventory.readHistoricalOwner(changed, "tenant", intent.operationId());
                 // Inject a same-snapshot owned-row fault through the underlying H2 connection only.
-                try (var statement = target.prepareStatement("UPDATE qwen_runtime_binding SET record_version = record_version + 1 WHERE binding_id = ?")) {
-                    statement.setString(1, binding.getBindingId());
+                try (var statement = target.prepareStatement("UPDATE ma_runtime_binding SET record_version = record_version + 1 WHERE binding_id = ?")) {
+                    statement.setBytes(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(binding.getBindingId()));
                     assertThat(statement.executeUpdate()).isEqualTo(1);
                 }
                 var refused = WorkspaceCsiApplicationInventory.historicalScan(changed, expected, Map.of());
-                assertThat(refused.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_runtime_binding")
+                assertThat(refused.blockers()).anyMatch(blocker -> blocker.table().equals("ma_runtime_binding")
                         && blocker.code().equals("historical_candidate_changed"));
             } finally {
                 target.rollback();
@@ -187,7 +243,7 @@ class WorkspaceCsiApplicationInventoryTest {
         String reference = new ObjectMapper().writeValueAsString(Map.of("sessionId", session, "promptId", "turn",
                 "callId", "call", "argsDigest", "digest", "dispatchMode", "deferred"));
         insertExecution(id, "SETTLED", binding.getBindingId(), session, brokerHash(session));
-        jdbc.update("UPDATE qwen_tool_execution SET reference_json = ?, result_json = ? WHERE execution_call_id = ?",
+        jdbc.update("UPDATE ma_tool_execution SET reference_json = ?, result_json = ? WHERE execution_call_id = ?",
                 reference, "{\"executionStatus\":\"success\"}", id);
         var expected = historicalKeys();
         var control = readKeys(expected, new java.util.ArrayList<>());
@@ -199,7 +255,7 @@ class WorkspaceCsiApplicationInventoryTest {
             target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             try {
                 var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime());
-                WorkspaceCsiApplicationInventory.readHistoricalOwner(read, intent.operationId());
+                WorkspaceCsiApplicationInventory.readHistoricalOwner(read, "tenant", intent.operationId());
                 var decoded = read.originalExecutions(original);
                 assertThat(decoded).hasSize(1);
                 assertThat(decoded.getFirst().getExecutionCallId()).isEqualTo(id);
@@ -219,7 +275,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 Map.of("reference_json", reference.substring(0, reference.length() - 1) + ",\"sessionId\":\"" + session + "\"}"),
                 Map.of("result_json", "{\"executionStatus\":\"success\",\"executionStatus\":\"success\"}"))) {
             var field = fault.entrySet().iterator().next();
-            jdbc.update("UPDATE qwen_tool_execution SET " + field.getKey() + " = ? WHERE execution_call_id = ?", field.getValue(), id);
+            jdbc.update("UPDATE ma_tool_execution SET " + field.getKey() + " = ? WHERE execution_call_id = ?", field.getValue(), id);
             try (var target = source.getConnection()) {
                 target.setAutoCommit(false);
                 target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
@@ -230,7 +286,7 @@ class WorkspaceCsiApplicationInventoryTest {
                     target.rollback();
                 }
             }
-            jdbc.update("UPDATE qwen_tool_execution SET execution_call_id_hash = ?, reference_json = ?, result_json = ? WHERE execution_call_id = ?",
+            jdbc.update("UPDATE ma_tool_execution SET execution_call_id_hash = ?, reference_json = ?, result_json = ? WHERE execution_call_id = ?",
                     brokerHash(id), reference, "{\"executionStatus\":\"success\"}", id);
         }
     }
@@ -240,12 +296,12 @@ class WorkspaceCsiApplicationInventoryTest {
         var image = inspect();
         var owner = WorkspaceCsiPhysicalHistoryImage.owner(image);
         assertThat(owner.tables()).hasSize(image.tables().size());
-        assertThat(owner.table("managed_workspace_execution_lease").rows()).hasSize(1);
-        assertThat(owner.table("managed_workspace_execution_lease").rows().getFirst().bytes())
-                .isEqualTo(WorkspaceCsiApplicationImage.sole(image, "managed_workspace_execution_lease").bytes());
+        assertThat(owner.table("ma_storage_owner").rows()).hasSize(1);
+        assertThat(owner.table("ma_storage_owner").rows().getFirst().bytes())
+                .isEqualTo(WorkspaceCsiApplicationImage.sole(image, "ma_storage_owner").bytes());
         assertThat(owner.tables().stream().flatMap(table -> table.rows().stream()))
                 .noneMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
-        assertThat(owner.table("managed_workspace_registry").rows().getFirst().text("display_name")).isNull();
+        assertThat(owner.table("ma_workspace").rows().getFirst().text("display_name")).isNull();
         assertThat(WorkspaceCsiApplicationInventory.restoreCanonical(owner.bytes()).bytes()).isEqualTo(owner.bytes());
     }
 
@@ -267,26 +323,30 @@ class WorkspaceCsiApplicationInventoryTest {
                         (scan, carrier) -> { calls.incrementAndGet(); throw new AssertionError("Nested carrier scan"); });
                 assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.auditForeignOwner(read, owner, original, intent))
                         .isInstanceOf(IllegalArgumentException.class);
-                assertThat(queries).isEmpty();
+                assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).isEmpty();
                 WorkspaceCsiApplicationInventory.historicalScan(read, empty, Map.of());
                 var retained = WorkspaceCsiApplicationInventory.readForeignOwner(read,
-                        WorkspaceCsiApplicationImage.sole(owner, "managed_workspace_csi_retirement"));
-                assertThat(retained.binding().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(owner, "qwen_runtime_binding").bytes());
+                        WorkspaceCsiApplicationImage.sole(owner, "ma_operation"));
+                assertThat(retained.binding().bytes()).isEqualTo(WorkspaceCsiApplicationImage.sole(owner, "ma_runtime_binding").bytes());
                 WorkspaceCsiApplicationInventory.auditForeignOwner(read, owner, original, intent);
                 WorkspaceCsiApplicationInventory.requireForeignPhysicalAbsent(read, intent.operationId(), binding.getBindingId(), intent.physicalKey());
                 assertThat(read.foreignExecutions(original)).isEmpty();
                 assertThat(calls.get()).isZero();
                 assertThat(queries).noneMatch(sql -> sql.contains("FOR UPDATE"));
-                assertThat(queries).anyMatch(sql -> sql.contains("FROM managed_workspace_csi_physical t WHERE retirement_id = ? OR binding_id = ? OR physical_key = ?"));
+                assertThat(queries).anyMatch(sql -> sql.contains("FROM ma_csi_physical t WHERE retirement_id = ? OR binding_id = ? OR physical_key = ?"));
                 int before = queries.size();
                 assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.historicalScan(read, empty, Map.of()))
                         .isInstanceOf(IllegalArgumentException.class);
                 assertThatThrownBy(() -> read.originalExecutions(original)).isInstanceOf(IllegalArgumentException.class);
                 assertThat(queries).hasSize(before);
                 // Fault injection is explicitly on the owned H2 connection, outside the read facade.
-                try (var statement = target.prepareStatement("INSERT INTO managed_agent_action"
-                        + " (tenant_id,session_id,action_id,state,options_json,created_at) VALUES ('shadow',?,'extra','COMPLETED','{}',1)")) {
-                    statement.setString(1, session);
+                try (var statement = target.prepareStatement(actionSql())) {
+                    bindAction(statement, "shadow", session, "extra", "{}");
+                    assertThat(statement.executeUpdate()).isEqualTo(1);
+                }
+                WorkspaceCsiApplicationInventory.auditForeignOwner(read, owner, original, intent);
+                try (var statement = target.prepareStatement(actionSql())) {
+                    bindAction(statement, "tenant", session, "original-extra", "{}");
                     assertThat(statement.executeUpdate()).isEqualTo(1);
                 }
                 assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.auditForeignOwner(read, owner, original, intent))
@@ -303,8 +363,8 @@ class WorkspaceCsiApplicationInventoryTest {
         var empty = WorkspaceCsiApplicationInventory.expectedImage(owner.tables().stream().map(table ->
                 new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(), List.of())).toList());
         for (String relation : List.of("retirement", "binding", "physical")) {
-            jdbc.update("DELETE FROM managed_workspace_csi_physical");
-            jdbc.update("INSERT INTO managed_workspace_csi_physical"
+            jdbc.update("DELETE FROM ma_csi_physical");
+            jdbc.update("INSERT INTO ma_csi_physical"
                     + " (retirement_id,binding_id,physical_key,record_version,record_bytes,record_sha256) VALUES (?,?,?,1,?,?)",
                     relation.equals("retirement") ? intent.operationId() : UUID.randomUUID().toString(),
                     relation.equals("binding") ? binding.getBindingId() : "foreign-binding",
@@ -323,17 +383,15 @@ class WorkspaceCsiApplicationInventoryTest {
                 }
             }
         }
-        jdbc.update("DELETE FROM managed_workspace_csi_physical");
-        jdbc.execute("ALTER TABLE managed_workspace_csi_physical ADD unexpected VARCHAR(10)");
+        jdbc.update("DELETE FROM ma_csi_physical");
+        jdbc.execute("ALTER TABLE ma_csi_physical ADD unexpected VARCHAR(10)");
         try (var target = source.getConnection()) {
             target.setAutoCommit(false);
             target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             try {
-                var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, new java.util.ArrayList<>()),
-                        System.nanoTime(), (scan, carrier) -> { throw new AssertionError("Unexpected carrier"); });
-                WorkspaceCsiApplicationInventory.historicalScan(read, empty, Map.of());
-                assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.requireForeignPhysicalAbsent(read,
-                        intent.operationId(), binding.getBindingId(), intent.physicalKey())).isInstanceOf(IllegalArgumentException.class);
+                assertThatThrownBy(() -> new WorkspaceCsiApplicationInventory.HistoricalScan(
+                        observedRead(target, new java.util.ArrayList<>()), System.nanoTime()))
+                        .isInstanceOf(java.sql.SQLException.class).hasMessageContaining("ma_csi_physical");
             } finally {
                 target.rollback();
             }
@@ -368,9 +426,9 @@ class WorkspaceCsiApplicationInventoryTest {
         records.add((new String(control, StandardCharsets.UTF_8).substring(0, control.length - 1) + ",\"extra\":null}")
                 .getBytes(StandardCharsets.UTF_8));
         for (int index = 0; index < records.size(); index++) {
-            jdbc.update("DELETE FROM managed_workspace_csi_physical");
+            jdbc.update("DELETE FROM ma_csi_physical");
             byte[] raw = records.get(index);
-            jdbc.update("INSERT INTO managed_workspace_csi_physical"
+            jdbc.update("INSERT INTO ma_csi_physical"
                     + " (retirement_id,binding_id,physical_key,record_version,record_bytes,record_sha256) VALUES (?,?,?,1,?,?)",
                     retirement, bindingId, physical, raw, sha(raw));
             try (var target = source.getConnection()) {
@@ -386,7 +444,7 @@ class WorkspaceCsiApplicationInventoryTest {
                         WorkspaceCsiApplicationInventory.verifyForeignProgress(read, row, expectedPlan, sourceFixture.source());
                         var poisoned = ((com.fasterxml.jackson.databind.node.ObjectNode) expectedPlan).deepCopy().put("sessionId", "old-session");
                         byte[] poisonedRaw = plannedData(poisoned.toString(), retirement, bindingId, physical);
-                        try (var statement = target.prepareStatement("UPDATE managed_workspace_csi_physical SET record_bytes=?,record_sha256=? WHERE retirement_id=?")) {
+                        try (var statement = target.prepareStatement("UPDATE ma_csi_physical SET record_bytes=?,record_sha256=? WHERE retirement_id=?")) {
                             statement.setBytes(1, poisonedRaw);
                             statement.setString(2, sha(poisonedRaw));
                             statement.setString(3, retirement);
@@ -479,8 +537,8 @@ class WorkspaceCsiApplicationInventoryTest {
 
     private void verifyPhysicalData(WorkspaceCsiPhysicalProgress progress, com.fasterxml.jackson.databind.JsonNode plan,
             WorkspaceCsiNodeSourceStore.Association association, Map<String, java.util.Set<String>> references) throws Exception {
-        jdbc.update("DELETE FROM managed_workspace_csi_physical");
-        jdbc.update("INSERT INTO managed_workspace_csi_physical VALUES (?,?,?,?,?,?)", progress.retirementId(), progress.bindingId(),
+        jdbc.update("DELETE FROM ma_csi_physical");
+        jdbc.update("INSERT INTO ma_csi_physical VALUES (?,?,?,?,?,?)", progress.retirementId(), progress.bindingId(),
                 progress.physicalKey(), progress.version(), progress.bytes(), progress.sha256());
         try (var target = source.getConnection()) {
             target.setAutoCommit(false);
@@ -577,26 +635,31 @@ class WorkspaceCsiApplicationInventoryTest {
         var expected = historicalKeys();
         var references = Map.of("session", java.util.Set.of("older-session"), "binding", java.util.Set.of("older-binding"));
         for (String kind : List.of("empty", "original", "unknown", "bad-id", "schema")) {
-            jdbc.update("DELETE FROM managed_workspace_csi_physical");
+            jdbc.update("DELETE FROM ma_csi_physical");
             if (!kind.equals("empty") && !kind.equals("schema")) {
-                jdbc.update("INSERT INTO managed_workspace_csi_physical"
+                jdbc.update("INSERT INTO ma_csi_physical"
                         + " (retirement_id,binding_id,physical_key,record_version,record_bytes,record_sha256) VALUES (?,?,?,1,?,?)",
                         kind.equals("bad-id") ? "invalid" : UUID.randomUUID().toString(),
                         kind.equals("original") ? "older-binding" : "foreign-binding", "e".repeat(64), new byte[] {1}, "a".repeat(64));
             }
             if (kind.equals("schema")) {
-                jdbc.execute("ALTER TABLE managed_workspace_csi_physical ADD unexpected VARCHAR(10)");
+                jdbc.execute("ALTER TABLE ma_csi_physical ADD unexpected VARCHAR(10)");
             }
             var queries = new java.util.ArrayList<String>();
             try (var target = source.getConnection()) {
                 target.setAutoCommit(false);
                 target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
                 try {
+                    if (kind.equals("schema")) {
+                        assertThatThrownBy(() -> new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime()))
+                                .isInstanceOf(java.sql.SQLException.class).hasMessageContaining("ma_csi_physical");
+                        continue;
+                    }
                     var read = new WorkspaceCsiApplicationInventory.HistoricalScan(observedRead(target, queries), System.nanoTime(),
                             (scan, carrier) -> { throw new AssertionError("An unknown owner cannot reach the consumer"); });
                     var current = WorkspaceCsiApplicationInventory.historicalScan(read, expected, references);
                     var result = WorkspaceCsiApplicationInventory.auditPhysicalCandidates(read, current);
-                    assertThat(queries).anyMatch(sql -> sql.contains("FROM managed_workspace_csi_physical t WHERE 1 = 1"));
+                    assertThat(queries).anyMatch(sql -> sql.contains("FROM ma_csi_physical t WHERE 1 = 1"));
                     assertThat(result.bytes()).isNotEqualTo(new byte[0]);
                     if (kind.equals("empty")) {
                         assertThat(result.blockers()).isEmpty();
@@ -604,7 +667,7 @@ class WorkspaceCsiApplicationInventoryTest {
                         assertThat(result.rowCount()).isEqualTo(current.rowCount());
                         assertThat(result.byteCount()).isEqualTo(current.byteCount());
                     } else {
-                        assertThat(result.blockers()).anyMatch(blocker -> blocker.table().equals("managed_workspace_csi_physical")
+                        assertThat(result.blockers()).anyMatch(blocker -> blocker.table().equals("ma_csi_physical")
                                 && blocker.code().equals(kind.equals("schema") ? "schema_drift"
                                         : kind.equals("original") ? "unsupported_original_physical_outcome" : "unsupported_historical_physical_owner"));
                         assertThat(result.rowCount()).isEqualTo(current.rowCount() + (kind.equals("schema") ? 0 : 1));
@@ -643,26 +706,26 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(proof.terminalSequence()).isEqualTo(42);
         assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
         for (var fault : List.of(
-                List.of("qwen_managed_session_resource", "workspace_id", "other"),
-                List.of("qwen_managed_session_resource", "session_scope_key", "b".repeat(64)),
-                List.of("qwen_managed_session_resource", "sha256", "b".repeat(64)),
-                List.of("qwen_managed_session_resource", "storage_kind", "OBJECT_STORAGE"),
-                List.of("qwen_managed_session_resource_ref", "workspace_id", "other"),
-                List.of("qwen_managed_session_resource_ref", "journal_revision", "32"),
-                List.of("qwen_managed_session_journal_tx", "record_digest", "b".repeat(64)),
-                List.of("qwen_managed_session_journal_head", "activation_head_revision", "2"),
-                List.of("qwen_managed_session_journal_head", "activation_head_revision", "3"),
-                List.of("qwen_managed_session_journal_head", "activation_head_revision", "33"),
-                List.of("qwen_managed_session_journal_head", "activation_expires_at", "1"),
-                List.of("qwen_managed_session_journal_head", "activation_id", "other"),
-                List.of("qwen_managed_session_journal_head", "writer_id", UUID.randomUUID().toString()),
-                List.of("qwen_managed_session_journal_head", "activation_phase", "released"))) {
+                List.of("ma_resource", "workspace_id", "other"),
+                List.of("ma_resource", "session_scope_key", "b".repeat(64)),
+                List.of("ma_resource", "sha256", "b".repeat(64)),
+                List.of("ma_resource", "storage_kind", "OBJECT_STORAGE"),
+                List.of("ma_resource_ref", "workspace_id", "other"),
+                List.of("ma_resource_ref", "journal_revision", "32"),
+                List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
+                List.of("ma_session_head", "activation_head_revision", "2"),
+                List.of("ma_session_head", "activation_head_revision", "3"),
+                List.of("ma_session_head", "activation_head_revision", "33"),
+                List.of("ma_session_head", "activation_expires_at", "1"),
+                List.of("ma_session_head", "activation_id", "other"),
+                List.of("ma_session_head", "writer_id", UUID.randomUUID().toString()),
+                List.of("ma_session_head", "activation_phase", "released"))) {
             var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
             assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body))
                     .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
         }
         var tables = new java.util.ArrayList<>(baseline.tables());
-        var references = baseline.table("qwen_managed_session_resource_ref");
+        var references = baseline.table("ma_resource_ref");
         tables.set(tables.indexOf(references), new WorkspaceCsiApplicationInventory.Table(references.name(),
                 references.columns(), references.primaryKey(), references.rows().subList(1, references.rows().size())));
         var missing = WorkspaceCsiApplicationInventory.expectedImage(tables);
@@ -688,13 +751,13 @@ class WorkspaceCsiApplicationInventoryTest {
                     java.util.Base64.getDecoder().decode(resource.path("bytesBase64").textValue()));
         }
         Map<String, List<WorkspaceCsiApplicationInventory.Row>> rows = new java.util.LinkedHashMap<>();
-        rows.put("qwen_managed_session_journal_tx", new java.util.ArrayList<>());
-        rows.put("qwen_managed_session_resource_ref", new java.util.ArrayList<>());
+        rows.put("ma_session_journal_tx", new java.util.ArrayList<>());
+        rows.put("ma_resource_ref", new java.util.ArrayList<>());
         Map<String, WorkspaceCsiApplicationInventory.Row> resources = new java.util.LinkedHashMap<>();
         for (int index = 0; index < 32; index++) {
             var request = fixture.path("requests").get(index);
-            var values = nativeFixtureScope(catalogue, "qwen_managed_session_journal_tx", key);
-            for (var column : catalogue.table("qwen_managed_session_journal_tx").columns()) {
+            var values = nativeFixtureScope(catalogue, "ma_session_journal_tx", key);
+            for (var column : catalogue.table("ma_session_journal_tx").columns()) {
                 String camel = java.util.Arrays.stream(column.name().split("_"))
                         .reduce((first, next) -> first + Character.toUpperCase(next.charAt(0)) + next.substring(1)).orElseThrow();
                 var value = request.path(camel);
@@ -707,30 +770,41 @@ class WorkspaceCsiApplicationInventoryTest {
             values.put("byte_length", Integer.toString(raw.length).getBytes(StandardCharsets.UTF_8));
             values.put("record_encoding", "identity".getBytes(StandardCharsets.UTF_8));
             values.put("journal_revision", Integer.toString(index + 1).getBytes(StandardCharsets.UTF_8));
-            rows.get("qwen_managed_session_journal_tx").add(WorkspaceCsiApplicationInventory.expectedRow(
-                    "qwen_managed_session_journal_tx", values, WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
+            rows.get("ma_session_journal_tx").add(WorkspaceCsiApplicationInventory.expectedRow(
+                    "ma_session_journal_tx", values, WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
             for (var resource : request.path("resources")) {
                 String id = resource.path("resourceId").textValue();
-                var resourceValues = nativeFixtureScope(catalogue, "qwen_managed_session_resource", key);
+                var resourceValues = nativeFixtureScope(catalogue, "ma_resource", key);
                 for (var field : Map.of("session_scope_key", scope, "resource_id", id,
+                        "resource_key", ManagedSessionStore.resourceKey(scope, id),
                         "kind", resource.path("kind").textValue(), "schema_version", resource.path("schemaVersion").asText(),
                         "byte_length", resource.path("byteLength").asText(), "sha256", resource.path("digest").textValue(),
                         "storage_kind", "MYSQL_INLINE", "state", "REFERENCED").entrySet()) {
                     resourceValues.put(field.getKey(), field.getValue().getBytes(StandardCharsets.UTF_8));
                 }
                 resourceValues.put("inline_bytes", bodies.get(id));
-                resources.putIfAbsent(id, WorkspaceCsiApplicationInventory.expectedRow("qwen_managed_session_resource",
+                resources.putIfAbsent(id, WorkspaceCsiApplicationInventory.expectedRow("ma_resource",
                         resourceValues, WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
-                var refValues = nativeFixtureScope(catalogue, "qwen_managed_session_resource_ref", key);
+                var refValues = nativeFixtureScope(catalogue, "ma_resource_ref", key);
                 refValues.put("session_scope_key", scope.getBytes(StandardCharsets.UTF_8));
                 refValues.put("resource_id", id.getBytes(StandardCharsets.UTF_8));
+                refValues.put("owner_kind", "JOURNAL".getBytes(StandardCharsets.UTF_8));
+                refValues.put("owner_key", scope.getBytes(StandardCharsets.UTF_8));
+                refValues.put("owner_revision", Integer.toString(index + 1).getBytes(StandardCharsets.UTF_8));
+                refValues.put("resource_key", ManagedSessionStore.resourceKey(scope, id).getBytes(StandardCharsets.UTF_8));
                 refValues.put("journal_revision", Integer.toString(index + 1).getBytes(StandardCharsets.UTF_8));
-                rows.get("qwen_managed_session_resource_ref").add(WorkspaceCsiApplicationInventory.expectedRow(
-                        "qwen_managed_session_resource_ref", refValues, WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
+                rows.get("ma_resource_ref").add(WorkspaceCsiApplicationInventory.expectedRow(
+                        "ma_resource_ref", refValues, WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
             }
         }
-        rows.put("qwen_managed_session_resource", List.copyOf(resources.values()));
-        var head = nativeFixtureScope(catalogue, "qwen_managed_session_journal_head", key);
+        rows.put("ma_resource", List.copyOf(resources.values()));
+        var head = nativeFixtureScope(catalogue, "ma_session_head", key);
+        head.put("tenant_key", brokerHash(nativeTenant).getBytes(StandardCharsets.UTF_8));
+        head.put("harness_key", brokerHash(nativeSession).getBytes(StandardCharsets.UTF_8));
+        head.put("harness_session_id", nativeSession.getBytes(StandardCharsets.UTF_8));
+        head.put("head_kind", "MANAGED_SESSION".getBytes(StandardCharsets.UTF_8));
+        head.put("phase", "OPEN".getBytes(StandardCharsets.UTF_8));
+        head.put("claim_generation", "0".getBytes(StandardCharsets.UTF_8));
         for (var field : Map.of("journal_revision", "32", "committed_sequence", "41", "state", "ACTIVE",
                 "storage_version", "1", "recovery_status", "READY", "compacted_through_revision", "0",
                 "writer_generation", "1", "activation_phase", "active", "activation_epoch", "1", "activation_event_epoch", "1").entrySet()) {
@@ -745,8 +819,8 @@ class WorkspaceCsiApplicationInventoryTest {
         head.put("latest_checkpoint_resource_id", fixture.path("requests").get(31).path("latestCheckpointResourceId")
                 .textValue().getBytes(StandardCharsets.UTF_8));
         head.put("last_commit_digest", fixture.path("requests").get(31).path("commitDigest").textValue().getBytes(StandardCharsets.UTF_8));
-        rows.put("qwen_managed_session_journal_head", List.of(WorkspaceCsiApplicationInventory.expectedRow(
-                "qwen_managed_session_journal_head", head, WorkspaceCsiApplicationInventory.Membership.ORIGINAL)));
+        rows.put("ma_session_head", List.of(WorkspaceCsiApplicationInventory.expectedRow(
+                "ma_session_head", head, WorkspaceCsiApplicationInventory.Membership.ORIGINAL)));
         return WorkspaceCsiApplicationInventory.expectedImage(catalogue.tables().stream().map(table ->
                 new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(),
                         rows.getOrDefault(table.name(), List.of()).stream()
@@ -781,109 +855,117 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
-        assertThat(snapshot.tables()).hasSize(62);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(854);
+        assertThat(snapshot.tables()).hasSize(34);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(764);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
-        for (String table : new String[] {"managed_agent_session", "managed_workspace_create_command",
-                "managed_session_create_scope", "managed_agent_event", "managed_agent_consumer_progress",
-                "managed_workspace_csi_registration", "managed_workspace_csi_retirement",
-                "managed_workspace_execution_lease", "qwen_runtime_binding", "qwen_runtime_binding_slot",
-                "qwen_runtime_placement_guard", "qwen_tool_publication_tenant"}) {
+        for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
+                "ma_storage_owner", "ma_runtime_binding", "ma_runtime_slot"}) {
             assertThat(snapshot.table(table).rows()).hasSize(1);
             assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.table().equals(table));
         }
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_journal_head")
+        assertThat(snapshot.table("ma_request_receipt").rows()).hasSize(2);
+        assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
     }
 
     @Test
     void extraMissingAndChangedColumnTypesBlockEvenAnEmptyUnsupportedTable() throws Exception {
-        jdbc.execute("ALTER TABLE managed_agent_action ADD COLUMN unexplained BIGINT");
+        jdbc.execute("ALTER TABLE ma_session_record ADD COLUMN unexplained BIGINT");
         assertSchemaDrift();
-        jdbc.execute("ALTER TABLE managed_agent_action DROP COLUMN unexplained");
-        jdbc.execute("ALTER TABLE managed_agent_action ALTER COLUMN options_json BIGINT");
+        jdbc.execute("ALTER TABLE ma_session_record DROP COLUMN unexplained");
+        jdbc.execute("ALTER TABLE ma_session_record ALTER COLUMN options_json BIGINT");
         assertSchemaDrift();
-        jdbc.execute("ALTER TABLE managed_agent_action DROP COLUMN options_json");
+        jdbc.execute("ALTER TABLE ma_session_record DROP COLUMN started_at");
         assertSchemaDrift();
     }
 
     @Test
     void taskJournalBooleanMetadataRetainsUnsupportedActivityAndExactValues() throws Exception {
-        jdbc.execute("ALTER TABLE qwen_managed_session_task_journal ALTER COLUMN truncated BOOLEAN");
-        jdbc.execute("ALTER TABLE qwen_managed_session_task_journal ALTER COLUMN archived BOOLEAN");
-        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("qwen_managed_session_task_journal")
-                && blocker.code().equals("schema_drift"));
-        jdbc.update("INSERT INTO qwen_managed_session_task_journal (session_scope_key, tenant_id, session_id, task_id,"
-                + " event_sequence, event_type, occurred_at, schema_version, projection_version, truncated, archived)"
-                + " VALUES (?, 'tenant', ?, 'task', 1, 'output', 1, 1, 1, FALSE, TRUE)", sessionScope(), session);
+        jdbc.execute("ALTER TABLE ma_public_event ALTER COLUMN truncated BOOLEAN");
+        jdbc.execute("ALTER TABLE ma_public_event ALTER COLUMN archived BOOLEAN");
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, updated_at)"
+                + " VALUES ('tenant', ?, 'TASK', 'task', 1, 1)", session);
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, stream_kind, stream_id, sequence_id, event_id,"
+                + " event_type, created_at, schema_version, projection_version, truncated, archived)"
+                + " VALUES ('tenant', ?, 'TASK', 'task', 1, ?, 'output', 1, 1, 1, FALSE, TRUE)", session, UUID.randomUUID().toString());
         var observed = inspect();
-        assertThat(observed.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_task_journal")
+        assertThat(observed.blockers()).anyMatch(blocker -> blocker.table().equals("ma_public_event")
                 && blocker.code().equals("unsupported_first_lane"));
-        var row = observed.table("qwen_managed_session_task_journal").rows().getFirst();
+        var row = observed.table("ma_public_event").rows().stream().filter(value -> "TASK".equals(value.text("stream_kind"))).findFirst().orElseThrow();
         assertThat(row.bool("truncated")).isFalse();
         assertThat(row.bool("archived")).isTrue();
         var values = new java.util.LinkedHashMap<String, byte[]>();
         row.fields().forEach((name, cell) -> values.put(name, cell.bytes()));
         values.put("archived", "2".getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow(
-                "qwen_managed_session_task_journal", values, row.membership())).isInstanceOf(IllegalArgumentException.class);
-        jdbc.execute("ALTER TABLE qwen_managed_session_task_journal ALTER COLUMN truncated VARCHAR(8)");
-        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_task_journal")
-                && blocker.code().equals("schema_drift"));
+                "ma_public_event", values, row.membership())).isInstanceOf(IllegalArgumentException.class);
+        jdbc.execute("ALTER TABLE ma_public_event ALTER COLUMN truncated VARCHAR(8)");
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.code().equals("schema_drift"));
     }
 
     @Test
     void aSqlFileHistoryExtensionIsBlockedWithoutBorrowingNativeProjectionSupport() throws Exception {
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                 + " (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id,"
                 + " operation_hash, revision, record_resource_id, created_at, first_sequence)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'file_history', 'history', ?, 1, 'resource', 1, 1)",
                 sessionScope(), "a".repeat(64), session, "b".repeat(64));
         var snapshot = inspect();
-        assertThat(snapshot.table("qwen_managed_session_extension_record").rows()).hasSize(1);
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_extension_record")
+        assertThat(snapshot.table("ma_session_record").rows()).hasSize(1);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_record")
                 && blocker.code().equals("unsupported_first_lane"));
     }
 
     @Test
     void independentlyRetainsAnOrphanRefAndAnUnreferencedPublishedResource() throws Exception {
         byte[] bytes = "{\"schemaVersion\":1}".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
+        jdbc.update("INSERT INTO ma_resource"
+                + " (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                 + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                + " VALUES (?, 'tenant', 'workspace', ?, 'extra', 'native-fixture', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                + " 'publish', 'PUBLISHED', CURRENT_TIMESTAMP(6))", sessionScope(), session, bytes.length, sha(bytes), bytes);
-        jdbc.update("INSERT INTO qwen_managed_session_resource_ref"
-                + " (session_scope_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, created_at)"
-                + " VALUES (?, 'foreign', 'workspace', ?, 99, 'missing', CURRENT_TIMESTAMP(6))",
-                sessionScope(), UUID.randomUUID().toString());
+                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'extra', 'native-fixture', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                + " 'publish', 'PUBLISHED', CURRENT_TIMESTAMP(6))", ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), session, bytes.length, sha(bytes), bytes);
+        jdbc.update("INSERT INTO ma_resource_ref"
+                + " (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, created_at)"
+                + " VALUES ('JOURNAL', ?, 99, ?, ?, 'foreign', 'workspace', ?, 99, 'missing', CURRENT_TIMESTAMP(6))",
+                sessionScope(), ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), UUID.randomUUID().toString());
         var snapshot = inspect();
-        assertThat(snapshot.table("qwen_managed_session_resource").rows()).hasSize(1);
-        assertThat(snapshot.table("qwen_managed_session_resource_ref").rows()).hasSize(1);
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_resource_ref")
+        assertThat(snapshot.table("ma_resource").rows()).hasSize(1);
+        assertThat(snapshot.table("ma_resource_ref").rows()).hasSize(1);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_resource_ref")
                 && blocker.code().equals("invalid_original_association"));
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_resource"));
-        assertThat(snapshot.table("qwen_managed_session_resource").rows().getFirst().binary("inline_bytes")).isEqualTo(bytes);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_resource"));
+        assertThat(snapshot.table("ma_resource").rows().getFirst().binary("inline_bytes")).isEqualTo(bytes);
     }
 
     @Test
     void independentlyFindsCommandsAndDeliveriesWithNoScheduleClaimOrSessionColumn() throws Exception {
-        jdbc.update("INSERT INTO qwen_managed_automation_command"
-                + " (tenant_id, idempotency_key, actor_id, request_digest, schedule_id, result_json, created_at)"
-                + " VALUES ('tenant', 'orphan', 'actor', 'digest', '', '{}', 1)");
-        jdbc.update("INSERT INTO qwen_managed_automation_command"
-                + " (tenant_id, idempotency_key, actor_id, request_digest, schedule_id, result_json, created_at)"
-                + " VALUES ('foreign', 'original-json', 'actor', 'digest', 'unknown', ?, 1)",
-                "{\"sessionId\":\"" + session + "\"}");
-        jdbc.update("INSERT INTO qwen_managed_channel_delivery"
-                + " (tenant_id, channel_instance_id, delivery_id, segment_id, segment_ordinal, state, created_at, updated_at)"
-                + " VALUES ('tenant', 'channel', 'delivery', 'segment', 0, 'returned', 1, 1)");
+        var namespace = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.AUTOMATION;
+        var scopeKind = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope.TENANT;
+        for (String owner : List.of("tenant", "foreign")) {
+            String id = owner.equals("tenant") ? "orphan" : "original-json";
+            String receipt = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.receiptKey(namespace, owner, scopeKind, owner, id);
+            jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id, scope_kind, scope_key, scope_id,"
+                    + " idempotency_key, idempotency_digest, actor_id, request_digest, schedule_id, result_json, state, created_at, updated_at)"
+                    + " VALUES (?, 'AUTOMATION', ?, ?, 'TENANT', ?, ?, ?, ?, 'actor', 'digest', ?, ?, 'COMPLETED', 1, 1)",
+                    receipt, brokerHash(owner), owner, WorkspaceOperations.hash("TENANT", owner), owner, id, brokerHash(id),
+                    owner.equals("tenant") ? "" : "unknown", owner.equals("tenant") ? "{}" : "{\"sessionId\":\"" + session + "\"}");
+        }
+        String channelScope = WorkspaceOperations.hash("tenant", "channel");
+        jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_scope_key,"
+                + " segment_id, segment_ordinal, transport_state, reception_state, consumption_state, payload_json, created_at, updated_at)"
+                + " VALUES (?, 'CHANNEL', 'tenant', 'channel', 'delivery', ?, 'segment', 0, 'RETURNED', 'PENDING', 'PENDING', '{}', 1, 1)",
+                WorkspaceOperations.hash("CHANNEL", channelScope, "delivery"), channelScope);
         var snapshot = inspect();
-        assertThat(snapshot.table("qwen_managed_automation_command").rows()).hasSize(2);
-        assertThat(snapshot.table("qwen_managed_channel_delivery").rows()).hasSize(1);
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.code().equals("unresolved_command_owner"));
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.code().equals("unresolved_delivery_owner"));
+        assertThat(snapshot.table("ma_request_receipt").rows().stream().filter(row -> "AUTOMATION".equals(row.text("namespace"))))
+                .hasSize(2);
+        assertThat(snapshot.table("ma_delivery").rows()).hasSize(1);
+        for (String table : List.of("ma_request_receipt", "ma_delivery")) {
+            assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals(table)
+                    && blocker.code().equals("unresolved_candidate_owner"));
+        }
     }
 
     @Test
@@ -891,7 +973,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var before = inspect();
         var replay = inspect();
         assertThat(replay.bytes()).isEqualTo(before.bytes());
-        var parent = before.table("managed_agent_session").rows().getFirst();
+        var parent = before.table("ma_session").rows().getFirst();
         byte[] actor = parent.binary("creator_actor_key");
         actor[0] ^= 1;
         byte[] encoded = parent.bytes();
@@ -901,25 +983,32 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(replay.bytes()).isEqualTo(before.bytes());
         assertThat(parent.binary("creator_actor_key")).isNotEqualTo(actor);
         assertThat(parent.bytes()).isNotEqualTo(encoded);
-        jdbc.update("UPDATE managed_agent_session SET approval_mode = 'default' WHERE session_id = ?", session);
+        jdbc.update("UPDATE ma_session SET approval_mode = 'default' WHERE session_id = ?", session);
         var changed = inspect();
         assertThat(changed.bytes()).isNotEqualTo(before.bytes());
-        assertThat(changed.table("managed_agent_session").rows().getFirst().text("approval_mode")).isEqualTo("default");
-        assertThat(before.table("managed_agent_session").rows().getFirst().text("approval_mode")).isEqualTo("yolo");
+        assertThat(changed.table("ma_session").rows().getFirst().text("approval_mode")).isEqualTo("default");
+        assertThat(before.table("ma_session").rows().getFirst().text("approval_mode")).isEqualTo("yolo");
+    }
+
+    @Test
+    void foreignCaptureWithoutItsActualSessionOwnerIsRetainedAsABlocker() throws Exception {
+        String foreignSession = "missing-foreign-session";
+        String foreignScope = ToolPublicationDataStore.scope("tenant", "workspace", foreignSession);
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes) VALUES (?, ?, 'tenant', 'workspace', ?,"
+                + " 'foreign-publication', ?, 'foreign-capture', '{}', ?, ?, 'FENCED', 0, 0, 0)",
+                foreignScope, ToolPublicationRetentionStore.hash("tenant"), foreignSession,
+                "a".repeat(64), "b".repeat(64), "c".repeat(64));
+        var snapshot = inspect();
+        assertThat(snapshot.table("ma_output_capture").rows()).hasSize(1);
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_output_capture")
+                && blocker.code().equals("unresolved_candidate_owner"));
     }
 
     @Test
     void aggregateRowOverflowCannotBeHiddenByUnsupportedOrRepeatedRows() throws Exception {
-        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                "INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                        + " VALUES ('tenant', ?, ?, 'COMPLETED', '{}', 1)")) {
-            for (int index = 0; index <= WorkspaceCsiApplicationInventory.MAX_ROWS; index++) {
-                statement.setString(1, session);
-                statement.setString(2, String.format("%05d", index));
-                statement.addBatch();
-            }
-            statement.executeBatch();
-        }
+        actionBatch("tenant", session, WorkspaceCsiApplicationInventory.MAX_ROWS + 1);
         var snapshot = inspect();
         assertThat(snapshot.rowCount()).isLessThanOrEqualTo(WorkspaceCsiApplicationInventory.MAX_ROWS);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.code().equals("row_limit"));
@@ -928,7 +1017,7 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void anOversizedBinaryColumnBlocksBeforeItCanBecomeACut() throws Exception {
         byte[] bytes = new byte[WorkspaceCsiApplicationInventory.MAX_BYTES + 1];
-        jdbc.update("UPDATE managed_workspace_csi_retirement SET frozen_request_bytes = ?, frozen_request_sha256 = ?",
+        jdbc.update("UPDATE ma_operation SET frozen_request_bytes = ?, frozen_request_sha256 = ?",
                 bytes, sha(bytes));
         var snapshot = inspect();
         assertThat(snapshot.byteCount()).isLessThanOrEqualTo(WorkspaceCsiApplicationInventory.MAX_BYTES);
@@ -939,33 +1028,33 @@ class WorkspaceCsiApplicationInventoryTest {
     void nonzeroNativeHistoryExecutionsAndReadsRemainCompleteAcrossAllStates() throws Exception {
         byte[] resource = "{\"schemaVersion\":1,\"data\":\"complete bytes\"}".getBytes(StandardCharsets.UTF_8);
         byte[] record = "{\"sequence\":1,\"resourceId\":\"resource\"}\n".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id, workspace_id, session_id, storage_version,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                 + " state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision,"
                 + " committed_sequence, last_commit_digest, activation_epoch, compacted_through_revision, recovery_status,"
-                + " created_at, updated_at, activation_id) VALUES ('tenant', 'workspace', ?, 1, 'ACTIVE', 1, 'writer',"
+                + " created_at, updated_at, activation_id) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 'writer',"
                 + " CURRENT_TIMESTAMP, ?, 1, 1, ?, 1, 0, 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'activation')",
-                session, "a".repeat(64), "b".repeat(64));
-        jdbc.update("INSERT INTO qwen_managed_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                brokerHash("tenant"), brokerHash(session), session, session, "a".repeat(64), "b".repeat(64));
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                 + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
                 + " event_count, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                 + " record_encoding, record_bytes, byte_length, record_digest, created_at)"
                 + " VALUES ('tenant', 'workspace', ?, 1, ?, 'transaction', 'fixture', 'command', ?, 1, 1, 1, ?, 1,"
                 + " 'writer', ?, 1, 'identity', ?, ?, ?, CURRENT_TIMESTAMP)",
                 session, "c".repeat(64), "d".repeat(64), "b".repeat(64), "a".repeat(64), record, record.length, sha(record));
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                + " state, created_at) VALUES (?, 'tenant', 'workspace', ?, 'resource', 'inventory-fixture', 1, ?, ?,"
+                + " state, created_at) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'inventory-fixture', 1, ?, ?,"
                 + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP)",
-                sessionScope(), session, resource.length, sha(resource), resource);
-        jdbc.update("INSERT INTO qwen_managed_session_resource_ref (session_scope_key, tenant_id, workspace_id, session_id,"
-                + " journal_revision, resource_id, created_at) VALUES (?, 'tenant', 'workspace', ?, 1, 'resource', CURRENT_TIMESTAMP)",
-                sessionScope(), session);
+                ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session, resource.length, sha(resource), resource);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+                + " journal_revision, resource_id, created_at) VALUES ('JOURNAL', ?, 1, ?, ?, 'tenant', 'workspace', ?, 1, 'resource', CURRENT_TIMESTAMP)",
+                sessionScope(), ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session);
         for (String state : List.of("PREPARED", "DISPATCHING", "EXECUTING", "CANCEL_REQUESTED", "UNKNOWN", "ABANDONED", "SETTLED")) {
             insertExecution(state, state, binding.getBindingId(), session, brokerHash(session));
         }
         insertExecution("foreign", "SETTLED", "foreign-binding", "foreign-session", brokerHash(session));
         for (String state : List.of("OPEN", "UNKNOWN", "RETURNED")) {
-            jdbc.update("INSERT INTO qwen_csi_resource_read (read_id, tenant_id, workspace_id, session_id, request_key, binding_id,"
+            jdbc.update("INSERT INTO ma_csi_resource_read (read_id, tenant_id, workspace_id, session_id, request_key, binding_id,"
                     + " runtime_generation, binding_version, writer_id, writer_generation, writer_token_hash, journal_revision,"
                     + " activation_id, activation_epoch, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
                     + " resource_state, state, started_at, delivery_expires_at, ended_at, outcome_code)"
@@ -976,22 +1065,22 @@ class WorkspaceCsiApplicationInventoryTest {
                     state.equals("RETURNED") ? "verified" : null);
         }
         var snapshot = inspect();
-        for (String table : List.of("qwen_managed_session_journal_head", "qwen_managed_session_journal_tx",
-                "qwen_managed_session_resource", "qwen_managed_session_resource_ref")) {
+        for (String table : List.of("ma_session_head", "ma_session_journal_tx",
+                "ma_resource", "ma_resource_ref")) {
             assertThat(snapshot.table(table).rows()).hasSize(1);
             assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.table().equals(table));
         }
-        assertThat(snapshot.table("qwen_managed_session_journal_tx").rows().getFirst().binary("record_bytes")).isEqualTo(record);
-        assertThat(snapshot.table("qwen_managed_session_resource").rows().getFirst().binary("inline_bytes")).isEqualTo(resource);
-        assertThat(snapshot.table("qwen_tool_execution").rows()).hasSize(8);
-        assertThat(snapshot.table("qwen_csi_resource_read").rows()).hasSize(3);
-        var settled = snapshot.table("qwen_tool_execution").rows().stream()
+        assertThat(snapshot.table("ma_session_journal_tx").rows().getFirst().binary("record_bytes")).isEqualTo(record);
+        assertThat(snapshot.table("ma_resource").rows().getFirst().binary("inline_bytes")).isEqualTo(resource);
+        assertThat(snapshot.table("ma_tool_execution").rows()).hasSize(8);
+        assertThat(snapshot.table("ma_csi_resource_read").rows()).hasSize(3);
+        var settled = snapshot.table("ma_tool_execution").rows().stream()
                 .filter(row -> row.text("execution_call_id").equals("SETTLED")).findFirst().orElseThrow();
         assertThat(settled.fields()).hasSize(28);
         assertThat(settled.text("native_authorization_json")).isEqualTo("{}");
         assertThat(settled.key()).containsExactly(settled.cell("execution_call_id_hash"));
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_tool_execution"));
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_csi_resource_read"));
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_tool_execution"));
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_csi_resource_read"));
         assertThat(snapshot.rowCount()).isEqualTo(snapshot.tables().stream().mapToInt(table -> table.rows().size()).sum());
         assertThat(snapshot.byteCount()).isEqualTo(snapshot.tables().stream()
                 .flatMap(table -> table.rows().stream()).mapToLong(row -> row.bytes().length).sum());
@@ -1001,54 +1090,54 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void legacyNullProgressBlocksAndEveryProgressTailChangesTheCapturedBytes() throws Exception {
         var before = inspect();
-        jdbc.update("UPDATE managed_workspace_csi_retirement SET progress_stage = NULL");
+        jdbc.update("UPDATE ma_operation SET progress_stage = NULL");
         var legacy = inspect();
-        assertThat(legacy.blockers()).anyMatch(blocker -> blocker.table().equals("managed_workspace_csi_retirement")
+        assertThat(legacy.blockers()).anyMatch(blocker -> blocker.table().equals("ma_operation")
                 && blocker.code().equals("invalid_original_association"));
         assertThat(legacy.bytes()).isNotEqualTo(before.bytes());
-        jdbc.update("UPDATE managed_workspace_csi_retirement SET progress_stage = 'FROZEN', progress_version = progress_version + 1,"
+        jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = progress_version + 1,"
                 + " frozen_request_bytes = ?, frozen_request_sha256 = ?", new byte[] {1, 2}, sha(new byte[] {1, 2}));
         var frozen = inspect();
         assertThat(frozen.bytes()).isNotEqualTo(legacy.bytes());
-        assertThat(frozen.table("managed_workspace_csi_retirement").rows().getFirst().binary("frozen_request_bytes"))
+        assertThat(frozen.table("ma_operation").rows().getFirst().binary("frozen_request_bytes"))
                 .isEqualTo(new byte[] {1, 2});
     }
 
     @Test
     void changedPhysicalRegistrationCannotHideBehindUnchangedAliasAndRevision() throws Exception {
         var saved = (com.fasterxml.jackson.databind.node.ObjectNode) new ObjectMapper().readTree(
-                jdbc.queryForObject("SELECT registration_json FROM managed_workspace_csi_registration", String.class));
+                jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class));
         saved.put("volumeHandle", "replacement");
-        jdbc.update("UPDATE managed_workspace_csi_registration SET registration_json = ?", saved.toString());
-        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("managed_workspace_csi_registration")
+        jdbc.update("UPDATE ma_storage SET registration_json = ?", saved.toString());
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_storage")
                 && blocker.code().equals("invalid_original_association"));
     }
 
     @Test
     void unrelatedGlobalDefinitionsAreNotOriginalWorkForTheOpaqueSelectedRevision() throws Exception {
-        jdbc.update("INSERT INTO managed_agent_definition (tenant_id, agent_id, revision, digest, definition_json, created_at)"
+        jdbc.update("INSERT INTO ma_agent_definition (tenant_id, agent_id, revision, digest, definition_json, created_at)"
                 + " VALUES ('tenant', 'qwen-code', 7, 'digest', '{}', 1)");
         var snapshot = inspect();
-        assertThat(snapshot.table("managed_agent_definition").rows()).isEmpty();
-        assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.table().equals("managed_agent_definition"));
+        assertThat(snapshot.table("ma_agent_definition").rows()).isEmpty();
+        assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.table().equals("ma_agent_definition"));
     }
 
     @Test
     void rowsUseTheWholeFinalPrimaryKeyAndSortNumericComponentsNumerically() throws Exception {
         for (long sequence : new long[] {10, 2}) {
-            jdbc.update("INSERT INTO managed_agent_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json,"
+            jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json,"
                     + " terminal, created_at) VALUES ('tenant', ?, ?, ?, 'fixture', '{}', FALSE, 1)",
                     session, sequence, UUID.randomUUID().toString());
         }
         var snapshot = inspect();
-        var table = snapshot.table("managed_agent_event");
-        assertThat(table.primaryKey()).containsExactly("tenant_id", "session_id", "sequence_id");
+        var table = snapshot.table("ma_public_event");
+        assertThat(table.primaryKey()).containsExactly("tenant_id", "session_id", "stream_kind", "stream_id", "sequence_id");
         assertThat(table.rows()).extracting(row -> row.number("sequence_id")).containsExactly(1L, 2L, 10L);
         for (var row : table.rows()) {
-            assertThat(row.key()).containsExactly(row.cell("tenant_id"), row.cell("session_id"), row.cell("sequence_id"));
+            assertThat(row.key()).containsExactly(row.cell("tenant_id"), row.cell("session_id"), row.cell("stream_kind"), row.cell("stream_id"), row.cell("sequence_id"));
             assertThat(row.fields()).hasSize(table.columns().size());
         }
-        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("managed_agent_event"));
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_public_event"));
     }
 
     @Test
@@ -1059,9 +1148,9 @@ class WorkspaceCsiApplicationInventoryTest {
             var wrapped = (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[] {Connection.class},
                     (proxy, method, arguments) -> {
                         if (method.getName().equals("prepareStatement") && arguments != null
-                                && arguments[0] instanceof String sql && sql.startsWith("SELECT t.* FROM managed_agent_session t")
+                                && arguments[0] instanceof String sql && sql.startsWith("SELECT t.* FROM ma_session t")
                                 && attempts.incrementAndGet() == 2) {
-                            try (var statement = target.prepareStatement("UPDATE managed_agent_session SET approval_mode = 'changed'")) {
+                            try (var statement = target.prepareStatement("UPDATE ma_session SET approval_mode = 'changed'")) {
                                 statement.executeUpdate();
                             }
                         }
@@ -1074,9 +1163,9 @@ class WorkspaceCsiApplicationInventoryTest {
             try {
                 var original = JdbcCsiFilesRetirementGuard.lockBindingControl(target, binding.getBindingId());
                 var snapshot = WorkspaceCsiApplicationInventory.inspect(wrapped, original, intent);
-                assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("managed_agent_session")
+                assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
                         && blocker.code().equals("same_key_conflicting_bytes"));
-                assertThat(snapshot.table("managed_agent_session").rows()).hasSize(1);
+                assertThat(snapshot.table("ma_session").rows()).hasSize(1);
             } finally {
                 target.rollback();
             }
@@ -1090,7 +1179,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var valueOnly = WorkspaceCsiApplicationInventory.expectedImage(observed.tables());
         var restored = WorkspaceCsiApplicationInventory.restoreCanonical(valueOnly.bytes());
         assertThat(restored.bytes()).isEqualTo(valueOnly.bytes());
-        assertThat(restored.tables()).hasSize(62);
+        assertThat(restored.tables()).hasSize(34);
         assertThat(restored.rowCount()).isEqualTo(observed.rowCount());
         assertThat(observed.blockers()).isNotEmpty();
         byte[] trailing = java.util.Arrays.copyOf(valueOnly.bytes(), valueOnly.bytes().length + 1);
@@ -1106,28 +1195,28 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void persistedRowsRefuseNoncanonicalTypesAndIncompleteFullKeys() throws Exception {
-        var row = inspect().table("managed_agent_session").rows().getFirst();
+        var row = inspect().table("ma_session").rows().getFirst();
         Map<String, byte[]> values = new java.util.LinkedHashMap<>();
         row.fields().forEach((name, cell) -> values.put(name, cell.bytes()));
         for (String invalid : List.of("01", "1.0", "+1", "9223372036854775808")) {
             var changed = new java.util.LinkedHashMap<>(values);
             changed.put("workspace_generation", invalid.getBytes(StandardCharsets.UTF_8));
-            assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("managed_agent_session", changed, row.membership()))
+            assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                     .isInstanceOf(IllegalArgumentException.class);
         }
         var changed = new java.util.LinkedHashMap<>(values);
         changed.put("csi_guard", "1".getBytes(StandardCharsets.UTF_8));
-        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("managed_agent_session", changed, row.membership()))
+        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                 .isInstanceOf(IllegalArgumentException.class);
         changed.put("csi_guard", values.get("csi_guard"));
         changed.put("session_id", null);
-        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("managed_agent_session", changed, row.membership()))
+        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                 .isInstanceOf(IllegalArgumentException.class);
         changed.put("session_id", new byte[] {(byte) 0xc3, 0x28});
-        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("managed_agent_session", changed, row.membership()))
+        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                 .isInstanceOf(IllegalArgumentException.class);
         changed.remove("approval_mode");
-        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("managed_agent_session", changed, row.membership()))
+        assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -1137,22 +1226,22 @@ class WorkspaceCsiApplicationInventoryTest {
         byte[] frozen = "{\"saved\":true}".getBytes(StandardCharsets.UTF_8);
         var expected = WorkspaceCsiApplicationImage.expected(baseline,
                 com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.FROZEN, frozen, null, null);
-        var progress = expected.table("managed_workspace_csi_retirement").rows().getFirst();
+        var progress = expected.table("ma_operation").rows().getFirst();
         assertThat(progress.text("progress_stage")).isEqualTo("FROZEN");
         assertThat(progress.number("progress_version")).isEqualTo(2);
         assertThat(progress.binary("frozen_request_bytes")).isEqualTo(frozen);
         assertThat(progress.text("frozen_request_sha256")).isEqualTo(sha(frozen));
         for (var table : baseline.tables()) {
-            if (!table.name().equals("managed_workspace_csi_retirement")) {
+            if (!table.name().equals("ma_operation")) {
                 assertThat(expected.table(table.name()).rows().stream().map(WorkspaceCsiApplicationInventory.Row::bytes).toList())
                         .containsExactlyElementsOf(table.rows().stream().map(WorkspaceCsiApplicationInventory.Row::bytes).toList());
             }
         }
-        jdbc.update("UPDATE managed_workspace_csi_retirement SET progress_stage = 'FROZEN', progress_version = 2,"
+        jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = 2,"
                 + " frozen_request_bytes = ?, frozen_request_sha256 = ?", frozen, sha(frozen));
         var actual = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         WorkspaceCsiApplicationImage.verify(actual, expected);
-        jdbc.update("UPDATE managed_agent_session SET updated_at = updated_at + 1");
+        jdbc.update("UPDATE ma_session SET updated_at = updated_at + 1");
         var drift = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         assertThatThrownBy(() -> WorkspaceCsiApplicationImage.verify(drift, expected)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> WorkspaceCsiApplicationImage.expected(actual,
@@ -1168,9 +1257,9 @@ class WorkspaceCsiApplicationInventoryTest {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(observed.tables());
         byte[] original = fixture.bytes();
         var projected = WorkspaceCsiPhysicalReleaseImage.expected(fixture);
-        var allowed = Map.of("qwen_runtime_binding", java.util.Set.of("binding_state", "record_version"),
-                "qwen_runtime_binding_slot", java.util.Set.of("active_binding_id"),
-                "managed_workspace_execution_lease", java.util.Set.of("csi_phase", "csi_revision", "csi_reservation_id",
+        var allowed = Map.of("ma_runtime_binding", java.util.Set.of("binding_state", "record_version"),
+                "ma_runtime_slot", java.util.Set.of("active_binding_id"),
+                "ma_storage_owner", java.util.Set.of("csi_phase", "csi_revision", "csi_reservation_id",
                         "csi_registration_key", "csi_registration_revision", "binding_id", "runtime_generation", "csi_provision_request_id"));
         int differences = 0;
         for (var table : fixture.tables()) {
@@ -1192,12 +1281,12 @@ class WorkspaceCsiApplicationInventoryTest {
             }
         }
         assertThat(differences).isEqualTo(11);
-        var changedBinding = WorkspaceCsiApplicationImage.sole(projected, "qwen_runtime_binding");
+        var changedBinding = WorkspaceCsiApplicationImage.sole(projected, "ma_runtime_binding");
         assertThat(changedBinding.text("binding_state")).isEqualTo("RELEASED");
         assertThat(changedBinding.number("record_version")).isEqualTo(
-                WorkspaceCsiApplicationImage.sole(fixture, "qwen_runtime_binding").number("record_version") + 1);
-        assertThat(WorkspaceCsiApplicationImage.sole(projected, "qwen_runtime_binding_slot").cell("active_binding_id").isNull()).isTrue();
-        var changedHolder = WorkspaceCsiApplicationImage.sole(projected, "managed_workspace_execution_lease");
+                WorkspaceCsiApplicationImage.sole(fixture, "ma_runtime_binding").number("record_version") + 1);
+        assertThat(WorkspaceCsiApplicationImage.sole(projected, "ma_runtime_slot").cell("active_binding_id").isNull()).isTrue();
+        var changedHolder = WorkspaceCsiApplicationImage.sole(projected, "ma_storage_owner");
         assertThat(changedHolder.text("csi_phase")).isEqualTo("RELEASED");
         assertThat(changedHolder.number("csi_revision")).isEqualTo(3);
         for (String field : List.of("csi_reservation_id", "csi_registration_key", "csi_registration_revision",
@@ -1214,20 +1303,20 @@ class WorkspaceCsiApplicationInventoryTest {
     void ownershipProjectionRefusesWrongPhaseIdentityAndLiveLogicalHolders() throws Exception {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         for (var fault : List.of(
-                List.of("qwen_runtime_binding", "binding_state", "READY"),
-                List.of("qwen_runtime_binding", "drain_requested", "false"),
-                List.of("qwen_runtime_binding_slot", "active_binding_id", "foreign"),
-                List.of("qwen_runtime_binding_slot", "last_generation", "2"),
-                List.of("qwen_runtime_binding_slot", "request_key", "x"),
-                List.of("qwen_runtime_binding_slot", "storage_id", "foreign"),
-                List.of("managed_workspace_execution_lease", "binding_id", "foreign"),
-                List.of("managed_workspace_execution_lease", "storage_kind", "LOCAL"),
-                List.of("managed_workspace_execution_lease", "csi_phase", "RELEASED"),
-                List.of("managed_workspace_execution_lease", "holder_key", "logical"),
-                List.of("managed_workspace_execution_lease", "runtime_session_id", "logical"),
-                List.of("managed_workspace_execution_lease", "maintenance_id", "maintenance"),
-                List.of("managed_workspace_execution_lease", "csi_reservation_id", ""),
-                List.of("managed_workspace_execution_lease", "csi_registration_revision", "0"))) {
+                List.of("ma_runtime_binding", "binding_state", "READY"),
+                List.of("ma_runtime_binding", "drain_requested", "false"),
+                List.of("ma_runtime_slot", "active_binding_id", "foreign"),
+                List.of("ma_runtime_slot", "last_generation", "2"),
+                List.of("ma_runtime_slot", "request_key", "x"),
+                List.of("ma_runtime_slot", "storage_id", "foreign"),
+                List.of("ma_storage_owner", "binding_id", "foreign"),
+                List.of("ma_storage_owner", "storage_kind", "LOCAL"),
+                List.of("ma_storage_owner", "csi_phase", "RELEASED"),
+                List.of("ma_storage_owner", "holder_key", "logical"),
+                List.of("ma_storage_owner", "runtime_session_id", "logical"),
+                List.of("ma_storage_owner", "maintenance_id", "maintenance"),
+                List.of("ma_storage_owner", "csi_reservation_id", ""),
+                List.of("ma_storage_owner", "csi_registration_revision", "0"))) {
             var invalid = ownershipCellFixture(fixture, fault.get(0), fault.get(1), fault.get(2));
             assertThatThrownBy(() -> WorkspaceCsiPhysicalReleaseImage.expected(invalid)).isInstanceOf(IllegalArgumentException.class);
         }
@@ -1237,26 +1326,26 @@ class WorkspaceCsiApplicationInventoryTest {
     void ownershipProjectionUsesCheckedStoredCountersWithoutEnablingLaterCycles() throws Exception {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         for (long revision : new long[] {2, 5, 9_007_199_254_740_989L}) {
-            var value = ownershipCellFixture(fixture, "managed_workspace_execution_lease", "csi_revision", Long.toString(revision));
+            var value = ownershipCellFixture(fixture, "ma_storage_owner", "csi_revision", Long.toString(revision));
             assertThat(WorkspaceCsiApplicationImage.sole(WorkspaceCsiPhysicalReleaseImage.expected(value),
-                    "managed_workspace_execution_lease").number("csi_revision")).isEqualTo(revision + 1);
+                    "ma_storage_owner").number("csi_revision")).isEqualTo(revision + 1);
         }
         for (String invalid : new String[] {null, "-1", "0", "1", "3", "9007199254740990", "9007199254740992"}) {
-            var value = ownershipCellFixture(fixture, "managed_workspace_execution_lease", "csi_revision", invalid);
+            var value = ownershipCellFixture(fixture, "ma_storage_owner", "csi_revision", invalid);
             assertThatThrownBy(() -> WorkspaceCsiPhysicalReleaseImage.expected(value)).isInstanceOf(IllegalArgumentException.class);
         }
         for (String invalid : new String[] {null, "0", "-1"}) {
-            var value = ownershipCellFixture(fixture, "qwen_runtime_binding", "record_version", invalid);
+            var value = ownershipCellFixture(fixture, "ma_runtime_binding", "record_version", invalid);
             assertThatThrownBy(() -> WorkspaceCsiPhysicalReleaseImage.expected(value)).isInstanceOf(IllegalArgumentException.class);
         }
-        var exhausted = ownershipCellFixture(fixture, "qwen_runtime_binding", "record_version", Long.toString(Long.MAX_VALUE));
+        var exhausted = ownershipCellFixture(fixture, "ma_runtime_binding", "record_version", Long.toString(Long.MAX_VALUE));
         assertThatThrownBy(() -> WorkspaceCsiPhysicalReleaseImage.expected(exhausted)).isInstanceOf(ArithmeticException.class);
     }
 
     @Test
     void ownershipProjectionRefusesMissingAndExtraOriginalRowsAndPreservesOtherMembership() throws Exception {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
-        for (String tableName : List.of("qwen_runtime_binding", "qwen_runtime_binding_slot", "managed_workspace_execution_lease")) {
+        for (String tableName : List.of("ma_runtime_binding", "ma_runtime_slot", "ma_storage_owner")) {
             var table = fixture.table(tableName);
             var missingTables = new java.util.ArrayList<>(fixture.tables());
             missingTables.set(missingTables.indexOf(table), new WorkspaceCsiApplicationInventory.Table(
@@ -1292,11 +1381,11 @@ class WorkspaceCsiApplicationInventoryTest {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         var released = WorkspaceCsiPhysicalReleaseImage.expected(fixture);
         var history = WorkspaceCsiPhysicalHistoryImage.expected(fixture);
-        assertThat(history.table("managed_workspace_execution_lease").rows()).isEmpty();
-        assertThat(WorkspaceCsiApplicationImage.sole(history, "qwen_runtime_binding").text("binding_state")).isEqualTo("RELEASED");
-        assertThat(WorkspaceCsiApplicationImage.sole(history, "qwen_runtime_binding_slot").cell("active_binding_id").isNull()).isTrue();
+        assertThat(history.table("ma_storage_owner").rows()).isEmpty();
+        assertThat(WorkspaceCsiApplicationImage.sole(history, "ma_runtime_binding").text("binding_state")).isEqualTo("RELEASED");
+        assertThat(WorkspaceCsiApplicationImage.sole(history, "ma_runtime_slot").cell("active_binding_id").isNull()).isTrue();
         for (var table : released.tables()) {
-            if (table.name().equals("managed_workspace_execution_lease")) {
+            if (table.name().equals("ma_storage_owner")) {
                 continue;
             }
             var original = table.rows().stream().filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL).toList();
@@ -1307,21 +1396,21 @@ class WorkspaceCsiApplicationInventoryTest {
                 assertThat(retained.get(index).bytes()).isEqualTo(original.get(index).bytes());
             }
         }
-        assertThat(history.table("managed_workspace_registry").rows()).hasSize(1);
-        assertThat(history.table("managed_workspace_registry").rows().getFirst().cell("display_name").isNull()).isTrue();
-        assertThat(history.table("managed_workspace_access").rows()).isEmpty();
-        assertThat(fixture.table("managed_workspace_execution_lease").rows()).hasSize(1);
-        assertThat(WorkspaceCsiApplicationImage.sole(fixture, "qwen_runtime_binding").text("binding_state")).isEqualTo("DRAINING");
+        assertThat(history.table("ma_workspace").rows()).hasSize(1);
+        assertThat(history.table("ma_workspace").rows().getFirst().cell("display_name").isNull()).isTrue();
+        assertThat(history.table("ma_workspace_access").rows()).isEmpty();
+        assertThat(fixture.table("ma_storage_owner").rows()).hasSize(1);
+        assertThat(WorkspaceCsiApplicationImage.sole(fixture, "ma_runtime_binding").text("binding_state")).isEqualTo("DRAINING");
     }
 
     @Test
     void historicalImagePinsOriginalBytesAndRequiredContextButExcludesDisplayAndHolderCells() throws Exception {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         var expected = WorkspaceCsiPhysicalHistoryImage.expected(fixture).bytes();
-        var changed = ownershipCellFixture(fixture, "managed_workspace_execution_lease", "mount_host_id", "later-host");
+        var changed = ownershipCellFixture(fixture, "ma_storage_owner", "mount_host_id", "later-host");
         assertThat(WorkspaceCsiPhysicalHistoryImage.expected(changed).bytes()).isEqualTo(expected);
         var tables = new java.util.ArrayList<>(fixture.tables());
-        var registry = fixture.table("managed_workspace_registry");
+        var registry = fixture.table("ma_workspace");
         int registryIndex = tables.indexOf(registry);
         var row = registry.rows().getFirst();
         var values = new java.util.LinkedHashMap<String, byte[]>();
@@ -1334,7 +1423,7 @@ class WorkspaceCsiApplicationInventoryTest {
         rows.sort(WorkspaceCsiApplicationInventory::compareKeys);
         tables.set(registryIndex, new WorkspaceCsiApplicationInventory.Table(registry.name(), registry.columns(), registry.primaryKey(), rows));
         assertThat(WorkspaceCsiPhysicalHistoryImage.expected(WorkspaceCsiApplicationInventory.expectedImage(tables)).bytes()).isEqualTo(expected);
-        changed = ownershipCellFixture(fixture, "managed_agent_session", "title", "changed-original");
+        changed = ownershipCellFixture(fixture, "ma_session", "title", "changed-original");
         assertThat(WorkspaceCsiPhysicalHistoryImage.expected(changed).bytes()).isNotEqualTo(expected);
         values.put("workspace_id", row.text("workspace_id").getBytes(StandardCharsets.UTF_8));
         values.put("policy_ref", "changed-policy".getBytes(StandardCharsets.UTF_8));
@@ -1348,7 +1437,7 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void historicalImageRefusesMissingRequiredContextOrForgedMembership() throws Exception {
         var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
-        for (String name : List.of("managed_workspace_registry", "qwen_runtime_placement_guard", "qwen_tool_publication_tenant")) {
+        for (String name : List.of("ma_workspace", "ma_tenant_guard")) {
             var table = fixture.table(name);
             var tables = new java.util.ArrayList<>(fixture.tables());
             int tableIndex = tables.indexOf(table);
@@ -1388,7 +1477,7 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     private void insertExecution(String id, String state, String bindingId, String runtimeSession, String runtimeKey) {
-        jdbc.update("INSERT INTO qwen_tool_execution (execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key,"
+        jdbc.update("INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key,"
                 + " binding_id, runtime_generation, harness_session_id, runtime_session_id, runtime_session_key, turn_id, tool_call_id,"
                 + " request_digest, reference_json, execution_state, execution_status, result_json, last_sequence, cancel_requested,"
                 + " dispatch_generation, record_version, settled_at, native_authorization_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
@@ -1402,9 +1491,43 @@ class WorkspaceCsiApplicationInventoryTest {
         return sha(java.nio.ByteBuffer.allocate(Integer.BYTES + value.length).putInt(value.length).put(value).array());
     }
 
+    private static String actionSql() {
+        return "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id, domain, record_id,"
+                + " revision, created_at, record_kind, state, action_id, action_version, options_json)"
+                + " VALUES (?, ?, ?, ?, 'action', ?, 1, 1, 'ACTION', 'COMPLETED', ?, 1, ?)";
+    }
+
+    private static void bindAction(java.sql.PreparedStatement statement, String tenant, String session,
+            String id, String payload) throws java.sql.SQLException {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        statement.setString(1, scope);
+        statement.setString(2, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, "ACTION", id));
+        statement.setBytes(3, tenant.getBytes(StandardCharsets.UTF_8));
+        statement.setBytes(4, session.getBytes(StandardCharsets.UTF_8));
+        statement.setBytes(5, id.getBytes(StandardCharsets.UTF_8));
+        statement.setBytes(6, id.getBytes(StandardCharsets.UTF_8));
+        statement.setString(7, payload);
+    }
+
+    private void action(String tenant, String session, String id, String payload) throws Exception {
+        try (var target = source.getConnection(); var statement = target.prepareStatement(actionSql())) {
+            bindAction(statement, tenant, session, id, payload);
+            assertThat(statement.executeUpdate()).isEqualTo(1);
+        }
+    }
+
+    private void actionBatch(String tenant, String session, int count) throws Exception {
+        try (var target = source.getConnection(); var statement = target.prepareStatement(actionSql())) {
+            for (int index = 0; index < count; index++) {
+                bindAction(statement, tenant, session, String.format("%05d", index), "{}");
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
     private void assertSchemaDrift() throws Exception {
-        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("managed_agent_action")
-                && blocker.code().equals("schema_drift"));
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.code().equals("schema_drift"));
     }
 
     @Test
@@ -1414,42 +1537,44 @@ class WorkspaceCsiApplicationInventoryTest {
         var result = readKeys(expected, queries);
         assertThat(result.blockers()).isEmpty();
         assertThat(result.bytes()).isEqualTo(expected.bytes());
-        assertThat(queries).hasSize(62).allMatch(sql -> sql.startsWith("SELECT t.* FROM ") && !sql.contains("FOR UPDATE"));
-        assertThat(queries).anyMatch(sql -> sql.startsWith("SELECT t.* FROM managed_workspace_execution_lease t WHERE 1 = 0"));
+        assertThat(queries.stream().filter(sql -> sql.startsWith("SELECT t.* FROM ma_"))).hasSize(34);
+        assertThat(queries).noneMatch(sql -> sql.contains("FOR UPDATE"));
+        assertThat(queries).anyMatch(sql -> sql.startsWith("SELECT t.* FROM ma_storage_owner t WHERE 1 = 0"));
         assertThat(queries).noneMatch(sql -> sql.contains("storage_key = ?") || sql.contains("physical_key = ?"));
-        assertThat(result.table("managed_workspace_create_command").rows().getFirst().binary("actor_id"))
-                .isEqualTo(expected.table("managed_workspace_create_command").rows().getFirst().binary("actor_id"));
+        assertThat(result.table("ma_request_receipt").rows().getFirst().binary("actor_id"))
+                .isEqualTo(expected.table("ma_request_receipt").rows().getFirst().binary("actor_id"));
     }
 
     @Test
     void fixedKeyReaderRefusesChangedAndMissingOriginalRows() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("UPDATE managed_agent_session SET approval_mode = 'changed' WHERE tenant_id = 'tenant' AND session_id = ?", session);
+        jdbc.update("UPDATE ma_session SET approval_mode = 'changed' WHERE tenant_id = X'74656e616e74' AND session_id = ?", session);
         assertThat(readKeys(expected, new java.util.ArrayList<>()).blockers()).anyMatch(blocker ->
-                blocker.table().equals("managed_agent_session") && blocker.code().equals("historical_row_changed"));
-        jdbc.update("DELETE FROM managed_agent_event WHERE tenant_id = 'tenant' AND session_id = ?", session);
+                blocker.table().equals("ma_session") && blocker.code().equals("historical_row_changed"));
+        jdbc.update("DELETE FROM ma_public_event WHERE tenant_id = X'74656e616e74' AND session_id = ?", session);
         assertThat(readKeys(expected, new java.util.ArrayList<>()).blockers()).anyMatch(blocker ->
-                blocker.table().equals("managed_agent_event") && blocker.code().equals("missing_historical_key"));
+                blocker.table().equals("ma_public_event") && blocker.code().equals("missing_historical_key"));
     }
 
     @Test
     void fixedContextMasksIgnoreDisplayNameAndRefuseOriginalConfigurationChanges() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("UPDATE managed_workspace_registry SET display_name = 'renamed' WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        jdbc.update("UPDATE ma_workspace SET display_name = 'renamed' WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
         assertThat(readKeys(expected, new java.util.ArrayList<>()).bytes()).isEqualTo(expected.bytes());
-        jdbc.update("UPDATE managed_workspace_registry SET policy_ref = 'changed' WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        jdbc.update("UPDATE ma_workspace SET policy_ref = 'changed' WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
         assertThat(readKeys(expected, new java.util.ArrayList<>()).blockers()).anyMatch(blocker ->
-                blocker.table().equals("managed_workspace_registry") && blocker.code().equals("historical_row_changed"));
-        assertThatThrownBy(() -> WorkspaceCsiPhysicalHistoryImage.context("managed_agent_event",
-                expected.table("managed_agent_event").rows().getFirst())).isInstanceOf(IllegalArgumentException.class);
+                blocker.table().equals("ma_workspace") && blocker.code().equals("historical_row_changed"));
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalHistoryImage.context("ma_public_event",
+                expected.table("ma_public_event").rows().getFirst())).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void fixedKeyReaderChecksEmptyTableSchemasAndRefusesMutableConnectionsBeforeSql() throws Exception {
         var expected = historicalKeys();
-        jdbc.execute("ALTER TABLE managed_agent_action ADD COLUMN unexpected BIGINT");
-        assertThat(readKeys(expected, new java.util.ArrayList<>()).blockers()).anyMatch(blocker ->
-                blocker.table().equals("managed_agent_action") && blocker.code().equals("schema_drift"));
+        jdbc.execute("ALTER TABLE ma_session_record ADD COLUMN unexpected BIGINT");
+        assertThatThrownBy(() -> readKeys(expected, new java.util.ArrayList<>()))
+                .isInstanceOf(java.sql.SQLException.class).hasMessageContaining("ma_session_record");
+        jdbc.execute("ALTER TABLE ma_session_record DROP COLUMN unexpected");
         try (var target = source.getConnection()) {
             assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.readHistoricalKeys(target, expected))
                     .isInstanceOf(IllegalArgumentException.class);
@@ -1461,32 +1586,52 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void historicalReaderPreservesActualForeignControlSessionWithSameLocalId() throws Exception {
+        var expected = historicalKeys();
+        jdbc.update("DELETE FROM ma_storage_owner");
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        transactions.executeWithoutResult(status -> ToolPublicationRetentionStore.lockSession(jdbc, "foreign", session));
+        var before = jdbc.queryForList("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                "foreign".getBytes(StandardCharsets.UTF_8), session.getBytes(StandardCharsets.UTF_8));
+        var queries = new java.util.ArrayList<String>();
+        var result = readHistory(expected, queries, true);
+        assertThat(result.blockers()).isEmpty();
+        assertThat(result.bytes()).isEqualTo(expected.bytes());
+        assertThat(queries).anyMatch(sql -> sql.contains("(tenant_id IN (?) AND session_id IN (?))"));
+        assertThat(jdbc.queryForList("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                "foreign".getBytes(StandardCharsets.UTF_8), session.getBytes(StandardCharsets.UTF_8)))
+                .usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @Test
     void referencedReaderFindsExtraTypedOwnersWithoutAddingTheirRowsToTheOriginalImage() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         assertThat(readReferences(expected).blockers()).isEmpty();
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                + " VALUES ('foreign', ?, 'late', 'COMPLETED', '{}', 1)", session);
+        new TransactionTemplate(new DataSourceTransactionManager(source)).executeWithoutResult(status ->
+                ToolPublicationRetentionStore.lockSession(jdbc, "foreign", session));
+        action("foreign", session, "late", "{}");
+        assertThat(readReferences(expected).blockers()).isEmpty();
+        action("tenant", session, "late-original", "{}");
         var result = readReferences(expected);
-        assertThat(result.blockers()).anyMatch(blocker -> blocker.table().equals("managed_agent_action")
+        assertThat(result.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_record")
                 && blocker.code().equals("extra_historical_reference"));
-        assertThat(result.table("managed_agent_action").rows()).isEmpty();
+        assertThat(result.table("ma_session_record").rows()).isEmpty();
         assertThat(result.rowCount()).isGreaterThan(expected.rowCount());
     }
 
     @Test
     void referencedReaderStrictlyDecodesForeignJsonAndEscapedReferenceNames() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                + " VALUES ('foreign', 'new-session', 'candidate', 'COMPLETED', '{}', 1)");
+        jdbc.update("DELETE FROM ma_storage_owner");
+        action("foreign", "new-session", "candidate", "{}");
         String escaped = "{\"nested\":[{\"session\\u0049d\":\"" + session.replace("-", "\\u002d") + "\"}]}";
         for (String json : List.of(escaped, "{", "{\"sessionId\":\"" + session + "\",\"sessionId\":\"new-session\"}", "{} {}")) {
-            jdbc.update("UPDATE managed_agent_action SET options_json = ? WHERE action_id = 'candidate'", json);
-            assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("managed_agent_action")
+            jdbc.update("UPDATE ma_session_record SET options_json = ? WHERE action_id = X'63616e646964617465'", json);
+            assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_record")
                     && (blocker.code().equals("extra_historical_reference") || blocker.code().equals("invalid_historical_payload")));
         }
-        jdbc.update("UPDATE managed_agent_action SET options_json = ? WHERE action_id = 'candidate'",
+        jdbc.update("UPDATE ma_session_record SET options_json = ? WHERE action_id = X'63616e646964617465'",
                 "{\"text\":\"" + session + "\",\"payloadJson\":\"{\\\"sessionId\\\":\\\"" + session + "\\\"}\"}");
         assertThat(readReferences(expected).blockers()).isEmpty();
     }
@@ -1494,20 +1639,20 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void referencedReaderChecksInlineMetadataAndKeepsResourceIdsLocalToTheirOwner() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         byte[] harmless = "{\"cwd\":\"/workspace\"}".getBytes(StandardCharsets.UTF_8);
         foreignResource("same-local-id", "managed-root", harmless);
         assertThat(readReferences(expected).blockers()).isEmpty();
-        jdbc.update("UPDATE qwen_managed_session_resource SET sha256 = ? WHERE resource_id = 'same-local-id'", "0".repeat(64));
+        jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = X'73616d652d6c6f63616c2d6964'", "0".repeat(64));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
-        jdbc.update("UPDATE qwen_managed_session_resource SET sha256 = ?, kind = 'unknown-format' WHERE resource_id = 'same-local-id'", sha(harmless));
+        jdbc.update("UPDATE ma_resource SET sha256 = ?, kind = 'unknown-format' WHERE resource_id = X'73616d652d6c6f63616c2d6964'", sha(harmless));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("unsupported_historical_payload"));
     }
 
     @Test
     void referencedReaderReassemblesSplitUtf8BeforeCheckingMessageReferences() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         byte[] body = new ObjectMapper().createObjectNode().put("padding", "a" + "\uD83D\uDE00".repeat(18000))
                 .put("sessionId", session).toString().getBytes(StandardCharsets.UTF_8);
         byte[] first = java.util.Arrays.copyOfRange(body, 0, 60 * 1024);
@@ -1524,33 +1669,34 @@ class WorkspaceCsiApplicationInventoryTest {
         }
         foreignResource("z-manifest", "managed-message-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
         var found = readReferences(expected);
-        assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_resource")
+        assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_resource")
                 && blocker.code().equals("extra_historical_reference"));
         assertThat(found.blockers()).noneMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
         byte[] unrelated = new ObjectMapper().createObjectNode().put("padding", "a" + "\uD83D\uDE00".repeat(18000))
                 .put("sessionId", "foreign-session").toString().getBytes(StandardCharsets.UTF_8);
-        jdbc.update("DELETE FROM qwen_managed_session_resource");
+        jdbc.update("DELETE FROM ma_resource");
         byte[] end = java.util.Arrays.copyOfRange(unrelated, first.length, unrelated.length);
         foreignResource("a-part", "managed-message-part", first);
         foreignResource("b-part", "managed-message-part", end);
         ((com.fasterxml.jackson.databind.node.ObjectNode) parts.get(1)).put("byteLength", end.length).put("digest", sha(end));
         foreignResource("z-manifest", "managed-message-chunks", manifest.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(readReferences(expected).blockers()).isEmpty();
-        jdbc.update("DELETE FROM qwen_managed_session_resource WHERE resource_id = 'z-manifest'");
+        jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'7a2d6d616e6966657374'");
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
     }
 
     private void foreignResource(String id, String kind, byte[] bytes) {
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
+        String scope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
                 + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                + " VALUES (?, 'foreign', 'other-workspace', 'foreign-session', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
-                ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"), id, kind, bytes.length, sha(bytes), bytes);
+                + " VALUES (?, ?, 'foreign', 'other-workspace', 'foreign-session', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.resourceKey(scope, id), scope, id, kind, bytes.length, sha(bytes), bytes);
     }
 
     @Test
     void referencedReaderSharesNativeInputArrayContract() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         byte[] originalInput;
         try (var input = getClass().getResourceAsStream("/csi-native-text-fixture.json")) {
             assertThat(input).isNotNull();
@@ -1563,7 +1709,7 @@ class WorkspaceCsiApplicationInventoryTest {
         foreignResource("foreign-input", "managed-input", originalInput);
         assertThat(readReferences(expected).blockers()).isEmpty();
         byte[] literal = ("[{\"type\":\"text\",\"text\":\"" + session + "\"}]").getBytes(StandardCharsets.UTF_8);
-        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes=?,byte_length=?,sha256=? WHERE resource_id='foreign-input'",
+        jdbc.update("UPDATE ma_resource SET inline_bytes=?,byte_length=?,sha256=? WHERE resource_id = X'666f726569676e2d696e707574'",
                 literal, literal.length, sha(literal));
         assertThat(readReferences(expected).blockers()).isEmpty();
         for (byte[] malformed : List.of("{}".getBytes(StandardCharsets.UTF_8), "[]".getBytes(StandardCharsets.UTF_8),
@@ -1573,9 +1719,9 @@ class WorkspaceCsiApplicationInventoryTest {
                 "[{\"type\":\"text\",\"text\":\"x\",\"extra\":true}]".getBytes(StandardCharsets.UTF_8),
                 "[{\"type\":\"text\",\"text\":\"x\",\"text\":\"y\"}]".getBytes(StandardCharsets.UTF_8),
                 "[{\"type\":\"text\",\"text\":\"x\"}] []".getBytes(StandardCharsets.UTF_8), new byte[] {(byte) 0xff}, new byte[65537])) {
-            jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes=?,byte_length=?,sha256=? WHERE resource_id='foreign-input'",
+            jdbc.update("UPDATE ma_resource SET inline_bytes=?,byte_length=?,sha256=? WHERE resource_id = X'666f726569676e2d696e707574'",
                     malformed, malformed.length, sha(malformed));
-            assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_resource")
+            assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("ma_resource")
                     && blocker.code().equals("invalid_historical_payload"));
         }
     }
@@ -1583,100 +1729,95 @@ class WorkspaceCsiApplicationInventoryTest {
     @Test
     void referencedReaderChecksJournalBytesAndReferencesWithTheirActualOwner() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         byte[] records = ("{\"sessionId\":\"foreign-session\",\"payload\":{\"bindingId\":\"" + binding.getBindingId() + "\"}}\n")
                 .getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_managed_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                 + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
                 + " event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, created_at)"
                 + " VALUES ('foreign', 'other-workspace', 'foreign-session', 1, ?, 'tx', 'operation', 'command', ?, 1, 1, 1, 1, 'writer', ?,"
                 + " 1, 'identity', ?, ?, ?, CURRENT_TIMESTAMP(6))", "a".repeat(64), "b".repeat(64), "c".repeat(64), records, records.length, sha(records));
-        assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("qwen_managed_session_journal_tx")
+        assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_journal_tx")
                 && blocker.code().equals("extra_historical_reference"));
         byte[] harmless = "{\"sessionId\":\"foreign-session\",\"payload\":{\"text\":\"ordinary\"}}\n".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
+        jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
                 harmless, harmless.length, sha(harmless));
         assertThat(readReferences(expected).blockers()).isEmpty();
-        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_digest = ?", "0".repeat(64));
+        jdbc.update("UPDATE ma_session_journal_tx SET record_digest = ?", "0".repeat(64));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
     }
 
     @Test
     void referencedReaderCountsAllCandidateRowsAndRefusesOverLimitBeforeExpandingTheImage() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
-        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                "INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                        + " VALUES ('foreign', 'new-session', ?, 'COMPLETED', '{}', 1)")) {
-            for (int index = 0; index <= WorkspaceCsiApplicationInventory.MAX_ROWS; index++) {
-                statement.setString(1, String.format("%05d", index));
-                statement.addBatch();
-            }
-            statement.executeBatch();
-        }
+        jdbc.update("DELETE FROM ma_storage_owner");
+        actionBatch("foreign", "new-session", WorkspaceCsiApplicationInventory.MAX_ROWS + 1);
         var result = readReferences(expected);
         assertThat(result.blockers()).anyMatch(blocker -> blocker.code().equals("row_limit"));
         assertThat(result.rowCount()).isEqualTo(WorkspaceCsiApplicationInventory.MAX_ROWS);
-        assertThat(result.table("managed_agent_action").rows()).isEmpty();
+        assertThat(result.table("ma_session_record").rows()).isEmpty();
     }
 
     @Test
     void referencedReaderTreatsDeclaredRawOutputAsDataAndRejectsExternalStructuredPayloads() throws Exception {
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         var json = new ObjectMapper();
         var contract = json.readTree(java.nio.file.Path.of("../../core/src/managed-runtime/contracts/managed-tool-publication-v1.fixtures.json").toFile())
                 .path("cases").get(0).path("value");
         byte[] bindingBytes = json.writeValueAsBytes(contract);
         ToolPublicationContract.parseBytes("binding", bindingBytes);
         String scope = ToolPublicationDataStore.scope("tenant-1", "workspace-1", "session-1");
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
                 + " execution_key, capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes)"
                 + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', 'publication-1', ?, 'capture-1', ?, ?, ?, 'OPEN', 1024, 1024, 1024)",
-                scope, "a".repeat(64), sha(contract.path("executionCallId").textValue().getBytes(StandardCharsets.UTF_8)), new String(bindingBytes, StandardCharsets.UTF_8),
+                scope, ToolPublicationRetentionStore.hash("tenant-1"), sha(contract.path("executionCallId").textValue().getBytes(StandardCharsets.UTF_8)), new String(bindingBytes, StandardCharsets.UTF_8),
                 ToolPublicationContract.bindingDigest(contract), "c".repeat(64));
         byte[] raw = ("{\"bindingId\":\"" + binding.getBindingId() + "\"}").getBytes(StandardCharsets.UTF_8);
         String contentId = "result-" + sha((scope + ":publication-1:content:output").getBytes(StandardCharsets.UTF_8)).substring(0, 32);
-        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id, resource_kind,"
-                + " byte_length, sha256, inline_bytes, state, operation_id, created_at)"
-                + " VALUES (?, 'publication-1', 'content:output', ?, 'managed-tool-result-content', ?, ?, ?, 'VERIFIED', 'publish', CURRENT_TIMESTAMP(6))",
-                scope, contentId, raw.length, sha(raw), raw);
+        String resourceScope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, scope_key,"
+                + " publication_id, slot_key, resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state, capture_state, operation_id, created_at)"
+                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', ?, 'publication-1', 'content:output', ?, 'managed-tool-result-content',"
+                + " 1, ?, ?, ?, 'MYSQL_INLINE', 'PUBLISHED', 'VERIFIED', 'publish', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.resourceKey(resourceScope, contentId), resourceScope, scope, contentId, raw.length, sha(raw), raw);
         assertThat(readReferences(expected).blockers()).isEmpty();
         assertThat(ToolPublicationContract.bindingDigest(contract)).isNotEqualTo(sha(bindingBytes));
-        jdbc.update("UPDATE qwen_tool_publication SET binding_digest = ?", sha(bindingBytes));
+        jdbc.update("UPDATE ma_output_capture SET binding_digest = ?", sha(bindingBytes));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
-        jdbc.update("UPDATE qwen_tool_publication SET binding_digest = ?", ToolPublicationContract.bindingDigest(contract));
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = NULL, object_key = ?",
+        jdbc.update("UPDATE ma_output_capture SET binding_digest = ?", ToolPublicationContract.bindingDigest(contract));
+        jdbc.update("UPDATE ma_resource SET inline_bytes = NULL, storage_kind = 'TOOL_PUBLICATION', capture_object_key = ?",
                 "managed-tool-results/" + scope + "/publication-1/" + sha("content:output".getBytes(StandardCharsets.UTF_8)));
         assertThat(readReferences(expected).blockers()).isEmpty();
-        jdbc.update("UPDATE qwen_tool_publication_object SET slot_key = 'terminal', resource_kind = 'managed-tool-terminal', resource_id = ?, object_key = ?",
-                "result-" + sha((scope + ":publication-1:terminal").getBytes(StandardCharsets.UTF_8)).substring(0, 32),
+        String terminalId = "result-" + sha((scope + ":publication-1:terminal").getBytes(StandardCharsets.UTF_8)).substring(0, 32);
+        jdbc.update("UPDATE ma_resource SET slot_key = 'terminal', kind = 'managed-tool-terminal', resource_id = ?, resource_key = ?, capture_object_key = ?",
+                terminalId, ManagedSessionStore.resourceKey(resourceScope, terminalId),
                 "managed-tool-results/" + scope + "/publication-1/" + sha("terminal".getBytes(StandardCharsets.UTF_8)));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("unsupported_historical_payload"));
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ?, object_key = NULL", raw);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, storage_kind = 'MYSQL_INLINE', capture_object_key = NULL", raw);
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("invalid_historical_payload"));
     }
 
     @Test
     void referencedReaderFindsReadLeaseAliasesUsingVerifiedOriginalReadIds() throws Exception {
         String readId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO qwen_csi_resource_read (read_id, tenant_id, workspace_id, session_id, request_key, binding_id,"
+        jdbc.update("INSERT INTO ma_csi_resource_read (read_id, tenant_id, workspace_id, session_id, request_key, binding_id,"
                 + " runtime_generation, binding_version, writer_id, writer_generation, writer_token_hash, journal_revision, activation_epoch,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, resource_state, state, started_at, delivery_expires_at, ended_at)"
                 + " VALUES (?, 'tenant', 'workspace', ?, ?, ?, 1, 1, 'writer', 1, ?, 1, 1, 'resource', 'managed-root', 1, 2, ?,"
                 + " 'MYSQL_INLINE', 'REFERENCED', 'RETURNED', 1, 2, 2)", readId, session, binding.getRequest().requestKey(),
                 binding.getBindingId(), "a".repeat(64), sha("{}".getBytes(StandardCharsets.UTF_8)));
         var expected = historicalKeys();
-        jdbc.update("DELETE FROM managed_workspace_execution_lease");
+        jdbc.update("DELETE FROM ma_storage_owner");
         String unrelated = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO qwen_output_read_lease (lease_id, tenant_key, session_key, retirement_generation, expires_at)"
+        jdbc.update("INSERT INTO ma_read_lease (lease_id, tenant_key, session_key, retirement_generation, expires_at)"
                 + " VALUES (?, ?, ?, 0, 2)", unrelated, "b".repeat(64), "c".repeat(64));
         assertThat(readReferences(expected).blockers()).isEmpty();
-        jdbc.update("UPDATE qwen_output_read_lease SET lease_id = ? WHERE lease_id = ?", readId, unrelated);
+        jdbc.update("UPDATE ma_read_lease SET lease_id = ? WHERE lease_id = ?", readId, unrelated);
         var found = readReferences(expected);
-        assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("qwen_output_read_lease")
+        assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_read_lease")
                 && blocker.code().equals("extra_historical_reference"));
-        assertThat(found.table("qwen_output_read_lease").rows()).isEmpty();
+        assertThat(found.table("ma_read_lease").rows()).isEmpty();
     }
 
     private WorkspaceCsiApplicationInventory.Snapshot readReferences(WorkspaceCsiApplicationInventory.Snapshot expected) throws Exception {
@@ -1685,7 +1826,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void savedBaselineCannotHideOriginalEventsUsingCanonicalMembershipLabels() throws Exception {
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
         var baseline = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
         try (var target = source.getConnection()) {
             target.setAutoCommit(false);
@@ -1696,9 +1837,9 @@ class WorkspaceCsiApplicationInventoryTest {
                                 || blocker.code().equals("original_row_hidden_as_other"));
                 for (var label : new WorkspaceCsiApplicationInventory.Membership[]{WorkspaceCsiApplicationInventory.Membership.CONTEXT,
                         WorkspaceCsiApplicationInventory.Membership.OTHER}) {
-                    var changed = relabel(baseline, "managed_agent_event", label);
+                    var changed = relabel(baseline, "ma_public_event", label);
                     assertThat(WorkspaceCsiApplicationInventory.validateHistoricalBaseline(actual, intent, changed))
-                            .anyMatch(blocker -> blocker.table().equals("managed_agent_event") && blocker.code().equals(
+                            .anyMatch(blocker -> blocker.table().equals("ma_public_event") && blocker.code().equals(
                                     label == WorkspaceCsiApplicationInventory.Membership.CONTEXT
                                             ? "invalid_historical_membership" : "original_row_hidden_as_other"));
                 }
@@ -1710,7 +1851,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void baselineBindingVersionCanExceedTheImmutableAuthorizationCeiling() throws Exception {
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
         var repository = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var claimed = repository.claimOperation(binding.getBindingId(), "resumed-coordinator", Duration.ofMinutes(1));
         assertThat(claimed.getVersion()).isGreaterThan(intent.sealedBindingVersion());
@@ -1720,7 +1861,7 @@ class WorkspaceCsiApplicationInventoryTest {
             try {
                 var actual = JdbcCsiFilesRetirementGuard.lockBindingControl(target, binding.getBindingId());
                 assertThat(WorkspaceCsiApplicationInventory.validateHistoricalBaseline(actual, intent, baseline))
-                        .noneMatch(blocker -> blocker.table().equals("qwen_runtime_binding"));
+                        .noneMatch(blocker -> blocker.table().equals("ma_runtime_binding"));
             } finally {
                 target.rollback();
             }
@@ -1729,9 +1870,9 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void savedBaselineDecodesEscapedSessionReferencesWithoutGlobalizingLocalResourceIds() throws Exception {
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
         var baseline = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
-        var definition = baseline.table("managed_agent_definition");
+        var definition = baseline.table("ma_agent_definition");
         try (var target = source.getConnection()) {
             target.setAutoCommit(false);
             try {
@@ -1784,9 +1925,9 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void savedNativeInputWrapperDecodesItsDeclaredPayloadCarrier() throws Exception {
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = 2 WHERE binding_id = ?", binding.getBindingId());
         var baseline = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
-        var resource = baseline.table("qwen_managed_session_resource");
+        var resource = baseline.table("ma_resource");
         try (var target = source.getConnection()) {
             target.setAutoCommit(false);
             try {
@@ -1800,7 +1941,8 @@ class WorkspaceCsiApplicationInventoryTest {
                     resource.columns().forEach(column -> values.put(column.name(), null));
                     for (var entry : Map.of("session_scope_key", ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"),
                             "tenant_id", "foreign", "workspace_id", "foreign-workspace", "session_id", "foreign-session",
-                            "resource_id", "local", "kind", "managed-tool-input", "schema_version", "1", "byte_length", Integer.toString(bytes.length),
+                            "resource_id", "local", "resource_key", ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"), "local"),
+                            "kind", "managed-tool-input", "schema_version", "1", "byte_length", Integer.toString(bytes.length),
                             "sha256", sha(bytes)).entrySet()) {
                         values.put(entry.getKey(), entry.getValue().getBytes(StandardCharsets.UTF_8));
                     }
@@ -1834,10 +1976,10 @@ class WorkspaceCsiApplicationInventoryTest {
 
     private WorkspaceCsiApplicationInventory.Snapshot historicalKeys() throws Exception {
         var sourceImage = inspect();
-        var context = java.util.Set.of("qwen_runtime_placement_guard", "qwen_tool_publication_tenant", "managed_workspace_registry");
+        var context = java.util.Set.of("ma_tenant_guard", "ma_workspace");
         var tables = sourceImage.tables().stream().map(table -> new WorkspaceCsiApplicationInventory.Table(
                 table.name(), table.columns(), table.primaryKey(), table.rows().stream()
-                        .filter(row -> !table.name().equals("managed_workspace_execution_lease")
+                        .filter(row -> !table.name().equals("ma_storage_owner")
                                 && (row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL
                                         || context.contains(table.name()) && row.membership() == WorkspaceCsiApplicationInventory.Membership.CONTEXT))
                         .map(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.CONTEXT
@@ -1860,7 +2002,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 if (references) {
                     var original = new JdbcCsiFilesRetirementGuard.Original(binding.getRequest(), binding.getBindingId(), binding.getGeneration(),
                             binding.getState(), binding.isDrainRequested(), binding.getVersion(),
-                            WorkspaceCsiApplicationImage.sole(expected, "qwen_runtime_binding").number("first_activation_journal_revision"));
+                            WorkspaceCsiApplicationImage.sole(expected, "ma_runtime_binding").number("first_activation_journal_revision"));
                     return WorkspaceCsiApplicationInventory.readHistoricalReferencedKeys(observed, expected, original, intent, System.nanoTime());
                 }
                 return WorkspaceCsiApplicationInventory.readHistoricalKeys(observed, expected);
@@ -1903,7 +2045,7 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     private String sessionScope() {
-        return sha(("tenant\u0000" + session).getBytes(StandardCharsets.UTF_8));
+        return ManagedSessionStore.sessionScopeKey("tenant", session);
     }
 
     private static String sha(byte[] bytes) {

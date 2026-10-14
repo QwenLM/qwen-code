@@ -45,7 +45,7 @@ final class WorkspaceCsiApplicationWorkerMatch {
         require(number(secondary.get("mcpCalls")) == 0);
         Map<String, WorkspaceCsiApplicationInventory.Row> expected = new HashMap<>();
         Set<String> executionCalls = new HashSet<>();
-        for (var row : inventory.table("qwen_tool_execution").rows()) {
+        for (var row : inventory.table("ma_tool_execution").rows()) {
             if (row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL) {
                 JsonNode nativeRef = object(row.text("reference_json"));
                 String nativeCall = text(nativeRef, "callId");
@@ -195,7 +195,7 @@ final class WorkspaceCsiApplicationWorkerMatch {
 
     private static JsonNode resource(WorkspaceCsiApplicationInventory.Snapshot inventory, JsonNode ref) {
         closed(ref, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest"));
-        var rows = inventory.table("qwen_managed_session_resource").rows().stream()
+        var rows = inventory.table("ma_resource").rows().stream()
                 .filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL
                         && text(ref, "resourceId").equals(row.text("resource_id"))).toList();
         require(rows.size() == 1);

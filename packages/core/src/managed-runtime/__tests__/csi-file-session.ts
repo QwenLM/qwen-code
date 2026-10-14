@@ -345,8 +345,16 @@ export async function csiFileSession(
   };
 }
 
-const hash = (value: string) =>
-  createHash('sha256').update(value).digest('hex');
+const schemaKey = (...values: string[]) => {
+  const digest = createHash('sha256');
+  for (const value of values) {
+    const bytes = Buffer.from(value, 'utf8');
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    digest.update(length).update(bytes);
+  }
+  return digest.digest('hex');
+};
 export async function csiFileInventory(empty = false) {
   const f = await csiFileSession('write_file');
   await f.harness.consumeRuntimeResults();
@@ -370,15 +378,16 @@ export function csiFileInventoryFromSnapshot<T extends Record<string, unknown>>(
     isolationClass: 'session',
   };
   const id = snapshot.sessionKey.sessionId;
-  const resourceScope = hash(`t\0${id}`);
+  const resourceScope = schemaKey('t', id);
   return {
-    format: 'qwen-csi-retirement-inventory/1',
+    format: 'qwen-csi-retirement-inventory/2',
     originalCSI: snapshot.originalCSI,
     scope,
     isolationKey: id,
     runtimeSessions: [
       {
         ...scope,
+        scopeKey: schemaKey(...Object.values(scope)),
         runtimeSessionId: 'runtime-session',
         harnessSessionId: id,
         bindingId: 'java-binding',
@@ -393,6 +402,7 @@ export function csiFileInventoryFromSnapshot<T extends Record<string, unknown>>(
     sessionResourceInventory: snapshot.resources.map(({ ref }) => ({
       ...snapshot.sessionKey,
       sessionScopeKey: resourceScope,
+      resourceKey: schemaKey(resourceScope, ref.resourceId),
       resourceId: ref.resourceId,
       kind: ref.kind,
       schemaVersion: String(ref.schemaVersion),
@@ -407,6 +417,10 @@ export function csiFileInventoryFromSnapshot<T extends Record<string, unknown>>(
         referencedRevisions.map((revision) => ({
           ...snapshot.sessionKey,
           sessionScopeKey: resourceScope,
+          ownerKind: 'JOURNAL',
+          ownerKey: resourceScope,
+          ownerRevision: String(revision),
+          resourceKey: schemaKey(resourceScope, ref.resourceId),
           resourceId: ref.resourceId,
           journalRevision: String(revision),
         })),

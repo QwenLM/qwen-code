@@ -25,7 +25,7 @@ final class WorkspaceCsiApplicationImage {
 
     static Snapshot expected(Snapshot baseline, Stage stage, byte[] frozen, byte[] cut, byte[] receipt) {
         require(baseline.blockers().isEmpty());
-        Row progress = sole(baseline, "managed_workspace_csi_retirement");
+        Row progress = sole(baseline, "ma_operation");
         require("SETTLING".equals(progress.text("progress_stage")) && progress.number("progress_version") == 1);
         for (String field : List.of("frozen_request", "cut", "finalize_receipt")) {
             require(progress.cell(field + "_bytes").isNull() && progress.cell(field + "_sha256").isNull());
@@ -40,7 +40,7 @@ final class WorkspaceCsiApplicationImage {
         payload(progressDelta, "cut", cut);
         payload(progressDelta, "finalize_receipt", receipt);
         Map<String, Map<String, byte[]>> changes = new LinkedHashMap<>();
-        changes.put("managed_workspace_csi_retirement", progressDelta);
+        changes.put("ma_operation", progressDelta);
         Map<String, Row> additions = new LinkedHashMap<>();
         if (cut != null) {
             JsonNode envelope = WorkspaceCsiApplicationJson.object(frozen, WorkspaceCsiApplicationInventory.MAX_BYTES);
@@ -53,13 +53,13 @@ final class WorkspaceCsiApplicationImage {
             WorkspaceCsiApplicationJson.closed(delta, Set.of("format", "retirementId", "frozenRequestSha256",
                     "baselineSha256", "preparedCommitSha256", "writtenAt"));
             require("qwen-csi-application-cut/1".equals(delta.path("format").textValue())
-                    && progress.text("retirement_id").equals(delta.path("retirementId").textValue())
+                    && progress.text("operation_id").equals(delta.path("retirementId").textValue())
                     && hash(frozen).equals(delta.path("frozenRequestSha256").textValue())
                     && hash(baseline.bytes()).equals(delta.path("baselineSha256").textValue())
                     && hash(body).equals(delta.path("preparedCommitSha256").textValue()));
             String writtenAt = delta.path("writtenAt").textValue();
             require(writtenAt != null && Instant.parse(writtenAt).toString().equals(writtenAt));
-            Row head = sole(baseline, "qwen_managed_session_journal_head");
+            Row head = sole(baseline, "ma_session_head");
             require("ACTIVE".equals(head.text("state")) && "active".equals(head.text("activation_phase")));
             long revision = Math.addExact(head.number("journal_revision"), 1L);
             require(head.number("journal_revision") == request.path("expectedJournalRevision").longValue()
@@ -72,14 +72,17 @@ final class WorkspaceCsiApplicationImage {
             put(headDelta, "activation_phase", "released");
             put(headDelta, "activation_head_revision", revision);
             put(headDelta, "updated_at", writtenAt);
-            changes.put("qwen_managed_session_journal_head", headDelta);
+            changes.put("ma_session_head", headDelta);
             require(request.path("resources").isArray() && request.path("resources").size() == 1);
             JsonNode resource = request.path("resources").get(0);
             byte[] resourceBytes = WorkspaceCsiApplicationJson.base64(resource.path("bytesBase64"), 16 * 1024);
-            Map<String, byte[]> values = empty(baseline, "qwen_managed_session_resource");
+            Map<String, byte[]> values = empty(baseline, "ma_resource");
             scope(values, head);
             put(values, "session_scope_key", ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
             put(values, "resource_id", text(resource, "resourceId"));
+            String resourceScope = ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id"));
+            String resourceKey = ManagedSessionStore.resourceKey(resourceScope, text(resource, "resourceId"));
+            put(values, "resource_key", resourceKey);
             put(values, "kind", text(resource, "kind"));
             put(values, "schema_version", resource.path("schemaVersion").intValue());
             put(values, "byte_length", resourceBytes.length);
@@ -90,15 +93,19 @@ final class WorkspaceCsiApplicationImage {
             put(values, "state", "REFERENCED");
             put(values, "created_at", writtenAt);
             put(values, "last_verified_at", writtenAt);
-            additions.put("qwen_managed_session_resource", row("qwen_managed_session_resource", values));
-            values = empty(baseline, "qwen_managed_session_resource_ref");
+            additions.put("ma_resource", row("ma_resource", values));
+            values = empty(baseline, "ma_resource_ref");
             scope(values, head);
+            put(values, "owner_kind", "JOURNAL");
+            put(values, "owner_key", resourceScope);
+            put(values, "owner_revision", revision);
+            put(values, "resource_key", resourceKey);
             put(values, "session_scope_key", ManagedSessionStore.sessionScopeKey(head.text("tenant_id"), head.text("session_id")));
             put(values, "journal_revision", revision);
             put(values, "resource_id", text(resource, "resourceId"));
             put(values, "created_at", writtenAt);
-            additions.put("qwen_managed_session_resource_ref", row("qwen_managed_session_resource_ref", values));
-            values = empty(baseline, "qwen_managed_session_journal_tx");
+            additions.put("ma_resource_ref", row("ma_resource_ref", values));
+            values = empty(baseline, "ma_session_journal_tx");
             scope(values, head);
             put(values, "journal_revision", revision);
             put(values, "command_key_hash", hash((text(request, "operation") + "\u0000" + text(request, "commandId"))
@@ -121,15 +128,15 @@ final class WorkspaceCsiApplicationImage {
             put(values, "byte_length", records.length);
             put(values, "record_digest", hash(records));
             put(values, "created_at", writtenAt);
-            additions.put("qwen_managed_session_journal_tx", row("qwen_managed_session_journal_tx", values));
+            additions.put("ma_session_journal_tx", row("ma_session_journal_tx", values));
         }
         if (stage == Stage.DRAINED) {
-            Row session = sole(baseline, "qwen_runtime_session");
+            Row session = sole(baseline, "ma_runtime_session");
             require("READY".equals(session.text("session_state")));
             Map<String, byte[]> release = new LinkedHashMap<>();
             put(release, "session_state", "RELEASED");
             put(release, "record_version", Math.addExact(session.number("record_version"), 1L));
-            changes.put("qwen_runtime_session", release);
+            changes.put("ma_runtime_session", release);
         }
         List<Table> tables = new ArrayList<>();
         for (Table table : baseline.tables()) {

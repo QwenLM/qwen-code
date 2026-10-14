@@ -56,12 +56,11 @@ public final class JdbcCsiApplicationProgress {
         lockReservation(connection, original);
         Long ceiling = JdbcCsiRetirementSeal.lock(connection, original);
         try (PreparedStatement statement = statement(connection,
-                "SELECT progress_format, progress_version, progress_stage, settlement_deadline_ms, identity_json,"
-                        + " frozen_request_bytes, frozen_request_sha256, cut_bytes, cut_sha256,"
-                        + " finalize_receipt_bytes, finalize_receipt_sha256"
-                        + " FROM managed_workspace_csi_retirement WHERE binding_id = ? AND runtime_generation = ? FOR UPDATE")) {
-            statement.setString(1, original.bindingId());
+                "SELECT * FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'"
+                        + " AND target_key = ? AND target_revision = ? AND tenant_id = ? FOR UPDATE")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.bindingId()));
             statement.setLong(2, original.generation());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             try (var row = statement.executeQuery()) {
                 if (!row.next()) {
                     require(ceiling == null);
@@ -72,7 +71,7 @@ public final class JdbcCsiApplicationProgress {
                         && "SETTLING".equals(row.getString("progress_stage")));
                 long deadline = row.getLong("settlement_deadline_ms");
                 require(!row.wasNull() && deadline > 0);
-                var identity = CsiNativeActivationProof.readObject(row.getBytes("identity_json"));
+                var identity = CsiNativeActivationProof.readObject(JdbcCsiRetirementSeal.operationIdentity(row, original).getBytes(StandardCharsets.UTF_8));
                 try {
                     require(deadline == Math.addExact(Instant.parse(identity.path("startedAt").textValue()).toEpochMilli(), 300_000));
                 } catch (RuntimeException malformed) {
@@ -97,7 +96,7 @@ public final class JdbcCsiApplicationProgress {
         String alias = aliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
         try (PreparedStatement statement = statement(connection,
                 "SELECT tenant_id, storage_id, physical_key, registration_revision"
-                        + " FROM managed_workspace_csi_registration WHERE alias_key = ? FOR UPDATE")) {
+                        + " FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE")) {
             statement.setString(1, alias);
             try (var row = statement.executeQuery()) {
                 require(row.next()
@@ -110,7 +109,7 @@ public final class JdbcCsiApplicationProgress {
         }
         try (PreparedStatement statement = statement(connection,
                 "SELECT storage_kind, csi_phase, csi_revision, csi_registration_key, csi_registration_revision,"
-                        + " binding_id, runtime_generation FROM managed_workspace_execution_lease"
+                        + " binding_id, runtime_generation FROM ma_storage_owner"
                         + " WHERE storage_key = ? FOR UPDATE")) {
             statement.setString(1, physicalKey);
             try (var row = statement.executeQuery()) {

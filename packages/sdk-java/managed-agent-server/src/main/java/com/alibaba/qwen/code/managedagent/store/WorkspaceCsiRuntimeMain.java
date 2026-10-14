@@ -99,7 +99,7 @@ public final class WorkspaceCsiRuntimeMain {
         ManagedCsiFilesProtocol.authority(authorityOrigin);
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
                 required("K2_JDBC_PASSWORD"));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision(required("K2_AGENT_REVISION"));
@@ -118,7 +118,10 @@ public final class WorkspaceCsiRuntimeMain {
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
                 request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http);
         if (retained) {
-            var ids = jdbc.queryForList("SELECT binding_id FROM managed_workspace_csi_retirement WHERE retirement_id = ?", String.class, args[3]);
+            var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?", String.class,
+                    WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, request.registration().tenantId(), args[3]),
+                    request.registration().tenantId(), args[3]);
             if (ids.size() != 1) {
                 throw new IllegalArgumentException("Original retirement is unavailable");
             }

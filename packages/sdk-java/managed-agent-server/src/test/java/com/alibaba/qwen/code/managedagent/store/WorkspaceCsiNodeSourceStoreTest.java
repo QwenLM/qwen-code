@@ -53,7 +53,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -86,17 +85,17 @@ class WorkspaceCsiNodeSourceStoreTest {
     void setUp() throws Exception {
         var source = new DriverManagerDataSource("jdbc:h2:mem:source-association-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "0c39f52b-120c-47fb-99bc-df907924af71",
                 "pv", "3cfe8df0-ec94-465b-9e93-53c2491946a7", "diskplugin.csi.alibabacloud.com", "volume", "backend", "disk-serial", "/workspace", 7);
         var reservations = new WorkspaceCsiReservationStore(jdbc, manager, json);
         reservations.register(registration);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
@@ -334,7 +333,7 @@ class WorkspaceCsiNodeSourceStoreTest {
     void holderRevisionDriftRollsBackTheOriginalAssociationTransition() {
         store.saveArm(binding, registration, reservation, configuration, arm);
         var expected = store.inspect(binding.getBindingId());
-        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_revision = 4 WHERE storage_key = ?", registration.physicalKey());
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 4 WHERE storage_key = ?", registration.physicalKey());
         assertThatThrownBy(() -> store.saveBound(binding, registration, reservation, expected, podUid, "a".repeat(64), "opaque:1", bound))
                 .hasMessageContaining("original CSI node source association");
         var actual = store.inspect(binding.getBindingId());
@@ -342,7 +341,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThat(actual.version()).isEqualTo(1);
         assertThat(actual.podUid()).isNull();
         assertThat(actual.arm().bytes()).isEqualTo(arm.bytes());
-        assertThat(jdbc.queryForObject("SELECT csi_revision FROM managed_workspace_execution_lease WHERE storage_key = ?", Long.class,
+        assertThat(jdbc.queryForObject("SELECT csi_revision FROM ma_storage_owner WHERE storage_key = ?", Long.class,
                 registration.physicalKey())).isEqualTo(4);
     }
 
@@ -357,7 +356,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
                 store.saveArm(binding, registration, reservation, configuration, arm)))
                 .hasMessageContaining("original CSI node source association");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_source", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_source", Long.class)).isZero();
     }
 
     @Test
@@ -560,7 +559,7 @@ class WorkspaceCsiNodeSourceStoreTest {
             ordered.verify(api).deleteCsiPod(request);
             ordered.verify(physical).saveReply(selected, "token", 1, reply);
         }
-        assertThat(jdbc.queryForObject("SELECT csi_phase FROM managed_workspace_execution_lease", String.class)).isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
     }
 
     private byte[] coordinatorPlan() throws Exception {
@@ -670,7 +669,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThat(next.stage()).isEqualTo("INTENT");
         assertThat(WorkspaceCsiPhysicalProgress.restore(next.version(), next.bytes(), next.sha256(),
                 WorkspaceCsiApplicationJson.object(plan, 64 * 1024), original).stage()).isEqualTo("INTENT");
-        assertThat(jdbc.queryForObject("SELECT csi_phase FROM managed_workspace_execution_lease", String.class)).isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
     }
 
     @Test
@@ -715,8 +714,8 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThat(WorkspaceCsiPhysicalProgress.restore(3, unknown, CsiNativeActivationProof.sha256(unknown), expectedPlan, original).stage())
                 .isEqualTo("INTENT");
         assertThat(store.inspect(binding.getBindingId()).publication().bytes()).isEqualTo(publication.bytes());
-        assertThat(jdbc.queryForObject("SELECT csi_phase FROM managed_workspace_execution_lease", String.class)).isEqualTo("RESERVED");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_physical", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class)).isZero();
     }
 
     @ParameterizedTest
@@ -797,7 +796,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(previous.version(), previous.bytes(), previous.sha256(), expected, original))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(previous.bytes()).isEqualTo(previousBytes);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_physical", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class)).isZero();
     }
 
     @Test
@@ -821,21 +820,21 @@ class WorkspaceCsiNodeSourceStoreTest {
             WorkspaceCsiPhysicalStore.requireEmpty(connection, "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", binding.getBindingId(), registration.physicalKey());
             return null;
         }));
-        jdbc.update("INSERT INTO managed_workspace_csi_physical VALUES (?,?,?,?,?,?)", "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08",
+        jdbc.update("INSERT INTO ma_csi_physical VALUES (?,?,?,?,?,?)", "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08",
                 "foreign-binding", registration.physicalKey(), 1, new byte[] {1}, "a".repeat(64));
         assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(status -> jdbc.execute(
                 (org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                     WorkspaceCsiPhysicalStore.requireEmpty(connection, "other", binding.getBindingId(), registration.physicalKey());
                     return null;
                 }))).isInstanceOf(IllegalArgumentException.class);
-        jdbc.update("DELETE FROM managed_workspace_csi_physical");
-        jdbc.execute("ALTER TABLE managed_workspace_csi_physical ADD COLUMN undeclared BIGINT");
+        jdbc.update("DELETE FROM ma_csi_physical");
+        jdbc.execute("ALTER TABLE ma_csi_physical ADD COLUMN undeclared BIGINT");
         assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(status -> jdbc.execute(
                 (org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                     WorkspaceCsiPhysicalStore.requireEmpty(connection, "other", binding.getBindingId(), registration.physicalKey());
                     return null;
                 }))).isInstanceOf(IllegalArgumentException.class);
-        assertThat(jdbc.queryForObject("SELECT csi_phase FROM managed_workspace_execution_lease", String.class)).isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
     }
 
     private WorkspaceCsiNodeSourceStore.Association publishedAssociation() {

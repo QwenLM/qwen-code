@@ -58,6 +58,18 @@ function text(value: unknown): string {
 }
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 
+function schemaKey(...values: string[]): string {
+  const digest = createHash('sha256');
+  for (const value of values) {
+    const bytes = Buffer.from(value, 'utf8');
+    requireFact(bytes.toString('utf8') === value, 'invalid_inventory_identity');
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    digest.update(length).update(bytes);
+  }
+  return digest.digest('hex');
+}
+
 export function originalCsiDecodedBytes(value: unknown): number {
   if (typeof value === 'string') return Buffer.byteLength(value);
   if (Array.isArray(value))
@@ -81,7 +93,7 @@ export async function inspectOriginalCsiInventory(
   try {
     const root = object(value);
     requireFact(
-      root['format'] === 'qwen-csi-retirement-inventory/1',
+      root['format'] === 'qwen-csi-retirement-inventory/2',
       'inventory_format_not_qualified',
     );
     requireFact(
@@ -135,7 +147,16 @@ export async function inspectOriginalCsiInventory(
     for (const [id, session] of sessions) {
       requireFact(
         session['bindingId'] === bindingId &&
-          session['runtimeGeneration'] === generation,
+          session['runtimeGeneration'] === generation &&
+          session['scopeKey'] ===
+            schemaKey(
+              tenant,
+              workspace,
+              text(scope['workspaceGeneration']),
+              text(scope['canonicalCwd']),
+              text(scope['capabilityDigest']),
+              text(scope['isolationClass']),
+            ),
         'inventory_runtime_session_conflict',
       );
       expectedSessions.add(text(session['harnessSessionId']));
@@ -319,12 +340,13 @@ export async function inspectOriginalCsiInventory(
         : undefined;
       const ref =
         resource === undefined ? undefined : object(object(resource)['ref']);
-      const resourceKey = `${id}:${resourceId}`;
+      const resourceKey = schemaKey(schemaKey(tenant, id), resourceId);
       requireFact(!resources.has(resourceKey), 'inventory_resource_repeated');
       resources.add(resourceKey);
       if (
         ref === undefined ||
-        row['sessionScopeKey'] !== sha(`${tenant}\0${id}`) ||
+        row['sessionScopeKey'] !== schemaKey(tenant, id) ||
+        row['resourceKey'] !== schemaKey(schemaKey(tenant, id), resourceId) ||
         row['kind'] !== ref['kind'] ||
         row['schemaVersion'] !== String(ref['schemaVersion']) ||
         row['byteLength'] !== String(ref['byteLength']) ||
@@ -336,11 +358,32 @@ export async function inspectOriginalCsiInventory(
         block(resourceKey, 'resource_not_qualified');
     }
     const references = new Set<string>();
+    const allReferences = new Set<string>();
     for (const row of rows.get('sessionResourceReferences')!) {
       const id = key(row);
       const resourceId = text(row['resourceId']);
+      const ownerKind = text(row['ownerKind']);
+      const ownerKey = text(row['ownerKey']);
+      const ownerRevision = text(row['ownerRevision']);
+      const resourceKey = text(row['resourceKey']);
+      const actualKey = JSON.stringify([
+        text(row['sessionScopeKey']),
+        ownerKind,
+        ownerKey,
+        ownerRevision,
+        resourceKey,
+      ]);
+      requireFact(
+        !allReferences.has(actualKey),
+        'inventory_reference_repeated',
+      );
+      allReferences.add(actualKey);
+      if (row['ownerKind'] !== 'JOURNAL') {
+        block(id, 'unsupported_resource_reference_owner');
+        continue;
+      }
       const revision = text(row['journalRevision']);
-      const referenceKey = `${id}:${resourceId}:${revision}`;
+      const referenceKey = JSON.stringify([resourceKey, revision]);
       requireFact(
         !references.has(referenceKey),
         'inventory_reference_repeated',
@@ -354,8 +397,11 @@ export async function inspectOriginalCsiInventory(
           )
         : undefined;
       if (
-        !resources.has(`${id}:${resourceId}`) ||
-        row['sessionScopeKey'] !== sha(`${tenant}\0${id}`) ||
+        !resources.has(resourceKey) ||
+        row['sessionScopeKey'] !== schemaKey(tenant, id) ||
+        row['ownerKey'] !== schemaKey(tenant, id) ||
+        row['ownerRevision'] !== revision ||
+        row['resourceKey'] !== schemaKey(schemaKey(tenant, id), resourceId) ||
         resource === undefined ||
         !(object(resource)['referencedRevisions'] as number[]).some(
           (value) => String(value) === revision,
@@ -368,10 +414,11 @@ export async function inspectOriginalCsiInventory(
       for (const resource of snapshot['resources']) {
         const row = object(resource);
         const resourceId = text(object(row['ref'])['resourceId']);
-        if (!resources.has(`${id}:${resourceId}`))
+        const resourceKey = schemaKey(schemaKey(tenant, id), resourceId);
+        if (!resources.has(resourceKey))
           block(id, 'inventory_resource_missing');
         for (const revision of row['referencedRevisions'] as number[])
-          if (!references.has(`${id}:${resourceId}:${revision}`))
+          if (!references.has(JSON.stringify([resourceKey, String(revision)])))
             block(id, 'inventory_reference_missing');
       }
     }

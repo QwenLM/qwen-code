@@ -58,7 +58,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -92,9 +93,9 @@ class WorkspaceCsiRuntimeIdentityTest {
     void setUp() {
         source = new DriverManagerDataSource("jdbc:h2:mem:provenance-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        ManagedSchema.initialize(source);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
-        storage = new WorkspaceCsiReservationStore(new JdbcTemplate(source), new DataSourceTransactionManager(source), new ObjectMapper());
+        storage = new WorkspaceCsiReservationStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), new ObjectMapper());
         storage.register(registration);
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace"), null, "kubernetes-workspace", "storage");
@@ -236,7 +237,7 @@ class WorkspaceCsiRuntimeIdentityTest {
                 nested(api.objects.get("secrets"), "data").put("boot.json", Base64.getEncoder().encodeToString(
                         WorkspaceCsiRuntimeIdentity.bytes(WorkspaceCsiRuntimeIdentity.boot(original.getRequest(), original.getProvisionSeed(), handle))));
                 // Seed a pre-existing handle3; production CAS must never downgrade handle4.
-                assertThat(new JdbcTemplate(source).update("UPDATE qwen_runtime_binding SET resource_handle_version = ?,"
+                assertThat(new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET resource_handle_version = ?,"
                         + " resource_handle_json = ? WHERE binding_id = ?", handleVersion,
                         com.alibaba.fastjson2.JSON.toJSONString(handle.getValue(), com.alibaba.fastjson2.JSONWriter.Feature.WriteNulls),
                         original.getBindingId())).isEqualTo(1);
@@ -561,17 +562,17 @@ class WorkspaceCsiRuntimeIdentityTest {
                         session.getRuntimeSessionId(), "continuation", session.getScope()))) {
             assertThatThrownBy(() -> access.acquire(original.getLease(), invalid)).isInstanceOf(RuntimeBrokerException.class);
         }
-        var jdbc = new JdbcTemplate(source);
-        jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ? WHERE session_id = ?",
+        var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        jdbc.update("UPDATE ma_session SET runtime_request_key = ? WHERE session_id = ?",
                 "f".repeat(64), session.getHarnessSessionId());
         assertThatThrownBy(() -> join(access.resolve(session.getHarnessSessionId()))).hasCauseInstanceOf(ApiException.class);
         assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
-        jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ? WHERE session_id = ?",
+        jdbc.update("UPDATE ma_session SET runtime_request_key = ? WHERE session_id = ?",
                 original.getRequest().requestKey(), session.getHarnessSessionId());
-        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_registration_revision = 2");
+        jdbc.update("UPDATE ma_storage_owner SET csi_registration_revision = 2");
         assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
-        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_registration_revision = 1");
-        jdbc.update("UPDATE managed_agent_session SET context_revision = 2 WHERE session_id = ?", session.getHarnessSessionId());
+        jdbc.update("UPDATE ma_storage_owner SET csi_registration_revision = 1");
+        jdbc.update("UPDATE ma_session SET context_revision = 2 WHERE session_id = ?", session.getHarnessSessionId());
         assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
         verify(transport, never()).installContext(any(), any(), any(), any());
     }
@@ -584,18 +585,18 @@ class WorkspaceCsiRuntimeIdentityTest {
         var foreign = new RuntimeLease(lease.getRuntimeInstanceId(), lease.getEndpoint(), lease.getToken(),
                 UUID.randomUUID().toString(), lease.getEpoch());
         assertThatThrownBy(() -> access.acquire(foreign, session)).isInstanceOf(RuntimeBrokerException.class);
-        var jdbc = new JdbcTemplate(source);
-        jdbc.update("INSERT INTO qwen_runtime_session (runtime_session_id, scope_key, tenant_id, workspace_id,"
+        var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        jdbc.update("INSERT INTO ma_runtime_session (runtime_session_id, scope_key, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
                 + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
                 + " SELECT ?, scope_key, tenant_id, workspace_id, workspace_generation, canonical_cwd,"
                 + " capability_digest, isolation_class, harness_session_id, turn_kind, binding_id,"
-                + " runtime_generation, session_state, record_version, last_active_at FROM qwen_runtime_session"
+                + " runtime_generation, session_state, record_version, last_active_at FROM ma_runtime_session"
                 + " WHERE runtime_session_id = ?", UUID.randomUUID().toString(), session.getRuntimeSessionId());
         var reserved = storage.inspect(registration);
         assertThatThrownBy(() -> access.acquire(lease, session)).isInstanceOf(RuntimeBrokerException.class);
         assertThat(storage.inspect(registration)).isEqualTo(reserved);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session", Integer.class)).isEqualTo(2);
         verify(transport, never()).installContext(any(), any(), any(), any());
     }
 
@@ -630,7 +631,7 @@ class WorkspaceCsiRuntimeIdentityTest {
     private WorkspaceCsiRuntimeAccess privateAccess() {
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
-        return new WorkspaceCsiRuntimeAccess(new JdbcTemplate(source), new DataSourceTransactionManager(source),
+        return new WorkspaceCsiRuntimeAccess(new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source),
                 new ObjectMapper(), properties, registration, original.getRequest().getIsolationKey(),
                 original.getRequest().requestKey(), bindings, new JdbcRuntimeSessionRepository(source), transport);
     }
@@ -852,7 +853,7 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = provider()) {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             provider.reserveResource(original);
-            new JdbcTemplate(source).update("UPDATE qwen_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(api.creates).isZero();
         }

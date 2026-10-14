@@ -22,7 +22,6 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -56,14 +55,17 @@ final class WorkspaceCsiHostedMain {
         var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager,
                 json, properties, request.registration(), request.sessionId(), request.runtimeRequestKey(),
                 bindings, new JdbcRuntimeSessionRepository(source), new HttpRuntimeTransport());
         if (retiring) {
             UUID.fromString(args[2]);
-            var ids = jdbc.queryForList("SELECT binding_id FROM managed_workspace_csi_retirement WHERE retirement_id = ?", String.class, args[2]);
+            var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?", String.class,
+                    WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, request.registration().tenantId(), args[2]),
+                    request.registration().tenantId(), args[2]);
             if (ids.size() != 1) {
                 throw new IllegalArgumentException("Original retirement is unavailable");
             }

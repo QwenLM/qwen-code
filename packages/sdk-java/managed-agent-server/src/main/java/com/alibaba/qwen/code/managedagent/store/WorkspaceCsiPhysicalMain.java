@@ -14,7 +14,6 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -44,11 +43,14 @@ public final class WorkspaceCsiPhysicalMain {
             throw new IllegalArgumentException("The reviewed original node and retirement are required");
         }
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"), required("K2_JDBC_PASSWORD"));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"), required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
-        var ids = jdbc.queryForList("SELECT binding_id FROM managed_workspace_csi_retirement WHERE retirement_id=?", String.class, args[4]);
+        var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?", String.class,
+                    WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, request.registration().tenantId(), args[4]),
+                    request.registration().tenantId(), args[4]);
         if (ids.size() != 1) {
             throw new IllegalArgumentException("The original CSI retirement is unavailable");
         }

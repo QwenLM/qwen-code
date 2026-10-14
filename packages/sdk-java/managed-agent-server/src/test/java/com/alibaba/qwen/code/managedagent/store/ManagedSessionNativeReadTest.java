@@ -25,7 +25,6 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,9 +56,9 @@ class ManagedSessionNativeReadTest {
     void setUp() {
         var raw = new DriverManagerDataSource("jdbc:h2:mem:native-read-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(raw).locations("classpath:db/migration").load().migrate();
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(raw);
         source = new FaultSource(raw);
-        jdbc = new JdbcTemplate(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         transactions = new TransactionTemplate(manager);
         reservations = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
@@ -81,11 +80,12 @@ class ManagedSessionNativeReadTest {
         store = new ManagedSessionStore(jdbc);
         transactions.execute(status -> store.acquireWriter("tenant", session, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 300_000L)));
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, created_at, last_verified_at)"
-                        + " VALUES (?, 'tenant', 'workspace', ?, 'resource', 'managed-session-context', 1, ?, ?,"
+                        + " VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'managed-session-context', 1, ?, ?,"
                         + " 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', CURRENT_TIMESTAMP(6), '2000-01-01 00:00:00')",
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
                 ManagedSessionStore.sessionScopeKey("tenant", session), session, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
     }
@@ -101,7 +101,7 @@ class ManagedSessionNativeReadTest {
     void readsBeforeActivationAndRetainsDistinctOriginalHistory() {
         assertThat(read().bytes()).isEqualTo(BYTES);
         assertThat(read().bytes()).isEqualTo(BYTES);
-        var history = jdbc.queryForList("SELECT * FROM qwen_csi_resource_read ORDER BY read_id");
+        var history = jdbc.queryForList("SELECT * FROM ma_csi_resource_read ORDER BY read_id");
         assertThat(history).hasSize(2);
         assertThat(history).allSatisfy(row -> {
             assertThat(row.get("state")).isEqualTo("RETURNED");
@@ -112,20 +112,20 @@ class ManagedSessionNativeReadTest {
             assertThat(row.get("writer_token_hash")).isEqualTo(ToolPublicationContract.sha256(TOKEN.getBytes(StandardCharsets.UTF_8)));
             assertThat(row.get("ended_at")).isNotNull();
         });
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(count("ma_read_lease")).isZero();
         assertThat(history.getFirst().get("read_id")).isNotEqualTo(history.getLast().get("read_id"));
     }
 
     @Test
     void readsWithSuccessorWriterAndPriorActivationWithoutInstallingAnything() {
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_generation = 2, writer_id = 'successor',"
+        jdbc.update("UPDATE ma_session_head SET writer_generation = 2, writer_id = 'successor',"
                 + " activation_id = 'prior-activation', activation_epoch = 9");
         assertThat(read().bytes()).isEqualTo(BYTES);
-        var history = jdbc.queryForMap("SELECT * FROM qwen_csi_resource_read");
+        var history = jdbc.queryForMap("SELECT * FROM ma_csi_resource_read");
         assertThat(((Number) history.get("writer_generation")).longValue()).isEqualTo(2);
         assertThat(history.get("writer_id")).isEqualTo("successor");
         assertThat(history.get("activation_id")).isEqualTo("prior-activation");
-        assertThat(jdbc.queryForObject("SELECT activation_id FROM qwen_managed_session_journal_head", String.class))
+        assertThat(jdbc.queryForObject("SELECT activation_id FROM ma_session_head", String.class))
                 .isEqualTo("prior-activation");
     }
 
@@ -135,21 +135,21 @@ class ManagedSessionNativeReadTest {
         source.onFetch = () -> { throw new AssertionError("sealed read reached fetch"); };
         assertThatThrownBy(this::read).isInstanceOfSatisfying(RuntimeBrokerException.class,
                 error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
-        assertThat(count("qwen_csi_resource_read")).isZero();
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(count("ma_csi_resource_read")).isZero();
+        assertThat(count("ma_read_lease")).isZero();
     }
 
     @Test
     void admittedFetchRunsOutsideSqlAndCanFinishAfterOriginalSeal() {
         source.onFetch = () -> {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-            assertThat(jdbc.queryForObject("SELECT state FROM qwen_csi_resource_read", String.class)).isEqualTo("OPEN");
-            assertThat(count("qwen_output_read_lease")).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_csi_resource_read", String.class)).isEqualTo("OPEN");
+            assertThat(count("ma_read_lease")).isEqualTo(1);
             retire();
         };
         assertThat(read().bytes()).isEqualTo(BYTES);
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_csi_resource_read", String.class)).isEqualTo("RETURNED");
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_csi_resource_read", String.class)).isEqualTo("RETURNED");
+        assertThat(count("ma_read_lease")).isZero();
         assertThat(reservations.inspect(registration).phase()).isEqualTo("DRAINING");
     }
 
@@ -159,66 +159,66 @@ class ManagedSessionNativeReadTest {
         source.closeFailure = fault;
         assertThatThrownBy(this::read).isInstanceOf(DataAccessResourceFailureException.class)
                 .hasRootCauseMessage("owned " + fault + " close failure");
-        var old = jdbc.queryForMap("SELECT * FROM qwen_csi_resource_read");
+        var old = jdbc.queryForMap("SELECT * FROM ma_csi_resource_read");
         assertThat(old.get("state")).isEqualTo("UNKNOWN");
         assertThat(old.get("ended_at")).isNull();
-        assertThat(count("qwen_output_read_lease")).isEqualTo(1);
+        assertThat(count("ma_read_lease")).isEqualTo(1);
         assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
         source.closeFailure = "";
         assertThat(read().bytes()).isEqualTo(BYTES);
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_csi_resource_read WHERE read_id = ?", old.get("read_id")))
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_csi_resource_read WHERE read_id = ?", old.get("read_id")))
                 .isEqualTo(old);
-        assertThat(count("qwen_csi_resource_read")).isEqualTo(2);
-        assertThat(count("qwen_output_read_lease")).isEqualTo(1);
+        assertThat(count("ma_csi_resource_read")).isEqualTo(2);
+        assertThat(count("ma_read_lease")).isEqualTo(1);
     }
 
     @Test
     void expiredDeliveryRecordsReturnedFailureWithoutVerifyingOrReturningBytes() {
-        source.onFetch = () -> jdbc.update("UPDATE qwen_output_read_lease SET expires_at = 0");
+        source.onFetch = () -> jdbc.update("UPDATE ma_read_lease SET expires_at = 0");
         assertCode(this::read, "tool_output_read_expired");
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_csi_resource_read", String.class)).isEqualTo("RETURNED");
-        assertThat(jdbc.queryForObject("SELECT outcome_code FROM qwen_csi_resource_read", String.class))
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_csi_resource_read", String.class)).isEqualTo("RETURNED");
+        assertThat(jdbc.queryForObject("SELECT outcome_code FROM ma_csi_resource_read", String.class))
                 .isEqualTo("tool_output_read_expired");
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(count("ma_read_lease")).isZero();
         assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
     }
 
     @Test
     void writerTakeoverRecordsOldEndWithoutDeliveringOldBytes() {
-        source.onFetch = () -> jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_generation = 2, writer_id = 'successor'");
+        source.onFetch = () -> jdbc.update("UPDATE ma_session_head SET writer_generation = 2, writer_id = 'successor'");
         assertThatThrownBy(this::read).isInstanceOf(ApiException.class);
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_csi_resource_read", String.class)).isEqualTo("RETURNED");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_csi_resource_read", String.class)).isEqualTo("RETURNED");
         assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
     }
 
     @Test
     void corruptReturnedBytesKeepKnownEndButNeverUpdateVerification() {
-        source.onFetch = () -> jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?", new byte[] {0});
+        source.onFetch = () -> jdbc.update("UPDATE ma_resource SET inline_bytes = ?", new byte[] {0});
         assertThatThrownBy(this::read).isInstanceOf(ApiException.class);
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_csi_resource_read", String.class)).isEqualTo("RETURNED");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_csi_resource_read", String.class)).isEqualTo("RETURNED");
         assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
     }
 
     @Test
     void completionIdentityFailurePreservesOpenAndOriginalFetchError() {
         source.onFetch = () -> {
-            jdbc.update("UPDATE qwen_csi_resource_read SET writer_id = 'forged'");
+            jdbc.update("UPDATE ma_csi_resource_read SET writer_id = 'forged'");
             throw new IllegalArgumentException("owned fetch failure");
         };
         assertThatThrownBy(this::read).isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("owned fetch failure").satisfies(error -> assertThat(error.getSuppressed()).hasSize(1));
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_csi_resource_read", String.class)).isEqualTo("OPEN");
-        assertThat(count("qwen_output_read_lease")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_csi_resource_read", String.class)).isEqualTo("OPEN");
+        assertThat(count("ma_read_lease")).isEqualTo(1);
         assertThat(verifiedAt()).hasToString("2000-01-01 00:00:00.0");
     }
 
     @Test
     void ownerBoundaryRefusesAmbientTransactionAndObjectStorage() {
         assertThatThrownBy(() -> transactions.execute(status -> read())).isInstanceOf(IllegalStateException.class);
-        jdbc.update("UPDATE qwen_managed_session_resource SET storage_kind = 'TOOL_PUBLICATION', object_key = 'historical'");
+        jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', object_key = 'historical'");
         assertCode(this::read, "csi_inline_resource_required");
-        assertThat(count("qwen_csi_resource_read")).isZero();
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(count("ma_csi_resource_read")).isZero();
+        assertThat(count("ma_read_lease")).isZero();
     }
 
     @Test
@@ -227,8 +227,8 @@ class ManagedSessionNativeReadTest {
                 .isInstanceOf(ApiException.class);
         assertThatThrownBy(() -> store.readOwnerResource("tenant", "other-workspace", session, "resource", TOKEN))
                 .isInstanceOf(ApiException.class);
-        assertThat(count("qwen_csi_resource_read")).isZero();
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(count("ma_csi_resource_read")).isZero();
+        assertThat(count("ma_read_lease")).isZero();
     }
 
     @Test
@@ -236,17 +236,18 @@ class ManagedSessionNativeReadTest {
         String ordinary = "ordinary-session";
         transactions.execute(status -> store.acquireWriter("tenant", ordinary, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "ordinary-writer", 60_000L)));
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at) VALUES (?, 'tenant', 'workspace', ?,"
+                        + " publish_command_id, state, created_at) VALUES (?, ?, 'tenant', 'workspace', ?,"
                         + " 'ordinary-resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?,"
                         + " 'ordinary-fixture', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", ordinary), "ordinary-resource"),
                 ManagedSessionStore.sessionScopeKey("tenant", ordinary), ordinary, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
         assertThat(store.readOwnerResource("tenant", "workspace", ordinary, "ordinary-resource", TOKEN).bytes())
                 .isEqualTo(BYTES);
-        assertThat(count("qwen_csi_resource_read")).isZero();
-        assertThat(count("qwen_output_read_lease")).isZero();
+        assertThat(count("ma_csi_resource_read")).isZero();
+        assertThat(count("ma_read_lease")).isZero();
     }
 
     private ManagedSessionStoreModels.StoredResource read() {
@@ -258,7 +259,7 @@ class ManagedSessionNativeReadTest {
     }
 
     private Object verifiedAt() {
-        return jdbc.queryForObject("SELECT last_verified_at FROM qwen_managed_session_resource", java.sql.Timestamp.class);
+        return jdbc.queryForObject("SELECT last_verified_at FROM ma_resource", java.sql.Timestamp.class);
     }
 
     private void retire() {
@@ -300,7 +301,7 @@ class ManagedSessionNativeReadTest {
                         }
                         Object result = invoke(actual, method, args);
                         if ("prepareStatement".equals(method.getName()) && args[0] instanceof String sql
-                                && sql.startsWith("SELECT * FROM qwen_managed_session_resource")
+                                && sql.startsWith("SELECT * FROM ma_resource")
                                 && !TransactionSynchronizationManager.isActualTransactionActive()) {
                             fetching.set(true);
                             return statement((PreparedStatement) result);

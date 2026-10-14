@@ -37,7 +37,6 @@ import java.util.Base64;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
@@ -74,8 +73,8 @@ class WorkspaceCsiNativeActivationGate {
     void setUp(TestInfo info) throws Exception {
         var source = new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         transaction = new TransactionTemplate(manager);
         transaction.setTimeout(10);
@@ -83,11 +82,11 @@ class WorkspaceCsiNativeActivationGate {
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         reservations = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
         reservations.register(registration);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
@@ -277,7 +276,7 @@ class WorkspaceCsiNativeActivationGate {
             assertThat(commit(index).replayed()).isFalse();
         }
         assertThat(pin()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT committed_sequence FROM qwen_managed_session_journal_head", Long.class))
+        assertThat(jdbc.queryForObject("SELECT committed_sequence FROM ma_session_head", Long.class))
                 .isEqualTo(41);
         before = allRows();
         for (int index = 0; index < 32; index++) {
@@ -338,7 +337,7 @@ class WorkspaceCsiNativeActivationGate {
         JsonNode part = nativeFixture.path("commits").get(27).path("request").path("resources").get(1);
         String id = part.path("resourceId").textValue();
         assertThat(part.path("kind").textValue()).isEqualTo("managed-message-part");
-        assertThat(jdbc.update("UPDATE qwen_managed_session_resource_ref SET journal_revision = 1 WHERE resource_id = ?",
+        assertThat(jdbc.update("UPDATE ma_resource_ref SET journal_revision = 1 WHERE resource_id = ?",
                 id)).isEqualTo(1);
         var before = allRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(8).path("request"));
@@ -406,16 +405,16 @@ class WorkspaceCsiNativeActivationGate {
         commit(index++);
         retire();
         String checkpoint = jdbc.queryForObject("SELECT latest_checkpoint_resource_id"
-                + " FROM qwen_managed_session_journal_head WHERE session_id = ?", String.class, sessionId);
-        var head = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", sessionId);
+                + " FROM ma_session_head WHERE session_id = ?", String.class, sessionId);
+        var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", sessionId);
         var resource = journal.readOwnerResource("tenant", "workspace", sessionId, checkpoint, token);
         assertThat(resource.resourceId()).isEqualTo(checkpoint);
         assertThat(resource.bytes()).isEqualTo(jdbc.queryForObject("SELECT inline_bytes"
-                + " FROM qwen_managed_session_resource WHERE resource_id = ?", byte[].class, checkpoint));
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", sessionId)).isEqualTo(head);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_csi_resource_read"
+                + " FROM ma_resource WHERE resource_id = ?", byte[].class, checkpoint));
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", sessionId)).isEqualTo(head);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_resource_read"
                 + " WHERE resource_id = ? AND state = 'RETURNED' AND outcome_code = 'verified'", Long.class, checkpoint)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Long.class)).isZero();
         var before = allRows();
         String definition = nativeFixture.path("commits").get(0).path("request").path("resources").get(0).path("resourceId").textValue();
         rejected(() -> journal.readOwnerResource("tenant", "workspace", sessionId, definition, token),
@@ -425,7 +424,7 @@ class WorkspaceCsiNativeActivationGate {
             commit(index++);
         }
         String settled = jdbc.queryForObject("SELECT latest_checkpoint_resource_id"
-                + " FROM qwen_managed_session_journal_head WHERE session_id = ?", String.class, sessionId);
+                + " FROM ma_session_head WHERE session_id = ?", String.class, sessionId);
         before = allRows();
         rejected(() -> journal.readOwnerResource("tenant", "workspace", sessionId, settled, token),
                 "csi_original_activation_unavailable");
@@ -439,8 +438,8 @@ class WorkspaceCsiNativeActivationGate {
             rows.put(table, jdbc.queryForList("SELECT * FROM \"" + table + "\"").stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
-        assertThat(rows).containsKeys("qwen_managed_child_result_relay", "managed_agent_session",
-                "qwen_managed_session_journal_head", "qwen_csi_resource_read");
+        assertThat(rows).containsKeys("ma_delivery", "ma_session",
+                "ma_session_head", "ma_csi_resource_read");
         return rows;
     }
 
@@ -493,7 +492,7 @@ class WorkspaceCsiNativeActivationGate {
         before = authorityRows();
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_native_resources_required");
         assertThat(authorityRows()).isEqualTo(before);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Integer.class)).isEqualTo(1);
     }
 
     @Test
@@ -525,12 +524,12 @@ class WorkspaceCsiNativeActivationGate {
                 original.getBindingId(), original.getRuntimeGeneration(), original.getHarnessSessionId(),
                 original.getRuntimeSessionId(), original.getTurnId(), original.getToolCallId(),
                 original.getRequestDigest(), original.getReference());
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = NULL");
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = NULL");
         var before = authorityRows();
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_original_activation_unavailable");
         assertThat(authorityRows()).isEqualTo(before);
 
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = 2");
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = 2");
         var runtime = sessions.findById(request.getScope(), sessionId);
         assertThat(sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now())))
                 .isNotNull();
@@ -538,7 +537,7 @@ class WorkspaceCsiNativeActivationGate {
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "runtime_admission_closed");
         assertThat(authorityRows()).isEqualTo(before);
 
-        jdbc.update("UPDATE qwen_runtime_session SET session_state = 'READY'");
+        jdbc.update("UPDATE ma_runtime_session SET session_state = 'READY'");
         retire();
         before = authorityRows();
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "runtime_admission_closed");
@@ -559,7 +558,7 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(authorityRows()).isEqualTo(before);
         commit(6);
         assertThat(pin()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM ma_session_head",
                 String.class)).isEqualTo(checkpoint);
         before = authorityRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(7).path("request"));
@@ -648,7 +647,7 @@ class WorkspaceCsiNativeActivationGate {
         commit(5);
         String resource = nativeFixture.path("commits").get(5).path("request").path("resources").get(0)
                 .path("resourceId").textValue();
-        jdbc.update("UPDATE qwen_managed_session_resource_ref SET journal_revision = 1 WHERE resource_id = ?", resource);
+        jdbc.update("UPDATE ma_resource_ref SET journal_revision = 1 WHERE resource_id = ?", resource);
         var before = authorityRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(5).path("request"));
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(6).path("request"));
@@ -663,14 +662,14 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(commit(3).replayed()).isFalse();
         String checkpoint = nativeFixture.path("commits").get(3).path("request")
                 .path("latestCheckpointResourceId").textValue();
-        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM ma_session_head",
                 String.class)).isEqualTo(checkpoint);
         var before = authorityRows();
         assertThat(commit(3).replayed()).isTrue();
         assertThat(authorityRows()).isEqualTo(before);
         commit(4);
         assertThat(pin()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM ma_session_head",
                 String.class)).isEqualTo(checkpoint);
         var executing = seedHistoricalExecuting(seedHistorical("checkpoint-original"));
         retire();
@@ -745,7 +744,7 @@ class WorkspaceCsiNativeActivationGate {
         ready();
         commit(2);
         commit(3);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = NULL");
+        jdbc.update("UPDATE ma_session_head SET latest_checkpoint_resource_id = NULL");
         var before = authorityRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(4).path("request"));
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(3).path("request"));
@@ -770,23 +769,23 @@ class WorkspaceCsiNativeActivationGate {
         commit(2);
         assertThat(pin()).isEqualTo(2);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(pinnedVersion);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isEqualTo(3);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(3);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(4);
     }
 
     @Test
     void lateJournalFailureRollsBackPinVersionHeadAndOriginalResourceReference() throws Exception {
         commit(0);
         var before = head();
-        jdbc.execute("ALTER TABLE qwen_managed_session_journal_tx ADD CONSTRAINT owned_reject_install CHECK (journal_revision < 2)");
+        jdbc.execute("ALTER TABLE ma_session_journal_tx ADD CONSTRAINT owned_reject_install CHECK (journal_revision < 2)");
         assertThatThrownBy(() -> commit(1)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(binding.getVersion());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(2);
     }
 
     @Test
@@ -832,12 +831,12 @@ class WorkspaceCsiNativeActivationGate {
     void missingPinnedOriginalReferenceBlocksSelectedAdmissionWithoutNewExecution() throws Exception {
         commit(0);
         commit(1);
-        jdbc.update("DELETE FROM qwen_managed_session_resource_ref WHERE journal_revision = 2");
+        jdbc.update("DELETE FROM ma_resource_ref WHERE journal_revision = 2");
         var candidate = ToolExecutionRecord.prepared("missing-ref-call", "missing-ref-key", binding.getBindingId(), 1,
                 sessionId, sessionId, "turn", "call", "sha256:" + "b".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
                         "promptId", "turn", "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_original_activation_unavailable");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Integer.class)).isZero();
         assertThat(pin()).isEqualTo(2);
     }
 
@@ -916,19 +915,19 @@ class WorkspaceCsiNativeActivationGate {
         var peer = seedHistorical("legacy-peer");
         for (boolean grant : List.of(true, false)) {
             if (grant) {
-                jdbc.update("UPDATE qwen_tool_execution SET native_authorization_json = '{}' WHERE execution_call_id = ?",
+                jdbc.update("UPDATE ma_tool_execution SET native_authorization_json = '{}' WHERE execution_call_id = ?",
                         peer.getExecutionCallId());
             } else {
                 var changed = new java.util.LinkedHashMap<>(peer.getReference());
                 changed.put("batchId", UUID.randomUUID().toString());
-                jdbc.update("UPDATE qwen_tool_execution SET reference_json = ? WHERE execution_call_id = ?",
+                jdbc.update("UPDATE ma_tool_execution SET reference_json = ? WHERE execution_call_id = ?",
                         JSON.writeValueAsString(changed), peer.getExecutionCallId());
             }
             var before = authorityRows();
             rejected(() -> executions.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
                     "csi_native_execution_unavailable");
             assertThat(authorityRows()).isEqualTo(before);
-            jdbc.update("UPDATE qwen_tool_execution SET native_authorization_json = NULL, reference_json = ?"
+            jdbc.update("UPDATE ma_tool_execution SET native_authorization_json = NULL, reference_json = ?"
                             + " WHERE execution_call_id = ?", JSON.writeValueAsString(peer.getReference()), peer.getExecutionCallId());
         }
         assertThat(executions.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNotNull();
@@ -941,17 +940,17 @@ class WorkspaceCsiNativeActivationGate {
         for (String kind : List.of("managed-tool-input", "managed-tool-definition", "managed-tool-outcome", "managed-file_history")) {
             String id = UUID.randomUUID().toString();
             byte[] bytes = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            jdbc.update("INSERT INTO qwen_managed_session_resource"
+            jdbc.update("INSERT INTO ma_resource"
                             + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
                             + " SELECT session_scope_key, tenant_id, workspace_id, session_id, ?, ?, 1, 2, ?, 'INLINE', ?, ?, 'STAGED', created_at"
-                            + " FROM qwen_managed_session_resource ORDER BY resource_id LIMIT 1",
+                            + " FROM ma_resource ORDER BY resource_id LIMIT 1",
                     id, kind, CsiNativeActivationProof.sha256(bytes), bytes, id);
             var before = authorityRows();
             rejected(() -> executions.requestCancel(original.getExecutionCallId(), original.getVersion()),
                     "csi_native_execution_unavailable");
             assertThat(authorityRows()).isEqualTo(before);
-            assertThat(jdbc.update("DELETE FROM qwen_managed_session_resource WHERE resource_id = ?", id)).isEqualTo(1);
+            assertThat(jdbc.update("DELETE FROM ma_resource WHERE resource_id = ?", id)).isEqualTo(1);
         }
         assertThat(executions.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNotNull();
     }
@@ -961,7 +960,7 @@ class WorkspaceCsiNativeActivationGate {
         ready();
         var executing = seedHistoricalExecuting(seedHistorical("expired"));
         retire();
-        jdbc.update("UPDATE qwen_tool_execution SET dispatch_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        jdbc.update("UPDATE ma_tool_execution SET dispatch_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
         assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNull();
         assertThat(executions.claimDispatch(executing.getExecutionCallId(), "replacement", Duration.ofSeconds(120))).isNull();
         var unknown = executions.findByExecutionCallId(executing.getExecutionCallId());
@@ -984,12 +983,12 @@ class WorkspaceCsiNativeActivationGate {
         var operation = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         var advanced = bindings.renewOperation(binding.getBindingId(), "operator", operation.getOperationGeneration(), Duration.ofSeconds(120));
         assertThat(advanced.getVersion()).isGreaterThan(retirement.sealedBindingVersion());
-        jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", retirement.sealedBindingVersion());
+        jdbc.update("UPDATE ma_tool_execution SET authorized_binding_version = ?", retirement.sealedBindingVersion());
         var before = executionRows();
         rejected(() -> executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
                 "csi_execution_continuation_unavailable");
         assertThat(executionRows()).isEqualTo(before);
-        jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", executing.getAuthorizedBindingVersion());
+        jdbc.update("UPDATE ma_tool_execution SET authorized_binding_version = ?", executing.getAuthorizedBindingVersion());
         assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNotNull();
     }
 
@@ -998,7 +997,7 @@ class WorkspaceCsiNativeActivationGate {
         ready();
         var executing = seedHistoricalExecuting(seedHistorical("corrupt-intent"));
         var retirement = retire();
-        String encoded = jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement", String.class);
+        String encoded = jdbc.queryForObject("SELECT identity_json FROM ma_operation", String.class);
         for (String corrupt : List.of(encoded + " {}", encoded.replaceFirst("\\{", "{\"unexpected\":true,"),
                 encoded.replaceFirst("\\{", "{\"phase\":\"DRAINING\","),
                 encoded.replace("\"sealedBindingVersion\":" + retirement.sealedBindingVersion(), "\"sealedBindingVersion\":0"),
@@ -1006,14 +1005,14 @@ class WorkspaceCsiNativeActivationGate {
                 encoded.replace("\"sealedBindingVersion\":" + retirement.sealedBindingVersion(), "\"sealedBindingVersion\":3.1"),
                 encoded.replace("\"sealedBindingVersion\":" + retirement.sealedBindingVersion(), "\"sealedBindingVersion\":\"3\""),
                 encoded.replace(retirement.startedAt(), "invalid-time"), " ".repeat(256 * 1024 + 1))) {
-            jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", corrupt);
+            jdbc.update("UPDATE ma_operation SET identity_json = ?", corrupt);
             var before = executionRows();
             rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()),
                     "csi_retirement_identity_unavailable");
             assertThat(executionRows()).isEqualTo(before);
         }
-        jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", encoded);
-        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_revision = 3");
+        jdbc.update("UPDATE ma_operation SET identity_json = ?", encoded);
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 3");
         rejected(() -> executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
                 "csi_application_continuation_unavailable");
     }
@@ -1027,8 +1026,8 @@ class WorkspaceCsiNativeActivationGate {
         var before = executionRows();
         rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()), "runtime_admission_closed");
         assertThat(executionRows()).isEqualTo(before);
-        jdbc.update("UPDATE qwen_runtime_session SET session_state = 'READY'");
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        jdbc.update("UPDATE ma_runtime_session SET session_state = 'READY'");
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
         rejected(() -> executions.compareAndSet(executing, executing.withUnknown(), "owner", 1), "csi_original_activation_unavailable");
         assertThat(executionRows()).isEqualTo(before);
     }
@@ -1037,16 +1036,16 @@ class WorkspaceCsiNativeActivationGate {
     void privateLostRecoveryCannotAbandonExecutionOrClearOriginalSlot() throws Exception {
         ready();
         seedHistoricalExecuting(seedHistorical("lost-original"));
-        jdbc.update("UPDATE qwen_runtime_binding SET binding_state = 'LOST'");
+        jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'LOST'");
         var lost = bindings.findById(binding.getBindingId());
         var before = executionRows();
-        var runtimeBefore = jdbc.queryForList("SELECT * FROM qwen_runtime_session");
-        var slotBefore = jdbc.queryForList("SELECT * FROM qwen_runtime_binding_slot");
+        var runtimeBefore = jdbc.queryForList("SELECT * FROM ma_runtime_session");
+        var slotBefore = jdbc.queryForList("SELECT * FROM ma_runtime_slot");
         rejected(() -> bindings.recoverLost(sessions, executions, lost), "csi_finalize_required");
         rejected(() -> bindings.finishLostRecovery(sessions, executions, lost), "csi_finalize_required");
         assertThat(executionRows()).isEqualTo(before);
-        assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_session")).isEqualTo(runtimeBefore);
-        assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_binding_slot")).isEqualTo(slotBefore);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_runtime_session")).isEqualTo(runtimeBefore);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_runtime_slot")).isEqualTo(slotBefore);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(lost.getVersion());
     }
 
@@ -1055,13 +1054,13 @@ class WorkspaceCsiNativeActivationGate {
         ready();
         var executing = seedHistoricalExecuting(seedHistorical("unqualified-authorization"));
         for (long version : List.of(0L, bindings.findById(binding.getBindingId()).getVersion() + 1)) {
-            jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", version);
+            jdbc.update("UPDATE ma_tool_execution SET authorized_binding_version = ?", version);
             var before = executionRows();
             rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()),
                     "csi_execution_continuation_unavailable");
             assertThat(executionRows()).isEqualTo(before);
         }
-        jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = NULL, authorized_dispatch_generation = NULL");
+        jdbc.update("UPDATE ma_tool_execution SET authorized_binding_version = NULL, authorized_dispatch_generation = NULL");
         var before = executionRows();
         rejected(() -> executions.claimDispatch(executing.getExecutionCallId(), "owner", Duration.ofSeconds(120)),
                 "csi_execution_continuation_unavailable");
@@ -1074,7 +1073,7 @@ class WorkspaceCsiNativeActivationGate {
         var executing = seedHistoricalExecuting(seedHistorical("non-file-mode"));
         var reference = new java.util.LinkedHashMap<>(executing.getReference());
         reference.put("runtimeProtocol", 3);
-        jdbc.update("UPDATE qwen_tool_execution SET reference_json = ?", JSON.writeValueAsString(reference));
+        jdbc.update("UPDATE ma_tool_execution SET reference_json = ?", JSON.writeValueAsString(reference));
         var before = executionRows();
         rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()),
                 "csi_execution_continuation_unavailable");
@@ -1085,11 +1084,11 @@ class WorkspaceCsiNativeActivationGate {
     void absentSnapshotCannotAdoptLaterOriginalExecution() throws Exception {
         ready();
         for (String action : List.of("claim", "renew", "cancel", "result")) {
-            jdbc.update("UPDATE qwen_runtime_session SET session_state = 'READY'");
+            jdbc.update("UPDATE ma_runtime_session SET session_state = 'READY'");
             try (var snapshot = jdbc.getDataSource().getConnection()) {
                 snapshot.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
                 snapshot.setAutoCommit(false);
-                try (var query = snapshot.prepareStatement("SELECT COUNT(*) FROM qwen_tool_execution WHERE execution_call_id = ?")) {
+                try (var query = snapshot.prepareStatement("SELECT COUNT(*) FROM ma_tool_execution WHERE execution_call_id = ?")) {
                     query.setString(1, "late-" + action);
                     try (var row = query.executeQuery()) {
                         assertThat(row.next()).isTrue();
@@ -1140,7 +1139,7 @@ class WorkspaceCsiNativeActivationGate {
     // Unpublished resource-free rows exercise the existing continuation fence,
     // not fresh native admission. The generic producer must refuse them.
     private ToolExecutionRecord seedHistorical(ToolExecutionRecord candidate) throws Exception {
-        jdbc.update("INSERT INTO qwen_tool_execution"
+        jdbc.update("INSERT INTO ma_tool_execution"
                         + " (execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key, binding_id,"
                         + " runtime_generation, harness_session_id, runtime_session_id, runtime_session_key, turn_id,"
                         + " tool_call_id, request_digest, reference_json, execution_state, last_sequence, cancel_requested,"
@@ -1165,7 +1164,7 @@ class WorkspaceCsiNativeActivationGate {
     // Persisted legacy markers exercise continuation only, not a native dispatch grant.
     private ToolExecutionRecord seedHistoricalExecuting(ToolExecutionRecord prepared) {
         var claimed = executions.claimDispatch(prepared.getExecutionCallId(), "owner", Duration.ofSeconds(120));
-        assertThat(jdbc.update("UPDATE qwen_tool_execution SET execution_state = 'EXECUTING',"
+        assertThat(jdbc.update("UPDATE ma_tool_execution SET execution_state = 'EXECUTING',"
                         + " authorized_dispatch_generation = ?, authorized_binding_version = ?, record_version = record_version + 1"
                         + " WHERE execution_call_id = ? AND record_version = ? AND execution_state = 'DISPATCHING'"
                         + " AND authorized_dispatch_generation IS NULL AND authorized_binding_version IS NULL",
@@ -1179,7 +1178,7 @@ class WorkspaceCsiNativeActivationGate {
     }
 
     private List<Map<String, Object>> executionRows() {
-        return jdbc.queryForList("SELECT * FROM qwen_tool_execution ORDER BY execution_call_id_hash");
+        return jdbc.queryForList("SELECT * FROM ma_tool_execution ORDER BY execution_call_id_hash");
     }
 
     private ManagedSessionStoreModels.CommitReceipt commit(int index) throws Exception {
@@ -1280,10 +1279,10 @@ class WorkspaceCsiNativeActivationGate {
 
     private Map<String, List<String>> authorityRows() {
         Map<String, List<String>> rows = new TreeMap<>();
-        for (String table : List.of("qwen_managed_session_journal_head", "qwen_managed_session_journal_tx",
-                "qwen_managed_session_resource", "qwen_managed_session_resource_ref", "qwen_runtime_binding",
-                "managed_agent_session", "qwen_runtime_session", "qwen_tool_execution",
-                "managed_workspace_execution_lease", "managed_workspace_csi_retirement")) {
+        for (String table : List.of("ma_session_head", "ma_session_journal_tx",
+                "ma_resource", "ma_resource_ref", "ma_runtime_binding",
+                "ma_session", "ma_runtime_session", "ma_tool_execution",
+                "ma_storage_owner", "ma_operation")) {
             rows.put(table, jdbc.queryForList("SELECT * FROM " + table).stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
@@ -1294,14 +1293,14 @@ class WorkspaceCsiNativeActivationGate {
     void pinNullWithCommittedActivationHistoryCannotBeRepairedByRenewal() throws Exception {
         commit(0);
         commit(1);
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = NULL");
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = NULL");
         var before = head();
         assertThatThrownBy(() -> commit(2)).isInstanceOfSatisfying(RuntimeBrokerException.class,
                 error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(3);
     }
 
     @Test
@@ -1311,7 +1310,7 @@ class WorkspaceCsiNativeActivationGate {
                 sessionId, sessionId, "prior-turn", "prior-tool", "sha256:" + "c".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
                         "promptId", "prior-turn", "callId", "prior-tool", "argsDigest", "sha256:" + "c".repeat(64)));
         executions.findOrCreate(historical);
-        jdbc.update("UPDATE qwen_tool_execution SET binding_id = ?, execution_state = 'SETTLED',"
+        jdbc.update("UPDATE ma_tool_execution SET binding_id = ?, execution_state = 'SETTLED',"
                 + " execution_status = 'success', dispatch_generation = 1, authorized_dispatch_generation = 1,"
                 + " authorized_binding_version = ?", binding.getBindingId(), binding.getVersion());
         var before = head();
@@ -1320,17 +1319,17 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(binding.getVersion());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(2);
     }
 
     private Long pin() {
-        return jdbc.queryForObject("SELECT first_activation_journal_revision FROM qwen_runtime_binding WHERE binding_id = ?",
+        return jdbc.queryForObject("SELECT first_activation_journal_revision FROM ma_runtime_binding WHERE binding_id = ?",
                 Long.class, binding.getBindingId());
     }
 
     private List<Map<String, Object>> head() {
-        return jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_head");
+        return jdbc.queryForList("SELECT * FROM ma_session_head");
     }
 
     private void generate(boolean conversation, boolean streamed) throws Exception {

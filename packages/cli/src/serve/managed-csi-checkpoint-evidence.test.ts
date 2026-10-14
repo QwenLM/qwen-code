@@ -124,7 +124,36 @@ describe('Managed CSI checkpoint evidence entry', () => {
     },
   );
 
-  it.each(['owner', 'snapshots', 'extra'])(
+  it('refuses a foreign Hosted history owner before changing the journal', async () => {
+    const fixture = await hostedHistoryFixture('write_file');
+    const original = fixture.session.authority.domainRecord('file_history')!;
+    const proof = fixture.session.authority.commitProof;
+    const content = JSON.parse(
+      (await fixture.resources.read(original.recordRef)).toString('utf8'),
+    );
+    delete content.operationId;
+    delete content.revision;
+    delete content.previousRecordRef;
+    content.record.sessionId = 'other-session';
+    await expect(
+      fixture.session.authority.commitDomainRecord(
+        {
+          operation: 'commitFileHistory',
+          commandId: 'foreign-owner-projection',
+          sessionKey: fixture.session.authority.sessionHeader.sessionKey,
+          contentDigest: fixture.outcomeRef.digest,
+        },
+        { domain: 'file_history', content },
+        { class: 'trusted_entry' },
+      ),
+    ).rejects.toThrow('invalid reader-facing record');
+    expect(fixture.session.authority.commitProof).toEqual(proof);
+    expect(fixture.session.authority.domainRecord('file_history')).toEqual(
+      original,
+    );
+  });
+
+  it.each(['snapshots', 'extra'])(
     'refuses a conflicting Hosted history projection: %s',
     async (damage) => {
       const directory = mkdtempSync(path.join(tmpdir(), 'qwen-csi-hosted-'));
@@ -137,7 +166,6 @@ describe('Managed CSI checkpoint evidence entry', () => {
         delete content.operationId;
         delete content.revision;
         delete content.previousRecordRef;
-        if (damage === 'owner') content.record.sessionId = 'other-session';
         if (damage === 'snapshots') content.record.systemPayload.snapshots = [];
         if (damage === 'extra') content.record.pendingOtherEffect = true;
         await fixture.session.authority.commitDomainRecord(

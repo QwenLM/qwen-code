@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -7,7 +10,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -86,20 +88,32 @@ public class ManagedToolResultStore {
         if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
             return;
         }
-        var existing = jdbc.queryForList("SELECT result_id, source_digest FROM managed_agent_tool_result"
-                + " WHERE result_id IN (" + String.join(",", Collections.nCopies(sources.size(), "?")) + ")",
+        var existing = jdbc.query("SELECT operation_id, request_digest FROM ma_operation"
+                + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id IN (" + String.join(",", Collections.nCopies(sources.size(), "?")) + ")", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 sources.keySet().toArray());
         for (var row : existing) {
-            Source source = sources.remove((String) row.get("result_id"));
-            require(source.sourceDigest().equals(row.get("source_digest")), "Tool receipt source changed");
+            Source source = sources.remove((String) row.get("operation_id"));
+            require(source.sourceDigest().equals(row.get("request_digest")), "Tool receipt source changed");
         }
         if (!sources.isEmpty()) {
-            jdbc.batchUpdate("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key,"
-                    + " tenant_id, workspace_id, session_id, source_json, source_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    sources.values().stream().map(source -> new Object[] {source.id(), scope(tenant, session),
-                            identity("execution", source.executionCallId().isEmpty() ? "sequence:" + source.receiptSequence()
-                                    : source.executionCallId()).substring(10), tenant, workspace, session,
-                            JSON.valueToTree(source).toString(), source.sourceDigest()}).toList());
+            long createdAt = now();
+            String sourceScope = scope(tenant, session);
+            List<Object[]> rows = new ArrayList<>();
+            for (Source source : sources.values()) {
+                String executionKey = identity("execution", source.executionCallId().isEmpty()
+                        ? "sequence:" + source.receiptSequence() : source.executionCallId()).substring(10);
+                rows.add(new Object[] {
+                        ManagedSchemaKeys.operationKey(OperationKind.TOOL_RESULT_PROJECTION, sourceScope,
+                                executionKey, source.id()), sourceScope, sourceScope, ManagedSchemaKeys.identity(source.id()),
+                        ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(workspace), ManagedSchemaKeys.identity(session),
+                        executionKey, executionKey, JSON.valueToTree(source).toString(), source.sourceDigest(),
+                        createdAt, createdAt});
+            }
+            jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
+                    + " tenant_id, workspace_id, session_id, target_kind, target_key, execution_key,"
+                    + " request_json, request_digest, phase, state, created_at, updated_at)"
+                    + " VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?,"
+                    + " 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
     }
 
@@ -118,12 +132,10 @@ public class ManagedToolResultStore {
         var selected = new ArrayList<Map<String, Object>>(1);
         try {
             return Boolean.TRUE.equals(transactions.execute(status -> {
-                var heads = jdbc.queryForList("SELECT h.tenant_id, h.workspace_id, h.session_id"
-                        + " FROM qwen_managed_session_journal_head h"
-                        + " WHERE h.state NOT IN ('DELETING', 'DELETED') AND h.o3_backfill_pending = TRUE"
-                        + " AND h.o3_backfill_error IS NULL AND NOT EXISTS (SELECT 1 FROM managed_agent_session s"
-                        + " WHERE s.tenant_id = h.tenant_id AND s.session_id = h.session_id AND s.csi_guard = TRUE)"
-                        + " ORDER BY h.tenant_id, h.session_id LIMIT 1");
+                var heads = jdbc.query("SELECT h.tenant_id, h.workspace_id, h.session_id, h.journal_revision,"
+                        + " o3_backfill_revision, o3_backfill_through FROM ma_session_head h"
+                        + " WHERE head_kind = 'MANAGED_SESSION' AND state NOT IN ('DELETING', 'DELETED') AND o3_backfill_pending = TRUE AND o3_backfill_error IS NULL"
+                        + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = h.tenant_id AND s.session_id = h.session_id AND s.csi_guard = TRUE) ORDER BY tenant_key, harness_key LIMIT 1", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
                 if (heads.isEmpty()) {
                     return false;
                 }
@@ -142,10 +154,10 @@ public class ManagedToolResultStore {
                 long after = ((Number) head.get("o3_backfill_revision")).longValue();
                 long through = ((Number) (head.get("o3_backfill_through") == null
                         ? head.get("journal_revision") : head.get("o3_backfill_through"))).longValue();
-                var rows = jdbc.queryForList("SELECT journal_revision, first_sequence, event_count, record_bytes, record_digest FROM"
-                        + " qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                var rows = jdbc.query("SELECT journal_revision, first_sequence, event_count, record_bytes, record_digest FROM"
+                        + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                         + " AND workspace_id = ? AND journal_revision > ? AND journal_revision <= ?"
-                        + " ORDER BY journal_revision LIMIT 1", tenant, session, workspace, after, through);
+                        + " ORDER BY journal_revision LIMIT 1", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenant, session, workspace, after, through);
                 if (!rows.isEmpty()) {
                     var row = rows.getFirst();
                     byte[] bytes = (byte[]) row.get("record_bytes");
@@ -157,9 +169,9 @@ public class ManagedToolResultStore {
                 } else {
                     require(after == through, "Backfill journal is incomplete");
                 }
-                jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_revision = ?,"
-                                + " o3_backfill_through = ?, o3_backfill_pending = ? WHERE tenant_id = ? AND session_id = ?",
-                        after, through, after < through, tenant, session);
+                jdbc.update("UPDATE ma_session_head SET o3_backfill_revision = ?,"
+                                + " o3_backfill_through = ?, o3_backfill_pending = ? WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                        after, through, after < through, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, session);
                 return true;
             }));
         } catch (IllegalArgumentException error) {
@@ -174,8 +186,8 @@ public class ManagedToolResultStore {
                     }
                     var current = lockBackfillHead(tenant, workspace, session);
                     if (failed.equals(current)) {
-                        jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_error = 'invalid_journal',"
-                                + " o3_backfill_pending = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                        jdbc.update("UPDATE ma_session_head SET o3_backfill_error = 'invalid_journal',"
+                                + " o3_backfill_pending = FALSE WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?", ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, session);
                     }
                 });
             }
@@ -184,11 +196,13 @@ public class ManagedToolResultStore {
     }
 
     private Map<String, Object> lockBackfillHead(String tenant, String workspace, String session) {
-        var rows = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, journal_revision,"
-                + " o3_backfill_revision, o3_backfill_through FROM qwen_managed_session_journal_head"
-                + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
+        ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+        var rows = jdbc.query("SELECT tenant_id, workspace_id, session_id, journal_revision,"
+                + " o3_backfill_revision, o3_backfill_through FROM ma_session_head"
+                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
                 + " AND state NOT IN ('DELETING', 'DELETED') AND o3_backfill_pending = TRUE"
-                + " AND o3_backfill_error IS NULL FOR UPDATE", tenant, workspace, session);
+                + " AND o3_backfill_error IS NULL FOR UPDATE", (result, index) -> ManagedSchemaRows.read(result),
+                ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, workspace, session);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -197,36 +211,43 @@ public class ManagedToolResultStore {
             long now = now();
             List<Map<String, Object>> rows = new ArrayList<>();
             for (String state : List.of("PENDING", "RETRYABLE", "LEASED")) {
-                String due = "LEASED".equals(state) ? "claim_until" : "next_attempt_at";
-                rows.addAll(jdbc.queryForList("SELECT r.*, r." + due
-                        + " AS due_at FROM managed_agent_tool_result r WHERE r.work_state = ? AND r."
-                        + due + " <= ? AND NOT EXISTS (SELECT 1 FROM managed_agent_session s"
-                        + " WHERE s.tenant_id = r.tenant_id AND s.session_id = r.session_id AND s.csi_guard = TRUE)"
-                        + " ORDER BY r." + due + ", r.result_id LIMIT 1", state, now));
+                String due = "LEASED".equals(state) ? "claim_until" : "available_at";
+                String epoch = "LEASED".equals(state) ? "CAST(UNIX_TIMESTAMP(r.claim_until) AS DECIMAL(20, 3)) * 1000" : "r." + due;
+                String bound = "LEASED".equals(state) ? "FROM_UNIXTIME(? / 1000.0)" : "?";
+                rows.addAll(jdbc.query("SELECT r.*, " + epoch + " AS due_at FROM ma_operation r"
+                        + " WHERE r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.state = ? AND r." + due + " <= " + bound
+                        + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = r.tenant_id"
+                        + " AND s.session_id = r.session_id AND s.csi_guard = TRUE)"
+                        + " ORDER BY r." + due + ", r.operation_key LIMIT 1",
+                        (result, index) -> ManagedSchemaRows.read(result), state, now));
             }
             rows.sort(java.util.Comparator.<Map<String, Object>>comparingLong(
                     row -> ((Number) row.get("due_at")).longValue())
-                    .thenComparing(row -> (String) row.get("result_id")));
+                    .thenComparing(row -> (String) row.get("operation_key")));
             for (var candidate : rows) {
+                String tenant = (String) candidate.get("tenant_id");
+                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                 if (isPrivateResult(candidate)) {
-                    continue;
+                    status.setRollbackOnly();
+                    return null;
                 }
-                var row = lockResultRow((String) candidate.get("result_id"));
+                var row = lockResultRow((String) candidate.get("operation_id"));
                 if (row == null) {
                     continue;
                 }
                 requireSameSource(candidate, row);
-                String state = (String) row.get("work_state");
-                String due = "LEASED".equals(state) ? "claim_until" : "next_attempt_at";
+                String state = (String) row.get("state");
+                String due = "LEASED".equals(state) ? "claim_until_epoch" : "available_at";
                 if (!List.of("PENDING", "RETRYABLE", "LEASED").contains(state)
                         || row.get(due) == null || ((Number) row.get(due)).longValue() > now) {
                     continue;
                 }
                 Source source = storedSource(row);
-                long generation = ((Number) row.get("claim_generation")).longValue() + 1;
-                jdbc.update("UPDATE managed_agent_tool_result SET work_state = 'LEASED', claim_generation = ?,"
-                                + " claim_until = ?, attempts = attempts + 1 WHERE result_id = ?",
-                        generation, now + 60_000, source.id());
+                long generation = Math.addExact(((Number) row.get("claim_generation")).longValue(), 1);
+                jdbc.update("UPDATE ma_operation SET state = 'LEASED', claim_generation = ?,"
+                                + " claim_until = FROM_UNIXTIME(? / 1000.0), attempt_count = attempt_count + 1"
+                                + " WHERE operation_key = ? AND operation_kind = 'TOOL_RESULT_PROJECTION'",
+                        generation, Math.addExact(now, 60_000), row.get("operation_key"));
                 return new Claim(source, generation);
             }
             return null;
@@ -238,7 +259,12 @@ public class ManagedToolResultStore {
                 "Invalid projection failure state");
         transactions.executeWithoutResult(status -> {
             var candidate = resultRow(claim.source().id());
-            if (candidate == null || isPrivateResult(candidate)) {
+            if (candidate == null) {
+                return;
+            }
+            ToolPublicationRetentionStore.lockTenant(jdbc, (String) candidate.get("tenant_id"));
+            if (isPrivateResult(candidate)) {
+                status.setRollbackOnly();
                 return;
             }
             var row = lockResultRow(claim.source().id());
@@ -250,11 +276,11 @@ public class ManagedToolResultStore {
     }
 
     private void settleFailure(Source source, long generation, String state, String code) {
-        jdbc.update("UPDATE managed_agent_tool_result SET work_state = ?, failure_code = ?,"
-                        + " claim_until = NULL, next_attempt_at = CAST(? AS DECIMAL(20, 0))"
-                        + " + LEAST(300000, attempts * 5000) WHERE result_id = ?"
-                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND source_digest = ?"
-                        + " AND work_state = 'LEASED' AND claim_generation = ?",
+        jdbc.update("UPDATE ma_operation SET state = ?, failure_code = ?,"
+                        + " claim_until = NULL, available_at = CAST(? AS DECIMAL(20, 0))"
+                        + " + LEAST(300000, attempt_count * 5000) WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?"
+                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND request_digest = ?"
+                        + " AND state = 'LEASED' AND claim_generation = ?",
                 state, code, now(), source.id(), source.tenantId(), source.workspaceId(), source.sessionId(),
                 source.sourceDigest(), generation);
     }
@@ -262,7 +288,12 @@ public class ManagedToolResultStore {
     boolean admitsLegacyProjection(Claim claim) {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             var candidate = resultRow(claim.source().id());
-            if (candidate == null || isPrivateResult(candidate)) {
+            if (candidate == null) {
+                return false;
+            }
+            ToolPublicationRetentionStore.lockTenant(jdbc, (String) candidate.get("tenant_id"));
+            if (isPrivateResult(candidate)) {
+                status.setRollbackOnly();
                 return false;
             }
             var row = lockResultRow(claim.source().id());
@@ -276,12 +307,14 @@ public class ManagedToolResultStore {
     }
 
     private Map<String, Object> resultRow(String id) {
-        var rows = jdbc.queryForList("SELECT * FROM managed_agent_tool_result WHERE result_id = ?", id);
+        var rows = jdbc.query("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) * 1000 AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?", (result, index) -> ManagedSchemaRows.read(result), id);
+        require(rows.size() <= 1, "Projection identity is ambiguous");
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private Map<String, Object> lockResultRow(String id) {
-        var rows = jdbc.queryForList("SELECT * FROM managed_agent_tool_result WHERE result_id = ? FOR UPDATE", id);
+        var rows = jdbc.query("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) * 1000 AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE", (result, index) -> ManagedSchemaRows.read(result), id);
+        require(rows.size() <= 1, "Projection identity is ambiguous");
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -290,18 +323,18 @@ public class ManagedToolResultStore {
     }
 
     private static void requireSameSource(Map<String, Object> before, Map<String, Object> current) {
-        for (String column : List.of("tenant_id", "workspace_id", "session_id", "scope_key", "source_digest", "source_json")) {
+        for (String column : List.of("tenant_id", "workspace_id", "session_id", "scope_key", "request_digest", "request_json")) {
             require(Objects.equals(before.get(column), current.get(column)), "Projection source changed");
         }
     }
 
     private static Source storedSource(Map<String, Object> row) {
-        Source source = readSource((String) row.get("source_json"));
-        require(Objects.equals(source.id(), row.get("result_id"))
+        Source source = readSource((String) row.get("request_json"));
+        require(Objects.equals(source.id(), row.get("operation_id"))
                         && Objects.equals(source.tenantId(), row.get("tenant_id"))
                         && Objects.equals(source.workspaceId(), row.get("workspace_id"))
                         && Objects.equals(source.sessionId(), row.get("session_id"))
-                        && Objects.equals(source.sourceDigest(), row.get("source_digest"))
+                        && Objects.equals(source.sourceDigest(), row.get("request_digest"))
                         && scope(source.tenantId(), source.sessionId()).equals(row.get("scope_key")),
                 "Stored projection source conflicts");
         return source;
@@ -314,8 +347,8 @@ public class ManagedToolResultStore {
     }
 
     public void verifySource(Source source) {
-        var rows = jdbc.queryForList("SELECT record_bytes, record_digest FROM qwen_managed_session_journal_tx"
-                        + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND journal_revision = ?",
+        var rows = jdbc.query("SELECT record_bytes, record_digest FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND journal_revision = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 source.tenantId(), source.workspaceId(), source.sessionId(), source.journalRevision());
         require(rows.size() == 1, "Original receipt journal is missing");
         byte[] bytes = (byte[]) rows.getFirst().get("record_bytes");
@@ -349,16 +382,18 @@ public class ManagedToolResultStore {
                 return false;
             }
             Source source = claimSource(claim, candidate);
-            jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
-                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", source.tenantId(), source.sessionId());
-            var retired = jdbc.queryForList("SELECT generation FROM qwen_output_session_retirement"
-                    + " WHERE tenant_key = ? AND session_key = ?",
+            ToolPublicationRetentionStore.lockSession(jdbc, source.tenantId(), source.sessionId());
+            var retired = jdbc.query("SELECT retirement_generation FROM ma_session"
+                    + " WHERE tenant_key = ? AND session_key = ? AND retired_at IS NOT NULL",
+                    (result, index) -> ManagedSchemaRows.read(result),
                     ToolPublicationRetentionStore.hash(source.tenantId()), ToolPublicationRetentionStore.hash(source.sessionId()));
-            jdbc.queryForList("SELECT publication_id FROM qwen_tool_publication WHERE scope_key = ? AND tenant_id = ?"
-                    + " AND session_id = ? AND publication_id = ? FOR UPDATE",
+            jdbc.query("SELECT publication_id FROM ma_output_capture WHERE scope_key = ? AND tenant_id = ?"
+                    + " AND session_id = ? AND publication_id = ? FOR UPDATE", (result, index) -> ManagedSchemaRows.read(result),
                     ToolPublicationDataStore.scope(source.sessionKey()), source.tenantId(), source.sessionId(), projection.publicationId());
-            var publicSessions = jdbc.queryForList("SELECT tenant_id, session_id, workspace_id, status, last_sequence FROM"
-                            + " managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+            var publicSessions = jdbc.query("SELECT s.tenant_id, s.session_id, s.workspace_id, s.status, e.last_sequence FROM"
+                            + " ma_session s JOIN ma_event_stream e ON e.tenant_id = s.tenant_id AND e.session_id = s.session_id"
+                            + " AND e.stream_kind = 'SESSION' AND e.stream_id = X''"
+                            + " WHERE s.tenant_id = ? AND s.session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                     source.tenantId(), source.sessionId());
             var row = lockResultRow(source.id());
             if (row == null) {
@@ -366,7 +401,7 @@ public class ManagedToolResultStore {
             }
             requireSameSource(candidate, row);
             source = claimSource(claim, row);
-            if (!"LEASED".equals(row.get("work_state"))
+            if (!"LEASED".equals(row.get("state"))
                     || ((Number) row.get("claim_generation")).longValue() != claim.generation()) {
                 return false;
             }
@@ -374,7 +409,7 @@ public class ManagedToolResultStore {
                 settleFailure(source, claim.generation(), "SUPPRESSED", "session_retired");
                 return false;
             }
-            if (((Number) row.get("claim_until")).longValue() <= now()) {
+            if (((Number) row.get("claim_until_epoch")).longValue() <= now()) {
                 settleFailure(source, claim.generation(), "RETRYABLE", "projection_claim_lapsed");
                 return false;
             }
@@ -392,12 +427,21 @@ public class ManagedToolResultStore {
             verifyCatalog(source, projection);
             long sequence = ((Number) publicSessions.getFirst().get("last_sequence")).longValue() + 1;
             for (Artifact artifact : projection.artifacts()) {
-                jdbc.update("INSERT INTO managed_agent_artifact (artifact_id, result_id, scope_key, descriptor_json,"
+                jdbc.update("INSERT INTO ma_artifact (artifact_id, result_id, scope_key, descriptor_json,"
                                 + " publication_id, binding_json, manifest_ref_json, stream_id, creation_sequence)"
                                 + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", artifact.descriptor().path("id").asText(),
                         source.id(), scope(source.tenantId(), source.sessionId()), artifact.descriptor().toString(),
                         artifact.publicationId(), artifact.binding().toString(), artifact.manifestRef().toString(),
                         artifact.streamId(), sequence);
+                String sessionScope = scope(source.tenantId(), source.sessionId());
+                jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+                                + " resource_key, tenant_id, workspace_id, session_id, resource_id, created_at)"
+                                + " SELECT session_scope_key, 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id,"
+                                + " session_id, resource_id, CURRENT_TIMESTAMP(6) FROM ma_resource"
+                                + " WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED'"
+                                + " AND deletion_operation_key IS NULL",
+                        ManagedSchemaKeys.key(sessionScope, artifact.descriptor().path("id").asText()),
+                        ToolPublicationDataStore.scope(source.sessionKey()), artifact.publicationId());
             }
             JsonNode descriptor = projection.descriptor();
             String itemId = descriptor.path("item_id").asText();
@@ -412,17 +456,17 @@ public class ManagedToolResultStore {
                             "itemId", itemId, "toolCallId", projection.binding().path("modelCallId").asText(),
                             "name", "run_shell_command", "status", itemStatus,
                             "result", JSON.convertValue(descriptor, Map.class)), false, "tool-result:" + source.id() + ":1");
-            jdbc.update("UPDATE managed_agent_tool_result SET work_state = 'READY', claim_until = NULL,"
-                            + " failure_code = NULL, item_id = ?, descriptor_json = ?, policy_version = ? WHERE result_id = ?",
+            jdbc.update("UPDATE ma_operation SET state = 'READY', claim_until = NULL,"
+                            + " failure_code = NULL, item_id = ?, result_json = ?, policy_version = ? WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
                     itemId, descriptor.toString(), projection.policyVersion(), source.id());
             return true;
         }));
     }
 
     private void verifyCatalog(Source source, Projection projection) {
-        var rows = jdbc.queryForList("SELECT state, producer_phase, binding_digest, admission_resource_id,"
-                        + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication"
-                        + " WHERE scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
+        var rows = jdbc.query("SELECT state, producer_phase, binding_digest, admission_resource_id,"
+                        + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture"
+                        + " WHERE scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 ToolPublicationDataStore.scope(source.sessionKey()), source.tenantId(), source.workspaceId(), source.sessionId(), projection.publicationId());
         require(rows.size() == 1, "Original publication disappeared");
         var row = rows.getFirst();
@@ -444,15 +488,15 @@ public class ManagedToolResultStore {
     }
 
     public Optional<JsonNode> findResult(String tenant, String session, String itemId) {
-        return jdbc.query("SELECT descriptor_json FROM managed_agent_tool_result WHERE scope_key = ?"
-                        + " AND tenant_id = ? AND session_id = ? AND item_id = ? AND work_state = 'READY'",
+        return jdbc.query("SELECT result_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND scope_key = ?"
+                        + " AND tenant_id = ? AND session_id = ? AND item_id = ? AND state = 'READY'",
                 (r, n) -> parse(r.getString(1)), scope(tenant, session), tenant, session, itemId).stream().findFirst();
     }
 
     public Optional<Artifact> findArtifact(String tenant, String session, String artifactId) {
-        return jdbc.query("SELECT a.*, r.source_json FROM managed_agent_artifact a JOIN managed_agent_tool_result r"
-                        + " ON r.result_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
-                        + " AND a.artifact_id = ? AND r.work_state = 'READY'", this::artifact,
+        return jdbc.query("SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r"
+                        + " ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                        + " AND a.artifact_id = ? AND r.state = 'READY'", this::artifact,
                 scope(tenant, session), tenant, session, artifactId).stream().findFirst();
     }
 
@@ -460,7 +504,7 @@ public class ManagedToolResultStore {
             String beforeId, int limit) {
         require(limit >= 1 && limit <= 100 && (beforeSequence == null) == (beforeId == null), "Invalid artifact page");
         long through = watermark == null ? jdbc.queryForObject("SELECT COALESCE(MAX(creation_sequence), 0)"
-                + " FROM managed_agent_artifact WHERE scope_key = ?", Long.class, scope(tenant, session)) : watermark;
+                + " FROM ma_artifact WHERE scope_key = ?", Long.class, scope(tenant, session)) : watermark;
         require(through >= 0, "Invalid artifact watermark");
         List<Object> args = new ArrayList<>(List.of(scope(tenant, session), tenant, session, through));
         String cursor = "";
@@ -471,16 +515,16 @@ public class ManagedToolResultStore {
             args.add(beforeId);
         }
         args.add(limit + 1);
-        List<Artifact> rows = jdbc.query("SELECT a.*, r.source_json FROM managed_agent_artifact a"
-                        + " JOIN managed_agent_tool_result r ON r.result_id = a.result_id WHERE a.scope_key = ?"
+        List<Artifact> rows = jdbc.query("SELECT a.*, r.request_json FROM ma_artifact a"
+                        + " JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ?"
                         + " AND r.tenant_id = ? AND r.session_id = ? AND a.creation_sequence <= ?"
-                        + " AND r.work_state = 'READY'" + cursor
+                        + " AND r.state = 'READY'" + cursor
                         + " ORDER BY a.creation_sequence DESC, a.artifact_id DESC LIMIT ?", this::artifact, args.toArray());
         return new ArtifactPage(List.copyOf(rows.subList(0, Math.min(rows.size(), limit))), through, rows.size() > limit);
     }
 
     private Artifact artifact(ResultSet row, int index) throws SQLException {
-        return new Artifact(parse(row.getString("descriptor_json")), readSource(row.getString("source_json")),
+        return new Artifact(parse(row.getString("descriptor_json")), readSource(row.getString("request_json")),
                 row.getString("publication_id"), parse(row.getString("binding_json")),
                 parse(row.getString("manifest_ref_json")), row.getString("stream_id"), row.getLong("creation_sequence"));
     }
@@ -549,7 +593,7 @@ public class ManagedToolResultStore {
     }
 
     private long now() {
-        return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).getTime();
+        return ToolPublicationRetentionStore.now(jdbc);
     }
 
     static void require(boolean valid, String message) {

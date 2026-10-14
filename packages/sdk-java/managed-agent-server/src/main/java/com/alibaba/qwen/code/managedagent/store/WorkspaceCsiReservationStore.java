@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -61,17 +62,24 @@ public final class WorkspaceCsiReservationStore {
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, registration.tenantId());
-            if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE storage_key = ?",
-                    Long.class, WorkspaceStorageKindGuard.localKey(registration.tenantId(), registration.storageId())) != 0) {
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'LOCAL'",
+                    Long.class, registration.aliasKey()) != 0) {
                 throw unavailable();
             }
-            jdbc.update("INSERT INTO managed_workspace_csi_registration"
-                    + " (alias_key, tenant_id, storage_id, physical_key, registration_revision, registration_json)"
-                    + " VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE alias_key = alias_key",
-                    registration.aliasKey(), registration.tenantId(), registration.storageId(),
+            jdbc.update("INSERT INTO ma_storage"
+                    + " (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+                    + " storage_kind, registration_state, registration_revision, registration_json)"
+                    + " VALUES (?, ?, ?, ?, ?, ?, 'CSI', 'REGISTERED', ?, ?)"
+                    + " ON DUPLICATE KEY UPDATE physical_key = COALESCE(physical_key, VALUES(physical_key)),"
+                    + " registration_revision = COALESCE(registration_revision, VALUES(registration_revision)),"
+                    + " registration_json = COALESCE(registration_json, VALUES(registration_json)),"
+                    + " storage_kind = CASE WHEN registration_state = 'FENCE_ONLY' THEN 'CSI' ELSE storage_kind END,"
+                    + " registration_state = CASE WHEN registration_state = 'FENCE_ONLY' THEN 'REGISTERED' ELSE registration_state END",
+                    registration.aliasKey(), JdbcRuntimeBindingRepository.storageFenceKey(registration.tenantId()),
+                    JdbcRuntimeBindingRepository.storageFenceKey(registration.storageId()), registration.tenantId(), registration.storageId(),
                     registration.physicalKey(), registration.revision(), encoded);
             verifyRegistration(registration);
-            jdbc.update("INSERT INTO managed_workspace_execution_lease (storage_key, storage_kind)"
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind)"
                     + " VALUES (?, 'CSI') ON DUPLICATE KEY UPDATE storage_key = storage_key",
                     registration.physicalKey());
             readReservation(registration.physicalKey());
@@ -127,7 +135,7 @@ public final class WorkspaceCsiReservationStore {
                 throw busy();
             }
             long revision = nextRevision(current.revision());
-            int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
+            int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET csi_phase = 'RESERVED', csi_revision = ?,"
                     + " csi_reservation_id = ?, csi_registration_key = ?, csi_registration_revision = ?,"
                     + " binding_id = ?, runtime_generation = ?, csi_provision_request_id = ?"
@@ -194,15 +202,22 @@ public final class WorkspaceCsiReservationStore {
                 throw unavailable();
             }
             requireRetirementLease(current);
-            jdbc.update("INSERT INTO managed_workspace_csi_retirement"
-                    + " (retirement_id, binding_id, runtime_generation, physical_key, phase, identity_json,"
-                    + " progress_format, progress_version, progress_stage, settlement_deadline_ms)"
-                    + " VALUES (?, ?, ?, ?, 'DRAINING', ?, 'qwen-csi-application-retirement/1', 1, 'SETTLING', ?)",
-                    operationId, current.getBindingId(), current.getGeneration(), registration.physicalKey(), encoded,
-                    settlementDeadline);
+            new WorkspaceOperations(jdbc, registration.tenantId()).create(WorkspaceOperations.Kind.CSI_RETIREMENT,
+                    operationId, WorkspaceOperations.values("binding_id", current.getBindingId(),
+                            "runtime_generation", current.getGeneration(), "storage_id", registration.storageId(),
+                            "physical_key", registration.physicalKey(), "phase", "DRAINING", "state", "DRAINING",
+                            "identity_json", encoded, "request_json", encoded));
+            if (jdbc.update("UPDATE ma_operation SET progress_format = 'qwen-csi-application-retirement/1',"
+                    + " progress_version = 1, progress_stage = 'SETTLING', settlement_deadline_ms = ?"
+                    + " WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND progress_format IS NULL"
+                    + " AND progress_version IS NULL AND progress_stage IS NULL AND settlement_deadline_ms IS NULL",
+                    settlementDeadline, WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT,
+                            registration.tenantId(), operationId)) != 1) {
+                throw unavailable();
+            }
             requireRetirementLease(current);
             long drainingRevision = nextRevision(expected.revision());
-            if (jdbc.update("UPDATE managed_workspace_execution_lease"
+            if (jdbc.update("UPDATE ma_storage_owner"
                     + " SET csi_phase = 'DRAINING', csi_revision = ?"
                     + " WHERE storage_key = ? AND storage_kind = 'CSI' AND csi_phase = 'RESERVED'"
                     + " AND csi_revision = ? AND csi_reservation_id = ?",
@@ -306,30 +321,66 @@ public final class WorkspaceCsiReservationStore {
     }
 
     private Retirement readRetirement(RuntimeBindingRecord binding) {
-        List<Retirement> rows = jdbc.query("SELECT * FROM managed_workspace_csi_retirement"
-                + " WHERE binding_id = ? AND runtime_generation = ? FOR UPDATE", (row, index) -> {
-                    String encoded = row.getString("identity_json");
-                    if (encoded == null || encoded.length() > 256 * 1024) {
-                        throw unavailable();
-                    }
-                    try {
-                        Retirement value = json.readValue(encoded, Retirement.class);
-                        if (!uuid(value.operationId()) || !value.operationId().equals(row.getString("retirement_id"))
-                                || !"DRAINING".equals(value.phase()) || !value.phase().equals(row.getString("phase"))
-                                || !value.physicalKey().equals(row.getString("physical_key"))
-                                || !binding.getBindingId().equals(row.getString("binding_id"))
-                                || binding.getGeneration() != row.getLong("runtime_generation")) {
-                            throw unavailable();
-                        }
-                        return value;
-                    } catch (JsonProcessingException | NullPointerException error) {
-                        throw unavailable();
-                    }
-                }, binding.getBindingId(), binding.getGeneration());
+        var rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'"
+                + " AND tenant_id = ? AND target_key = ? AND target_revision = ? FOR UPDATE",
+                (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), binding.getRequest().getScope().getTenantId(),
+                WorkspaceOperations.hash(binding.getBindingId()), binding.getGeneration());
         if (rows.size() > 1) {
             throw unavailable();
         }
-        return rows.isEmpty() ? null : rows.getFirst();
+        if (rows.isEmpty()) {
+            return null;
+        }
+        Retirement value = decodeRetirement(rows.getFirst(), json);
+        if (!binding.getRequest().getScope().getTenantId().equals(rows.getFirst().get("tenant_id"))
+                || !binding.getBindingId().equals(value.reservation().bindingId())
+                || binding.getGeneration() != value.reservation().runtimeGeneration()) {
+            throw unavailable();
+        }
+        return value;
+    }
+
+    static Retirement decodeRetirement(Map<String, Object> row, ObjectMapper json) {
+        try {
+            String tenant = (String) row.get("tenant_id");
+            String id = (String) row.get("operation_id");
+            String request = (String) row.get("request_json");
+            if (request == null || request.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 256 * 1024) {
+                throw unavailable();
+            }
+            Retirement value = json.readValue(request, Retirement.class);
+            var envelope = json.readTree((String) row.get("result_json"));
+            var data = envelope.path("data");
+            Reservation owner = value.reservation();
+            if (tenant == null || !uuid(id) || !id.equals(value.operationId()) || owner == null
+                    || !"CSI_RETIREMENT".equals(row.get("operation_kind"))
+                    || !WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, tenant, id).equals(row.get("operation_key"))
+                    || !WorkspaceOperations.hash(tenant).equals(row.get("scope_key"))
+                    || !"RUNTIME_BINDING".equals(row.get("target_kind"))
+                    || !owner.bindingId().equals(row.get("target_id"))
+                    || !WorkspaceOperations.hash(owner.bindingId()).equals(row.get("target_key"))
+                    || !Objects.equals(owner.runtimeGeneration(), ((Number) row.get("target_revision")).longValue())
+                    || !Objects.equals(owner.registrationKey(), row.get("storage_key"))
+                    || !value.physicalKey().equals(row.get("physical_key"))
+                    || !"DRAINING".equals(value.phase()) || !value.phase().equals(row.get("phase"))
+                    || !value.phase().equals(row.get("state"))
+                    || !WorkspaceOperations.hash(request).equals(row.get("request_digest"))
+                    || ((Number) row.get("payload_version")).intValue() != 1
+                    || !envelope.isObject() || envelope.size() != 2 || !envelope.path("schemaVersion").isIntegralNumber()
+                    || envelope.path("schemaVersion").intValue() != 1 || !data.isObject() || data.size() != 5
+                    || !request.equals(data.path("identity_json").textValue())
+                    || !owner.bindingId().equals(data.path("binding_id").textValue())
+                    || !data.path("runtime_generation").isIntegralNumber()
+                    || data.path("runtime_generation").longValue() != owner.runtimeGeneration()
+                    || !value.physicalKey().equals(data.path("physical_key").textValue())
+                    || !data.path("storage_id").isTextual()
+                    || !JdbcRuntimeBindingRepository.storageAliasKey(tenant, data.path("storage_id").textValue()).equals(owner.registrationKey())) {
+                throw unavailable();
+            }
+            return value;
+        } catch (java.io.IOException | ClassCastException | NullPointerException error) {
+            throw unavailable();
+        }
     }
 
     private void verifyRetirement(Retirement intent, WorkspaceCsiRegistration registration,
@@ -421,8 +472,8 @@ public final class WorkspaceCsiReservationStore {
     }
 
     private WorkspaceCsiRegistration readRegistration(String aliasKey) {
-        List<WorkspaceCsiRegistration> exact = jdbc.query("SELECT * FROM managed_workspace_csi_registration"
-                + " WHERE alias_key = ? FOR UPDATE", (row, index) -> {
+        List<WorkspaceCsiRegistration> exact = jdbc.query("SELECT * FROM ma_storage"
+                + " WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE", (row, index) -> {
                     String encoded = row.getString("registration_json");
                     if (encoded == null || encoded.length() > 16 * 1024) {
                         throw unavailable();
@@ -448,7 +499,7 @@ public final class WorkspaceCsiReservationStore {
     }
 
     private Reservation readReservation(String physicalKey) {
-        List<Reservation> rows = jdbc.query("SELECT * FROM managed_workspace_execution_lease"
+        List<Reservation> rows = jdbc.query("SELECT * FROM ma_storage_owner"
                 + " WHERE storage_key = ? FOR UPDATE", (row, index) -> {
                     Reservation value = new Reservation(row.getString("csi_phase"), row.getLong("csi_revision"),
                             row.getString("csi_reservation_id"), row.getString("csi_registration_key"),

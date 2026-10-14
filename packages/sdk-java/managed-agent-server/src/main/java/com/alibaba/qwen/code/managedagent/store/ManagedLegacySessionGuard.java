@@ -12,12 +12,12 @@ final class ManagedLegacySessionGuard {
         return Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection -> {
             String product = connection.getMetaData().getDatabaseProductName();
             String index = "MySQL".equals(product) || "MariaDB".equals(product)
-                    ? " FORCE INDEX (managed_session_csi_guard_idx)" : "";
-            try (var statement = connection.prepareStatement("SELECT csi_guard FROM managed_agent_session" + index
+                    ? " FORCE INDEX (ix_ma_session_csi_guard)" : "";
+            try (var statement = connection.prepareStatement("SELECT csi_guard FROM ma_session" + index
                     + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
                 statement.setQueryTimeout(10);
-                statement.setString(1, tenantId);
-                statement.setString(2, sessionId);
+                statement.setBytes(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(tenantId));
+                statement.setBytes(2, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(sessionId));
                 try (var rows = statement.executeQuery()) {
                     return rows.next();
                 }

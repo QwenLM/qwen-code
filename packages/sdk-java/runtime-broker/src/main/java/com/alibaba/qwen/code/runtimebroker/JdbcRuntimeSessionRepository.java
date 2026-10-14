@@ -53,11 +53,11 @@ public final class JdbcRuntimeSessionRepository
             throw new IllegalArgumentException("Original binding is required");
         }
         com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding context;
-        try (var statement = connection.prepareStatement("SELECT * FROM managed_agent_session"
+        try (var statement = connection.prepareStatement("SELECT * FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
             statement.setQueryTimeout(10);
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !row.getBoolean("csi_guard")) {
                     throw new IllegalArgumentException("Original managed Session is required");
@@ -82,10 +82,17 @@ public final class JdbcRuntimeSessionRepository
             throw new IllegalArgumentException("Original observation is required");
         }
         try (var statement = connection.prepareStatement("SELECT finalize_receipt_bytes, finalize_receipt_sha256"
-                + " FROM managed_workspace_csi_retirement WHERE retirement_id = ? AND progress_stage = 'CUT'"
-                + " AND progress_version = 3 FOR UPDATE")) {
+                + " FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT'"
+                + " AND tenant_id = ? AND operation_id = ? AND target_kind = 'RUNTIME_BINDING'"
+                + " AND target_key = ? AND target_id = ? AND target_revision = ?"
+                + " AND progress_stage = 'CUT' AND progress_version = 3 FOR UPDATE")) {
             statement.setQueryTimeout(10);
-            statement.setString(1, authority.retirementId());
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("CSI_RETIREMENT", original.request().getScope().getTenantId(), authority.retirementId()));
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 3, authority.retirementId());
+            statement.setString(4, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.bindingId()));
+            JdbcRepositorySupport.setIdentity(statement, 5, original.bindingId());
+            statement.setLong(6, original.generation());
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !java.util.Arrays.equals(receipt, row.getBytes(1))
                         || !CsiNativeActivationProof.sha256(receipt).equals(row.getString(2)) || row.next()) {
@@ -98,13 +105,13 @@ public final class JdbcRuntimeSessionRepository
         if (saved.getState() != RuntimeSessionRecord.State.READY || saved.getVersion() == Long.MAX_VALUE) {
             throw new IllegalArgumentException("Original READY logical Session is required");
         }
-        try (var statement = connection.prepareStatement("UPDATE qwen_runtime_session SET session_state = 'RELEASED',"
+        try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET session_state = 'RELEASED',"
                 + " record_version = record_version + 1 WHERE scope_key = ? AND runtime_session_id = ?"
                 + " AND binding_id = ? AND runtime_generation = 1 AND session_state = 'READY' AND record_version = ?")) {
             statement.setQueryTimeout(10);
             statement.setString(1, JdbcRepositorySupport.scopeKey(original.request().getScope()));
-            statement.setString(2, original.request().getIsolationKey());
-            statement.setString(3, original.bindingId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.bindingId());
             statement.setLong(4, saved.getVersion());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Original logical Session completion failed");
@@ -115,12 +122,12 @@ public final class JdbcRuntimeSessionRepository
     static List<RuntimeSessionRecord> lockActiveSessions(Connection connection,
             RuntimeBindingRecord binding) throws SQLException {
         List<RuntimeSessionRecord> batch = new ArrayList<>();
-        String sql = "SELECT " + SESSION_COLUMNS + " FROM qwen_runtime_session "
+        String sql = "SELECT " + SESSION_COLUMNS + " FROM ma_runtime_session "
                 + "WHERE binding_id = ? AND runtime_generation = ? "
                 + "AND session_state NOT IN ('RELEASED', 'FAILED') "
                 + "ORDER BY scope_key, runtime_session_id LIMIT 100 FOR UPDATE";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, binding.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
@@ -138,12 +145,12 @@ public final class JdbcRuntimeSessionRepository
             Instant now) throws SQLException {
         for (RuntimeSessionRecord session : batch) {
             try (PreparedStatement statement = connection.prepareStatement(
-                    "UPDATE qwen_runtime_session SET session_state = 'RELEASED', "
+                    "UPDATE ma_runtime_session SET session_state = 'RELEASED', "
                             + "record_version = record_version + 1, last_active_at = ? "
                             + "WHERE scope_key = ? AND runtime_session_id = ?")) {
                 JdbcRepositorySupport.setInstant(statement, 1, now);
                 statement.setString(2, JdbcRepositorySupport.scopeKey(session.getSession().getScope()));
-                statement.setString(3, session.getRuntimeSessionId());
+                JdbcRepositorySupport.setIdentity(statement, 3, session.getRuntimeSessionId());
                 if (statement.executeUpdate() != 1) {
                     throw new SQLException("Lost Session release failed");
                 }
@@ -154,9 +161,9 @@ public final class JdbcRuntimeSessionRepository
     static boolean hasActiveByBinding(Connection connection, RuntimeBindingRecord binding)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT binding_id FROM qwen_runtime_session WHERE binding_id = ? "
+                "SELECT binding_id FROM ma_runtime_session WHERE binding_id = ? "
                         + "AND runtime_generation = ? AND session_state NOT IN ('RELEASED', 'FAILED')")) {
-            statement.setString(1, binding.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
@@ -241,10 +248,10 @@ public final class JdbcRuntimeSessionRepository
         return JdbcRepositorySupport.read(dataSource, connection -> {
             List<RuntimeSessionRecord> matches = new ArrayList<>();
             try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
-                    + " FROM qwen_runtime_session WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?")) {
-                statement.setString(1, tenantId);
-                statement.setString(2, harnessSessionId);
-                statement.setString(3, runtimeSessionId);
+                    + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+                JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
+                JdbcRepositorySupport.setIdentity(statement, 3, runtimeSessionId);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         var record = mapSession(rows);
@@ -303,7 +310,7 @@ public final class JdbcRuntimeSessionRepository
         RuntimeSessionRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);
         try (PreparedStatement statement = connection.prepareStatement(
-                "UPDATE qwen_runtime_session SET session_state = ?, "
+                "UPDATE ma_runtime_session SET session_state = ?, "
                         + "record_version = ?, last_active_at = ? "
                         + "WHERE scope_key = ? "
                         + "AND runtime_session_id = ?")) {
@@ -313,7 +320,7 @@ public final class JdbcRuntimeSessionRepository
                     updated.getLastActiveAt());
             statement.setString(4, JdbcRepositorySupport.scopeKey(
                     updated.getSession().getScope()));
-            statement.setString(5, updated.getRuntimeSessionId());
+            JdbcRepositorySupport.setIdentity(statement, 5, updated.getRuntimeSessionId());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Runtime Session update failed");
             }
@@ -330,11 +337,11 @@ public final class JdbcRuntimeSessionRepository
         return JdbcRepositorySupport.read(dataSource, connection -> {
             List<RuntimeSessionRecord> result = new ArrayList<>();
             try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
-                    + " FROM qwen_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
+                    + " FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
                     + " AND runtime_session_id > ? ORDER BY runtime_session_id LIMIT ?")) {
-                statement.setString(1, bindingId);
+                JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
                 statement.setLong(2, generation);
-                statement.setString(3, afterSessionId == null ? "" : afterSessionId);
+                JdbcRepositorySupport.setIdentity(statement, 3, afterSessionId == null ? "" : afterSessionId);
                 statement.setInt(4, limit);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
@@ -356,12 +363,12 @@ public final class JdbcRuntimeSessionRepository
         }
         return JdbcRepositorySupport.read(dataSource, connection -> {
             long count = 0;
-            String sql = "SELECT binding_id FROM qwen_runtime_session "
+            String sql = "SELECT binding_id FROM ma_runtime_session "
                     + "WHERE binding_id = ? AND runtime_generation = ? "
                     + "AND session_state NOT IN ('RELEASED', 'FAILED')";
             try (PreparedStatement statement = connection.prepareStatement(
                     sql)) {
-                statement.setString(1, id);
+                JdbcRepositorySupport.setIdentity(statement, 1, id);
                 statement.setLong(2, runtimeGeneration);
                 try (ResultSet result = statement.executeQuery()) {
                     while (result.next()) {
@@ -385,7 +392,7 @@ public final class JdbcRuntimeSessionRepository
             RuntimeScope scope, String runtimeSessionId, boolean forUpdate,
             int queryTimeout) throws SQLException {
         String sql = "SELECT " + SESSION_COLUMNS
-                + " FROM qwen_runtime_session WHERE scope_key = ? "
+                + " FROM ma_runtime_session WHERE scope_key = ? "
                 + "AND runtime_session_id = ?"
                 + (forUpdate ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -393,7 +400,7 @@ public final class JdbcRuntimeSessionRepository
                 statement.setQueryTimeout(queryTimeout);
             }
             statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
-            statement.setString(2, runtimeSessionId);
+            JdbcRepositorySupport.setIdentity(statement, 2, runtimeSessionId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     return null;
@@ -412,22 +419,22 @@ public final class JdbcRuntimeSessionRepository
 
     static void insertSession(Connection connection,
             RuntimeSessionRecord record) throws SQLException {
-        String sql = "INSERT INTO qwen_runtime_session (" + SESSION_COLUMNS
+        String sql = "INSERT INTO ma_runtime_session (" + SESSION_COLUMNS
                 + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         RuntimeSession session = record.getSession();
         RuntimeScope scope = session.getScope();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
-            statement.setString(2, session.getRuntimeSessionId());
-            statement.setString(3, scope.getTenantId());
-            statement.setString(4, scope.getWorkspaceId());
-            statement.setString(5, scope.getWorkspaceGeneration());
+            JdbcRepositorySupport.setIdentity(statement, 2, session.getRuntimeSessionId());
+            JdbcRepositorySupport.setIdentity(statement, 3, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 4, scope.getWorkspaceId());
+            JdbcRepositorySupport.setIdentity(statement, 5, scope.getWorkspaceGeneration());
             statement.setString(6, scope.getCanonicalCwd());
-            statement.setString(7, scope.getCapabilityDigest());
+            JdbcRepositorySupport.setIdentity(statement, 7, scope.getCapabilityDigest());
             statement.setString(8, scope.getIsolationClass());
-            statement.setString(9, session.getHarnessSessionId());
+            JdbcRepositorySupport.setIdentity(statement, 9, session.getHarnessSessionId());
             statement.setString(10, session.getTurnKind());
-            statement.setString(11, record.getBindingId());
+            JdbcRepositorySupport.setIdentity(statement, 11, record.getBindingId());
             statement.setLong(12, record.getRuntimeGeneration());
             statement.setString(13, record.getState().name());
             statement.setLong(14, record.getVersion());

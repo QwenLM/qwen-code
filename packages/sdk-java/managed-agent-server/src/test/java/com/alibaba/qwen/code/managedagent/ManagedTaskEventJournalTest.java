@@ -63,7 +63,7 @@ class ManagedTaskEventJournalTest {
             if (taskId == null) {
                 taskId = jdbc.queryForObject(
                         "SELECT CONCAT('task_', record_key) FROM"
-                                + " qwen_managed_session_extension_record"
+                                + " ma_session_record"
                                 + " WHERE tenant_id = ? AND session_id = ?",
                         String.class, TENANT, sessionId);
             }
@@ -78,11 +78,11 @@ class ManagedTaskEventJournalTest {
         }
         // A cursor is pure durable state: a rebuild derives the same string.
         TaskEvent first = page.events().getFirst();
-        assertThat(ManagedTaskEventStore.encodeCursor(taskId,
+        assertThat(ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId,
                 first.sequence())).isEqualTo(
-                ManagedTaskEventStore.encodeCursor(taskId, 1));
-        assertThat(ManagedTaskEventStore.decodeCursor(taskId,
-                ManagedTaskEventStore.encodeCursor(taskId,
+                ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 1));
+        assertThat(ManagedTaskEventStore.decodeCursor(TENANT, sessionId, taskId,
+                ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId,
                         first.sequence()))).isEqualTo(first.sequence());
         // The first revision's view opens the task; a settled chain end
         // shows the terminal state of the last committed revision.
@@ -250,12 +250,9 @@ class ManagedTaskEventJournalTest {
         events.appendArtifact(TENANT, sessionId, taskId, "artifact-a", 1);
         // The clobber the old write shape could carry: a writer holding the
         // outdated empty list. The compare-and-set latch must refuse it.
-        int rewritten = jdbc.update("UPDATE"
-                        + " qwen_managed_session_task_journal_cursor"
-                        + " SET artifact_refs = ? WHERE tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?"
-                        + " AND artifact_refs = ?",
-                "[\"artifact-b\"]", TENANT, sessionId, taskId, "[]");
+        int rewritten = jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key=NULL WHERE tenant_id=? AND session_id=?"
+                        + " AND stream_kind='TASK' AND stream_id=? AND artifact_refs_resource_key IS NULL",
+                TENANT, sessionId, taskId);
         assertThat(rewritten).isZero();
         assertThat(events.positions(TENANT, sessionId,
                 taskId).artifactRefs()).containsExactly("artifact-a");
@@ -306,7 +303,7 @@ class ManagedTaskEventJournalTest {
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         String deleting = session(true);
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETING'"
+        jdbc.update("UPDATE ma_session SET status = 'DELETING'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT,
                 deleting);
         assertThatThrownBy(() -> events.appendOutput(TENANT, deleting,
@@ -389,7 +386,7 @@ class ManagedTaskEventJournalTest {
         if (workspaceBound) {
             // The binding reader verifies the descriptor digest over the
             // persisted config and policy references.
-            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+            jdbc.update("INSERT INTO ma_session (tenant_id,"
                             + " session_id, agent_id, status, created_at,"
                             + " updated_at, workspace_id,"
                             + " workspace_generation, workspace_storage_id,"
@@ -403,7 +400,7 @@ class ManagedTaskEventJournalTest {
                     "sha256:" + ExtensionRecordJournal.sha256(
                             "config\u0000policy"));
         } else {
-            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+            jdbc.update("INSERT INTO ma_session (tenant_id,"
                             + " session_id, agent_id, status, created_at,"
                             + " updated_at) VALUES"
                             + " (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",

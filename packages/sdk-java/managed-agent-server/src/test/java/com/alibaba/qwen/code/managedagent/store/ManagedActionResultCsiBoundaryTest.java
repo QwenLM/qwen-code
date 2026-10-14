@@ -19,7 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,8 +42,8 @@ class ManagedActionResultCsiBoundaryTest {
     void setUp() {
         var data = new DriverManagerDataSource("jdbc:h2:mem:csi-action-result-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(data);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(data);
+        jdbc = new ManagedSchemaJdbcTemplate(data);
         var manager = new DataSourceTransactionManager(data);
         transaction = new TransactionTemplate(manager);
         var properties = new ManagedAgentProperties();
@@ -52,11 +51,11 @@ class ManagedActionResultCsiBoundaryTest {
         var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         new WorkspaceCsiReservationStore(jdbc, manager, JSON).register(registration);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         privateSession = WorkspaceCsiSessionMain.create(jdbc, manager, JSON, properties,
                 new WorkspaceCsiSessionMain.Request(registration, "actor", "original", null, null,
@@ -78,8 +77,8 @@ class ManagedActionResultCsiBoundaryTest {
             seedResult(privateSession, "private-" + state, state);
         }
         seedHead(privateSession);
-        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'ordinary' WHERE session_id = ?", privateSession);
-        assertThat(jdbc.queryForObject("SELECT csi_guard FROM managed_agent_session WHERE session_id = ?",
+        jdbc.update("UPDATE ma_session SET tool_profile = 'ordinary' WHERE session_id = ?", privateSession);
+        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session WHERE session_id = ?",
                 Boolean.class, privateSession)).isTrue();
         var before = tables();
         results.captureEvents("tenant", "workspace", privateSession, 1, List.of(receipt(privateSession)));
@@ -87,7 +86,7 @@ class ManagedActionResultCsiBoundaryTest {
         assertThat(results.claim()).isEmpty();
         for (String state : List.of("PENDING", "RETRYABLE", "LEASED", "UNSUPPORTED", "SUPPRESSED", "QUARANTINED", "READY")) {
             var source = JSON.convertValue(ManagedToolResultStore.parse(jdbc.queryForObject(
-                    "SELECT source_json FROM managed_agent_tool_result WHERE result_id = ?", String.class,
+                    "SELECT request_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?", String.class,
                     "private-" + state)), ManagedToolResultStore.Source.class);
             var claim = new ManagedToolResultStore.Claim(source, 1);
             results.fail(claim, "RETRYABLE", "late-callback");
@@ -103,9 +102,9 @@ class ManagedActionResultCsiBoundaryTest {
         var forged = new ManagedToolResultStore.Source(original.id(), "ordinary-tenant", "ordinary-workspace",
                 "ordinary-session", original.executionCallId(), 1, 1, JSON.nullNode(), JSON.nullNode(),
                 JSON.createArrayNode(), original.sourceDigest());
-        jdbc.update("UPDATE managed_agent_tool_result SET source_json = ? WHERE result_id = ?",
+        jdbc.update("UPDATE ma_operation SET request_json = ? WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
                 JSON.valueToTree(forged).toString(), original.id());
-        jdbc.update("DELETE FROM qwen_tool_publication_tenant");
+        jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
         var data = mock(ToolPublicationDataStore.class);
         var reader = mock(ManagedArtifactReader.class);
         var policy = mock(ManagedArtifactPolicy.class);
@@ -140,8 +139,8 @@ class ManagedActionResultCsiBoundaryTest {
                 .containsExactly("ordinary-op");
         assertThat(results.claim().orElseThrow().source()).isEqualTo(ordinary);
         results.backfillOnePage();
-        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM qwen_managed_session_journal_head"
-                + " WHERE session_id = 'z-journal-only'", Boolean.class)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM ma_session_head"
+                + " WHERE session_id = X'7a2d6a6f75726e616c2d6f6e6c79'", Boolean.class)).isFalse();
         assertThat(privateRows()).isEqualTo(privateBefore);
     }
 
@@ -170,10 +169,11 @@ class ManagedActionResultCsiBoundaryTest {
             String session = "ordinary-" + retired;
             var source = seedResult(session, session, "LEASED");
             if (retired) {
-                jdbc.update("INSERT INTO qwen_output_session_retirement (tenant_key, session_key, tenant_id,"
-                        + " session_id, operation_id, generation, retired_at, recovery_protected) VALUES (?, ?,"
-                        + " 'tenant', ?, 'retirement', 1, 0, FALSE)", ToolPublicationRetentionStore.hash("tenant"),
+                jdbc.update("INSERT INTO ma_session (tenant_key, session_key, tenant_id, session_id, session_kind,"
+                        + " retirement_operation_id, retirement_generation, retired_at, recovery_protected, created_at, updated_at)"
+                        + " VALUES (?, ?, 'tenant', ?, 'CONTROL', 'retirement', 1, 0, FALSE, 0, 0)", ToolPublicationRetentionStore.hash("tenant"),
                         ToolPublicationRetentionStore.hash(session), session);
+
             }
             var conflicting = new ManagedToolResultStore.Source(source.id(), source.tenantId(), source.workspaceId(),
                     "foreign", source.executionCallId(), 1, 1, source.outcomeRef(), source.resultRef(),
@@ -185,7 +185,7 @@ class ManagedActionResultCsiBoundaryTest {
             assertThatThrownBy(() -> results.admitsLegacyProjection(claim)).hasMessageContaining("source conflicts");
             assertThat(tables()).isEqualTo(before);
             assertThat(results.complete(new ManagedToolResultStore.Claim(source, 1), projection(), "policy")).isFalse();
-            assertThat(jdbc.queryForMap("SELECT work_state, failure_code FROM managed_agent_tool_result WHERE result_id = ?",
+            assertThat(jdbc.queryForMap("SELECT state AS work_state, failure_code FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
                     source.id())).containsEntry("work_state", retired ? "SUPPRESSED" : "RETRYABLE")
                     .containsEntry("failure_code", retired ? "session_retired" : "projection_claim_lapsed");
         }
@@ -199,38 +199,48 @@ class ManagedActionResultCsiBoundaryTest {
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("owns its scheduler transactions");
         assertThat(tables()).isEqualTo(before);
         results.backfillOnePage();
-        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM qwen_managed_session_journal_head", Boolean.class)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM ma_session_head", Boolean.class)).isFalse();
     }
 
     private ManagedToolResultStore.Source seedResult(String session, String id, String state) {
         // Explicit historical legacy work, not original native membership.
         var source = new ManagedToolResultStore.Source(id, "tenant", "workspace", session, "execution-" + id,
                 1, 1, JSON.nullNode(), JSON.nullNode(), JSON.createArrayNode(), "a".repeat(64));
-        jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id, workspace_id,"
-                + " session_id, source_json, source_digest, work_state, claim_generation, claim_until)"
-                + " VALUES (?, ?, ?, 'tenant', 'workspace', ?, ?, ?, ?, 1, 0)", id,
-                ManagedToolResultStore.scope("tenant", session), ManagedToolResultStore.identity("execution", id).substring(10),
+        String scope = ManagedToolResultStore.scope("tenant", session);
+        String execution = ManagedToolResultStore.identity("execution", source.executionCallId()).substring(10);
+        String key = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION, scope, execution, id);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id,"
+                + " target_kind, target_key, execution_key, tenant_id, workspace_id, session_id, request_json, request_digest,"
+                + " phase, state, claim_generation, claim_until, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'TOOL_EXECUTION', ?, ?, 'tenant', 'workspace', ?, ?, ?,"
+                + " 'PROJECTING', ?, 1, FROM_UNIXTIME(0), 0, 0)", key, scope, scope, id, execution, execution,
                 session, JSON.valueToTree(source).toString(), source.sourceDigest(), state);
         return source;
     }
 
     private void seedHead(String session) {
-        jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id, workspace_id, session_id, storage_version,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                 + " state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision,"
-                + " recovery_status, created_at, updated_at) VALUES ('tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
-                + " 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", session);
+                + " recovery_status, created_at, updated_at) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
+                + " 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session);
     }
 
     private void insertOrdinarySession(String session) {
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at)"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at)"
                 + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 0, 0)", session);
     }
 
     private void seedOperation(String session, String id, String delivery, long available) {
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before, lease_owner,"
-                + " lease_until, claim_generation, available_at, created_at, updated_at) VALUES ('tenant', ?, ?, 'ACTION_RESPONSE',"
-                + " '', ?, 'digest', 'PENDING', 'ADMITTED', ?, 'ACTIVE', 'owner', 0, 1, ?, 0, 0)", session, id, id, delivery, available);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        String target = WorkspaceOperations.hash(session);
+        String key = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.ACTION_RESPONSE, scope, target, id);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, target_id, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, idempotency_digest, request_digest, request_json, state, phase, admission_stage, delivery_state, session_status_before, claim_owner,"
+                + " claim_until, claim_generation, available_at, created_at, updated_at) VALUES (?, ?, ?, 'SESSION', ?, ?, 'tenant', ?, ?, 'ACTION_RESPONSE',"
+                + " '', ?, ?, 'digest', '{}', 'PENDING', 'PENDING', 'ADMITTED', ?, 'ACTIVE', 'owner', FROM_UNIXTIME(0), 1, ?, 0, 0)",
+                key, scope, scope, target, session, session, id, id, WorkspaceOperations.hash(id), delivery, available);
     }
 
     private JsonNode receipt(String session) {
@@ -258,13 +268,13 @@ class ManagedActionResultCsiBoundaryTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, JSON.valueToTree(rows));
         }
-        assertThat(result).hasSize(67);
+        assertThat(result).hasSize(35);
         return result;
     }
 
     private Map<String, JsonNode> privateRows() {
         var result = new TreeMap<String, JsonNode>();
-        for (String table : List.of("managed_agent_tool_result", "managed_agent_operation", "qwen_managed_session_journal_head")) {
+        for (String table : List.of("ma_operation", "ma_session_head")) {
             var rows = jdbc.queryForList("SELECT * FROM " + table + " WHERE session_id = ?", privateSession);
             rows.forEach(row -> row.replaceAll((column, value) -> value instanceof java.sql.Timestamp timestamp ? timestamp.toString() : value));
             result.put(table, JSON.valueToTree(rows));

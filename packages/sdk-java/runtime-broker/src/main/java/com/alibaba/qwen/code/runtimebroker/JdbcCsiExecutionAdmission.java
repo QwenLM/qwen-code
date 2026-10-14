@@ -38,12 +38,12 @@ public final class JdbcCsiExecutionAdmission {
                     .contains(resource.kind()));
         }
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT * FROM qwen_tool_execution WHERE binding_id = ? OR harness_session_id = ? OR runtime_session_id = ?"
+                "SELECT * FROM ma_tool_execution WHERE binding_id = ? OR harness_session_id = ? OR runtime_session_id = ?"
                         + " ORDER BY execution_call_id_hash LIMIT 4097 FOR UPDATE")) {
             statement.setQueryTimeout(10);
-            statement.setString(1, original.bindingId());
-            statement.setString(2, original.request().getIsolationKey());
-            statement.setString(3, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getIsolationKey());
             try (ResultSet rows = statement.executeQuery()) {
                 int count = 0;
                 while (rows.next()) {
@@ -88,9 +88,11 @@ public final class JdbcCsiExecutionAdmission {
                 CsiNativeToolReservation.inventory(connection, original, read), false, 0, 0, read);
         long revision;
         try (var statement = read.statement(connection,
-                "SELECT journal_revision FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
+                "SELECT journal_revision FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'")) {
+            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
                 require(row.next());
                 revision = Math.subtractExact(row.getLong(1), 1L);
@@ -227,11 +229,11 @@ public final class JdbcCsiExecutionAdmission {
             return null;
         }
         try (PreparedStatement statement = connection.prepareStatement(
-                "UPDATE qwen_tool_execution SET native_authorization_json = ? WHERE execution_call_id_hash = ?"
+                "UPDATE ma_tool_execution SET native_authorization_json = ? WHERE execution_call_id_hash = ?"
                         + " AND execution_call_id = ? AND native_authorization_json IS NULL")) {
             statement.setString(1, canonical(JSON.valueToTree(grant)));
             statement.setString(2, JdbcRepositorySupport.valueKey(expected.getExecutionCallId()));
-            statement.setString(3, expected.getExecutionCallId());
+            JdbcRepositorySupport.setIdentity(statement, 3, expected.getExecutionCallId());
             require(statement.executeUpdate() == 1);
         }
         return authorized;
@@ -287,7 +289,7 @@ public final class JdbcCsiExecutionAdmission {
             JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         String saved;
         try (PreparedStatement statement = read.statement(connection,
-                "SELECT execution_call_id, native_authorization_json FROM qwen_tool_execution WHERE execution_call_id_hash = ?")) {
+                "SELECT execution_call_id, native_authorization_json FROM ma_tool_execution WHERE execution_call_id_hash = ?")) {
             statement.setString(1, JdbcRepositorySupport.valueKey(execution.getExecutionCallId()));
             try (ResultSet row = statement.executeQuery()) {
                 require(row.next() && execution.getExecutionCallId().equals(row.getString(1)));
@@ -437,11 +439,11 @@ public final class JdbcCsiExecutionAdmission {
             long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         DispatchCheckpoint result = null;
         try (PreparedStatement statement = read.statement(connection,
-                "SELECT * FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                         + " AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY journal_revision")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
-            statement.setString(3, original.request().getScope().getWorkspaceId());
+            JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getWorkspaceId());
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     if (!rows.getString("command_id").startsWith("harness:await_runtime:")) {
@@ -484,11 +486,11 @@ public final class JdbcCsiExecutionAdmission {
             RuntimeBindingRecord binding, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT s.tenant_id, s.workspace_id, s.workspace_generation, s.workspace_storage_id, s.cwd_relative, s.context_config_ref, s.context_revision,"
-                        + " b.resource_handle_version, b.resource_handle_json FROM managed_agent_session s JOIN qwen_runtime_binding b ON b.binding_id = ?"
+                        + " b.resource_handle_version, b.resource_handle_json FROM ma_session s JOIN ma_runtime_binding b ON b.binding_id = ?"
                         + " WHERE s.tenant_id = ? AND s.session_id = ?")) {
-            statement.setString(1, original.bindingId());
-            statement.setString(2, original.request().getScope().getTenantId());
-            statement.setString(3, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getIsolationKey());
             try (ResultSet row = statement.executeQuery()) {
                 require(row.next());
                 var installed = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(

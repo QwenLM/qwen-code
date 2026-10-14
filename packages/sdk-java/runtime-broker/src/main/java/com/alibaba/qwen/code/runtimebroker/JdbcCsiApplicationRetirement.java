@@ -74,10 +74,10 @@ public final class JdbcCsiApplicationRetirement {
         Long ceiling = JdbcCsiRetirementSeal.lock(connection, original);
         require(ceiling != null);
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM managed_workspace_csi_retirement WHERE binding_id = ? AND runtime_generation = 1 FOR UPDATE")) {
-            statement.setString(1, bindingId);
+                "SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' FOR UPDATE")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("CSI_RETIREMENT", tenantId, retirementId));
             try (var row = statement.executeQuery()) {
-                require(row.next() && retirementId.equals(row.getString("retirement_id"))
+                require(row.next() && retirementId.equals(row.getString("operation_id"))
                         && "qwen-csi-application-retirement/1".equals(row.getString("progress_format")));
                 Stage stage;
                 try {
@@ -89,7 +89,7 @@ public final class JdbcCsiApplicationRetirement {
                 long deadline = row.getLong("settlement_deadline_ms");
                 require(!row.wasNull() && deadline > 0);
                 try {
-                    var identity = CsiNativeActivationProof.readObject(row.getBytes("identity_json"));
+                    var identity = CsiNativeActivationProof.readObject(JdbcCsiRetirementSeal.operationIdentity(row, original).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     require(deadline == Math.addExact(Instant.parse(identity.path("startedAt").textValue()).toEpochMilli(), 300_000));
                 } catch (RuntimeException malformed) {
                     throw unavailable();
@@ -118,10 +118,12 @@ public final class JdbcCsiApplicationRetirement {
             JdbcCsiActivationAdmission.lockRetirementPredecessor(connection, authority);
         }
         try (var statement = statement(connection,
-                "SELECT workspace_id, state, activation_phase FROM qwen_managed_session_journal_head"
-                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
+                "SELECT workspace_id, state, activation_phase FROM ma_session_head"
+                        + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE")) {
+            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
                 require(row.next() && original.request().getScope().getWorkspaceId().equals(row.getString("workspace_id"))
                         && (terminal ? "SEALED" : "ACTIVE").equals(row.getString("state"))
@@ -129,11 +131,11 @@ public final class JdbcCsiApplicationRetirement {
             }
         }
         try (var statement = statement(connection,
-                "SELECT * FROM qwen_runtime_session WHERE binding_id = ? OR"
+                "SELECT * FROM ma_runtime_session WHERE binding_id = ? OR"
                         + " (tenant_id = ? AND harness_session_id = ?) ORDER BY scope_key, runtime_session_id FOR UPDATE")) {
-            statement.setString(1, original.bindingId());
-            statement.setString(2, original.request().getScope().getTenantId());
-            statement.setString(3, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
                 require(row.next() && original.bindingId().equals(row.getString("binding_id"))
                         && row.getLong("runtime_generation") == 1

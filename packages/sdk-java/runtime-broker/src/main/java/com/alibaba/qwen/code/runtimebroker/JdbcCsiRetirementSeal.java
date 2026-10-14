@@ -31,20 +31,21 @@ final class JdbcCsiRetirementSeal {
 
     static Long lock(Connection connection, JdbcCsiFilesRetirementGuard.Original original) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT retirement_id, physical_key, phase, identity_json FROM managed_workspace_csi_retirement"
-                        + " WHERE binding_id = ? AND runtime_generation = ? FOR UPDATE")) {
-            statement.setString(1, original.bindingId());
+                "SELECT * FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'"
+                        + " AND target_key = ? AND target_revision = ? AND tenant_id = ? FOR UPDATE")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.bindingId()));
             statement.setLong(2, original.generation());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             try (var row = statement.executeQuery()) {
                 if (!row.next()) {
                     require(original.state() == RuntimeBindingRecord.State.READY && !original.draining());
                     return null;
                 }
-                String encoded = row.getString("identity_json");
+                String encoded = operationIdentity(row, original);
                 require(encoded != null && encoded.length() <= 256 * 1024
                         && encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 256 * 1024);
                 require(original.state() == RuntimeBindingRecord.State.DRAINING && original.draining());
-                Identity identity = identity(encoded, original, row.getString("retirement_id"),
+                Identity identity = identity(encoded, original, row.getString("operation_id"),
                         row.getString("physical_key"), row.getString("phase"));
                 require(!row.next());
                 verifyAssociation(connection, original, identity);
@@ -60,17 +61,17 @@ final class JdbcCsiRetirementSeal {
         read.requireHistorical(connection);
         require(frozenBytes != null && frozenBytes.length > 0 && frozenBytes.length <= 32 * 1024 * 1024);
         try (var statement = read.statement(connection,
-                "SELECT retirement_id, physical_key, phase, identity_json, progress_format, progress_version,"
-                        + " progress_stage, settlement_deadline_ms, frozen_request_bytes, frozen_request_sha256"
-                        + " FROM managed_workspace_csi_retirement WHERE binding_id = ? AND runtime_generation = ?")) {
-            statement.setString(1, original.bindingId());
+                "SELECT * FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'"
+                        + " AND target_key = ? AND target_revision = ? AND tenant_id = ?")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.bindingId()));
             statement.setLong(2, original.generation());
+            JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             try (var row = statement.executeQuery()) {
                 require(row.next() && "qwen-csi-application-retirement/1".equals(row.getString("progress_format"))
                         && row.getLong("progress_version") == 4 && "DRAINED".equals(row.getString("progress_stage")));
-                String encoded = row.getString("identity_json");
+                String encoded = operationIdentity(row, original);
                 require(encoded != null && encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 256 * 1024);
-                Identity identity = identity(encoded, original, row.getString("retirement_id"),
+                Identity identity = identity(encoded, original, row.getString("operation_id"),
                         row.getString("physical_key"), row.getString("phase"));
                 require(original.draining() && (original.state() == RuntimeBindingRecord.State.DRAINING
                         || original.state() == RuntimeBindingRecord.State.RELEASED)
@@ -98,6 +99,37 @@ final class JdbcCsiRetirementSeal {
         }
     }
 
+    static String operationIdentity(java.sql.ResultSet row, JdbcCsiFilesRetirementGuard.Original original)
+            throws SQLException {
+        String encoded = row.getString("request_json");
+        String result = row.getString("result_json");
+        String tenant = original.request().getScope().getTenantId();
+        String operation = row.getString("operation_id");
+        require(encoded != null && encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 256 * 1024
+                && result != null && result.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 1024 * 1024);
+        var envelope = CsiNativeActivationProof.readObject(result.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var data = envelope.path("data");
+        require(envelope.size() == 2 && CsiNativeActivationProof.number(envelope.get("schemaVersion")) == 1
+                && data.isObject() && data.size() == 5 && encoded.equals(data.path("identity_json").textValue())
+                && original.bindingId().equals(data.path("binding_id").textValue())
+                && CsiNativeActivationProof.number(data.get("runtime_generation")) == original.generation()
+                && original.request().getStorageId().equals(data.path("storage_id").textValue())
+                && row.getString("physical_key").equals(data.path("physical_key").textValue())
+                && "CSI_RETIREMENT".equals(row.getString("operation_kind"))
+                && "RUNTIME_BINDING".equals(row.getString("target_kind"))
+                && "DRAINING".equals(row.getString("phase")) && "DRAINING".equals(row.getString("state"))
+                && row.getInt("payload_version") == 1
+                && java.util.Arrays.equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(tenant), row.getBytes("tenant_id"))
+                && java.util.Arrays.equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(original.bindingId()), row.getBytes("target_id"))
+                && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.bindingId()).equals(row.getString("target_key"))
+                && row.getLong("target_revision") == original.generation() && !row.wasNull()
+                && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant).equals(row.getString("scope_key"))
+                && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("CSI_RETIREMENT", tenant, operation).equals(row.getString("operation_key"))
+                && JdbcRuntimeBindingRepository.storageAliasKey(tenant, original.request().getStorageId()).equals(row.getString("storage_key"))
+                && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(encoded).equals(row.getString("request_digest")));
+        return encoded;
+    }
+
     private static Identity identity(String encoded, JdbcCsiFilesRetirementGuard.Original original,
             String retirement, String physical, String phase) throws IOException {
         Identity identity = JSON.readValue(encoded, Identity.class);
@@ -115,7 +147,7 @@ final class JdbcCsiRetirementSeal {
         try (PreparedStatement statement = statement(connection,
                 "SELECT storage_kind, csi_phase, csi_revision, csi_reservation_id, csi_registration_key,"
                         + " csi_registration_revision, binding_id, runtime_generation, csi_provision_request_id"
-                        + " FROM managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE")) {
+                        + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
             statement.setString(1, identity.physicalKey());
             try (var row = statement.executeQuery()) {
                 require(row.next() && "CSI".equals(row.getString("storage_kind"))
@@ -144,8 +176,8 @@ final class JdbcCsiRetirementSeal {
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT provisioner_kind, provision_request_id, resource_handle_version, resource_handle_json,"
                         + " runtime_instance_id, runtime_lease_id, runtime_epoch, attestation_generation"
-                        + " FROM qwen_runtime_binding WHERE binding_id = ?")) {
-            statement.setString(1, original.bindingId());
+                        + " FROM ma_runtime_binding WHERE binding_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
             try (var row = statement.executeQuery()) {
                 require(row.next() && identity.resourceHandleKind().equals(row.getString("provisioner_kind"))
                         && identity.resourceHandleVersion() > 0
@@ -162,7 +194,7 @@ final class JdbcCsiRetirementSeal {
         }
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT tenant_id, storage_id, physical_key, registration_revision"
-                        + " FROM managed_workspace_csi_registration WHERE alias_key = ?")) {
+                        + " FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED'")) {
             statement.setString(1, reservation.registrationKey());
             try (var row = statement.executeQuery()) {
                 require(row.next() && original.request().getScope().getTenantId().equals(row.getString("tenant_id"))

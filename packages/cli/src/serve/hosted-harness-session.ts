@@ -7224,7 +7224,15 @@ export function registerHostedHarnessSessionRoutes(
     const body = object(req.body);
     const operationId = body?.['operationId'];
     const kind = body?.['kind'];
-    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+    const reconciliation =
+      typeof operationId === 'string' &&
+      kind === 'settle_delivery' &&
+      body?.['outcome'] === 'unknown' &&
+      /^channel-reconcile:[0-9a-f]{64}$/.test(operationId);
+    if (
+      typeof operationId !== 'string' ||
+      (!HOSTED_UUID.test(operationId) && !reconciliation)
+    ) {
       return error(res, 400, 'invalid_channel_operation');
     }
     const channels = session.channels;
@@ -7303,7 +7311,11 @@ export function registerHostedHarnessSessionRoutes(
           }
           result = {
             delivery: summary(
-              await channels.settle(deliveryId as string, outcome),
+              await channels.settle(
+                deliveryId as string,
+                outcome,
+                reconciliation ? operationId : undefined,
+              ),
             ),
           };
           break;

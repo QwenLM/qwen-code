@@ -63,10 +63,10 @@ public final class WorkspaceCsiPhysicalStore {
             var current = read(target, drained);
             if (current == null) {
                 current = WorkspaceCsiPhysicalProgress.planned(WorkspaceCsiApplicationJson.encode(expected));
-                try (var statement = target.prepareStatement("INSERT INTO managed_workspace_csi_physical"
+                try (var statement = target.prepareStatement("INSERT INTO ma_csi_physical"
                         + " (retirement_id,binding_id,physical_key,record_version,record_bytes,record_sha256) VALUES (?,?,?,?,?,?)")) {
                     statement.setString(1, current.retirementId());
-                    statement.setString(2, current.bindingId());
+                    statement.setBytes(2, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(current.bindingId()));
                     statement.setString(3, current.physicalKey());
                     statement.setLong(4, current.version());
                     statement.setBytes(5, current.bytes());
@@ -124,13 +124,13 @@ public final class WorkspaceCsiPhysicalStore {
             return;
         }
         require(next.version() == current.version() + 1);
-        try (var statement = target.prepareStatement("UPDATE managed_workspace_csi_physical SET record_version=?,record_bytes=?,record_sha256=?"
+        try (var statement = target.prepareStatement("UPDATE ma_csi_physical SET record_version=?,record_bytes=?,record_sha256=?"
                 + " WHERE retirement_id=? AND binding_id=? AND physical_key=? AND record_version=? AND record_sha256=? AND record_bytes=?")) {
             statement.setLong(1, next.version());
             statement.setBytes(2, next.bytes());
             statement.setString(3, next.sha256());
             statement.setString(4, current.retirementId());
-            statement.setString(5, current.bindingId());
+            statement.setBytes(5, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(current.bindingId()));
             statement.setString(6, current.physicalKey());
             statement.setLong(7, current.version());
             statement.setString(8, current.sha256());
@@ -176,10 +176,10 @@ public final class WorkspaceCsiPhysicalStore {
 
     private static java.sql.PreparedStatement catalogue(Connection target, String retirement, String binding, String physical) throws SQLException {
         require(target != null && !target.getAutoCommit());
-        var statement = target.prepareStatement("SELECT * FROM managed_workspace_csi_physical WHERE retirement_id=? OR binding_id=?"
+        var statement = target.prepareStatement("SELECT * FROM ma_csi_physical WHERE retirement_id=? OR binding_id=?"
                 + " OR physical_key=? ORDER BY retirement_id LIMIT 2 FOR UPDATE");
         statement.setString(1, retirement);
-        statement.setString(2, binding);
+        statement.setBytes(2, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(binding));
         statement.setString(3, physical);
         return statement;
     }
@@ -192,7 +192,7 @@ public final class WorkspaceCsiPhysicalStore {
             require(COLUMNS.get(index).equals(metadata.getColumnName(index + 1).toLowerCase(java.util.Locale.ROOT))
                     && switch (index) {
                         case 0, 2, 5 -> type == Types.CHAR;
-                        case 1 -> type == Types.VARCHAR;
+                        case 1 -> type == Types.VARBINARY;
                         case 3 -> type == Types.BIGINT;
                         case 4 -> type == Types.BLOB || type == Types.LONGVARBINARY;
                         default -> false;
@@ -235,12 +235,12 @@ public final class WorkspaceCsiPhysicalStore {
         value.put("drainedInventorySha256", hash(inventory.bytes()));
         value.put("ownershipReleaseInventorySha256", hash(WorkspaceCsiPhysicalReleaseImage.expected(inventory).bytes()));
         value.put("historicalReleaseInventorySha256", hash(WorkspaceCsiPhysicalHistoryImage.expected(inventory).bytes()));
-        value.put("identitySha256", hash(WorkspaceCsiApplicationImage.sole(inventory, "managed_workspace_csi_retirement").cell("identity_json").bytes()));
+        value.put("identitySha256", hash(WorkspaceCsiApplicationImage.sole(inventory, "ma_operation").cell("request_json").bytes()));
         value.put("baselineSha256", hash(WorkspaceCsiApplicationImage.baseline(frozen).bytes()));
         value.put("frozenRequestSha256", hash(frozen));
         value.put("cutSha256", hash(cut));
         value.put("finalizeReceiptSha256", hash(receipt));
-        value.put("sourceRowSha256", hash(WorkspaceCsiApplicationImage.sole(inventory, "managed_workspace_csi_source").bytes()));
+        value.put("sourceRowSha256", hash(WorkspaceCsiApplicationImage.sole(inventory, "ma_csi_source").bytes()));
         value.put("sourceConfigurationBase64", java.util.Base64.getEncoder().encodeToString(WorkspaceCsiApplicationJson.encode(source.configuration())));
         value.put("sourceScope", observed.scope());
         value.put("publicationSha256", hash(source.publication().bytes()));

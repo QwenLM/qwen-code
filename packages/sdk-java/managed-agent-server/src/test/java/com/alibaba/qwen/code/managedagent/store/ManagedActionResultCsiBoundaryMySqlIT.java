@@ -21,7 +21,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -42,20 +41,20 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                     "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
             new WorkspaceCsiReservationStore(fixture.jdbc, fixture.manager, JSON).register(registration);
-            fixture.jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            fixture.jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                     + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                     CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-            fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             String session = WorkspaceCsiSessionMain.create(fixture.jdbc, fixture.manager, JSON, fixture.properties,
                     new WorkspaceCsiSessionMain.Request(registration, "actor", "original", null, null,
                             new WorkspaceSelection("workspace", "."))).sessionId();
             var source = fixture.seedResult(session, "historical-private", "LEASED");
-            fixture.jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id, workspace_id, session_id, storage_version,"
+            fixture.jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                     + " state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision,"
-                    + " recovery_status, created_at, updated_at) VALUES ('tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
-                    + " 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", session);
+                    + " recovery_status, created_at, updated_at) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'workspace', ?, 1, 'ACTIVE', 1, 0, 0, 0, 0,"
+                    + " 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session);
             var claim = new ManagedToolResultStore.Claim(source, 1);
             var before = fixture.tables();
             fixture.waitAtParent(session, () -> {
@@ -80,7 +79,7 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             var ready = new CountDownLatch(2);
             var start = new CountDownLatch(1);
             Callable<java.util.Optional<ManagedToolResultStore.Claim>> callback = () -> fixture.transaction.execute(status -> {
-                fixture.jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Integer.class);
+                fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class);
                 ready.countDown();
                 await(start);
                 return fixture.results.claim();
@@ -93,7 +92,7 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                     .stream().flatMap(java.util.Optional::stream).toList();
             assertThat(winners).hasSize(1);
             assertThat(winners.getFirst()).isEqualTo(new ManagedToolResultStore.Claim(source, 2));
-            assertThat(fixture.jdbc.queryForMap("SELECT work_state, claim_generation, attempts FROM managed_agent_tool_result"))
+            assertThat(fixture.jdbc.queryForMap("SELECT state AS work_state, claim_generation, attempt_count AS attempts FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'"))
                     .containsEntry("work_state", "LEASED").containsEntry("claim_generation", 2L).containsEntry("attempts", 1);
         }
     }
@@ -129,8 +128,8 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             admin.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4");
             data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
             try {
-                Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
-                jdbc = new JdbcTemplate(data);
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(data);
+                jdbc = new ManagedSchemaJdbcTemplate(data);
                 manager = new DataSourceTransactionManager(data);
                 transaction = new TransactionTemplate(manager);
                 transaction.setIsolationLevel(isolation);
@@ -148,8 +147,8 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             try (var pool = Executors.newSingleThreadExecutor(); var owner = data.getConnection()) {
                 owner.setAutoCommit(false);
                 try {
-                    try (var query = owner.prepareStatement("SELECT csi_guard FROM managed_agent_session"
-                            + " FORCE INDEX (managed_session_csi_guard_idx)"
+                    try (var query = owner.prepareStatement("SELECT csi_guard FROM ma_session"
+                            + " FORCE INDEX (ix_ma_session_csi_guard)"
                             + " WHERE tenant_id = 'tenant' AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
                         query.setString(1, session);
                         try (var rows = query.executeQuery()) {
@@ -159,7 +158,7 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                     }
                     var warmed = new CountDownLatch(1);
                     var mutation = pool.submit(() -> transaction.execute(status -> {
-                        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Integer.class)).isEqualTo(1);
+                        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isEqualTo(1);
                         warmed.countDown();
                         try {
                             return callback.call();
@@ -171,13 +170,13 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                     while (jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.PROCESSLIST"
                             + " WHERE DB = DATABASE() AND COMMAND = 'Query'"
-                            + " AND INFO LIKE 'SELECT csi_guard FROM managed_agent_session%FOR UPDATE'", Integer.class) == 0) {
+                            + " AND INFO LIKE 'SELECT csi_guard FROM ma_session%FOR UPDATE'", Integer.class) == 0) {
                         assertThat(mutation).isNotDone();
                         assertThat(System.nanoTime()).isLessThan(deadline);
                         Thread.sleep(20);
                     }
                     assertThatThrownBy(() -> mutation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
-                    for (String table : List.of("qwen_managed_session_journal_head", "managed_agent_tool_result")) {
+                    for (String table : List.of("ma_session_head", "ma_operation")) {
                         try (var query = owner.prepareStatement("SELECT session_id FROM " + table
                                 + " WHERE tenant_id = 'tenant' AND session_id = ? FOR UPDATE")) {
                             query.setQueryTimeout(2);
@@ -206,11 +205,15 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             // This row is historical legacy work, not original native membership.
             var source = new ManagedToolResultStore.Source(id, "tenant", "workspace", session, "execution-" + id,
                     1, 1, JSON.nullNode(), JSON.nullNode(), JSON.createArrayNode(), "a".repeat(64));
-            jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id, workspace_id,"
-                    + " session_id, source_json, source_digest, work_state, claim_generation, claim_until)"
-                    + " VALUES (?, ?, ?, 'tenant', 'workspace', ?, ?, ?, ?, 1, 0)", id,
-                    ManagedToolResultStore.scope("tenant", session), ManagedToolResultStore.identity("execution", id).substring(10),
-                    session, JSON.valueToTree(source).toString(), source.sourceDigest(), state);
+            String scope = ManagedToolResultStore.scope("tenant", session);
+            String execution = ManagedToolResultStore.identity("execution", source.executionCallId()).substring(10);
+            String key = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION, scope, execution, id);
+            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, target_kind,"
+                    + " target_key, execution_key, tenant_id, workspace_id, session_id, request_json, request_digest, phase, state,"
+                    + " claim_generation, claim_until, created_at, updated_at) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'TOOL_EXECUTION',"
+                    + " ?, ?, 'tenant', 'workspace', ?, ?, ?, 'PROJECTING', ?, 1, FROM_UNIXTIME(0), 0, 0)",
+                    key, scope, scope, id, execution, execution, session, JSON.valueToTree(source).toString(), source.sourceDigest(), state);
             return source;
         }
 
@@ -226,8 +229,8 @@ class ManagedActionResultCsiBoundaryMySqlIT {
                             .sorted(Comparator.comparing(JsonNode::toString)).toList();
                     result.put(table, JSON.valueToTree(rows));
                 }
-                assertThat(result).containsKeys("flyway_schema_history", "managed_agent_session",
-                        "qwen_managed_session_journal_head", "managed_agent_tool_result", "qwen_csi_resource_read");
+                assertThat(result).containsKeys("ma_session",
+                        "ma_session_head", "ma_operation", "ma_csi_resource_read");
                 return result;
             });
         }

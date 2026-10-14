@@ -137,12 +137,30 @@ describe('original CSI inventory observation', () => {
     });
   });
   it.each([
+    ['resource-key', 'resource_not_qualified'],
+    ['reference-owner-key', 'orphan_resource_reference'],
+    ['reference-owner-revision', 'orphan_resource_reference'],
+    ['reference-resource-key', 'orphan_resource_reference'],
+    ['record-domain-reference', 'unsupported_resource_reference_owner'],
     ['resource-metadata', 'resource_not_qualified'],
     ['resource-missing', 'inventory_resource_missing'],
     ['reference-missing', 'inventory_reference_missing'],
     ['orphan-reference', 'orphan_resource_reference'],
   ])('retains %s contradictions', async (damage, expectedReason) => {
     const input = await inventory();
+    if (damage === 'resource-key')
+      input.sessionResourceInventory[0].resourceKey = '0'.repeat(64);
+    if (damage === 'reference-owner-key')
+      input.sessionResourceReferences[0].ownerKey = '0'.repeat(64);
+    if (damage === 'reference-owner-revision')
+      input.sessionResourceReferences[0].ownerRevision = '999';
+    if (damage === 'reference-resource-key')
+      input.sessionResourceReferences[0].resourceKey = '0'.repeat(64);
+    if (damage === 'record-domain-reference')
+      Object.assign(input.sessionResourceReferences[0], {
+        ownerKind: 'SESSION_RECORD',
+        journalRevision: null,
+      });
     if (damage === 'resource-metadata')
       input.sessionResourceInventory[0].sha256 = '0'.repeat(64);
     if (damage === 'resource-missing') input.sessionResourceInventory.pop();
@@ -157,5 +175,13 @@ describe('original CSI inventory observation', () => {
           { member: expect.any(String), reason: expectedReason },
         ]),
       );
+  });
+  it('refuses the legacy schema inventory format', async () => {
+    const input = await inventory();
+    input.format = 'qwen-csi-retirement-inventory/1';
+    expect(await inspectOriginalCsiInventory(input)).toMatchObject({
+      status: 'unresolved',
+      reason: 'inventory_format_not_qualified',
+    });
   });
 });
