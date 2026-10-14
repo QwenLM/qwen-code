@@ -555,10 +555,12 @@ daemon 参数的完整含义和配置方式见
 <WebShell onContextUsageOpen={(sessionId) => openContextDetails(sessionId)} />
 ```
 
-此参数也适用于 `WebShellWithProviders`。提供回调后，composer hover 弹层的
-「查看明细」及页头上下文详情入口会将来源会话 ID 交给宿主，不再打开内置右侧
-面板或自动读取详情；分屏传入对应分屏的会话 ID。不提供回调则保留默认行为。
-直接点击上下文圆环生成 `/context` 快照、压缩操作和已保存面板的恢复不受影响。
+此参数也适用于 `WebShellWithProviders`。提供回调后，上下文圆环的点击、
+composer hover 弹层的「查看明细」、对话内上下文卡片的「查看明细」以及页头
+上下文详情入口都会将来源会话 ID 交给宿主，不再打开内置右侧面板或自动读取
+详情；分屏传入对应分屏的会话 ID。不提供回调则保留默认行为。压缩操作和已保存
+面板的恢复不受影响。内嵌的 side-task 面板本身就在右侧面板里，没有可用的详情
+入口，它的圆环点击仍会在该面板的对话中生成 `/context` 快照。
 
 宿主可以监听命令，也可以返回 `true` 接管对应操作：
 
