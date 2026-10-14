@@ -22,6 +22,7 @@ public final class HostedShellLifecycleFixtureMain {
         var json = new ObjectMapper();
         var config = json.readTree(Files.readString(Path.of(args[0])));
         String tenant = config.path("tenant").asText();
+        Path objects = Path.of(config.path("objects").asText());
         var arguments = new ArrayList<String>();
         config.path("properties").fields().forEachRemaining(entry ->
                 arguments.add("--" + entry.getKey() + "=" + entry.getValue().asText()));
@@ -43,15 +44,40 @@ public final class HostedShellLifecycleFixtureMain {
                     authentication.setAsyncSupported(true);
                     authentication.addUrlPatterns("/v1/agents/*", "/api/agent/web-shell/v1/*");
                     context.getBeanFactory().registerSingleton("l4Authentication", authentication);
-                    // Inline capture still constructs the production OSS adapter. Only
-                    // its startup metadata reads are local; object I/O must fail loudly.
+                    // Object bytes must survive the Spring SIGKILL/restart recovery cut.
                     var acl = new com.aliyun.oss.model.AccessControlList();
                     acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
                     var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class, invocation -> switch (invocation.getMethod().getName()) {
                         case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
                         case "getBucketAcl" -> acl;
+                        case "putObject" -> {
+                            var put = (com.aliyun.oss.model.PutObjectRequest) invocation.getArgument(0);
+                            Path object = objects.resolve(put.getKey());
+                            Files.createDirectories(object.getParent());
+                            try {
+                                Files.write(object, put.getInputStream().readAllBytes(), java.nio.file.StandardOpenOption.CREATE_NEW);
+                            } catch (java.nio.file.FileAlreadyExistsException exists) {
+                                throw new com.aliyun.oss.OSSException("Object already exists", "FileAlreadyExists",
+                                        "request", "host", put.getBucketName(), put.getKey(), "resource");
+                            }
+                            yield new com.aliyun.oss.model.PutObjectResult();
+                        }
+                        case "getObject" -> {
+                            var object = new com.aliyun.oss.model.OSSObject();
+                            try {
+                                object.setObjectContent(Files.newInputStream(objects.resolve(invocation.<String>getArgument(1))));
+                            } catch (java.nio.file.NoSuchFileException missing) {
+                                throw new com.aliyun.oss.OSSException("Object not found", "NoSuchKey",
+                                        "request", "host", invocation.getArgument(0), invocation.getArgument(1), "resource");
+                            }
+                            yield object;
+                        }
+                        case "deleteObject" -> {
+                            Files.deleteIfExists(objects.resolve(invocation.<String>getArgument(1)));
+                            yield null;
+                        }
                         case "shutdown" -> null;
-                        case "toString" -> "l4-inline-capture-fixture";
+                        case "toString" -> "l4-publication-fixture";
                         default -> throw new AssertionError("Unexpected object I/O: " + invocation.getMethod().getName());
                     });
                     context.addBeanFactoryPostProcessor(factory -> factory.registerSingleton("toolPublicationOss", oss));
