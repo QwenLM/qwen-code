@@ -5173,7 +5173,7 @@ export interface DaemonAuthProviderCatalog {
   workspaceCwd: string;
   providers: DaemonAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];

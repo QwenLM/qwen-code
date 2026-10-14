@@ -40,8 +40,10 @@ const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
-type AuthGroupId = 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
+// Derived so the SDK union stays the single source of truth: a re-declared
+// literal union here is what let the daemon emit a group id this file denied.
+type AuthGroupId = AuthGroup['id'];
 type ModelWireApi = 'chat-completions' | 'responses';
 type AuthStep =
   | 'protocol'
