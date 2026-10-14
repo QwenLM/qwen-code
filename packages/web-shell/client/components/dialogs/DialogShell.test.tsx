@@ -280,6 +280,42 @@ describe('DialogShell', () => {
     ).toBe(true);
   });
 
+  it('keeps the footer outside the scrolling dialog body', () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ThemeProvider value="dark">
+            <DialogShell
+              title="Footer"
+              onClose={vi.fn()}
+              footer={
+                <button type="submit" form="footer-form">
+                  Add
+                </button>
+              }
+            >
+              <form id="footer-form">
+                <input aria-label="Path" />
+              </form>
+            </DialogShell>
+          </ThemeProvider>
+        </I18nProvider>,
+      );
+    });
+
+    const body =
+      document.querySelector<HTMLFormElement>('#footer-form')!.parentElement!;
+    const footerButton = document.querySelector<HTMLButtonElement>(
+      'button[form="footer-form"]',
+    )!;
+    expect(body.contains(footerButton)).toBe(false);
+    expect(body.nextElementSibling?.contains(footerButton)).toBe(true);
+  });
+
   it('keeps the fullscreen panel height on the dynamic viewport', () => {
     const css = readFileSync(
       resolve(__dirname, 'DialogShell.module.css'),
