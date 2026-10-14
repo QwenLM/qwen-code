@@ -380,7 +380,7 @@ class WorkspaceLifecycleStoreTest {
         }
         ManagedHookRecords.requireExecution(record);
         var ref = fixture.resource("SessionEnd-record", "hook-execution", record);
-        fixture.jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id, workspace_id,"
+        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
                 + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, created_at, first_sequence)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                 ManagedSessionStore.sessionScopeKey("tenant", fixture.session),

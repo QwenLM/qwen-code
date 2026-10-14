@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -278,7 +279,7 @@ class SessionLifecycleServiceResumeTest {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'workspace', ?, 'OPERATOR')",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"));
+                TENANT, "owner".getBytes(StandardCharsets.UTF_8));
         return store;
     }
 

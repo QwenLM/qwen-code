@@ -11,8 +11,12 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.EventIdentity;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
 import java.time.Clock;
@@ -26,7 +30,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -35,7 +38,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Regression for issue #13182 finding 1: once managed_agent_event has a
+ * Regression for issue #13182 finding 1: once ma_public_event has a
  * sequence gap ahead of the projection cursor, the gap is permanent —
  * appendEvent allocates a sequence under the session row lock that
  * materializeNextBatch already holds, so no missing sequence can still
@@ -142,7 +145,7 @@ class MessageProjectionGapHealTest {
         try {
             blocker.setAutoCommit(false);
             try (var statement = blocker.prepareStatement(
-                    "SELECT session_id FROM managed_agent_session WHERE"
+                    "SELECT session_id FROM ma_session WHERE"
                             + " tenant_id = ? AND session_id = ? FOR UPDATE")) {
                 statement.setString(1, TENANT);
                 statement.setString(2, sessionId);
@@ -309,28 +312,39 @@ class MessageProjectionGapHealTest {
 
     private long covered(String sessionId) {
         return jdbc.queryForObject("SELECT covered_sequence FROM"
-                        + " managed_agent_consumer_progress WHERE tenant_id = ?"
-                        + " AND session_id = ? AND consumer_name ="
-                        + " 'message_projection'",
+                        + " ma_event_stream WHERE tenant_id = ? AND session_id"
+                        + " = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 Long.class, TENANT, sessionId);
     }
 
     private int partCount(String sessionId, String text) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_item_part WHERE tenant_id = ? AND"
-                        + " session_id = ? AND part_text = ?",
-                Integer.class, TENANT, sessionId, text);
+        int count = 0;
+        for (String parts : jdbc.queryForList(
+                "SELECT parts_json FROM ma_message WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                String.class, TENANT, sessionId)) {
+            try {
+                for (JsonNode part : new ObjectMapper().readTree(parts)) {
+                    if (text.equals(part.path("text").asText())) {
+                        count++;
+                    }
+                }
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+        return count;
     }
 
     private String itemStatus(String sessionId, String itemId) {
         return jdbc.queryForObject("SELECT item_status FROM"
-                        + " managed_agent_item WHERE tenant_id = ? AND"
-                        + " session_id = ? AND item_id = ?",
+                        + " ma_message WHERE tenant_id = ? AND session_id = ?"
+                        + " AND item_id = ?",
                 String.class, TENANT, sessionId, itemId);
     }
 
     private void insertTurn(String sessionId, String turnId, String status) {
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, created_at, updated_at) VALUES (?, ?, ?,"
                         + " ?, '[]', 'digest', ?, ?, ?)",
@@ -342,7 +356,7 @@ class MessageProjectionGapHealTest {
             String turnId, String type, String data) {
         // A projectable event type, so the test can witness that events after
         // the gap are still materialized, not merely skipped over.
-        jdbc.update("INSERT INTO managed_agent_event (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                         + " sequence_id, event_id, turn_id, event_type,"
                         + " data_json, terminal, source_key, created_at,"
                         + " schema_version, projection_version, item_id,"
@@ -353,8 +367,9 @@ class MessageProjectionGapHealTest {
                 false, "gap-source-" + sequence,
                 now.get(), EventIdentity.SCHEMA_VERSION,
                 EventIdentity.PROJECTION_VERSION, null, null);
-        jdbc.update("UPDATE managed_agent_session SET last_sequence = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_event_stream SET last_sequence = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND"
+                        + " stream_kind = 'SESSION' AND stream_id = X''",
                 sequence, TENANT, sessionId);
     }
 
@@ -362,9 +377,8 @@ class MessageProjectionGapHealTest {
         dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:gap-heal-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         return new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {

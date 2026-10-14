@@ -65,7 +65,8 @@ class ManagedActionStoreTest {
                 (row, n) -> new OperationRecord(row.getString("tenant_id"), row.getString("session_id"), row.getString("operation_id"),
                         OperationKind.ACTION_RESPONSE, row.getString("request_digest"), row.getString("state"), row.getString("admission_stage"),
                         row.getString("delivery_state"), row.getString("session_status_before"), row.getString("receipt_id"),
-                        row.getString("claim_owner"), row.getLong("claim_generation"), row.getInt("attempt_count")),
+                        row.getString("claim_owner"), row.getLong("claim_generation"), row.getInt("attempt_count"),
+                        row.getString("failure_code"), row.getInt("lifecycle_protocol_version")),
                 call.getArgument(0), call.getArgument(1), call.getArgument(2)).stream().findFirst());
         when(agents.hasExecutionRegistryFacts(anyString(), anyString())).thenReturn(true);
         actions = new ManagedActionStore(jdbc, agents);
@@ -161,7 +162,7 @@ class ManagedActionStoreTest {
     void aReplayedFailedResponseIsNotReadmittedWhileTheStorageIsFenced() {
         bindWorkspace();
         project("requested", null, 1, 1000);
-        var admitted = admit("idem", "digest", response("allow"), 10);
+        var admitted = admitAs("owner", "idem", "digest", response("allow"), 10);
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         // The resurrection arm's evidence that a new delivery must wait.
@@ -172,7 +173,7 @@ class ManagedActionStoreTest {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey("storage"),
                 TENANT, "storage", "op-fence");
 
-        var replayed = admit("idem", "digest", response("allow"), 20);
+        var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);
 
         assertThat(replayed.replayed()).isTrue();
         assertThat(replayed.operation().state()).isEqualTo("FAILED");
@@ -333,7 +334,7 @@ class ManagedActionStoreTest {
 
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?"
-                + " AND workspace_id = 'workspace'", TENANT);
+                + " AND workspace_id = ?", TENANT, "workspace");
 
         assertThatThrownBy(() -> admitAs("operator", "idem", "digest", response("allow"), 30))
                 .isInstanceOf(ApiException.class)
@@ -400,7 +401,7 @@ class ManagedActionStoreTest {
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
                 TENANT, SESSION, operationId);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?"
-                + " AND workspace_id = 'workspace'", TENANT);
+                + " AND workspace_id = ?", TENANT, "workspace");
 
         assertThatThrownBy(() -> admitAs("operator", "idem", "digest", response("allow"), 3000))
                 .isInstanceOf(ApiException.class)

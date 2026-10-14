@@ -481,14 +481,14 @@ class ManagedSessionOperationStoreTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore store = store(properties);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'workspace', 1, 'storage',"
                         + " 'Workspace', ?, ?, 'ACTIVE')",
                 TENANT, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                 TENANT, "owner".getBytes(StandardCharsets.UTF_8));
