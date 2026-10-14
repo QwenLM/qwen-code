@@ -1785,7 +1785,13 @@ describe('Hosted Harness no-tool session', () => {
     await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce());
+    await vi.waitFor(
+      () => expect(state.model).toHaveBeenCalledOnce(),
+      // #14101: the admission crosses fsync-backed journal commits before
+      // the model call; the default 1s waitFor window flaked on a loaded
+      // CI runner (#13219).
+      { timeout: 10_000 },
+    );
     const original =
       LocalManagedSessionAuthority.prototype.appendExecutionEvent;
     const append = vi
@@ -1809,12 +1815,18 @@ describe('Hosted Harness no-tool session', () => {
       append.mockRestore();
       finish();
     }
-    await vi.waitFor(async () => {
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      );
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      // #14101: the cancelled turn's settle crosses fsync-backed journal
+      // commits before the active flag clears; the default 1s waitFor
+      // window flaked on a loaded CI runner (#13219).
+      { timeout: 10_000 },
+    );
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
     ).expect(204);
@@ -1851,7 +1863,13 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+      await vi.waitFor(
+        () => expect(state.model).toHaveBeenCalledTimes(1),
+        // #14101: the admission crosses fsync-backed journal commits before
+        // the model call; the default 1s waitFor window flaked on a loaded
+        // CI runner (#13219).
+        { timeout: 10_000 },
+      );
       state.authorizeOrdinary.mockClear();
       state.authorizeOrdinary.mockRejectedValue(cause);
       try {
@@ -1867,12 +1885,18 @@ describe('Hosted Harness no-tool session', () => {
       } finally {
         finish();
       }
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        // #14101: the cancelled turn's settle crosses fsync-backed journal
+        // commits before the active flag clears; the default 1s waitFor
+        // window flaked on a loaded CI runner (#13219).
+        { timeout: 10_000 },
+      );
       state.authorizeOrdinary.mockResolvedValue(undefined);
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/detach`),
