@@ -87,7 +87,7 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.event.pull_request.number || github.run_id }}'
+  group: 'sdk-java-${{ github.event.pull_request.number || github.ref }}'
   cancel-in-progress: true
 
 jobs:
