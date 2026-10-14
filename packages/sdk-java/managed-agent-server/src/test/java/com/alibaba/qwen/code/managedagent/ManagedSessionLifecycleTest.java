@@ -283,7 +283,7 @@ class ManagedSessionLifecycleTest {
                     .get("admission_stage").asText())
                     .isEqualTo("java_durable");
             assertThat(jdbc.queryForObject("SELECT state FROM"
-                            + " qwen_managed_session_journal_head WHERE"
+                            + " ma_session_head WHERE"
                             + " tenant_id = ? AND session_id = ?",
                     String.class, tenant, sessionId)).isEqualTo("ACTIVE");
         } finally {
@@ -397,23 +397,21 @@ class ManagedSessionLifecycleTest {
     @Test
     void allowsOneLifecycleChangeAtATime() throws Exception {
         String tenant = tenant();
-        String sessionId = attachedSession(tenant);
+        String ambiguous = attachedSession(tenant);
         harness.failNextRename();
-        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant)
-                        .header("Idempotency-Key", "rename")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"pending\"}"))
+        mvc.perform(patch("/v1/agents/sessions/{id}", ambiguous)
+                        .header(TENANT, tenant).header("Idempotency-Key", "rename")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isServiceUnavailable());
-        // The answered failure retired its command row, so the same key
-        // re-attempts the rename instead of finding the Session wedged.
-        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant)
-                        .header("Idempotency-Key", "rename")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"pending\"}"))
-                .andExpect(status().isOk());
-
+        int sends = harness.renameCount();
+        mvc.perform(patch("/v1/agents/sessions/{id}", ambiguous)
+                        .header(TENANT, tenant).header("Idempotency-Key", "rename")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("operation_outcome_unknown"));
+        assertThat(harness.renameCount()).isEqualTo(sends);
+        lifecycle(post("/v1/agents/sessions/{id}/close", ambiguous), tenant, "close")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("session_operation_active"));
+        String sessionId = attachedSession(tenant);
         String closeId;
         harness.setAvailable(false);
         try {
@@ -502,7 +500,7 @@ class ManagedSessionLifecycleTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value("renamed"))
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND event_type = 'session.updated'",
                 Integer.class, tenant, sessionId)).isEqualTo(1);
@@ -519,8 +517,8 @@ class ManagedSessionLifecycleTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
         assertThat(store.findCommand(tenant, "RENAME_SESSION", "blank")).isEmpty();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
-                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
+                + " WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
         assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
                 "", "close", "close-digest").replayed()).isFalse();
     }
@@ -572,8 +570,8 @@ class ManagedSessionLifecycleTest {
                             ? "hosted_harness_disabled" : "hosted_harness_unavailable");
                 });
         assertThat(store.findCommand(tenant, "RENAME_SESSION", "refused")).isEmpty();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
-                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
+                + " WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
         verify(unavailable, never()).createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
         assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
                 "", "close", "close-digest").replayed()).isFalse();
@@ -590,8 +588,12 @@ class ManagedSessionLifecycleTest {
         harness.setAvailable(false);
         try {
             doAnswer(call -> {
-                var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
-                        .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+                var held = jdbc.queryForMap("SELECT target_revision, attempt_count, phase FROM ma_operation WHERE operation_kind = 'RENAME'"
+                        + " AND tenant_id = ? AND session_id = ?", tenant, sessionId);
+                assertThat(held.get("phase")).isEqualTo("PREPARING");
+                var candidate = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
+                        "inline", "new title", ((Number) held.get("target_revision")).longValue(),
+                        ((Number) held.get("attempt_count")).intValue());
                 assertThat(store.claimRename(candidate, "peer", Duration.ofMinutes(1))).isEmpty();
                 assertThatThrownBy(() -> subject.renameSession(tenant, null, "inline", sessionId, "new title"))
                         .isInstanceOfSatisfying(ApiException.class, error ->
@@ -619,22 +621,24 @@ class ManagedSessionLifecycleTest {
             store.claimRename(candidate, "old", Duration.ofMinutes(1)).orElseThrow();
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), null);
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
-            jdbc.update("UPDATE managed_session_rename_delivery SET lease_until = 0"
+            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
             var current = store.claimRename(candidate, "new", Duration.ofMinutes(1)).orElseThrow();
-            var row = jdbc.queryForMap("SELECT * FROM managed_session_rename_delivery WHERE tenant_id = ? AND session_id = ?",
+            var row = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId);
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
             store.retryRename(candidate, "old", 0);
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_session_rename_delivery WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId)).isEqualTo(row);
             assertThat(store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title").renameRevision())
                     .isEqualTo(command.renameRevision());
             store.abandonSessionRename(tenant, "rename", sessionId, current.revision(), "new");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("FAILED");
-            store.completeSessionRename(tenant, "rename", sessionId, "new title", FixtureHarness.BOOT_ID, current.revision());
+            store.markRenameSubmitted(current, "new");
+            harness.rename(tenant, sessionId, "new title", current.revision());
+            store.completeSessionRename(current, "new", FixtureHarness.BOOT_ID);
             assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("new title");
         } finally {
             harness.setAvailable(true);
@@ -659,14 +663,17 @@ class ManagedSessionLifecycleTest {
             store.completeSessionRename(tenant, "k2", sessionId, "B", boot, second.renameRevision());
             assertThatThrownBy(() -> store.completeSessionRename(tenant, "k1", sessionId, "A", boot, first.renameRevision()))
                     .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
-            var latest = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A");
+            assertThatThrownBy(() -> store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
+            assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
+            var latest = store.beginSessionRename(tenant, "k3", "digest-c", sessionId, "A");
             assertThat(latest.renameRevision()).isGreaterThan(second.renameRevision());
             store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision(), "first-owner");
-            assertThat(store.findCommand(tenant, "RENAME_SESSION", "k1").orElseThrow().status()).isEqualTo("PENDING");
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "k3").orElseThrow().status()).isEqualTo("PENDING");
             var latestDelivery = store.deliverableRenames(Long.MAX_VALUE).stream()
                     .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
-            store.claimRename(latestDelivery, "latest-owner", Duration.ofMinutes(1)).orElseThrow();
-            store.abandonSessionRename(tenant, "k1", sessionId, latest.renameRevision(), "latest-owner");
+            latestDelivery = store.claimRename(latestDelivery, "latest-owner", Duration.ofMinutes(1)).orElseThrow();
+            store.abandonSessionRename(tenant, "k3", sessionId, latest.renameRevision(), "latest-owner");
             store.retryRename(latestDelivery, "latest-owner", 0);
             assertThatThrownBy(() -> store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
                     "", "close", "close-digest"))
@@ -676,7 +683,9 @@ class ManagedSessionLifecycleTest {
             var claimed = store.claimRename(candidate, "replica-b", Duration.ofMinutes(1)).orElseThrow();
             assertThat(store.claimRename(candidate, "replica-c", Duration.ofMinutes(1))).isEmpty();
             // The last remote write can already have succeeded when its reply was lost.
-            store.completeSessionRename(tenant, "k1", sessionId, "A", boot, claimed.revision());
+            store.markRenameSubmitted(claimed, "replica-b");
+            harness.rename(tenant, sessionId, "A", claimed.revision());
+            store.completeSessionRename(claimed, "replica-b", boot);
             assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("A");
             assertThat(store.deliverableRenames(Long.MAX_VALUE)).noneMatch(delivery -> delivery.sessionId().equals(sessionId));
             assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "", "close", "close-digest").replayed()).isFalse();
@@ -705,7 +714,7 @@ class ManagedSessionLifecycleTest {
                 sessionId, SessionMutationKind.RENAME);
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
         if (legacyReceipt) {
-            assertThat(jdbc.update("UPDATE managed_agent_command SET mutation_attempt_sequence"
+            assertThat(jdbc.update("UPDATE ma_request_receipt SET mutation_attempt_sequence"
                             + " = NULL WHERE tenant_id = ? AND operation = ?"
                             + " AND idempotency_key = ?",
                     tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
@@ -724,11 +733,11 @@ class ManagedSessionLifecycleTest {
                         assertThat(error.getCode())
                                 .isEqualTo("session_mutation_superseded"));
         assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
-        assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                        + " managed_agent_command WHERE tenant_id = ? AND"
-                        + " operation = 'RENAME_SESSION' AND idempotency_key = 'k1'",
-                String.class, tenant)).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                        + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND"
+                        + " operation = 'RENAME_SESSION' AND idempotency_key = ?",
+                String.class, tenant, "k1")).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND event_type = 'session.updated'",
                 Integer.class, tenant, sessionId)).isEqualTo(1);
@@ -784,7 +793,7 @@ class ManagedSessionLifecycleTest {
         store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
                 SessionMutationKind.RENAME, "B", bootId);
         if (recreatedReceipt) {
-            assertThat(jdbc.update("DELETE FROM managed_agent_command WHERE tenant_id = ?"
+            assertThat(jdbc.update("DELETE FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
                             + " AND operation = ? AND idempotency_key = ?",
                     tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
         }
@@ -797,11 +806,11 @@ class ManagedSessionLifecycleTest {
         assertThat(store.completeSessionMutation(tenant, "RENAME_SESSION", "k1",
                 sessionId, SessionMutationKind.RENAME, "A", bootId).title())
                 .isEqualTo("A");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ? AND source_key = ?",
                 Integer.class, tenant, sessionId,
                 "control:RENAME_SESSION:k1:requested")).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND event_type = 'session.updated'",
                 Integer.class, tenant, sessionId)).isEqualTo(2);
@@ -831,26 +840,26 @@ class ManagedSessionLifecycleTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"lookup", "completion", "cleanup"})
-    void renameStoreFailuresPreserveTheOriginalErrorAndAllowRetry(String phase)
+    void renameStoreFailuresPreserveTheOriginalErrorAndReconcileSubmittedOutcomes(String phase)
             throws Exception {
         String tenant = tenant();
         String sessionId = attachedSession(tenant);
         AgentStateStore faulted = mock(AgentStateStore.class, delegatesTo(store));
         if ("lookup".equals(phase)) {
             doAnswer(call -> {
-                if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'"
-                        + " AND command_status = 'PENDING'", Integer.class,
-                        tenant, sessionId) > 0) {
+                        + " AND operation = 'RENAME_SESSION' AND idempotency_key = ?"
+                        + " AND state = 'PENDING'", Integer.class,
+                        tenant, sessionId, "key") > 0) {
                     throw new IllegalStateException("lookup unavailable");
                 }
                 return store.requireSession(tenant, sessionId);
             }).when(faulted).requireSession(tenant, sessionId);
         } else if ("completion".equals(phase)) {
             doThrow(new IllegalStateException("completion unavailable"))
-                    .when(faulted).completeSessionRename(anyString(), anyString(),
-                            anyString(), anyString(), anyString(), anyLong());
+                    .when(faulted).completeSessionRename(any(com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery.class),
+                            anyString(), anyString());
         } else {
             doThrow(new IllegalStateException("cleanup unavailable"))
                     .when(faulted).abandonSessionRename(org.mockito.ArgumentMatchers.eq(tenant),
@@ -878,28 +887,28 @@ class ManagedSessionLifecycleTest {
                         assertThat(error.getCode()).isEqualTo("hosted_harness_unavailable");
                     });
             // Park before pinning the retired state: claimRename takes (PENDING AND
-            // available_at <= now) OR (RUNNING AND lease_until <= now), so both columns
+            // available_at <= now) OR (RUNNING AND claim_until <= now), so both columns
             // have to move to keep the row out of reach once the gate is lifted.
-            assertThat(jdbc.update("UPDATE managed_session_rename_delivery"
-                            + " SET available_at = ?, lease_until = ? WHERE tenant_id = ?"
+            assertThat(jdbc.update("UPDATE ma_operation"
+                            + " SET available_at = ?, claim_until = ? WHERE tenant_id = ?"
                             + " AND session_id = ?",
-                    Long.MAX_VALUE, Long.MAX_VALUE, tenant, sessionId)).isEqualTo(1);
+                    Long.MAX_VALUE, java.sql.Timestamp.valueOf("9999-12-31 23:59:59"), tenant, sessionId)).isEqualTo(1);
             if ("cleanup".equals(phase)) {
                 // abandonSessionRename threw, so retryRename never ran: the row stays
                 // RUNNING under the dead inline owner and the command stays PENDING.
                 assertThat(jdbc.queryForObject("SELECT delivery_state FROM"
-                                + " managed_session_rename_delivery WHERE tenant_id = ?"
+                                + " ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?"
                                 + " AND session_id = ?", String.class, tenant, sessionId))
-                        .isEqualTo("RUNNING");
-                assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                                + " managed_agent_command WHERE tenant_id = ?"
-                                + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",
-                        String.class, tenant)).isEqualTo("PENDING");
+                        .isEqualTo("LEASED");
+                assertThat(jdbc.queryForObject("SELECT state FROM"
+                                + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
+                                + " AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
+                        String.class, tenant, "key")).isEqualTo("PENDING");
             } else {
-                assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                                + " managed_agent_command WHERE tenant_id = ?"
-                                + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",
-                        String.class, tenant)).isEqualTo("FAILED");
+                assertThat(jdbc.queryForObject("SELECT state FROM"
+                                + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
+                                + " AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
+                        String.class, tenant, "key")).isEqualTo("FAILED");
             }
         } finally {
             harness.setAvailable(true);
@@ -909,15 +918,44 @@ class ManagedSessionLifecycleTest {
         // delivered", so the trailing PATCH is only deterministic once the delivery has
         // completed and it replays; timing out here would also prove the row was never
         // re-queued.
-        assertThat(jdbc.update("UPDATE managed_session_rename_delivery"
-                        + " SET available_at = 0, lease_until = 0 WHERE tenant_id = ?"
+        assertThat(jdbc.update("UPDATE ma_operation"
+                        + " SET available_at = 0, claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ?"
                         + " AND session_id = ?", tenant, sessionId)).isEqualTo(1);
+        if (!"lookup".equals(phase)) {
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                    assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'RENAME'"
+                                    + " AND tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isEqualTo("UNKNOWN"));
+            int sent = harness.renameCount();
+            assertThat(store.deliverableRenames(System.currentTimeMillis()))
+                    .noneMatch(delivery -> sessionId.equals(delivery.sessionId()));
+            try {
+                assertThatThrownBy(() -> subject.renameSession(tenant, null, "key", sessionId, "renamed"))
+                        .isInstanceOf(ApiException.class);
+            } finally {
+                harness.setAvailable(true);
+            }
+            assertThat(harness.renameCount()).isEqualTo(sent);
+            if ("completion".equals(phase)) {
+                // Reconcile the original Harness result, retaining its owner and generation.
+                assertThat(harness.title(sessionId)).isEqualTo("renamed");
+                var original = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME'"
+                        + " AND tenant_id = ? AND session_id = ?", tenant, sessionId);
+                var delivery = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
+                        "key", "renamed", ((Number) original.get("target_revision")).longValue(),
+                        ((Number) original.get("attempt_count")).intValue(), ((Number) original.get("claim_generation")).longValue());
+                new TransactionTemplate(transactionManager).execute(ignored -> store.completeSessionRename(delivery,
+                        (String) original.get("claim_owner"), FixtureHarness.BOOT_ID));
+                assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("renamed");
+                assertThat(harness.renameCount()).isEqualTo(sent);
+            }
+            return;
+        }
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                                + " managed_agent_command WHERE tenant_id = ?"
+                assertThat(jdbc.queryForObject("SELECT state FROM"
+                                + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
                                 + " AND operation = 'RENAME_SESSION'"
-                                + " AND idempotency_key = 'key'",
-                        String.class, tenant)).isEqualTo("COMPLETED"));
+                                + " AND idempotency_key = ?",
+                        String.class, tenant, "key")).isEqualTo("COMPLETED"));
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"renamed\"}"), tenant, "key")
@@ -935,8 +973,8 @@ class ManagedSessionLifecycleTest {
                 new IllegalStateException("completion unavailable");
         // The rename flow persists through the dedicated completion call; a
         // store fault there used to surface as a bare 503 with no log line.
-        doThrow(failure).when(faulted).completeSessionRename(anyString(),
-                anyString(), anyString(), anyString(), anyString(), anyLong());
+        doThrow(failure).when(faulted).completeSessionRename(any(com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery.class),
+                anyString(), anyString());
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
         // The 503 used to be the only trace of the failure: zero log lines
@@ -1021,13 +1059,13 @@ class ManagedSessionLifecycleTest {
         store.beginSessionMutation(tenant, "RENAME_SESSION", "pending-command",
                 "digest", sessionId, SessionMutationKind.RENAME);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_command WHERE tenant_id = ? AND session_id ="
-                + " ? AND command_status = 'PENDING'", Integer.class, tenant,
+                + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id ="
+                + " ? AND state = 'PENDING'", Integer.class, tenant,
                 sessionId)).isEqualTo(1);
         // Without this the refusals below could be read as the operation
         // conjunct firing instead of the command one.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_operation WHERE tenant_id = ? AND session_id"
+                + " ma_operation WHERE tenant_id = ? AND session_id"
                 + " = ? AND state IN ('PENDING', 'RUNNING')", Integer.class,
                 tenant, sessionId)).isZero();
         lifecycle(post("/v1/agents/sessions/{id}/close", sessionId), tenant,
@@ -1083,12 +1121,12 @@ class ManagedSessionLifecycleTest {
     void activeWorkspaceSessionsRejectRetentionAndUnsupportedClose()
             throws Exception {
         String tenant = tenant();
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'ws-a', 1, 'storage-a', 'ws-a',"
                         + " 'config', 'policy', 'ACTIVE')", tenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')", tenant,
                 "actor-a".getBytes(StandardCharsets.UTF_8));
@@ -1142,7 +1180,7 @@ class ManagedSessionLifecycleTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("session_not_found"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_operation WHERE tenant_id = ?",
+                        + " ma_operation WHERE tenant_id = ?",
                 Integer.class, tenant)).isZero();
         assertThat(sessionStatus(tenant, sessionId, "actor-a")).isEqualTo("active");
     }
@@ -1222,7 +1260,7 @@ class ManagedSessionLifecycleTest {
 
     private int attempts(String operationId) {
         return jdbc.queryForObject("SELECT attempt_count FROM"
-                        + " managed_agent_operation WHERE operation_id = ?",
+                        + " ma_operation WHERE operation_id = ?",
                 Integer.class, operationId);
     }
 

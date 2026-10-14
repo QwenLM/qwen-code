@@ -106,7 +106,7 @@ class HostedShellLifecycleRecoveryIT {
             Files.createDirectory(root.resolve("decoy"));
             var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
                     System.getProperty("mysql.password", ""));
-            jdbc = new JdbcTemplate(source);
+            jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
             jdbc.setQueryTimeout(10);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("l4-fixture", new byte[32]));
         }
@@ -114,25 +114,33 @@ class HostedShellLifecycleRecoveryIT {
         private void run() throws Exception {
             startHarness();
             startSpring();
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+            var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+            storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+            storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                            tenant, "storage", root.resolve("workspace").toString())));
+            new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
+                    .register(tenant, "storage", UUID.randomUUID().toString());
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'L4', ?, ?, 'ACTIVE')",
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             session = create("original");
-            assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session)).isEqualTo("hosted-workspace-shell/1");
             var input = List.of(Map.of("type", "input_text", "text", "L4_SHELL"));
             request("POST", "/v1/agents/sessions/" + session + "/events",
                     Map.of("type", "agent.session.input.message", "input", input), "shell-turn", 202);
             await().atMost(Duration.ofSeconds(45)).failFast(() -> modelFailure.get() != null).untilAsserted(() -> {
                 answerApproval();
-                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?",
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
                         String.class, tenant, session)).isEqualTo("COMPLETED");
             });
             assertThat(Files.readString(root.resolve("workspace/child/lifecycle-marker.txt"))).isEqualTo("once\n");
             assertThat(models.get()).isEqualTo(2);
-            var executions = jdbc.queryForList("SELECT * FROM qwen_tool_execution"
+            var executions = jdbc.queryForList("SELECT * FROM ma_tool_execution"
                     + " WHERE harness_session_id = ?", session);
             assertThat(executions).hasSize(1);
             assertThat(executions.getFirst().get("execution_state")).isEqualTo("SETTLED");
@@ -143,7 +151,7 @@ class HostedShellLifecycleRecoveryIT {
             worker = ProcessHandle.of(registration.path("pid").asLong()).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
             writer = writerIdentity();
-            var manifests = jdbc.queryForList("SELECT resource_id, sha256, inline_bytes FROM qwen_managed_session_resource"
+            var manifests = jdbc.queryForList("SELECT resource_id, sha256, inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-manifest'", tenant, session);
             assertThat(manifests).hasSize(1);
             manifest = manifests.getFirst();
@@ -167,16 +175,16 @@ class HostedShellLifecycleRecoveryIT {
             }
             assertThat(streams).containsExactlyInAnyOrder("stdout", "stderr");
             assertManifestUnchanged();
-            var outputs = jdbc.queryForList("SELECT resource_id, byte_length FROM qwen_managed_session_resource r"
+            var outputs = jdbc.queryForList("SELECT resource_id, byte_length FROM ma_resource r"
                     + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-content'"
                     + " AND storage_kind = 'MYSQL_INLINE' AND state = 'PUBLISHED' AND LOCATE('L4_CAPTURE_STDOUT', inline_bytes) > 0"
-                    + " AND NOT EXISTS (SELECT 1 FROM qwen_managed_session_resource_ref f"
+                    + " AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
                     + " WHERE f.session_scope_key = r.session_scope_key AND f.resource_id = r.resource_id)",
                     tenant, session);
             assertThat(outputs).as("real foreground stdout before lifecycle admission").isNotEmpty();
             String companion = create("companion");
             await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                    "SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                    "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, companion)).isEqualTo("ACTIVE"));
             installFault();
             boolean web = cut.equals("detach-ack");
@@ -193,14 +201,14 @@ class HostedShellLifecycleRecoveryIT {
             assertThat(successfulPrepare.get()).isPositive();
             assertThat(dropped.get()).isEqualTo(cut.endsWith("ack") ? 1 : 0);
             assertThat(models.get()).isEqualTo(2);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Integer.class, session)).isEqualTo(1);
             var released = bindings.findById(originalBinding.getBindingId());
             assertThat(released.getGeneration()).isEqualTo(originalBinding.getGeneration());
             assertThat(released.getResourceHandle()).isEqualTo(originalBinding.getResourceHandle());
             assertThat(released.getDrainReceipt()).isNotNull();
             assertThat(released.getDrainReceipt().matches(originalBinding)).isTrue();
-            assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+            assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                     String.class, originalBinding.getBindingId())).isEqualTo("RELEASED");
             assertThat(running(worker)).isFalse();
             // The completion transaction of a DELETE retires the Session and nulls the
@@ -214,34 +222,34 @@ class HostedShellLifecycleRecoveryIT {
                 assertThat(((Number) writerIdentity().get("writer_generation")).longValue())
                         .isEqualTo(((Number) writer.get("writer_generation")).longValue());
             }
-            assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session)).isEqualTo("DELETED");
-            assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM managed_agent_operation WHERE operation_id = ?",
+            assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE operation_id = ?",
                     Integer.class, operation)).isEqualTo(2);
-            assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session)).isEqualTo("DELETED");
             request("GET", "/v1/agents/sessions/" + session, null, null, 404);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                     Integer.class, tenant, session)).isEqualTo(1);
             await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
-                var collections = jdbc.queryForList("SELECT collected_at, collected_bytes FROM qwen_managed_session_resource_collection"
-                        + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                var collections = jdbc.queryForList("SELECT completed_at AS collected_at, CAST(JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.collectedBytes')) AS UNSIGNED) AS collected_bytes FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
+                        + " AND tenant_id = ? AND session_id = ?", tenant, session);
                 assertThat(collections).hasSize(1);
                 assertThat(collections.getFirst().get("collected_at")).isNotNull();
                 assertThat(((Number) collections.getFirst().get("collected_at")).longValue()).isPositive();
                 assertThat(((Number) collections.getFirst().get("collected_bytes")).longValue()).isGreaterThanOrEqualTo(
                         outputs.stream().mapToLong(row -> ((Number) row.get("byte_length")).longValue()).sum());
                 for (var output : outputs) {
-                    var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM qwen_managed_session_resource"
+                    var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM ma_resource"
                             + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", tenant, session, output.get("resource_id"));
                     assertThat(stored.get("state")).isEqualTo("COLLECTED");
                     assertThat(stored.get("inline_bytes")).isNull();
                     assertThat(stored.get("byte_length")).isEqualTo(output.get("byte_length"));
                 }
             });
-            assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, companion)).isEqualTo("ACTIVE");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement WHERE tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                     Integer.class, tenant, companion)).isZero();
             assertThat(Files.readString(root.resolve("workspace/child/lifecycle-marker.txt"))).isEqualTo("once\n");
             assertThat(root.resolve("decoy/lifecycle-marker.txt")).doesNotExist();
@@ -263,7 +271,7 @@ class HostedShellLifecycleRecoveryIT {
             evidence.put("writerGeneration", writer.get("writer_generation"));
             evidence.put("finalWriterId", writerIdentity().get("writer_id"));
             evidence.put("finalWriterGeneration", writerIdentity().get("writer_generation"));
-            evidence.put("finalClaimGeneration", jdbc.queryForObject("SELECT claim_generation FROM managed_agent_operation WHERE operation_id = ?",
+            evidence.put("finalClaimGeneration", jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_id = ?",
                     Long.class, operation));
             if (oldRequest.get() != null) evidence.put("oldClaimGeneration", JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong());
             evidence.put("manifestId", manifest.get("resource_id"));
@@ -303,7 +311,7 @@ class HostedShellLifecycleRecoveryIT {
                             || cut.equals("detach-ack") && request.path().equals("/session/" + session + "/detach");
                     if (cut.equals("detach-ack") && lose && status == 204 && dropped.get() == 0) {
                         assertThat(writerIdentity()).isEqualTo(writer);
-                        assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                                 String.class, tenant, session)).isEqualTo("SEALED");
                     }
                     return !(lose && status >= 200 && status < 300 && dropped.compareAndSet(0, 1));
@@ -314,9 +322,9 @@ class HostedShellLifecycleRecoveryIT {
         private void recoverExpiredResident() throws Exception {
             assertThat(firstPrepare.await(20, TimeUnit.SECONDS)).as("first real prepare request").isTrue();
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-                assertThat(jdbc.queryForObject("SELECT phase FROM qwen_runtime_harness_drain"
+                assertThat(jdbc.queryForObject("SELECT phase FROM ma_session_head"
                         + " WHERE tenant_id = ? AND harness_session_id = ?", String.class, tenant, session)).isEqualTo("DRAINING");
-                assertThat(jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM managed_agent_operation WHERE operation_id = ?",
+                assertThat(jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation WHERE operation_id = ?",
                         String.class, operation)).isNotBlank();
                 assertThat(liveWriter()).isFalse();
             });
@@ -330,24 +338,24 @@ class HostedShellLifecycleRecoveryIT {
                 assertThat(harness.isAlive()).isTrue();
                 releaseFirst.countDown();
                 await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                        "SELECT lease_until <= UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 FROM managed_agent_operation"
+                        "SELECT claim_until <= CURRENT_TIMESTAMP(6) FROM ma_operation"
                                 + " WHERE operation_id = ?", Boolean.class, operation)).isTrue());
                 startSpring();
                 assertThat(secondPrepare.await(30, TimeUnit.SECONDS)).as("second Spring resource claim").isTrue();
                 long oldGeneration = JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong();
                 long nextGeneration = JSON.readTree(newRequest.get().body()).at("/authority/claimGeneration").asLong();
                 assertThat(nextGeneration).isGreaterThan(oldGeneration);
-                assertThat(jdbc.queryForObject("SELECT claim_generation FROM managed_agent_operation WHERE operation_id = ?",
+                assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_id = ?",
                         Long.class, operation)).isEqualTo(nextGeneration);
                 assertThat(writerIdentity()).isEqualTo(writer);
                 assertThat(liveWriter()).isTrue();
-                long revision = jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head"
+                long revision = jdbc.queryForObject("SELECT journal_revision FROM ma_session_head"
                         + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session);
                 var stale = replay(oldRequest.get());
                 assertThat(stale.statusCode()).isEqualTo(503);
                 assertThat(JSON.readTree(stale.body()).path("code").asText()).isEqualTo("workspace_lifecycle_claim_fenced");
                 assertThat(writerIdentity()).isEqualTo(writer);
-                assertThat(jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head"
+                assertThat(jdbc.queryForObject("SELECT journal_revision FROM ma_session_head"
                         + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session)).isEqualTo(revision);
                 assertThat(bindings.findById(originalBinding.getBindingId()).getResourceHandle()).isEqualTo(originalBinding.getResourceHandle());
                 releaseSecond.countDown();
@@ -369,12 +377,12 @@ class HostedShellLifecycleRecoveryIT {
         }
 
         private Map<String, Object> writerIdentity() {
-            return jdbc.queryForMap("SELECT writer_id, writer_generation, lease_token_hash FROM qwen_managed_session_journal_head"
+            return jdbc.queryForMap("SELECT writer_id, writer_generation, lease_token_hash FROM ma_session_head"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         }
 
         private void assertManifestUnchanged() throws Exception {
-            var rows = jdbc.queryForList("SELECT resource_id, sha256, inline_bytes FROM qwen_managed_session_resource"
+            var rows = jdbc.queryForList("SELECT resource_id, sha256, inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-manifest'", tenant, session);
             assertThat(rows).hasSize(1);
             assertThat(rows.getFirst().get("resource_id")).isEqualTo(manifest.get("resource_id"));
@@ -386,7 +394,7 @@ class HostedShellLifecycleRecoveryIT {
 
         private boolean liveWriter() {
             return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                    + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
+                    + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
         }
 
         private String create(String key) throws Exception {
@@ -447,6 +455,7 @@ class HostedShellLifecycleRecoveryIT {
             properties.put(prefix + "runtime-broker.port", brokerPort);
             properties.put(prefix + "runtime-broker.token", TOKEN);
             properties.put(prefix + "runtime-broker.durable-local-process", true);
+            properties.put(prefix + "runtime-broker.verified-workspace-recovery-enabled", true);
             properties.put(prefix + "runtime-broker.trusted-local-reboot-recovery", false);
             properties.put(prefix + "runtime-broker.workspace-cwd", root.resolve("decoy"));
             properties.put(prefix + "runtime-broker.state-directory", root.resolve("broker"));

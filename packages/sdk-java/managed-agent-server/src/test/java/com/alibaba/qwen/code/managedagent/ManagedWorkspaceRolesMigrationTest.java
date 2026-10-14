@@ -12,7 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -29,64 +30,28 @@ class ManagedWorkspaceRolesMigrationTest {
             .getBytes(StandardCharsets.UTF_8);
 
     @Test
-    void backfillsRolesAndSessionOwnersAndRejectsNoRole() {
+    void freshRoleConstraintsAndSessionOwnerAuthorityRemainExact() {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:workspace-roles-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(source).target("47").load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(source);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        ManagedSchema.initialize(source);
+        JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 1, 'storage', 'Workspace',"
                 + " 'config', 'policy', 'ACTIVE')");
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " ('tenant', 'workspace', ?, TRUE, TRUE)", OPERATOR);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " ('tenant', 'workspace', ?, TRUE, FALSE)", READER);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " ('tenant', 'workspace', ?, FALSE, TRUE)",
-                "write-no-read".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " ('tenant', 'workspace', ?, FALSE, FALSE)",
-                "no-access".getBytes(StandardCharsets.UTF_8));
-        insertSession(jdbc, "owned", CREATOR);
-        insertSession(jdbc, "anonymous", null);
-
-        Flyway.configure().dataSource(source).load().migrate();
-
-        assertThat(jdbc.queryForObject("SELECT role FROM"
-                + " managed_workspace_access WHERE actor_id = ?",
-                String.class, OPERATOR)).isEqualTo("OPERATOR");
-        assertThat(jdbc.queryForObject("SELECT role FROM"
-                + " managed_workspace_access WHERE actor_id = ?",
-                String.class, READER)).isEqualTo("READER");
-        // Rows without can_read granted nothing under the booleans and are
-        // dropped instead of gaining a role through the backfill.
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_workspace_access WHERE actor_id IN (?, ?)",
-                Integer.class, "write-no-read".getBytes(StandardCharsets.UTF_8),
-                "no-access".getBytes(StandardCharsets.UTF_8))).isZero();
-        assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
-                + " managed_agent_session WHERE session_id = 'owned'",
-                byte[].class)).isEqualTo(CREATOR);
-        assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
-                + " managed_agent_session WHERE session_id = 'anonymous'",
-                byte[].class)).isNull();
-        // Fresh actor keys per negative case: reusing a seeded key would
-        // let a primary-key clash (also a DataIntegrityViolationException)
-        // mask the constraint actually being probed.
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'OPERATOR')", OPERATOR);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'READER')", READER);
+        assertThat(new ManagedWorkspaceRegistry(jdbc).accessOf("tenant", "operator", "workspace").canCreate()).isTrue();
+        assertThat(new ManagedWorkspaceRegistry(jdbc).accessOf("tenant", "reader", "workspace").canCreate()).isFalse();
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " managed_workspace_access (tenant_id, workspace_id,"
+                + " ma_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
                 + " 'NONE')", "none-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " managed_workspace_access (tenant_id, workspace_id,"
+                + " ma_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
                 + " 'SPECTATOR')",
                 "spectator-actor".getBytes(StandardCharsets.UTF_8)))
@@ -94,7 +59,7 @@ class ManagedWorkspaceRolesMigrationTest {
         // role carries no default: an INSERT omitting it must fail loudly,
         // as omitting a boolean did under the old NOT NULL columns.
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " managed_workspace_access (tenant_id, workspace_id,"
+                + " ma_workspace_access (tenant_id, workspace_id,"
                 + " actor_id) VALUES ('tenant', 'workspace', ?)",
                 "default-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
@@ -102,7 +67,7 @@ class ManagedWorkspaceRolesMigrationTest {
         // CHECK; the length-guarded CHECK stores only byte-exact enum
         // names.
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " managed_workspace_access (tenant_id, workspace_id,"
+                + " ma_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
                 + " 'READER ')",
                 "padded-actor".getBytes(StandardCharsets.UTF_8)))
@@ -111,7 +76,7 @@ class ManagedWorkspaceRolesMigrationTest {
         // A creation written after V53 keeps owner = creator on the store
         // path too; the two columns now only diverge through the handover
         // command that a later slice adds.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES ('tenant',"
                 + " 'workspace', ?, 'OPERATOR')", CREATOR);
         var properties = new ManagedAgentProperties();
@@ -127,19 +92,8 @@ class ManagedWorkspaceRolesMigrationTest {
                         new WorkspaceSelection("workspace", "."))
                 .sessionId());
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
-                + " managed_agent_session WHERE session_id = ?",
+                + " ma_session WHERE session_id = ?",
                 byte[].class, sessionId)).isEqualTo(CREATOR);
     }
 
-    private static void insertSession(JdbcTemplate jdbc, String id,
-            byte[] creatorKey) {
-        jdbc.update("INSERT INTO managed_agent_session"
-                + " (tenant_id, session_id, agent_id, status, created_at,"
-                + " updated_at) VALUES ('tenant', ?, 'qwen-code', 'ACTIVE',"
-                + " 1, 1)", id);
-        if (creatorKey != null) {
-            jdbc.update("UPDATE managed_agent_session SET creator_actor_key"
-                    + " = ? WHERE session_id = ?", creatorKey, id);
-        }
-    }
 }

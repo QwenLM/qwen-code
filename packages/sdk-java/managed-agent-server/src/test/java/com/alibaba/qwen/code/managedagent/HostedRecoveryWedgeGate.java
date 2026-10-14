@@ -176,12 +176,12 @@ class HostedRecoveryWedgeGate {
                     "hosted-workspace-files/1"};
             for (int index = 0; index < 3; index++) {
                 String workspaceId = workspaceIds.get(index);
-                jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+                jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref,"
                         + " state) VALUES (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE')",
                         tenant, workspaceId, "storage-" + index,
                         WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id,"
+                jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id,"
                         + " role) VALUES (?, ?, ?, 'OPERATOR')",
                         tenant, workspaceId, "actor".getBytes(StandardCharsets.UTF_8));
                 var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + index,
@@ -375,16 +375,16 @@ class HostedRecoveryWedgeGate {
                             + " recovery_detail_code, writer_id, writer_generation,"
                             + " journal_revision, committed_sequence, activation_epoch,"
                             + " writer_lease_until, updated_at FROM"
-                            + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
+                            + " ma_session_head WHERE tenant_id = ? AND"
                             + " session_id = ?", tenant, id);
             query(out, jdbc, "journal_tx " + id,
                     "SELECT session_id, operation, command_id, journal_revision, first_sequence,"
-                            + " last_sequence, created_at FROM qwen_managed_session_journal_tx"
+                            + " last_sequence, created_at FROM ma_session_journal_tx"
                             + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision"
                             + " DESC LIMIT 25", tenant, id);
             query(out, jdbc, "publications " + id,
                     "SELECT publication_id, tenant_id, session_id, retention_state, state,"
-                            + " capture_used_bytes FROM qwen_tool_publication WHERE tenant_id = ?"
+                            + " capture_used_bytes FROM ma_output_capture WHERE tenant_id = ?"
                             + " AND session_id = ?", tenant, id);
         }
         dumpSessionRows(jdbc, out, sessions);

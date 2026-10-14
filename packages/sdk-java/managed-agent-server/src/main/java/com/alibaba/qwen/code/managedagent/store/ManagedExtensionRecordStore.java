@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -62,7 +63,7 @@ public class ManagedExtensionRecordStore {
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
     public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
-            + " qwen_managed_session_extension_record WHERE"
+            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
             + " session_scope_key = ? AND operation_hash = ?";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
     private static final String HEADER_SUBTYPE = "managed_session_header_v1";
@@ -137,7 +138,7 @@ public class ManagedExtensionRecordStore {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
         require(body != null, "Unknown extension record domain.");
         List<String> ids = jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND domain = ?"
                         + " ORDER BY created_at, record_key",
@@ -152,8 +153,8 @@ public class ManagedExtensionRecordStore {
     }
 
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId) {
-        return jdbc.query("SELECT record_resource_id FROM qwen_managed_session_extension_record"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+        return jdbc.query("SELECT record_resource_id FROM ma_session_record"
+                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'hook_registration' AND settled_at IS NOT NULL"
                         + " ORDER BY first_sequence DESC",
                 (result, row) -> result.getString("record_resource_id"),
@@ -177,7 +178,7 @@ public class ManagedExtensionRecordStore {
             return Optional.empty();
         }
         return jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
                 (result, row) -> {
                     taskRow(result, tenantId, sessionId);
@@ -217,7 +218,7 @@ public class ManagedExtensionRecordStore {
     private StoredResource readResource(String tenantId, String sessionId,
             String resourceId) {
         StoredResource resource = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_resource WHERE"
+                        + " ma_resource WHERE"
                         + " session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND resource_id = ?"
                         + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE'"
@@ -260,7 +261,7 @@ public class ManagedExtensionRecordStore {
      */
     ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
-            Function<String, StoredResource> resources) {
+            Function<String, StoredResource> resources, long committedAt) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
@@ -352,7 +353,7 @@ public class ManagedExtensionRecordStore {
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
                         firstSequence + index, occurredAt, resources,
-                        () -> transactionInputIds(lines, eventCount));
+                        () -> transactionInputIds(lines, eventCount), committedAt);
                 applied++;
             }
         }
@@ -373,8 +374,8 @@ public class ManagedExtensionRecordStore {
     void reconcileNeverStartedVerdict(String tenantId, String sessionId,
             String domain, String recordId, JsonNode record) {
         jdbc.query("SELECT record_key FROM"
-                        + " qwen_managed_session_extension_record"
-                        + " WHERE session_scope_key = ?"
+                        + " ma_session_record"
+                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND record_key = ? FOR UPDATE",
                 (result, rowNum) -> result.getString(1),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
@@ -389,8 +390,8 @@ public class ManagedExtensionRecordStore {
         // isolation defaults — and takes the same extension-then-session
         // lock order the mint uses, so the seam never cycles.
         List<String> lineage = jdbc.query(
-                "SELECT session_id FROM managed_agent_session"
-                        + " WHERE tenant_id = ? AND parent_session_id = ?"
+                "SELECT session_id FROM ma_session"
+                        + " WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND parent_session_id = ?"
                         + " AND parent_child_run_id = ? FOR UPDATE",
                 (result, rowNum) -> result.getString(1), tenantId,
                 sessionId, recordId);
@@ -521,8 +522,8 @@ public class ManagedExtensionRecordStore {
         String key = domain + ":" + id;
         JsonNode previous = revisions.get(key);
         if (previous == null) {
-            previous = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
-                + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+            previous = jdbc.queryForList("SELECT record_resource_id FROM ma_session_record"
+                + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
                 String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, domain, id), tenantId, sessionId, domain, id).stream().map(resource -> {
                     JsonNode record = readBody(readResource(tenantId, sessionId, resource));
@@ -562,7 +563,7 @@ public class ManagedExtensionRecordStore {
         }
         arguments.add(limit + 1);
         List<TaskRow> rows = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND task_kind IS NOT NULL" + cursor + " ORDER BY created_at DESC,"
                         + " record_key DESC LIMIT ?",
                 (result, row) -> taskRow(result, tenantId, sessionId),
@@ -578,7 +579,7 @@ public class ManagedExtensionRecordStore {
             return Optional.empty();
         }
         return jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
@@ -693,7 +694,7 @@ public class ManagedExtensionRecordStore {
     private Optional<String> hookRecordResource(String where,
             Object... arguments) {
         return jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE "
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND "
                         + where + " LIMIT 1",
                 (result, row) -> result.getString("record_resource_id"),
                 arguments).stream().findFirst();
@@ -722,7 +723,7 @@ public class ManagedExtensionRecordStore {
             String sessionId, String domain, Body body, String operationId,
             JsonNode recordRef, long sequence, long occurredAt,
             Function<String, StoredResource> resources,
-            Supplier<List<String>> inputIds) {
+            Supplier<List<String>> inputIds, long committedAt) {
         String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
         require(resource.kind().equals(recordRef.get("kind").textValue())
@@ -821,6 +822,8 @@ public class ManagedExtensionRecordStore {
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
         }
         if (domain.equals("channel_delivery")) {
+            ChannelInstanceStore.requireReconciliationFence(jdbc, tenantId, sessionId,
+                    record.get("deliveryId").textValue(), operationId);
             JsonNode ref = record.get("contentRef");
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
             for (JsonNode segment : record.get("segments")) {
@@ -878,7 +881,7 @@ public class ManagedExtensionRecordStore {
         }
         if (domain.equals("mcp_configuration")) {
             List<String> configurations = jdbc.query("SELECT record_resource_id FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND domain = 'mcp_configuration'",
                     (result, row) -> result.getString("record_resource_id"), scopeKey);
             for (String configuration : configurations) {
@@ -892,7 +895,7 @@ public class ManagedExtensionRecordStore {
             String childRunKey = ManagedExtensionProjection.recordKey(sessionId,
                     "child_run", record.get("childRunId").textValue());
             String childRunResource = jdbc.query("SELECT record_resource_id FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND record_key = ?",
                     (result, row) -> result.getString("record_resource_id"),
                     scopeKey, childRunKey).stream().findFirst().orElse(null);
@@ -943,8 +946,8 @@ public class ManagedExtensionRecordStore {
                     record.get("childRunId").textValue());
             boolean acceptanceExists = !jdbc
                     .query("SELECT record_resource_id FROM"
-                                    + " qwen_managed_session_extension_record"
-                                    + " WHERE session_scope_key = ? AND record_key = ?",
+                                    + " ma_session_record"
+                                    + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ?",
                             (result, row) -> result.getString(
                                     "record_resource_id"),
                             scopeKey, acceptanceKey)
@@ -961,7 +964,7 @@ public class ManagedExtensionRecordStore {
                             + " acceptance record.");
         }
         StoredRow previous = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ?",
                 ManagedExtensionRecordStore::storedRow, scopeKey, recordKey)
                 .stream().findFirst().orElse(null);
@@ -988,7 +991,7 @@ public class ManagedExtensionRecordStore {
                 String registrationKey = ManagedExtensionProjection.recordKey(sessionId,
                         "hook_registration", record.get("registrationId").textValue());
                 String registrationResource = jdbc.query("SELECT record_resource_id FROM"
-                                + " qwen_managed_session_extension_record WHERE"
+                                + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                                 + " session_scope_key = ? AND record_key = ?",
                         (result, row) -> result.getString("record_resource_id"),
                         scopeKey, registrationKey).stream().findFirst().orElse(null);
@@ -1022,7 +1025,7 @@ public class ManagedExtensionRecordStore {
                 String configKey = ManagedExtensionProjection.recordKey(sessionId,
                         "mcp_configuration", record.get("configurationId").textValue());
                 String configResource = jdbc.query("SELECT record_resource_id FROM"
-                                + " qwen_managed_session_extension_record WHERE"
+                                + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                                 + " session_scope_key = ? AND record_key = ?",
                         (result, row) -> result.getString("record_resource_id"),
                         scopeKey, configKey).stream().findFirst().orElse(null);
@@ -1044,7 +1047,7 @@ public class ManagedExtensionRecordStore {
                 String scheduleKey = ManagedExtensionProjection.recordKey(sessionId,
                         "schedule", record.get("scheduleId").textValue());
                 String scheduleResource = jdbc.query("SELECT record_resource_id FROM"
-                                + " qwen_managed_session_extension_record WHERE"
+                                + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                                 + " session_scope_key = ? AND record_key = ?",
                         (result, row) -> result.getString("record_resource_id"),
                         scopeKey, scheduleKey).stream().findFirst().orElse(null);
@@ -1075,7 +1078,7 @@ public class ManagedExtensionRecordStore {
                 String routeKey = ManagedExtensionProjection.recordKey(sessionId,
                         "channel_route", record.get("routeId").textValue());
                 String routeResource = jdbc.query("SELECT record_resource_id FROM"
-                                + " qwen_managed_session_extension_record WHERE"
+                                + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                                 + " session_scope_key = ? AND record_key = ?",
                         (result, row) -> result.getString("record_resource_id"),
                         scopeKey, routeKey).stream().findFirst().orElse(null);
@@ -1096,7 +1099,7 @@ public class ManagedExtensionRecordStore {
             // The command that opens a record becomes the operation of its
             // grants, so it opens no other record.
             Integer opened = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND operation_hash = ?",
                     Integer.class, scopeKey, operationHash);
             require(opened != null && opened == 0, "Command " + operationId
@@ -1143,8 +1146,8 @@ public class ManagedExtensionRecordStore {
         long revision = previous == null ? 1 : previous.revision() + 1;
         if (previous == null) {
             try {
-                jdbc.update("INSERT INTO qwen_managed_session_extension_record"
-                                + " (session_scope_key, record_key, tenant_id,"
+                jdbc.update("INSERT INTO ma_session_record"
+                                + " (record_kind, session_scope_key, record_key, tenant_id,"
                                 + " workspace_id, session_id, domain, record_id,"
                                 + " operation_hash, revision, record_resource_id,"
                                 + " task_kind, task_state, runtime_state,"
@@ -1152,7 +1155,7 @@ public class ManagedExtensionRecordStore {
                                 + " delivery_state, created_at, started_at,"
                                 + " settled_at, first_sequence, hook_once_key_hash,"
                                 + " hook_occurrence_hash, hook_ordinal,"
-                                + " hook_definition_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+                                + " hook_definition_hash) VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?,"
                                 + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         scopeKey, recordKey, tenantId, workspaceId, sessionId,
                         domain, recordId, operationHash, revision, resourceId,
@@ -1175,12 +1178,12 @@ public class ManagedExtensionRecordStore {
                         + " already committed in this Session.");
             }
         } else {
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+            jdbc.update("UPDATE ma_session_record SET"
                             + " revision = ?, record_resource_id = ?,"
                             + " task_state = ?, runtime_state = ?,"
                             + " definition_revision = ?, delivery_target = ?,"
                             + " delivery_state = ?, started_at = ?,"
-                            + " settled_at = ? WHERE session_scope_key = ?"
+                            + " settled_at = ? WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                             + " AND record_key = ?",
                     revision, resourceId, body.taskKindOf().apply(record) == null ? null : projection.state(),
                     projection.runtimeState(),
@@ -1188,6 +1191,16 @@ public class ManagedExtensionRecordStore {
                     deliveryState, projection.startedAt(),
                     projection.settledAt(), scopeKey, recordKey);
         }
+        if (domain.equals("schedule")) {
+            new AutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
+                    sessionId, revision, record, committedAt);
+        }
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
+                        + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scopeKey, recordKey);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
+                        + " tenant_id, workspace_id, session_id, resource_id, created_at)"
+                        + " VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
         if (body.taskKindOf().apply(record) != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
@@ -1346,7 +1359,7 @@ public class ManagedExtensionRecordStore {
         // read decides; read directly, since a store built beside no
         // public Session table holds no AgentStateStore.
         List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
-                        + " parent_child_run_id FROM managed_agent_session"
+                        + " parent_child_run_id FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 (result, row) -> new String[] {
                         result.getString("parent_session_id"),
@@ -1393,7 +1406,7 @@ public class ManagedExtensionRecordStore {
             // stamped at creation and never changes, so a plain read
             // decides, exactly like the message channel's.
             List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
-                            + " parent_child_run_id FROM managed_agent_session"
+                            + " parent_child_run_id FROM ma_session"
                             + " WHERE tenant_id = ? AND session_id = ?",
                     (result, row) -> new String[] {
                             result.getString("parent_session_id"),
@@ -1473,7 +1486,7 @@ public class ManagedExtensionRecordStore {
         // authority keeps just that latest one, relying on the same
         // invariant, so a second release condition must change both.
         List<String> siblings = jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND domain = 'child_run'"
                         + " AND task_kind = ?",
                 (result, row) -> result.getString("record_resource_id"),
@@ -1648,7 +1661,7 @@ public class ManagedExtensionRecordStore {
     private List<JsonNode> domainBodies(String scopeKey, String domain,
             Function<String, StoredResource> resources) {
         return jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND domain = ?",
                 (result, row) -> result.getString("record_resource_id"),
                 scopeKey, domain)
@@ -1661,7 +1674,7 @@ public class ManagedExtensionRecordStore {
             String domain, String recordId,
             Function<String, StoredResource> resources) {
         return jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ?",
                 (result, row) -> result.getString("record_resource_id"),
                 scopeKey, ManagedExtensionProjection.recordKey(sessionId,
@@ -1716,7 +1729,7 @@ public class ManagedExtensionRecordStore {
      * row's lock here for the first time and may wait across connections —
      * the same shape main's announce() already has. */
     private boolean isBeingDeleted(String tenantId, String sessionId) {
-        String status = jdbc.query("SELECT status FROM managed_agent_session"
+        String status = jdbc.query("SELECT status FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 (result, row) -> result.getString("status"),
                 tenantId, sessionId).stream().findFirst().orElse(null);

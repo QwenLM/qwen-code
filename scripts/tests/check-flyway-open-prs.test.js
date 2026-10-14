@@ -206,6 +206,24 @@ describe('check-flyway-open-prs', () => {
     );
   });
 
+  it('tracks the shared fresh baseline and its open PR claims', async () => {
+    rmSync(join(root, SERVER, 'src'), { recursive: true });
+    const baseline = `${BROKER}/src/main/resources/db/managed-schema/V1__managed_schema.sql`;
+    onMain(baseline);
+    expect(mainMigrations(root, MODULES)).toEqual([baseline]);
+    const { byPr } = await check([
+      pr(20001, [
+        `${BROKER}/src/main/resources/db/managed-schema/V01__duplicate.sql`,
+      ]),
+      pr(20002, [
+        `${BROKER}/src/main/resources/db/managed-schema/V2__next.sql`,
+      ]),
+    ]);
+    expect(byPr[20001].state).toBe('failure');
+    expect(byPr[20001].description).toContain('V1__managed_schema.sql');
+    expect(byPr[20002].state).toBe('success');
+  });
+
   it('passes a free version and names every other open PR claiming it', async () => {
     const { byPr } = await check([
       pr(13530, [sql('V55__agent_definition.sql')]),

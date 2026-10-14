@@ -29,7 +29,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,11 +60,11 @@ class WorkspaceSessionRetentionMySqlIT {
         }
         String user = required("mysql.user");
         String password = System.getProperty("mysql.password", "");
-        admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        admin = new ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
         schema = "workspace_retention_" + UUID.randomUUID().toString().replace("-", "");
         admin.execute("CREATE DATABASE " + schema);
         source = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-        jdbc = new JdbcTemplate(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
     }
 
@@ -75,7 +76,7 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"UPDATE managed_agent_session SET status = 'CLOSED'", "session.unarchived"})
+    @ValueSource(strings = {"UPDATE ma_session SET status = 'CLOSED'", "session.unarchived"})
     void unarchiveRollsBackItsCommandStateAndEvents(String failureSql) {
         var store = store(Clock.systemUTC());
         String tenant = "rollback";
@@ -86,8 +87,8 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThatThrownBy(() -> transaction(() -> fault.unarchiveWorkspaceSession(tenant, session,
                 OWNER, "scoped-key", "digest"))).isInstanceOf(IllegalStateException.class);
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("ARCHIVED");
-        assertThat(count("managed_agent_command", "operation = 'UNARCHIVE_WORKSPACE_SESSION'")).isZero();
-        assertThat(count("managed_agent_event", "event_type IN ('session.unarchive.requested', 'session.unarchived')")).isZero();
+        assertThat(count("ma_request_receipt", "namespace = 'SESSION_COMMAND' AND operation = 'UNARCHIVE_WORKSPACE_SESSION'")).isZero();
+        assertThat(count("ma_public_event", "event_type IN ('session.unarchive.requested', 'session.unarchived')")).isZero();
         assertThat(transaction(() -> store.unarchiveWorkspaceSession(tenant, session, OWNER, "scoped-key", "digest")).replayed()).isFalse();
     }
 
@@ -107,16 +108,16 @@ class WorkspaceSessionRetentionMySqlIT {
             assertThat(List.of(one.get(5, TimeUnit.SECONDS).replayed(), two.get(5, TimeUnit.SECONDS).replayed()))
                     .containsExactlyInAnyOrder(false, true);
         }
-        assertThat(count("managed_agent_command", "operation = 'UNARCHIVE_WORKSPACE_SESSION'")).isEqualTo(1);
-        assertThat(count("managed_agent_event", "event_type = 'session.unarchived'")).isEqualTo(1);
+        assertThat(count("ma_request_receipt", "namespace = 'SESSION_COMMAND' AND operation = 'UNARCHIVE_WORKSPACE_SESSION'")).isEqualTo(1);
+        assertThat(count("ma_public_event", "event_type = 'session.unarchived'")).isEqualTo(1);
         assertThatThrownBy(() -> transaction(() -> first.unarchiveWorkspaceSession(tenant, session, OWNER, "key", "changed")))
                 .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         assertThat(first.requireSession(tenant, session).status()).isEqualTo("CLOSED");
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"UPDATE qwen_tool_publication SET retention_state", "UPDATE managed_agent_session SET status = 'DELETED'",
-            "UPDATE managed_agent_operation SET error_code = NULL, state = 'COMPLETED'", "INSERT INTO managed_agent_event"})
+    @ValueSource(strings = {"UPDATE ma_output_capture SET retention_state", "UPDATE ma_session SET status = 'DELETED'",
+            "UPDATE ma_operation SET failure_code = NULL, phase = 'COMPLETED', state =", "INSERT INTO ma_public_event"})
     void deletionRollsBackRetirementTombstoneReceiptAndEvent(String failureSql) {
         var store = store(Clock.systemUTC());
         String tenant = "rollback";
@@ -128,16 +129,16 @@ class WorkspaceSessionRetentionMySqlIT {
                 "delete-worker", claimed.claimGeneration(), false))).isInstanceOf(IllegalStateException.class);
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETING");
         assertThat(store.findOperation(tenant, session, claimed.operationId()).orElseThrow().receiptId()).isNull();
-        assertThat(count("qwen_output_session_retirement", "1=1")).isZero();
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head", String.class)).isEqualTo("SEALED");
-        assertThat(jdbc.queryForObject("SELECT retention_state FROM qwen_tool_publication", String.class)).isEqualTo("PINNED");
-        assertThat(count("managed_agent_event", "event_type = 'session.deleted'")).isZero();
+        assertThat(count("ma_session", "retirement_generation > 0")).isZero();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'", String.class)).isEqualTo("SEALED");
+        assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture", String.class)).isEqualTo("PINNED");
+        assertThat(count("ma_public_event", "event_type = 'session.deleted'")).isZero();
         assertThat(transaction(() -> store.completeOperation(tenant, session, claimed.operationId(),
                 "delete-worker", claimed.claimGeneration(), false))).isTrue();
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETED");
-        assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head", String.class)).isEqualTo("DELETED");
-        assertThat(jdbc.queryForObject("SELECT retention_state FROM qwen_tool_publication", String.class)).isEqualTo("RETIRING");
+        assertThat(count("ma_session", "retirement_generation > 0")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'", String.class)).isEqualTo("DELETED");
+        assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture", String.class)).isEqualTo("RETIRING");
     }
 
     @Test
@@ -159,16 +160,16 @@ class WorkspaceSessionRetentionMySqlIT {
                 }));
                 awaitLatch(reachedPublicLock);
                 assertThrows(TimeoutException.class, () -> queued.get().get(100, TimeUnit.MILLISECONDS));
-                jdbc.update("UPDATE managed_agent_operation SET lease_until = 0 WHERE operation_id = ?", claimed.operationId());
+                jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = ?", claimed.operationId());
                 return true;
             });
             assertThat(queued.get().get(5, TimeUnit.SECONDS)).isFalse();
         }
-        assertThat(count("qwen_output_session_retirement", "1=1")).isZero();
+        assertThat(count("ma_session", "retirement_generation > 0")).isZero();
         var takeover = transaction(() -> second.claimOperation(tenant, session, claimed.operationId(), "replacement", Duration.ofMinutes(1))).orElseThrow();
         assertThat(takeover.claimGeneration()).isGreaterThan(claimed.claimGeneration());
         assertThat(transaction(() -> second.completeOperation(tenant, session, claimed.operationId(), "replacement", takeover.claimGeneration(), false))).isTrue();
-        assertThat(count("managed_agent_event", "event_type = 'session.deleted'")).isEqualTo(1);
+        assertThat(count("ma_public_event", "event_type = 'session.deleted'")).isEqualTo(1);
     }
 
     @Test
@@ -177,11 +178,11 @@ class WorkspaceSessionRetentionMySqlIT {
         String tenant = "recovery";
         String session = closed(store, tenant, true);
         publication(tenant, session);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = 'BLOCKED'");
+        jdbc.update("UPDATE ma_session_head SET recovery_status = 'BLOCKED'");
         var claimed = deleteClaim(store, tenant, session);
-        jdbc.update("DELETE FROM managed_workspace_access");
+        jdbc.update("DELETE FROM ma_workspace_access");
         assertThat(transaction(() -> store.completeOperation(tenant, session, claimed.operationId(), "delete-worker", claimed.claimGeneration(), false))).isTrue();
-        assertThat(jdbc.queryForObject("SELECT recovery_protected FROM qwen_output_session_retirement", Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT recovery_protected FROM ma_session WHERE retirement_generation > 0", Boolean.class)).isTrue();
         var retention = new ToolPublicationRetentionStore(jdbc, new DataSourceTransactionManager(source));
         assertThat(retention.observe(Duration.ZERO)).singleElement().extracting(ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("recovery_protected");
         assertThatThrownBy(() -> transaction(() -> new ManagedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
@@ -202,8 +203,8 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(transaction(() -> disabled.unarchiveWorkspaceSession(tenant, session, OWNER, "unarchive", "digest")).session().status()).isEqualTo("CLOSED");
         var claimed = deleteClaim(disabled, tenant, session);
         assertThat(transaction(() -> disabled.completeOperation(tenant, session, claimed.operationId(), "delete-worker", claimed.claimGeneration(), false))).isTrue();
-        assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);
-        assertThat(count("qwen_managed_session_journal_head", "1=1")).isZero();
+        assertThat(count("ma_session", "retirement_generation > 0")).isEqualTo(1);
+        assertThat(count("ma_session_head", "head_kind = 'MANAGED_SESSION'")).isZero();
     }
 
     @ParameterizedTest
@@ -215,11 +216,15 @@ class WorkspaceSessionRetentionMySqlIT {
         publication(tenant, session);
         var deletion = deleteClaim(store, tenant, session);
         String digest = "c".repeat(64);
-        jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id, workspace_id,"
-                + " session_id, source_json, source_digest, work_state, claim_generation, claim_until)"
-                + " VALUES ('result-1', ?, ?, ?, 'workspace', ?, '{}', ?, 'LEASED', 1, ?)",
-                ManagedToolResultStore.identity("s", tenant, session).substring(2), digest, tenant, session,
-                digest, System.currentTimeMillis() + 60_000);
+        String projectionScope = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session);
+        String projectionKey = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION,
+                projectionScope, digest, "result-1");
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id,"
+                + " tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1,"
+                + " TIMESTAMPADD(SECOND, 60, CURRENT_TIMESTAMP(6)), 0, 0)", projectionKey, projectionScope, projectionScope,
+                digest, tenant, session, digest, digest);
         var projection = new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
         var claim = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source("result-1", tenant,
                 "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
@@ -264,9 +269,9 @@ class WorkspaceSessionRetentionMySqlIT {
                 assertThat(projected.get(5, TimeUnit.SECONDS)).isFalse();
             } finally { release.countDown(); }
         }
-        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("SUPPRESSED");
-        assertThat(count("managed_agent_event", "event_type = 'tool.result'")).isZero();
-        assertThat(count("managed_agent_artifact", "1=1")).isZero();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class)).isEqualTo("SUPPRESSED");
+        assertThat(count("ma_public_event", "event_type = 'tool.result'")).isZero();
+        assertThat(count("ma_artifact", "1=1")).isZero();
     }
 
     @Test
@@ -275,7 +280,7 @@ class WorkspaceSessionRetentionMySqlIT {
         String tenant = "renewal";
         String session = closed(store, tenant, true);
         // Restore a residual private writer to exercise the retirement safety check.
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE',"
+        jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE',"
                 + " writer_lease_until = TIMESTAMPADD(SECOND, 60, CURRENT_TIMESTAMP(6))");
         var deletion = deleteClaim(store, tenant, session);
         var sessions = new ManagedSessionStore(jdbc);
@@ -303,7 +308,7 @@ class WorkspaceSessionRetentionMySqlIT {
             } finally { release.countDown(); }
         }
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETING");
-        assertThat(count("qwen_output_session_retirement", "1=1")).isZero();
+        assertThat(count("ma_session", "retirement_generation > 0")).isZero();
         transaction(() -> sessions.sealWriter(tenant, session, TOKEN, new SealWriterRequest("workspace", "writer", 1)));
         assertThat(transaction(() -> store.completeOperation(tenant, session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false))).isTrue();
     }
@@ -314,67 +319,13 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     @Test
-    void prerequisiteMigrationsPreserveExistingCloseEvidenceAndAllowRetirement() {
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").target("31").load().migrate();
-        String tenant = "upgrade";
-        String session = UUID.randomUUID().toString();
-        long now = System.currentTimeMillis();
-        // Seed the historical schema without running current admission code against it.
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
-                + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
-                tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        // Seeded at V31, where the grant columns are still the booleans; the
-        // V52 backfill maps this (TRUE, TRUE) row to OPERATOR on upgrade.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
-                + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
-                + " context_revision, workspace_config_ref, workspace_policy_ref, version)"
-                + " VALUES (?, ?, 'qwen-code', 'CLOSED', ?, ?, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 2)",
-                tenant, session, now, now, "sha256:" + java.util.HexFormat.of().formatHex(sha256(
-                        WorkspaceExecutionProfile.CONFIG_REF + "\u0000" + WorkspaceExecutionProfile.POLICY_REF)),
-                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_session_create_scope (tenant_id, idempotency_key, workspace_bound)"
-                + " VALUES (?, 'create', TRUE)", tenant);
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key, request_digest,"
-                + " session_id, created_at) VALUES (?, ?, 'create', 'create-digest', ?, ?)",
-                tenant, OWNER.getBytes(StandardCharsets.UTF_8), session, now);
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before, receipt_id,"
-                + " claim_generation, available_at, created_at, updated_at, completed_at)"
-                + " VALUES (?, ?, 'legacy-close', 'CLOSE', ?, 'close', 'close-digest', 'COMPLETED', 'HARNESS_CONFIRMED',"
-                + " 'CONFIRMED', 'ACTIVE', 'legacy-close-receipt', 1, ?, ?, ?, ?)", tenant, session, ACTOR_DIGEST, now, now, now, now);
-        var originalSession = jdbc.queryForMap("SELECT * FROM managed_agent_session");
-        var originalClose = jdbc.queryForMap("SELECT * FROM managed_agent_operation");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                + " AND table_name = 'qwen_runtime_storage_fence'", Integer.class, schema)).isZero();
-
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session")).containsAllEntriesOf(originalSession);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation"))
-                .containsAllEntriesOf(originalClose)
-                .hasSize(originalClose.size() + 7)
-                .containsEntry("target_cwd_relative", null)
-                .containsEntry("expected_context_revision", null)
-                .containsEntry("result_context_revision", null)
-                .containsEntry("lifecycle_protocol_version", 0)
-                .containsEntry("lifecycle_effects_receipt_json", null)
-                // V56 grandfather: a pre-V56 operation settles on the
-                // creator-keyed facts alone.
-                .containsEntry("actor_key", null)
-                // V62: only a task_cancel names a task.
-                .containsEntry("task_id", null);
-        var properties = new ManagedAgentProperties();
-        properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
-        assertThat(store.hasCompletedWorkspaceClose(tenant, session)).isTrue();
-        assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().lifecycleProtocolVersion()).isZero();
-        assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED");
-        assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-files/1");
-        assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().receiptId()).isEqualTo("legacy-close-receipt");
-        var deletion = deleteClaim(store, tenant, session);
-        assertThat(transaction(() -> store.completeOperation(tenant, session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false))).isTrue();
-        assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);
+    void freshBaselineRefusesLegacyCloseEvidenceWithoutChangingIt() {
+        jdbc.execute("CREATE TABLE managed_agent_operation (operation_id VARCHAR(64) PRIMARY KEY, operation_kind VARCHAR(32), receipt_id VARCHAR(64))");
+        jdbc.update("INSERT INTO managed_agent_operation VALUES ('legacy-close', 'CLOSE', 'legacy-close-receipt')");
+        var before = jdbc.queryForMap("SELECT * FROM managed_agent_operation");
+        assertThatThrownBy(() -> ManagedSchema.initialize(source)).isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation")).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND LEFT(table_name, 3) = 'ma_'", Integer.class, schema)).isZero();
     }
 
     @ParameterizedTest
@@ -395,7 +346,7 @@ class WorkspaceSessionRetentionMySqlIT {
         });
         assertThat(store.findDeliverableOperations(Long.MAX_VALUE, 100)).isEmpty();
         assertThat(transaction(() -> store.claimOperation(tenant, session, old.operationId(), "replacement", Duration.ofMinutes(1)))).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE operation_id = ?", old.operationId());
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_id = ?", old.operationId());
         assertThat(store.findDeliverableOperations(0, 100)).extracting(target -> target.operationId()).containsExactly(old.operationId());
         var replacement = transaction(() -> store.claimOperation(tenant, session, old.operationId(), "replacement", Duration.ofMinutes(1))).orElseThrow();
         assertThat(replacement.claimGeneration()).isEqualTo(old.claimGeneration() + 1);
@@ -406,8 +357,8 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(completed.failureCode()).isNull();
         assertThat(completed.admissionStage()).isEqualTo("JAVA_DURABLE");
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETED");
-        assertThat(count("qwen_output_session_retirement", "1=1")).isEqualTo(1);
-        assertThat(count("managed_agent_event", "event_type = 'session.deleted'")).isEqualTo(1);
+        assertThat(count("ma_session", "retirement_generation > 0")).isEqualTo(1);
+        assertThat(count("ma_public_event", "event_type = 'session.deleted'")).isEqualTo(1);
     }
 
     private String closed(ManagedAgentStore store, String tenant, boolean journal) {
@@ -435,11 +386,11 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private ManagedAgentStore observingCompletion(CountDownLatch reachedPublicLock) {
-        var observedJdbc = new JdbcTemplate(source) {
+        var observedJdbc = new ManagedSchemaJdbcTemplate(source) {
             @Override
-            public <T> T queryForObject(String sql, org.springframework.jdbc.core.RowMapper<T> mapper, Object... arguments) {
-                if (sql.contains("managed_agent_session") && sql.endsWith("FOR UPDATE")) reachedPublicLock.countDown();
-                return super.queryForObject(sql, mapper, arguments);
+            public int update(String sql, Object... arguments) {
+                if (sql.startsWith("INSERT INTO ma_session")) reachedPublicLock.countDown();
+                return super.update(sql, arguments);
             }
         };
         return new ManagedAgentStore(observedJdbc, mapper, Clock.systemUTC(), ignored -> {},
@@ -447,11 +398,11 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private ManagedAgentStore faultStore(String sqlPrefix) {
-        var fault = new JdbcTemplate(source) {
+        var fault = new ManagedSchemaJdbcTemplate(source) {
             @Override
             public int update(String sql, Object... arguments) {
                 if (sql.startsWith(sqlPrefix) || sqlPrefix.equals("session.unarchived")
-                        && sql.startsWith("INSERT INTO managed_agent_event") && sqlPrefix.equals(arguments[5])) {
+                        && sql.startsWith("INSERT INTO ma_public_event") && java.util.Arrays.asList(arguments).contains(sqlPrefix)) {
                     throw new IllegalStateException("Injected transaction failure");
                 }
                 return super.update(sql, arguments);
@@ -464,13 +415,13 @@ class WorkspaceSessionRetentionMySqlIT {
 
     private void publication(String tenant, String session) {
         String key = "b".repeat(64);
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
                 + " VALUES (?, ?, ?, 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
-                key, java.util.HexFormat.of().formatHex(sha256(tenant)), tenant, session, key, key, key);
+                key, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant), tenant, session, key, key, key);
     }
 
     private static byte[] sha256(String value) {
@@ -479,18 +430,18 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private ManagedAgentStore store(Clock clock) {
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        ManagedSchema.initialize(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         return new ManagedAgentStore(jdbc, mapper, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
     }
 
     private String create(ManagedAgentStore store, String tenant) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_registry WHERE tenant_id = ?", Integer.class, tenant) == 0) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?", Integer.class, tenant) == 0) {
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
         }
         return transaction(() -> store.insertWorkspaceSessionCommand(tenant, OWNER, UUID.randomUUID().toString(),
@@ -498,7 +449,7 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private void lock(String tenant, String session) {
-        jdbc.queryForObject("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+        jdbc.queryForObject("SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 String.class, tenant, session);
     }
 
