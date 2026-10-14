@@ -439,8 +439,8 @@ class ManagedTeamStoreTest {
 
     private long revisions(String sessionId) {
         Long total = jdbc.queryForObject("SELECT COALESCE(SUM(revision), 0)"
-                        + " FROM qwen_managed_session_extension_record"
-                        + " WHERE tenant_id = ? AND session_id = ?",
+                        + " FROM ma_session_record"
+                        + " WHERE record_kind='DOMAIN' AND tenant_id = ? AND session_id = ?",
                 Long.class, TENANT, sessionId);
         return total == null ? 0 : total;
     }
