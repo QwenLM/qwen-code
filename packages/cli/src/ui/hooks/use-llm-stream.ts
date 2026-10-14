@@ -110,7 +110,7 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   getEnclosingFenceInfo,
-} from '../utils/markdownUtilities.js';
+} from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import type { RenderMode } from '../contexts/RenderModeContext.js';
 import { useStateAndRef } from './useStateAndRef.js';

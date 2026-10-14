@@ -32,7 +32,6 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
-import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -155,7 +154,10 @@ public class WebShellAgentController {
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
-        validateTraceMetadata(request.metadata());
+        // The WebShell handlers forward no metadata at all (null in its
+        // slot): whatever the client sends is accepted and ignored, so no
+        // clientId-only contract is asserted here and immediately
+        // discarded. The Session title travels in the title field.
         WebShellAdmission admission = webShell(selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
@@ -173,7 +175,6 @@ public class WebShellAgentController {
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse,
                 request.requestId());
-        validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
@@ -251,20 +252,6 @@ public class WebShellAgentController {
         return ResponseEntity.accepted().body(lifecycle.admitWebShell(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(), kind));
-    }
-
-    private static void validateTraceMetadata(Map<String, Object> metadata) {
-        if (metadata == null || metadata.isEmpty()) {
-            return;
-        }
-        Object clientId = metadata.get("clientId");
-        if (metadata.size() != 1 || !(clientId instanceof String)
-                || ((String) clientId).isBlank()
-                || ((String) clientId).length() > 128) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "WebShell metadata accepts clientId only.");
-        }
     }
 
     private static WebShellAdmission webShell(CommandAdmission admission) {

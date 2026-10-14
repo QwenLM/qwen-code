@@ -12,30 +12,24 @@ import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-import { useOverflowActions } from '../contexts/OverflowContext.js';
-import { parseCodeFenceInfo } from './markdownUtilities.js';
+import { parseCodeFenceInfo } from './markdown-utilities.js';
 import {
   fitPendingSlice,
   splitMarkdownTableRow,
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
+  LIST_ITEM_PREFIX_PADDING,
+  BLOCKQUOTE_PREFIX_PADDING,
+  BLOCKQUOTE_PREFIX,
 } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview (own constant — not
 // coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
-
-// Rows reserved from the viewport when clamping a streaming table's height:
-// marginY 2 + one row of wrapped-cell safety headroom. Tables under-estimate
-// their rendered height the most (a wrapped cell), so they keep one more
-// reserved row than the other blocks. Shared by the render-side clamp
-// (RenderTable's `maxHeight`) and the slice-side estimate (`tableClampRows`)
-// so the two never diverge and let a table overflow the render cap.
-const TABLE_PENDING_RESERVED_ROWS = 3;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -58,7 +52,6 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
-  registerOverflow?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -127,9 +120,7 @@ export function countMarkdownSourceBlocks(
 
 const EMPTY_LINE_HEIGHT = 1;
 const CODE_BLOCK_PREFIX_PADDING = 1;
-const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
-const BLOCKQUOTE_PREFIX_PADDING = 1;
 const MATH_BLOCK_PREFIX_PADDING = 1;
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
@@ -140,12 +131,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   enforceHeightBudget = false,
-  registerOverflow = false,
 }) => {
   const { renderMode } = useRenderMode();
-  const settings = useSettings();
-  const overflowId = React.useId();
-  const { addOverflowingId, removeOverflowingId } = useOverflowActions() ?? {};
+  const settings = React.useContext(SettingsContext);
 
   const renderVisualBlocks = renderMode === 'render';
   // Some models stream long runs of trailing newlines after useful content.
@@ -182,6 +170,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     (isPending || enforceHeightBudget) && availableTerminalHeight !== undefined
       ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
       : undefined;
+  // Bounded complete plans keep diagram source; source height cannot bound visuals.
+  const renderDiagrams =
+    renderVisualBlocks && (isPending || pendingRenderedBudget === undefined);
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = CODE_FENCE_RE;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
@@ -210,18 +201,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // tail means the user is asked to approve a plan whose remainder never
   // appears — a model could hide steps past the budget. See #6867.
   let droppedSourceLines = 0;
-  // Complete results also reserve a row for the source-tail truncation cue.
   const tableMaxHeight =
-    pendingRenderedBudget !== undefined && availableTerminalHeight !== undefined
-      ? Math.max(
-          1,
-          Math.min(
-            pendingRenderedBudget - 2,
-            availableTerminalHeight -
-              TABLE_PENDING_RESERVED_ROWS -
-              (enforceHeightBudget && !isPending ? 1 : 0),
-          ),
-        )
+    pendingRenderedBudget !== undefined
+      ? Math.max(1, pendingRenderedBudget - 2)
       : undefined;
   if (pendingRenderedBudget !== undefined) {
     const tableClampRows = tableMaxHeight ?? Number.MAX_SAFE_INTEGER;
@@ -233,7 +215,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       isPending,
       {
         renderVisualBlocks,
-        showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+        rejectVisualBlocks: !isPending && renderDiagrams,
+        showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true,
       },
     );
     if (keptLines < allLines.length) {
@@ -243,20 +226,6 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   }
   const showTruncationCue =
     enforceHeightBudget && !isPending && droppedSourceLines > 0;
-  React.useEffect(() => {
-    if (registerOverflow && showTruncationCue) {
-      addOverflowingId?.(overflowId);
-    } else {
-      removeOverflowingId?.(overflowId);
-    }
-    return () => removeOverflowingId?.(overflowId);
-  }, [
-    registerOverflow,
-    showTruncationCue,
-    overflowId,
-    addOverflowingId,
-    removeOverflowingId,
-  ]);
   if (!text) return <></>;
 
   // Hold back a still-forming table at the streaming frontier. A table is only
@@ -461,6 +430,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             lang={codeBlockLang}
             codeBlockIndex={currentCodeBlockIndex}
             codeBlockLangIndex={currentCodeBlockLangIndex}
+            renderDiagrams={renderDiagrams}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
@@ -487,6 +457,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             content={mathBlockContent}
             sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
             contentWidth={contentWidth}
+            renderDiagrams={renderDiagrams}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
           />,
@@ -612,7 +583,6 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             // horizontal→vertical when the message finally commits.
             isFrontier={false}
             maxHeight={tableMaxHeight}
-            registerOverflow={registerOverflow}
           />,
         );
       }
@@ -774,6 +744,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         lang={codeBlockLang}
         codeBlockIndex={currentCodeBlockIndex}
         codeBlockLangIndex={currentCodeBlockLangIndex}
+        renderDiagrams={renderDiagrams}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
@@ -789,6 +760,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         content={mathBlockContent}
         sourceCopyCommand={`/copy latex ${currentMathBlockIndex}`}
         contentWidth={contentWidth}
+        renderDiagrams={renderDiagrams}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
       />,
@@ -826,7 +798,6 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         // gain rows, so anchor its format to the first row while pending.
         isFrontier={true}
         maxHeight={tableMaxHeight}
-        registerOverflow={registerOverflow}
       />,
     );
   }
@@ -864,6 +835,7 @@ interface RenderCodeBlockProps {
   lang: string | null;
   codeBlockIndex: number;
   codeBlockLangIndex: number;
+  renderDiagrams: boolean;
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -877,13 +849,13 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   lang,
   codeBlockIndex,
   codeBlockLangIndex,
+  renderDiagrams,
   isPending,
   availableTerminalHeight,
   contentWidth,
   startLineNumber = 1,
 }) => {
-  const settings = useSettings();
-  const { renderMode } = useRenderMode();
+  const settings = React.useContext(SettingsContext);
   // Below this many usable rows there is no room for a meaningful code
   // preview, so we fall back to the "... code is being written ..." notice.
   const MIN_PREVIEW_LINES = 1;
@@ -892,7 +864,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   // so the reclaimed row now shows an extra code line at the same total height.
   const RESERVED_LINES = 1;
 
-  if (lang?.toLowerCase() === 'mermaid' && renderMode === 'render') {
+  if (lang?.toLowerCase() === 'mermaid' && renderDiagrams) {
     if (isPending) {
       return (
         <RenderPendingMermaidBlock
@@ -1011,6 +983,7 @@ interface RenderMathBlockProps {
   content: string[];
   sourceCopyCommand: string;
   contentWidth: number;
+  renderDiagrams: boolean;
   isPending: boolean;
   availableTerminalHeight?: number;
 }
@@ -1019,9 +992,13 @@ const RenderMathBlockInternal: React.FC<RenderMathBlockProps> = ({
   content,
   sourceCopyCommand,
   contentWidth,
+  renderDiagrams,
   isPending,
   availableTerminalHeight,
 }) => {
+  if (!renderDiagrams) {
+    return <Text wrap="wrap">{content.join('\n')}</Text>;
+  }
   // One row for the "LaTeX block · source:" header plus one row of headroom.
   // The third row used to hold a "... generating more ..." cue (removed with PR
   // #6170); reclaiming it shows an extra preview line at the same total height.
@@ -1085,7 +1062,7 @@ const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
   enableInlineMath = true,
 }) => (
   <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
-    <Text color={theme.text.secondary}>│ </Text>
+    <Text color={theme.text.secondary}>{BLOCKQUOTE_PREFIX}</Text>
     <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
       <Text wrap="wrap" color={textColor} italic>
         <RenderInline
@@ -1168,7 +1145,6 @@ interface RenderTableProps {
    */
   isFrontier?: boolean;
   maxHeight?: number;
-  registerOverflow?: boolean;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
@@ -1180,7 +1156,6 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   isPending = false,
   isFrontier = true,
   maxHeight,
-  registerOverflow,
 }) => (
   <TableRenderer
     headers={headers}
@@ -1190,7 +1165,6 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
     enableInlineMath={enableInlineMath}
     isStreaming={isPending && isFrontier}
     maxHeight={maxHeight}
-    registerOverflow={registerOverflow}
   />
 );
 

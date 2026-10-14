@@ -51,7 +51,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { findLastSafeSplitPoint } from '../utils/markdown-utilities.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
@@ -178,9 +178,9 @@ vi.mock('./shellCommandProcessor.js', () => ({
 
 vi.mock('./atCommandProcessor.js');
 
-vi.mock('../utils/markdownUtilities.js', async (importOriginal) => {
+vi.mock('../utils/markdown-utilities.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/markdownUtilities.js')>();
+    await importOriginal<typeof import('../utils/markdown-utilities.js')>();
   return {
     ...actual,
     // Only the split-point chooser is mocked so tests can drive commit
@@ -500,6 +500,8 @@ describe('useLlmStream', () => {
         rerender({ ...baseProps, toolCalls }),
       rerenderWithRenderMode: (renderMode: 'render' | 'raw') =>
         rerender({ ...baseProps, renderMode }),
+      rerenderWithSettings: (loadedSettings: LoadedSettings) =>
+        rerender({ ...baseProps, loadedSettings }),
     };
   };
 
@@ -12071,7 +12073,17 @@ describe('useLlmStream', () => {
           await holdStream;
         })(),
       );
-      const { result, rerenderWithRenderMode } = renderTestHook();
+      const { result, rerenderWithRenderMode, rerenderWithSettings } =
+        renderTestHook();
+      act(() =>
+        rerenderWithSettings({
+          ...mockLoadedSettings,
+          merged: {
+            ...mockLoadedSettings.merged,
+            ui: { showLineNumbers: false },
+          },
+        }),
+      );
       act(() => {
         void result.current.submitQuery('test query');
       });
@@ -12080,6 +12092,7 @@ describe('useLlmStream', () => {
         await vi.advanceTimersByTimeAsync(60);
       });
       expect(fit.mock.calls.at(-1)?.[5]?.renderVisualBlocks).toBe(true);
+      expect(fit.mock.calls.at(-1)?.[5]?.showLineNumbers).toBe(false);
       act(() => rerenderWithRenderMode('raw'));
       await act(async () => {
         nextChunk();

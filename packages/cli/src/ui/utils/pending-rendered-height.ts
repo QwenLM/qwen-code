@@ -7,8 +7,12 @@
 import wrapAnsi from 'wrap-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { readInlineMathSpanAt } from './inline-math.js';
-import { parseCodeFenceInfo } from './markdownUtilities.js';
-import { renderTableText } from './TableRenderer.js';
+import { parseCodeFenceInfo } from './markdown-utilities.js';
+import { renderTableText, TABLE_MARGIN_ROWS } from './TableRenderer.js';
+
+export const LIST_ITEM_PREFIX_PADDING = 1;
+export const BLOCKQUOTE_PREFIX_PADDING = 1;
+export const BLOCKQUOTE_PREFIX = '│ ';
 
 /**
  * Shared rendered-height accounting for bounding the live (pending) markdown
@@ -144,8 +148,8 @@ export interface PendingSliceResult {
  *  - a table that would overflow the remaining budget is cut *before* (kept for
  *    a later chunk / commit) unless it is the first pending block and its
  *    margins can fit, in which case it is kept for the renderer to clamp;
- *  - completed visual Mermaid/math blocks are rejected: source height does
- *    not bound diagrams or their copy-command headers;
+ *  - visual Mermaid/math blocks can be rejected: source height does not bound
+ *    diagrams or their copy-command headers;
  *  - lines inside a fenced code block are charged individually (never treated as
  *    a table) so the estimate matches the renderer, which renders them as code.
  *
@@ -161,15 +165,33 @@ export function fitPendingSlice(
   {
     renderVisualBlocks = true,
     showLineNumbers = true,
-  }: { renderVisualBlocks?: boolean; showLineNumbers?: boolean } = {},
+    rejectVisualBlocks = !isPending,
+    keepFirstTable = true,
+  }: {
+    renderVisualBlocks?: boolean;
+    showLineNumbers?: boolean;
+    rejectVisualBlocks?: boolean;
+    keepFirstTable?: boolean;
+  } = {},
 ): PendingSliceResult {
   let rendered = 0;
   let kept = allLines.length;
   let codeFence = ''; // non-empty while inside a fenced code block
+  let inMathBlock = false;
   let codeContentWidth = contentWidth;
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
+    if (inMathBlock) {
+      if (/^ *\$\$ *$/.test(line)) inMathBlock = false;
+      rendered += estimateWrappedRows(line, contentWidth);
+      if (rendered > budget) {
+        kept = i;
+        break;
+      }
+      i++;
+      continue;
+    }
     if (codeFence) {
       // Inside a code block: charge the line as code (one row, wrapped), and
       // close on a matching fence. Never treat contents as a table.
@@ -195,9 +217,9 @@ export function fitPendingSlice(
       codeFence = fenceMatch[1]!;
       // CodeColorizer adds padding and a numbered gutter, and expands tabs.
       const { lang, startLine } = parseCodeFenceInfo(fenceMatch[2]);
-      // A completed diagram's height cannot be inferred from its source lines.
+      // A diagram's height cannot be inferred from its source lines.
       if (
-        !isPending &&
+        rejectVisualBlocks &&
         renderVisualBlocks &&
         lang?.toLowerCase() === 'mermaid'
       ) {
@@ -215,11 +237,11 @@ export function fitPendingSlice(
           break;
         end++;
       }
-      const blockLineCount = allLines
-        .slice(i + 1, end)
-        .join('\n')
-        .replace(/\n$/, '')
-        .split('\n').length;
+      const contentLines = end - i - 1;
+      const blockLineCount = Math.max(
+        1,
+        contentLines - (allLines[end - 1] === '' ? 1 : 0),
+      );
       const gutterWidth = showLineNumbers
         ? String(startLine + blockLineCount - 1).length + 1
         : 0;
@@ -232,9 +254,12 @@ export function fitPendingSlice(
       i++;
       continue;
     }
-    if (!isPending && renderVisualBlocks && /^ *\$\$ *$/.test(line)) {
-      kept = i;
-      break;
+    if (renderVisualBlocks && /^ *\$\$ *$/.test(line)) {
+      if (rejectVisualBlocks) {
+        kept = i;
+        break;
+      }
+      inMathBlock = true;
     }
     if (renderVisualBlocks && isTableStart(allLines, i)) {
       let j = i + 2;
@@ -258,19 +283,24 @@ export function fitPendingSlice(
             (count, line) =>
               count + estimateWrappedRows(line, Math.max(1, contentWidth)),
             0,
-          ) + 2;
-      // Slicing can make a closed table the frontier; either layout must fit.
-      const tableRows = isPending
-        ? Math.max(
-            layoutRows(true),
-            j < allLines.length ? layoutRows(false) : 0,
-          )
-        : layoutRows(false);
-      // TableRenderer clamps its text, with two margin rows outside the clamp.
-      const cost = Math.min(tableRows, tableClampRows + 2);
-      if (rendered + cost > budget && (i > 0 || !isPending || budget < 3)) {
-        kept = i;
+          ) + TABLE_MARGIN_ROWS;
+      const clampedRows = tableClampRows + TABLE_MARGIN_ROWS;
+      let cost = Math.min(layoutRows(isPending), clampedRows);
+      if (rendered + cost > budget) {
+        kept =
+          i > 0 || !isPending || !keepFirstTable || budget <= TABLE_MARGIN_ROWS
+            ? i
+            : j;
         break;
+      }
+      if (isPending && j < allLines.length) {
+        const completedCost = Math.min(layoutRows(false), clampedRows);
+        // Keep a fitting frontier rather than drop it for unseen following text.
+        if (rendered + completedCost > budget) {
+          kept = j;
+          break;
+        }
+        cost = Math.max(cost, completedCost);
       }
       rendered += cost;
       i = j;
@@ -281,17 +311,34 @@ export function fitPendingSlice(
     } else {
       const listItem = /^([ \t]*)(?:([-*+])|(\d+)\.) +(.*)/.exec(line);
       if (listItem) {
-        const markerWidth = listItem[2] ? 2 : listItem[3]!.length + 2;
+        const taskItem = renderVisualBlocks
+          ? /^\[([ xX])\]\s+(.*)$/.exec(listItem[4]!)
+          : null;
+        const markerWidth =
+          taskItem || listItem[2] ? 2 : listItem[3]!.length + 2;
         const itemWidth = Math.max(
           1,
-          contentWidth - listItem[1]!.length - 1 - markerWidth,
+          contentWidth -
+            listItem[1]!.length -
+            LIST_ITEM_PREFIX_PADDING -
+            markerWidth,
         );
-        rendered += estimateWrappedRows(listItem[4]!, itemWidth);
+        rendered += estimateWrappedRows(
+          taskItem ? taskItem[2]! : listItem[4]!,
+          itemWidth,
+        );
       } else {
         const quote = renderVisualBlocks ? /^ *> ?(.*)$/.exec(line) : null;
         rendered += estimateWrappedRows(
           quote ? quote[1]! : line,
-          quote ? Math.max(1, contentWidth - 3) : contentWidth,
+          quote
+            ? Math.max(
+                1,
+                contentWidth -
+                  BLOCKQUOTE_PREFIX_PADDING -
+                  getCachedStringWidth(BLOCKQUOTE_PREFIX),
+              )
+            : contentWidth,
         );
       }
       if (rendered > budget) {

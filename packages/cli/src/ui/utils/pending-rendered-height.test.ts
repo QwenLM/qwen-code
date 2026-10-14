@@ -399,6 +399,35 @@ describe('fitPendingSlice', () => {
     expect(fitPendingSlice(lines, 80, 14, CLAMP).keptLines).toBe(1);
   });
 
+  it('keeps a followed table as a frontier when only its streaming layout fits', () => {
+    const lines = [
+      'intro',
+      '| A | B | C | D | E |',
+      '| - | - | - | - | - |',
+      ...Array.from(
+        { length: 6 },
+        (_, i) => `| a | b | c | d | ${i === 5 ? 'z'.repeat(240) : 'e'} |`,
+      ),
+      'after',
+    ];
+    expect(fitPendingSlice(lines, 80, 28, 26)).toEqual({
+      keptLines: 9,
+      clipped: true,
+    });
+    expect(fitPendingSlice(lines, 80, 100, CLAMP)).toEqual({
+      keptLines: 10,
+      clipped: false,
+    });
+  });
+
+  it('lets a tool fit probe reject an oversized first pending table', () => {
+    const lines = ['| A | B |', '| --- | --- |', '| x | y |'];
+    expect(fitPendingSlice(lines, 80, 3, CLAMP).keptLines).toBe(3);
+    expect(
+      fitPendingSlice(lines, 80, 3, CLAMP, true, { keepFirstTable: false }),
+    ).toEqual({ keptLines: 0, clipped: true });
+  });
+
   it('rejects an oversized first table when checking a completed result', () => {
     const lines = ['| A | B |', '| --- | --- |', '| x | y |'];
     expect(fitPendingSlice(lines, 80, 1, CLAMP, false)).toEqual({
@@ -446,6 +475,47 @@ describe('fitPendingSlice', () => {
     expect(
       fitPendingSlice(['- ' + 'x'.repeat(22)], 24, 1, CLAMP).keptLines,
     ).toBe(0);
+  });
+
+  it.each(['-', '123.'])(
+    'strips %s task checkboxes only in render mode',
+    (marker) => {
+      const lines = [`${marker} [ ] ${'x'.repeat(74)}`];
+      expect(fitPendingSlice(lines, 80, 1, CLAMP).keptLines).toBe(1);
+      expect(
+        fitPendingSlice(lines, 80, 1, CLAMP, true, {
+          renderVisualBlocks: false,
+        }).keptLines,
+      ).toBe(0);
+    },
+  );
+
+  it.each([
+    ['```mermaid', 'graph TD; A-->B', '```'],
+    ['$$', 'x', '$$'],
+  ])('lets a live tool reject visual source height', (...lines) => {
+    expect(fitPendingSlice(lines, 80, 3, CLAMP, true).clipped).toBe(false);
+    expect(
+      fitPendingSlice(lines, 80, 3, CLAMP, true, { rejectVisualBlocks: true })
+        .clipped,
+    ).toBe(true);
+  });
+
+  it('counts literal bounded math source without parsing internal fences or tables', () => {
+    const lines = [
+      '$$',
+      '```',
+      'x'.repeat(80),
+      '| A | B |',
+      '| --- | --- |',
+      '$$',
+      'after',
+    ];
+    expect(
+      fitPendingSlice(lines, 80, lines.length, CLAMP, false, {
+        rejectVisualBlocks: false,
+      }).clipped,
+    ).toBe(false);
   });
 
   it('counts code gutters in raw mode too', () => {

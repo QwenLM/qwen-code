@@ -17,6 +17,7 @@ import {
 import { ToolCallStatus, StreamingState } from '../../types.js';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { RenderModeProvider } from '../../contexts/RenderModeContext.js';
+import { LoadedSettings } from '../../../config/settings.js';
 import { ToolMessage, type ToolMessageProps } from './ToolMessage.js';
 
 const baseProps: ToolMessageProps = {
@@ -145,6 +146,57 @@ describe('tool result Markdown with a real renderer', () => {
     expect((lastFrame() ?? '').split('\n')).toHaveLength(8);
   });
 
+  it.each([false, true])(
+    'honors showLineNumbers=%s in the result fit probe',
+    (showLineNumbers) => {
+      const settings = new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { showLineNumbers } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          contentWidth: 26,
+          availableTerminalHeight: 12,
+          resultDisplay:
+            '```text\n' +
+            Array.from({ length: 4 }, () => 'x'.repeat(23)).join('\n') +
+            '\n```',
+        }),
+        { settings },
+      );
+      expect((lastFrame() ?? '').includes('```text')).toBe(showLineNumbers);
+    },
+  );
+
+  it.each(['-', '123.'])(
+    'keeps fitting %s task lists as Markdown',
+    (marker) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          availableTerminalHeight: 9,
+          resultDisplay: Array.from(
+            { length: 3 },
+            () => `${marker} [ ] ${'x'.repeat(74)}`,
+          ).join('\n'),
+        }),
+      );
+      expect(lastFrame()).toContain('x'.repeat(74));
+      expect(lastFrame()).not.toContain('[ ]');
+      expect(lastFrame()).not.toContain('hidden');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(5);
+    },
+  );
+
   it('keeps a completed Mermaid source bounded rather than estimating its diagram from source lines', () => {
     const { lastFrame } = renderWithProviders(
       resultWithOverflow({
@@ -205,24 +257,91 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).not.toContain('row 0');
   });
 
-  it('keeps executing Markdown results pending', () => {
+  it('keeps the newest executing Markdown output and its hidden-line count', async () => {
+    const props = {
+      ...baseProps,
+      isPending: true,
+      status: ToolCallStatus.Executing,
+      availableTerminalHeight: 12,
+      resultDisplay: Array.from(
+        { length: 200 },
+        (_, i) => `**line ${i + 1}**`,
+      ).join('\n'),
+    };
+    const { lastFrame, rerender } = renderWithProviders(
+      resultWithOverflow(props),
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+    expect(lastFrame()).toContain('line 200');
+    rerender(
+      withProviders(
+        resultWithOverflow({
+          ...props,
+          resultDisplay: Array.from(
+            { length: 5000 },
+            (_, i) => `**line ${i + 1}**`,
+          ).join('\n'),
+        }),
+      ),
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('line 5000'));
+    expect(lastFrame()).not.toContain('line 1**');
+    expect(lastFrame()).toContain('first 4995 lines hidden');
+    expect(lastFrame()).toContain('overflow:1');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(8);
+  });
+
+  it.each([
+    [
+      'pending headroom',
+      80,
+      12,
+      '**line 1**\n**line 2**\n**line 3**\n**line 4**\n**line 5**',
+      'line 5',
+    ],
+    [
+      'frontier layout',
+      80,
+      22,
+      `| A | B |\n| --- | --- |\n| x | y |\n| ${'z'.repeat(500)} TAIL-LIVE | y |`,
+      'TAIL-LIVE',
+    ],
+    ['narrow math header', 6, 11, '$$\nx\n$$', '$$'],
+  ])(
+    'keeps live content visible at %s',
+    (_name, contentWidth, availableTerminalHeight, resultDisplay, tail) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          name: 'MCP',
+          isPending: true,
+          status: ToolCallStatus.Executing,
+          contentWidth,
+          availableTerminalHeight,
+          resultDisplay,
+        }),
+      );
+      expect(lastFrame()).toContain(tail);
+      expect(lastFrame()).not.toContain('LaTeX');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight - 4,
+      );
+    },
+  );
+
+  it('preserves Markdown for a fitting executing result', () => {
     const { lastFrame } = renderWithProviders(
       resultWithOverflow({
         ...baseProps,
         isPending: true,
         status: ToolCallStatus.Executing,
-        resultDisplay: Array.from(
-          { length: 60 },
-          (_, i) => `**row ${i}**`,
-        ).join('\n'),
       }),
     );
-    expect(lastFrame()).toContain('row 0');
-    expect(lastFrame()).not.toContain('viewport too small');
+    expect(lastFrame()).toContain('配置范围: 两个都改');
     expect(lastFrame()).not.toContain('**');
   });
 
-  it('uses a streaming cue for a pending table', () => {
+  it('keeps the tail of an overflowing pending table', async () => {
     const { lastFrame } = renderWithProviders(
       resultWithOverflow({
         ...baseProps,
@@ -236,8 +355,10 @@ describe('tool result Markdown with a real renderer', () => {
           ).join('\n'),
       }),
     );
-    expect(lastFrame()).toContain('more rows streaming');
-    expect(lastFrame()).not.toContain('viewport too small');
+    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+    expect(lastFrame()).toContain('value39');
+    expect(lastFrame()).toContain('lines hidden');
+    expect(lastFrame()).not.toContain('more rows streaming');
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(16);
   });
 
@@ -257,6 +378,23 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).toContain('**row 59**');
     expect(lastFrame()).not.toContain('**row 0**');
   });
+
+  it.each([false, true])(
+    'honors explicit shell Markdown only when forceShowResult=%s lifts the cap',
+    (forceShowResult) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          name: 'Shell',
+          forceShowResult,
+          renderOutputAsMarkdown: true,
+          resultDisplay: '**row 0**\n**row 1**\n**row 2**',
+        }),
+      );
+      expect((lastFrame() ?? '').includes('**row')).toBe(!forceShowResult);
+      expect(lastFrame()).toContain('row 2');
+    },
+  );
 
   it.each([
     [

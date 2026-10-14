@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -354,6 +355,7 @@ describe('ManagedToolRuntime', () => {
     config.isLsToolEnabled = () => false;
     const childConfig = Object.assign(Object.create(config) as Config, {
       getTargetDir: () => '/managed-child',
+      getFileSystemService: () => new StandardFileSystemService(),
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getPlansDir: () => '/managed-child/plans',
@@ -714,6 +716,68 @@ describe('ManagedToolRuntime', () => {
       result: rawResult,
     });
     expect(tool.invocations).toHaveLength(1025);
+  });
+
+  it('refuses a new turn while an invocation is prepared but not yet executed', async () => {
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    expect(() =>
+      runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+    ).toThrow('unfinished');
+    expect(runtime.status(ref).state).toBe('prepared');
+    expect(runtime.hasActiveWork()).toBe(true);
+  });
+
+  it('refuses a new turn while an invocation is still executing and preserves access to it', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    const next = { ...identity, promptId: 'prompt-2' };
+    try {
+      expect(() => runtime.beginTurn(next)).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve(rawResult);
+      await executing;
+    }
+    expect((await executing).executionStatus).toBe('success');
+    expect(runtime.status(ref).state).toBe('settled');
+    await runtime.beginTurn(next);
+    expect(() => runtime.status(ref)).toThrow('identity does not match');
+  });
+
+  it('refuses a new turn while a cancellation is confirming', async () => {
+    const gate = deferred<void>();
+    tool.setup = (invocation) =>
+      invocation.onConfirm.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    const confirming = runtime.confirm(
+      ref,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    const rejection = confirming.catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() =>
+        expect(tool.invocations[0].onConfirm).toHaveBeenCalledTimes(1),
+      );
+      expect(runtime.cancel(ref).state).toBe('cancel_requested');
+      expect(() =>
+        runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+      ).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('cancel_requested');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve();
+    }
+    expect(await rejection).toMatchObject({
+      message: expect.stringContaining('cancelled'),
+    });
+    await vi.waitFor(() => expect(runtime.status(ref).state).toBe('settled'));
+    expect(runtime.status(ref).result?.executionStatus).toBe('not_started');
   });
 
   it.each([

@@ -23,16 +23,26 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class RuntimeHarnessDrainTest {
-    private final JdbcDataSource source = source();
-    private final RuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source,
-            new AesGcmSecretProtector("test", new byte[32]));
-    private final RuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(source);
-    private final ToolExecutionRepository executions = new JdbcToolExecutionRepository(source);
+    private final javax.sql.DataSource source;
+    private final RuntimeBindingRepository bindings;
+    private final RuntimeSessionRepository sessions;
+    private final ToolExecutionRepository executions;
     private final RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
             WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
     private final RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope, "harness", "local-process", "storage");
     private final Provider provisioner = new Provider();
     private final Transport transport = new Transport();
+
+    RuntimeHarnessDrainTest() {
+        this.source = createSource();
+        bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        sessions = new JdbcRuntimeSessionRepository(source);
+        executions = new JdbcToolExecutionRepository(source);
+    }
+
+    javax.sql.DataSource createSource() {
+        return source();
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -594,6 +604,117 @@ class RuntimeHarnessDrainTest {
         }
     }
 
+    @Test
+    void stoppedResourcesReleaseLostOwnersOnlyAfterOriginalStopProof() throws Exception {
+        var binding = ready();
+        for (String id : java.util.List.of("mcp-owner", "hook-owner")) {
+            var owner = bindings.admitSession(sessions, candidate(binding, id));
+            assertNotNull(sessions.compareAndSet(owner, owner.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        }
+        var claimed = bindings.claimOperation(binding.getBindingId(), "setup", Duration.ofSeconds(10));
+        var lost = bindings.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.LOST, claimed.getLease(), Instant.now()));
+        assertNotNull(lost);
+        bindings.releaseOperation(lost.getBindingId(), "setup", lost.getOperationGeneration());
+        provisioner.usable = false;
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        provisioner.stop = new CompletableFuture<>();
+        var authority = resourceClaim();
+        try (var service = service()) {
+            var cleanup = service.drainHarnessResources("tenant", "harness", authority, true).toCompletableFuture();
+            assertFalse(cleanup.isCompletedExceptionally(),
+                    () -> cleanup.handle((ignored, error) -> String.valueOf(error)).join());
+            assertFalse(cleanup.isDone());
+            assertEquals(2, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(1, provisioner.stops);
+            provisioner.stop.complete(receipt(binding));
+            cleanup.get(5, TimeUnit.SECONDS);
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(retired));
+            assertEquals(0, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertEquals(0, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, provisioner.provisions);
+            service.drainHarnessResources("tenant", "harness", authority, true).toCompletableFuture().get();
+            assertEquals(1, provisioner.stops);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stoppedResourceRecoveryDoesNotClearUnknownExecution(boolean lost) throws Exception {
+        var binding = ready();
+        var owner = bindings.admitSession(sessions, candidate(binding, "mcp-owner"));
+        var prepared = ToolExecutionRecord.prepared("execution", "key", binding.getBindingId(), binding.getGeneration(),
+                "harness", "mcp-owner", "prompt", "call", "digest", java.util.Map.of("sessionId", "mcp-owner", "promptId", "prompt", "callId", "call", "argsDigest", "digest"));
+        executions.findOrCreate(prepared);
+        var dispatch = executions.claimDispatch("execution", "dispatcher", Duration.ofSeconds(10));
+        assertNotNull(executions.compareAndSet(dispatch, dispatch.withUnknown(), "dispatcher", dispatch.getDispatchGeneration()));
+        if (lost) {
+            var claimed = bindings.claimOperation(binding.getBindingId(), "setup", Duration.ofSeconds(10));
+            var absent = bindings.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.LOST, claimed.getLease(), Instant.now()));
+            bindings.releaseOperation(absent.getBindingId(), "setup", absent.getOperationGeneration());
+        }
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        var authority = resourceClaim();
+        try (var service = service()) {
+            var failure = assertThrows(ExecutionException.class,
+                    () -> service.drainHarnessResources("tenant", "harness", authority, true).toCompletableFuture().get());
+            assertEquals("workspace_close_execution_unsettled", assertInstanceOf(RuntimeBrokerException.class, failure.getCause()).getCode());
+            assertTrue(sessions.findById(scope, owner.getRuntimeSessionId()).isActive());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(0, provisioner.stops);
+            assertEquals(0, transport.releases);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"stop", "release", "complete"})
+    void stoppedResourceReplyCannotReleaseOwnersUnderASupersededClaim(String phase) throws Exception {
+        var binding = ready();
+        var owner = bindings.admitSession(sessions, candidate(binding, "mcp-owner"));
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        provisioner.stop = new CompletableFuture<>();
+        var authority = resourceClaim();
+        var switched = new java.util.concurrent.atomic.AtomicBoolean();
+        var guarded = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
+                new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
+                    if (("release".equals(phase) && method.getName().equals("completeStoppedSessionRelease")
+                            || "complete".equals(phase) && method.getName().equals("compareAndSet")
+                                    && ((RuntimeBindingRecord) arguments[1]).getState() == RuntimeBindingRecord.State.RELEASED)
+                            && switched.compareAndSet(false, true)) {
+                        advanceResourceClaim();
+                    }
+                    try {
+                        return method.invoke(bindings, arguments);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.failedFuture(new AssertionError()),
+                provisioner, transport, guarded, sessions, executions, "drainer", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
+            var cleanup = service.drainHarnessResources("tenant", "harness", authority, true).toCompletableFuture();
+            assertFalse(cleanup.isDone());
+            if ("stop".equals(phase)) {
+                advanceResourceClaim();
+            }
+            provisioner.stop.complete(receipt(binding));
+            assertThrows(ExecutionException.class, cleanup::get);
+            assertEquals(!"complete".equals(phase), sessions.findById(scope, owner.getRuntimeSessionId()).isActive());
+            assertEquals("stop".equals(phase), bindings.findById(binding.getBindingId()).getDrainReceipt() == null);
+            assertNotEquals(RuntimeBindingRecord.State.RELEASED, bindings.findById(binding.getBindingId()).getState());
+            var current = new RuntimeLifecycleAuthority(authority.operationId(), 2);
+            service.drainHarnessResources("tenant", "harness", current, true).toCompletableFuture().get();
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, owner.getRuntimeSessionId()).getState());
+            assertEquals(0, transport.releases);
+            assertEquals(0, provisioner.provisions);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void unknownExecutionBlocksReleaseAndStop(boolean absent) throws Exception {
@@ -825,6 +946,24 @@ class RuntimeHarnessDrainTest {
         return new RuntimeRecoveryEvidence(fact.name(), fact, "operator-attested:original", Instant.now(), "original-host",
                 seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(),
                 seed.getLeaseId(), seed.getEpoch(), handle);
+    }
+
+    private RuntimeLifecycleAuthority resourceClaim() throws Exception {
+        bindings.requestHarnessDrain("tenant", "harness");
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE qwen_runtime_harness_drain SET operation_id = 'lifecycle', claim_generation = 1,"
+                        + " claim_lease_until = ? WHERE tenant_id = 'tenant' AND harness_session_id = 'harness'")) {
+            statement.setLong(1, System.currentTimeMillis() + 30_000);
+            assertEquals(1, statement.executeUpdate());
+        }
+        return new RuntimeLifecycleAuthority("lifecycle", 1);
+    }
+
+    private void advanceResourceClaim() throws Exception {
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE qwen_runtime_harness_drain SET claim_generation = 2")) {
+            assertEquals(1, statement.executeUpdate());
+        }
     }
 
     private RuntimeBrokerService service() {

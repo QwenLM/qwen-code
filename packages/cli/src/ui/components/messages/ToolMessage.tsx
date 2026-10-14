@@ -643,22 +643,31 @@ const StringResultRenderer: React.FC<{
     displayData = '...' + displayData.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS);
   }
 
-  // Completed overflow keeps the existing plain-text tail, including diagnostics.
+  // Live tool output is replaced, not committed to scrollback: overflow needs its tail.
+  const markdownBudget =
+    availableHeight === undefined
+      ? undefined
+      : isPending
+        ? Math.max(1, availableHeight - 2)
+        : availableHeight;
+  const resultLines = displayData.split(/\r?\n/);
   const useMarkdown =
     renderAsMarkdown &&
-    (isPending ||
-      availableHeight === undefined ||
-      !fitPendingSlice(
-        displayData.split(/\r?\n/),
-        childWidth,
-        availableHeight,
-        Number.MAX_SAFE_INTEGER,
-        false,
-        {
-          renderVisualBlocks: renderMode === 'render',
-          showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
-        },
-      ).clipped);
+    (markdownBudget === undefined ||
+      (resultLines.length <= markdownBudget &&
+        !fitPendingSlice(
+          resultLines,
+          childWidth,
+          markdownBudget,
+          Number.MAX_SAFE_INTEGER,
+          isPending,
+          {
+            renderVisualBlocks: renderMode === 'render',
+            showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+            rejectVisualBlocks: true,
+            keepFirstTable: false,
+          },
+        ).clipped));
   if (useMarkdown) {
     return (
       <Box flexDirection="column">
@@ -667,7 +676,6 @@ const StringResultRenderer: React.FC<{
           isPending={isPending}
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
-          registerOverflow={registerOverflow ?? true}
         />
       </Box>
     );

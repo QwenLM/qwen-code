@@ -6,23 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import stripAnsi from 'strip-ansi';
-import { Box, Text } from 'ink';
+import { Box } from 'ink';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
-import {
-  OverflowProvider,
-  useOverflowState,
-} from '../contexts/OverflowContext.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
 import { getSelectedText } from '../selection/selection-text.js';
-
-function OverflowProbe() {
-  const state = useOverflowState();
-  return <Text>overflow:{state?.overflowingIds.size ?? 0}</Text>;
-}
+import { splitFencedMarkdown } from './markdown-utilities.js';
+import { fitPendingSlice } from './pending-rendered-height.js';
+import { renderTableText, TABLE_MARGIN_ROWS } from './TableRenderer.js';
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -52,32 +46,206 @@ describe('<MarkdownDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('clears overflow when the same mounted Markdown instance becomes empty and unmounts', async () => {
-    const longText = '**line**\n'.repeat(60);
-    const tree = (text: string, visible = true) => (
-      <OverflowProvider>
-        <Box width={80} flexDirection="column">
-          {visible && (
-            <MarkdownDisplay
-              {...baseProps}
-              text={text}
-              enforceHeightBudget
-              registerOverflow
-            />
-          )}
-        </Box>
-        <OverflowProbe />
-      </OverflowProvider>
+  it('bounds completed tables and restores full content when expanded', async () => {
+    const longText =
+      '| A | B |\n| --- | --- |\n' +
+      Array.from({ length: 40 }, (_, i) => `| value${i} | result${i} |`).join(
+        '\n',
+      );
+    const tree = (text: string, height: number | undefined) => (
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          availableTerminalHeight={height}
+          enforceHeightBudget
+        />
+      </Box>
     );
-    const { lastFrame, rerender } = renderWithProviders(tree(longText));
-    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
-    rerender(withProviders(tree('')));
-    await vi.waitFor(() => expect(lastFrame()).toBe('overflow:0'));
-    rerender(withProviders(tree(longText)));
-    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
-    rerender(withProviders(tree(longText, false)));
-    await vi.waitFor(() => expect(lastFrame()).toBe('overflow:0'));
+    const { lastFrame, rerender } = renderWithProviders(tree(longText, 40));
+    expect(lastFrame()).toContain('more rows not shown');
+    expect(lastFrame()).not.toContain('value39');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(40);
+    rerender(withProviders(tree(longText, undefined)));
+    await vi.waitFor(() => expect(lastFrame()).toContain('value39'));
+    expect(lastFrame()).not.toContain('more rows not shown');
+    rerender(withProviders(tree('', 40)));
+    await vi.waitFor(() => expect(lastFrame()).toBe(''));
   });
+
+  it.each([
+    ['Mermaid', '```mermaid\ngraph TD; A-->B\n```'],
+    ['math', '$$\nx+y\n$$'],
+    [
+      'literal math source',
+      '$$\n```mermaid\n| A | B |\n| --- | --- |\n- [ ] literal\n$$',
+    ],
+  ])(
+    'keeps fitting bounded %s source and following plan steps',
+    (_name, block) => {
+      const { lastFrame } = renderWithProviders(
+        <Box width={80} flexDirection="column">
+          <MarkdownDisplay
+            {...baseProps}
+            text={`Step 1\n\n${block}\n\nStep 2`}
+            availableTerminalHeight={20}
+            enforceHeightBudget
+          />
+        </Box>,
+      );
+      expect(lastFrame()).toContain('Step 2');
+      expect(lastFrame()).not.toContain('more lines');
+      expect(lastFrame()).not.toContain('LaTeX block');
+      expect(lastFrame()).not.toContain('Mermaid diagram');
+      if (_name === 'literal math source') {
+        expect(lastFrame()).toContain('```mermaid');
+        expect(lastFrame()).toContain('- [ ] literal');
+        expect(lastFrame()).not.toContain('┌');
+      }
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(20);
+    },
+  );
+
+  it('still renders unbounded visuals when enforceHeightBudget has no height', () => {
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay
+        {...baseProps}
+        text={'$$\nx+y\n$$'}
+        availableTerminalHeight={undefined}
+        enforceHeightBudget
+      />,
+    );
+    expect(lastFrame()).toContain('LaTeX block');
+  });
+
+  it('bounds oversized diagram source and discloses hidden plan steps', () => {
+    const text =
+      'Step 1\n```mermaid\n' +
+      Array.from({ length: 50 }, (_, i) => `A${i}-->B${i}`).join('\n') +
+      '\n```\nStep 2';
+    const { lastFrame } = renderWithProviders(
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />
+      </Box>,
+    );
+    expect(lastFrame()).toContain('A0-->B0');
+    expect(lastFrame()).toContain('more lines not shown');
+    expect(lastFrame()).not.toContain('Step 2');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(10);
+  });
+
+  it('keeps followed tables at completed layout in a bounded complete plan', () => {
+    const text = `intro\n| A | B |\n| --- | --- |\n| x | y |\n| ${'z'.repeat(500)} | y |\nafter`;
+    const { lastFrame } = renderWithProviders(
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          availableTerminalHeight={17}
+          enforceHeightBudget
+        />
+      </Box>,
+    );
+    expect(lastFrame()).toContain('after');
+    expect(lastFrame()).not.toContain('more lines');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(17);
+  });
+
+  it('retains a fitting pending frontier when following text would close it too tall', () => {
+    const rows = Array.from(
+      { length: 6 },
+      (_, i) => `| x | y | z | w | ${i === 5 ? 'z'.repeat(240) : 'v'} |`,
+    );
+    const text = [
+      'intro',
+      '| A | B | C | D | E |',
+      '| - | - | - | - | - |',
+      ...rows,
+      'after',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending
+          availableTerminalHeight={30}
+        />
+      </Box>,
+    );
+    expect(lastFrame()).toContain('┌');
+    expect(lastFrame()).toContain('intro');
+    expect(lastFrame()).not.toContain('after');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(28);
+  });
+
+  it('shares the table margin and exact layout with the height estimator', () => {
+    const lines = ['intro', '| A | B |', '| --- | --- |', '| x | y |', 'after'];
+    const { lastFrame } = renderWithProviders(
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={lines.join('\n')}
+          availableTerminalHeight={undefined}
+        />
+      </Box>,
+    );
+    const height =
+      renderTableText({
+        headers: ['A', 'B'],
+        rows: [['x', 'y']],
+        contentWidth: 80,
+      }).split('\n').length +
+      TABLE_MARGIN_ROWS +
+      2;
+    expect((lastFrame() ?? '').split('\n')).toHaveLength(height);
+    expect(fitPendingSlice(lines, 80, height, 1000, false).clipped).toBe(false);
+    expect(fitPendingSlice(lines, 80, height - 1, 1000, false).clipped).toBe(
+      true,
+    );
+  });
+
+  it.each([false, true])(
+    'honors showLineNumbers=%s in a bounded complete Markdown slice',
+    (showLineNumbers) => {
+      const settings = new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { showLineNumbers } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+      const text =
+        '```text\n' +
+        Array.from({ length: 4 }, () => 'x'.repeat(23)).join('\n') +
+        '\n```\nafter';
+      const { lastFrame } = renderWithProviders(
+        <Box width={24} flexDirection="column">
+          <MarkdownDisplay
+            {...baseProps}
+            text={text}
+            contentWidth={24}
+            availableTerminalHeight={9}
+            enforceHeightBudget
+          />
+        </Box>,
+        { settings },
+      );
+      expect((lastFrame() ?? '').includes('after')).toBe(!showLineNumbers);
+      expect((lastFrame() ?? '').includes('more lines')).toBe(showLineNumbers);
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(9);
+    },
+  );
 
   it('renders a simple paragraph', () => {
     const text = 'Hello, world.';
@@ -151,6 +319,37 @@ describe('<MarkdownDisplay />', () => {
       );
       expect(lastFrame()).toMatchSnapshot();
     });
+
+    it.each([
+      ['~~~', '```'],
+      ['```', '~~~'],
+    ])(
+      'renders %s code across an inner %s line after a streaming split',
+      (outer, inner) => {
+        const text =
+          `${outer}md\nHere:\n${inner}\nstill inside\n${outer}\nAfter.`.replace(
+            /\n/g,
+            eol,
+          );
+        const { after } = splitFencedMarkdown(text, text.indexOf('still'));
+        for (const renderedText of [text, after]) {
+          for (const isPending of [false, true]) {
+            const { lastFrame, unmount } = renderWithProviders(
+              <MarkdownDisplay
+                {...baseProps}
+                text={renderedText}
+                isPending={isPending}
+              />,
+            );
+            const frame = stripAnsi(lastFrame() ?? '');
+            expect(frame).toMatch(/3\s+still inside/);
+            expect(frame).toContain('After.');
+            expect(frame).not.toContain('qwen-code');
+            unmount();
+          }
+        }
+      },
+    );
 
     it('clips a long pending message to availableTerminalHeight', () => {
       // A long streaming message must NOT render all its lines: the live

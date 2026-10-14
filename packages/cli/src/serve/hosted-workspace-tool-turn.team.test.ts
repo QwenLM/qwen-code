@@ -59,7 +59,11 @@ import {
 // H4e-b1: team_state and team_task are enabled, so the flags close the
 // real gate per test; with either closed the turn keeps the H4b surface
 // exactly, which is what a rollback of the enablement restores.
-const enablement = vi.hoisted(() => ({ teamState: true, teamTask: true }));
+const enablement = vi.hoisted(() => ({
+  teamState: true,
+  teamTask: true,
+  teamPlan: false,
+}));
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
   async (importOriginal) => {
@@ -79,6 +83,7 @@ vi.mock(
           throw new actual.ManagedSessionRecordError(
             `domain ${domain} is registered but not enabled for submission.`,
           );
+        if (domain === 'team_plan' && enablement.teamPlan) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
     };
@@ -132,6 +137,8 @@ function createTurn(
     messages?: boolean;
     /** H4e-b2: another Turn of the same Session. */
     promptId?: string;
+    /** H4e-b3a: this run's first input carried a plan-mode preamble. */
+    memberPlanMode?: boolean;
   } = {},
 ): HostedWorkspaceToolTurn {
   const hookEvents = options.hookEvents;
@@ -173,6 +180,7 @@ function createTurn(
         queueConsumption: () => undefined,
       },
       teams: options.funnel ?? teams,
+      memberPlanMode: options.memberPlanMode === true,
       ...(options.messages
         ? {
             messages: new HostedSessionMessageSession(
@@ -234,6 +242,99 @@ const member = (name: string, callId: string, extra = {}) =>
     callId,
   );
 
+it('gates plan launch declarations and propagates the named member requirement', async () => {
+  const signal = new AbortController().signal;
+  expect(JSON.stringify(await createTurn().declarations(signal))).not.toContain(
+    'plan_mode_required',
+  );
+  enablement.teamPlan = true;
+  const tools = await createTurn().declarations(signal);
+  expect(tools.map((tool) => tool.name)).toContain('team_plan_approval');
+  expect(JSON.stringify(tools.find((tool) => tool.name === 'agent'))).toContain(
+    'plan_mode_required',
+  );
+  await execute(createTurn(), [
+    call('team_create', { team_name: 'review' }, 'create-plan-team'),
+  ]);
+  expect(
+    await execute(createTurn(), [
+      member('alice', 'launch-plan', { plan_mode_required: true }),
+    ]),
+  ).toContain('joined');
+  expect(roster()[0]?.planModeRequired).toBe(true);
+  const run = children.record(hostedCallKey('prompt', 'launch-plan'));
+  expect(run).toBeDefined();
+  const envelope = await session.resources.read(run!.inputRef);
+  expect(envelope.toString()).toContain('plan-mode=');
+  expect(
+    await execute(createTurn(), [
+      call(
+        'agent',
+        { description: 'plain', prompt: 'work', plan_mode_required: true },
+        'plain-plan',
+      ),
+    ]),
+  ).toContain('unsupported argument');
+});
+
+it.each([false, true])(
+  'executes plan approval through the tool turn with closing=%s',
+  async (closing) => {
+    enablement.teamPlan = true;
+    await execute(createTurn(), [
+      call('team_create', { team_name: 'review' }, 'create'),
+    ]);
+    await execute(createTurn(), [
+      member('alice', 'launch-plan', { plan_mode_required: true }),
+    ]);
+    const childRunId = hostedCallKey('prompt', 'launch-plan');
+    await teams.submitPlan('submitted-plan', childRunId, 'Read the source');
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-plan',
+      runtime: { runtimeBindingId: 'binding', generation: '1' },
+    });
+    await children.attach(childRunId, 'alice-session');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from('plan ready'),
+      receipt: Buffer.from('{"outcome":"settled"}'),
+    });
+    const activation = session.authority.currentActivation!;
+    const context = closing
+      ? vi
+          .spyOn(session.authority, 'currentActivation', 'get')
+          .mockReturnValue({ ...activation, phase: 'closing' })
+      : undefined;
+    try {
+      const answer = await execute(createTurn(), [
+        call(
+          'team_plan_approval',
+          { request_id: 'submitted-plan', action: 'approve' },
+          'decide',
+        ),
+      ]);
+      const continuation = children.record(hostedCallKey('prompt', 'decide'));
+      if (closing) {
+        expect(answer).toContain('closing');
+        expect(teams.plan('submitted-plan')?.run.state).toBe('waiting');
+        expect(continuation).toBeUndefined();
+      } else {
+        expect(answer).toContain('member was continued');
+        expect(teams.plan('submitted-plan')?.decision).toBe('approved');
+        expect(continuation?.predecessorChildRunId).toBe(childRunId);
+        expect(continuation).toBeDefined();
+        expect(
+          session.authority.committedExtensionOperation(
+            'decideTeamPlan',
+            hostedCallKey('prompt', 'decide'),
+          ),
+        ).toBeDefined();
+      }
+    } finally {
+      context?.mockRestore();
+    }
+  },
+);
+
 function roster() {
   return session.authority
     .extensionRecordsInDomain('team_state')
@@ -243,6 +344,7 @@ function roster() {
 beforeEach(async () => {
   enablement.teamState = true;
   enablement.teamTask = true;
+  enablement.teamPlan = false;
   vi.resetAllMocks();
   broker.warm.mockResolvedValue(undefined);
   broker.acquire.mockResolvedValue(undefined);
@@ -280,12 +382,39 @@ beforeEach(async () => {
   });
   const store = { authority: session.authority, resources: session.resources };
   children = new HostedChildAgentSession(store, sessionKey);
-  teams = new HostedTeamSession(store, sessionKey);
+  teams = new HostedTeamSession(store, sessionKey, children);
 });
 
 afterEach(async () => {
   await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+// H4e-b3a (decisions 5 and 9): a run whose first input carried the
+// plan-mode attribute admits reads only; this build's refusal never names
+// exit_plan_mode.
+it('admits reads only in a plan-mode run, without naming exit_plan_mode', async () => {
+  // messages: the arm needs send_message declared, alongside its reads.
+  const planTurn = createTurn({ memberPlanMode: true, messages: true });
+  const refusal = 'This run is in plan mode until the leader approves its plan';
+  for (const denied of [
+    call('write_file', { file_path: 'notes.md', content: 'x' }, 'call-1'),
+    call('run_shell_command', { command: 'ls' }, 'call-2'),
+    call('agent', { description: 'a', prompt: 'b' }, 'call-3'),
+    call('team_create', { team_name: 'review' }, 'call-4'),
+  ]) {
+    const answer = await execute(planTurn, [denied]);
+    expect(answer).toContain(refusal);
+    expect(answer).not.toContain('exit_plan_mode');
+  }
+  // The reads stay admitted: their own answers never name plan mode.
+  // (glob rides the same allowance, and only the search profiles declare
+  // it — this profile's surface cannot exercise it either way.)
+  for (const allowed of [
+    call('send_message', {}, 'call-5'),
+    call('read_file', {}, 'call-7'),
+  ])
+    expect(await execute(planTurn, [allowed])).not.toContain('plan mode');
 });
 
 it('declares the team tools only beside the root Agent tool, behind both gates', async () => {
@@ -295,6 +424,7 @@ it('declares the team tools only beside the root Agent tool, behind both gates',
   const team = [
     'team_create',
     'team_delete',
+    'request_shutdown',
     'task_create',
     'task_update',
     'task_list',
@@ -433,7 +563,9 @@ it('keeps team tools out of a foreground child batch', async () => {
       'call-child',
     ),
   ]);
-  expect(answer).toContain('cannot share a batch with a non-agent tool');
+  expect(answer).toContain(
+    'cannot share a batch with a tool other than agent or workflow',
+  );
   expect(children.record('prompt:call-child')).toBeUndefined();
 });
 
@@ -517,6 +649,7 @@ it('a re-driven named launch completes a join its first run lost', async () => {
       }),
     },
     sessionKey,
+    children,
   );
   await expect(
     execute(createTurn({ funnel: crashing }), [member('alice', 'call-alice')]),
@@ -577,6 +710,7 @@ it.each(['failed', 'finished'] as const)(
         }),
       },
       sessionKey,
+      children,
     );
     const answer = await execute(createTurn({ funnel: endFirst }), [
       member('alice', 'call-alice'),

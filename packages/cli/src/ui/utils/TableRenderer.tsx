@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import type React from 'react';
 import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth, truncateToWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
-import { useOverflowActions } from '../contexts/OverflowContext.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
   INLINE_CODE_SPAN_PATTERN_SOURCE,
@@ -35,6 +34,7 @@ import {
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
 const MAX_ROW_LINES = 4;
+export const TABLE_MARGIN_ROWS = 2;
 
 // The height estimator uses renderTableText's exact layout and format choice.
 
@@ -78,7 +78,6 @@ interface TableRendererProps {
    * overflowing the viewport and triggering the scroll-to-top lock.
    */
   maxHeight?: number;
-  registerOverflow?: boolean;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -444,10 +443,7 @@ const TableText: React.FC<{
   contentWidth: number;
   maxHeight?: number;
   isStreaming: boolean;
-  registerOverflow: boolean;
-}> = ({ text, contentWidth, maxHeight, isStreaming, registerOverflow }) => {
-  const id = React.useId();
-  const { addOverflowingId, removeOverflowingId } = useOverflowActions() ?? {};
+}> = ({ text, contentWidth, maxHeight, isStreaming }) => {
   const lines: string[] = [];
   if (maxHeight !== undefined) {
     for (const line of text.split('\n')) {
@@ -456,14 +452,6 @@ const TableText: React.FC<{
     }
   }
   const isClipped = maxHeight !== undefined && lines.length > maxHeight;
-  React.useEffect(() => {
-    if (registerOverflow && isClipped) {
-      addOverflowingId?.(id);
-    } else {
-      removeOverflowingId?.(id);
-    }
-    return () => removeOverflowingId?.(id);
-  }, [registerOverflow, isClipped, id, addOverflowingId, removeOverflowingId]);
   if (isClipped) {
     const kept = lines.slice(0, maxHeight <= 2 ? 0 : maxHeight - 1);
     kept.push(
@@ -830,13 +818,12 @@ export const TableRenderer: React.FC<TableRendererProps> = (props) =>
   props.headers.length === 0 ? (
     <Box />
   ) : (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column" marginY={TABLE_MARGIN_ROWS / 2}>
       <TableText
         text={renderTableText(props)}
         contentWidth={props.contentWidth}
         maxHeight={props.maxHeight}
         isStreaming={props.isStreaming ?? false}
-        registerOverflow={props.registerOverflow ?? false}
       />
     </Box>
   );
