@@ -8,10 +8,20 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -26,6 +36,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -37,8 +48,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
  * directly, with a dispatch lease no worker can take over.
  */
 @SpringBootTest(properties = {
-        "spring.datasource.url=jdbc:h2:mem:managed-turn-query;"
-                + "MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
+        "spring.datasource.url=" + ManagedTurnQueryTest.URL,
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
@@ -47,6 +57,8 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 @AutoConfigureMockMvc
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 class ManagedTurnQueryTest {
+    static final String URL = "jdbc:h2:mem:managed-turn-query;"
+            + "MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE";
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final long NEVER = Long.MAX_VALUE / 2;
 
@@ -61,6 +73,9 @@ class ManagedTurnQueryTest {
 
     @Autowired
     private ManagedAgentStore store;
+
+    @Autowired
+    private ManagedWorkspaceRegistry registry;
 
     @ParameterizedTest
     @ValueSource(longs = {1_000, 2_000})
@@ -99,6 +114,79 @@ class ManagedTurnQueryTest {
                     assertThat(event.turnId()).isEqualTo("turn_a");
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });
+    }
+
+    /**
+     * The latest-environment read compares (session_id, turn_id) rows. H2
+     * types row-comparison parameters as VARCHAR, and when a new session or
+     * a SET lands between binding and execution it recompiles the command
+     * with the bound values; string-bound identities then fail as VARBINARY
+     * rows compared against VARCHAR ones. A fresh session opened right
+     * before execution forces that recompile here.
+     */
+    @Test
+    void latestEnvironmentReadSurvivesARecompileBeforeExecution() throws Exception {
+        String tenant = tenant();
+        String sessionId = emptySession(tenant);
+        turn(tenant, sessionId, "turn_r", "COMPLETED", 1_000, 2_000L, null);
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_r",
+                "turn.accepted", Map.of("input", List.of()), false,
+                "accepted:recompile");
+        store.appendPublicEventIfAbsent(tenant, sessionId, "turn_r",
+                "environment.ready", Map.of(), false, "ready:recompile");
+        var latest = store.findLatestTurns(tenant, List.of(sessionId));
+        assertThat(latest).containsKey(sessionId);
+        var recompiling = new ManagedAgentStore(
+                new ManagedSchemaJdbcTemplate(new FreshSessionBeforeExecute(
+                        jdbc.getDataSource(), "(session_id, turn_id) IN")),
+                objectMapper, Clock.systemUTC(), ignored -> {
+                }, registry, new ManagedAgentProperties());
+
+        assertThat(recompiling.findLatestEnvironmentEvents(tenant, latest)
+                .get(sessionId))
+                .satisfies(event -> {
+                    assertThat(event.turnId()).isEqualTo("turn_r");
+                    assertThat(event.type()).isEqualTo("environment.ready");
+                });
+    }
+
+    /** Opens and closes a new H2 session right before a matching statement executes. */
+    private static final class FreshSessionBeforeExecute extends DelegatingDataSource {
+        private final String marker;
+
+        private FreshSessionBeforeExecute(javax.sql.DataSource source, String marker) {
+            super(source);
+            this.marker = marker;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            Connection connection = super.getConnection();
+            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(),
+                    new Class<?>[] {Connection.class}, (proxy, method, args) -> {
+                        try {
+                            Object result = method.invoke(connection, args);
+                            if (!method.getName().equals("prepareStatement")
+                                    || !(result instanceof PreparedStatement statement)
+                                    || !((String) args[0]).contains(marker)) {
+                                return result;
+                            }
+                            return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                    new Class<?>[] {PreparedStatement.class}, (prepared, call, values) -> {
+                                        try {
+                                            if (call.getName().startsWith("execute")) {
+                                                DriverManager.getConnection(URL, "sa", "").close();
+                                            }
+                                            return call.invoke(statement, values);
+                                        } catch (InvocationTargetException error) {
+                                            throw error.getCause();
+                                        }
+                                    });
+                        } catch (InvocationTargetException error) {
+                            throw error.getCause();
+                        }
+                    });
+        }
     }
 
     @Test

@@ -3032,8 +3032,14 @@ public class ManagedAgentStore implements AgentStateStore {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
-            arguments.add(turn.sessionId());
-            arguments.add(turn.turnId());
+            // Bound as identity bytes: H2 types row-comparison parameters
+            // as VARCHAR, and a command it recompiles after binding (any
+            // new session or SET in between) refuses VARBINARY rows against
+            // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
+            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                    .identity(turn.sessionId()));
+            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                    .identity(turn.turnId()));
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest
