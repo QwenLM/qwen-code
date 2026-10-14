@@ -439,7 +439,7 @@ function spawnAndCapture(
     const child = execFile(
       command,
       args,
-      { timeout: timeoutMs },
+      { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
       (err, out, stderr) => {
         if (settled) return;
         settled = true;
@@ -493,6 +493,36 @@ async function smokeTest(
   }
   if (!fs.existsSync(cliBin)) {
     throw new Error(`Smoke test failed: CLI entry not found at ${cliBin}`);
+  }
+
+  const identity = await spawnAndCapture(
+    interpreter,
+    [
+      '-e',
+      'console.log(JSON.stringify({runtime:process.versions.bun?"bun":"node",platform:process.platform,arch:process.arch}))',
+    ],
+    10_000,
+  );
+  let actual: unknown;
+  try {
+    actual = JSON.parse(identity.stdout);
+  } catch {
+    throw new Error('Smoke test failed: invalid interpreter identity');
+  }
+  const [platform, arch] = target.split('-');
+  if (
+    identity.exitCode !== 0 ||
+    !actual ||
+    typeof actual !== 'object' ||
+    Array.isArray(actual) ||
+    Reflect.get(actual, 'runtime') !== runtime ||
+    Reflect.get(actual, 'platform') !==
+      (platform === 'win' ? 'win32' : platform) ||
+    Reflect.get(actual, 'arch') !== arch
+  ) {
+    throw new Error(
+      'Smoke test failed: interpreter identity does not match the expected runtime and target',
+    );
   }
 
   const { exitCode, stdout, stderr } = await spawnAndCapture(
