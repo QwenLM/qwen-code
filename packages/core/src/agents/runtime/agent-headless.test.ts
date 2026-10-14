@@ -502,6 +502,10 @@ describe('subagent.ts', () => {
 
     afterEach(() => {
       vi.restoreAllMocks();
+      // A test interrupted mid-run (e.g. by its own timeout) never reaches the
+      // finally that restores real timers, and the leak cascades: every later
+      // test awaiting a timer then hangs until its own timeout too.
+      vi.useRealTimers();
     });
 
     const EXECUTE_PROMPT: PromptConfig = { systemPrompt: 'Execute task.' };
