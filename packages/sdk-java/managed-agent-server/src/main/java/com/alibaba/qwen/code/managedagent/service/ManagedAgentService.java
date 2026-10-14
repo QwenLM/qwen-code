@@ -619,9 +619,9 @@ public class ManagedAgentService {
                 SessionRecord session = store.requireSession(tenantId, sessionId);
                 HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null, true);
+                store.markRenameSubmitted(delivery, owner);
                 harness.rename(tenantId, sessionId, effectiveTitle, command.renameRevision());
-                session = store.completeSessionRename(tenantId, idempotencyKey, sessionId,
-                        effectiveTitle, attachment.bootId(), command.renameRevision());
+                session = store.completeSessionRename(delivery, owner, attachment.bootId());
                 return new SessionMutationResult<>(publicSession(session),
                         command.replayed());
             } catch (RuntimeException error) {
@@ -821,29 +821,18 @@ public class ManagedAgentService {
 
     public PublicItemList listPublicItems(String tenantId, String actorId,
             String sessionId, long afterSequence, int requestedLimit) {
+        return listPublicItems(tenantId, actorId, sessionId, null, afterSequence, requestedLimit);
+    }
+
+    public PublicItemList listPublicItems(String tenantId, String actorId, String sessionId,
+            String cursor, long afterSequence, int requestedLimit) {
         if (afterSequence < 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "invalid_event_cursor",
-                    "Item sequence must be non-negative.");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_event_cursor", "Item sequence must be non-negative.");
         }
-        int limit = limit(requestedLimit);
         requireReadableSession(tenantId, actorId, sessionId);
-        SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
-                .orElse(null);
-        if (snapshot == null) {
-            return new PublicItemList("list", List.of(), false, null, 0);
-        }
-        List<ItemRecord> matching = snapshot.items().stream()
-                .filter(item -> item.firstSequence() > afterSequence)
-                .toList();
-        boolean hasMore = matching.size() > limit;
-        List<PublicItem> items = matching.stream().limit(limit)
-                .map(this::publicItem).toList();
-        String nextCursor = hasMore && !items.isEmpty()
-                ? Long.toString(items.get(items.size() - 1).firstSequence())
-                : null;
-        return new PublicItemList("list", items, hasMore, nextCursor,
-                snapshot.coveredSequence());
+        var page = store.findSnapshotPage(tenantId, sessionId, cursor, afterSequence, limit(requestedLimit));
+        return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(), page.hasMore(),
+                page.nextCursor(), page.coveredSequence());
     }
 
     public WebShellTranscript transcript(String tenantId, String actorId,
@@ -893,8 +882,7 @@ public class ManagedAgentService {
                 session.sessionId(), afterSequence, limit);
         ReplayWindow window = store.findReplayWindow(session.tenantId(),
                 session.sessionId());
-        if (afterSequence < window.floorSequence()
-                && window.floorSequence() <= window.snapshotThroughSequence()) {
+        if (afterSequence < window.floorSequence()) {
             throw new ReplayCursorExpired(window);
         }
         return events;
@@ -1546,7 +1534,7 @@ public class ManagedAgentService {
     }
 
     // The creator-gated twin: the moment the key exists the caller must
-    // be the actor who recorded it (V69) or the Session's creator, before
+    // be the actor its receipt recorded or the Session's creator, before
     // the digest comparison runs — its idempotency_conflict would
     // otherwise confirm to another actor that the key is live. A fresh key
     // never gates here; it meets the visibility and shape refusals below
@@ -1595,9 +1583,9 @@ public class ManagedAgentService {
                         actorId));
     }
 
-    // The recorder half of the replay admission: a V69 command row names
-    // the actor whose own retry the recorded outcome answers. A NULL row —
-    // pre-V69 or server-keyed — leaves the creator gate alone.
+    // The recorder half of the replay admission: a command receipt names
+    // the actor whose own retry the recorded outcome answers. A receipt
+    // without one — server-keyed — leaves the creator gate alone.
     private boolean recordedByCaller(StoreModels.CommandRecord command,
             String actorId) {
         byte[] recorded = command.actorKey();

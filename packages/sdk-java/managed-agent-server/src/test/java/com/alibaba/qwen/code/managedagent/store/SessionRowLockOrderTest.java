@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.lang.model.element.Modifier;
 import javax.tools.JavaCompiler;
@@ -108,9 +109,17 @@ class SessionRowLockOrderTest {
     private static final Path STORE_PACKAGE = Path.of("src", "main", "java",
             "com", "alibaba", "qwen", "code", "managedagent", "store");
     private static final String MANAGED_AGENT_STORE = "ManagedAgentStore.java";
-    private static final String SESSION_TABLE = "managed_agent_session";
-    private static final String TURN_TABLE = "managed_agent_turn";
+    private static final String SESSION_TABLE = "ma_session";
+    private static final String TURN_TABLE = "ma_turn";
     private static final String LOCK_MODE = "FOR UPDATE";
+    // ma_session is a prefix of ma_session_head, ma_session_record and
+    // ma_session_journal_tx, none of which is the session row, so its
+    // needle refuses a trailing underscore. Nothing else bounds it: a
+    // spelling flattens its branches without a separator.
+    private static final Pattern SESSION_WRITE = Pattern.compile(
+            "(?:insert into|update) " + SESSION_TABLE + "(?!_)");
+    private static final Pattern SESSION_NAMED = Pattern.compile(
+            SESSION_TABLE + "(?!_)");
 
     // Sibling stores whose session-row lock the audit can see today,
     // conditional locks included: a lock taken on only some runs still
@@ -121,7 +130,10 @@ class SessionRowLockOrderTest {
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
             "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
-            "ManagedSessionStore.java", "ManagedToolResultStore.java",
+            "ManagedProjectionResourceCollector.java",
+            "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
+            "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ToolPublicationRetentionStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
@@ -135,7 +147,9 @@ class SessionRowLockOrderTest {
     // name and arity collide with same-file members, and overload sets
     // tied on name and arity. Every candidate of every pinned reference
     // provably reaches neither the session lock nor the turn row — a
-    // candidate that starts reaching a side throws instead of exempting —
+    // candidate that starts reaching a side throws instead of exempting,
+    // save a lock-only candidate in a file with no turn access at all,
+    // ToolPublicationRetentionStore.open/4 since the 32-table baseline —
     // and the pin is asserted exactly, so a new unresolvable reference or
     // a stale entry fails the sibling boundary test. ManagedEventEnvelopes
     // and the staged-placement delegation entered through the merge:
@@ -147,7 +161,10 @@ class SessionRowLockOrderTest {
                     Map.entry("ChildResultRelayStore.java",
                             Set.of("ChildResultRelayStore.readTree/1")),
                     Map.entry("ChildWorkspaceStore.java",
-                            Set.of("ChildWorkspaceStore.row/2")),
+                            Set.of("ChildWorkspaceStore.find/3",
+                                    "ChildWorkspaceStore.row/2")),
+                    Map.entry("JdbcChannelRouteRepository.java",
+                            Set.of("JdbcChannelRouteRepository.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",
                             Set.of("ManagedAgentDefinitionStore.notFound/0",
                                     "ManagedAgentDefinitionStore.row/2",
@@ -162,10 +179,14 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedExtensionRecordStore.sha256/1",
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
-                            Set.of("ManagedExtensionRecords.concat/2",
-                                    "ManagedExtensionRecords.require/2")),
+                            Set.of("ManagedExtensionRecords.require/2")),
                     Map.entry("ManagedSessionStore.java",
                             Set.of("ManagedSessionStore.storedTransaction/1")),
+                    Map.entry("ManagedSnapshotStore.java",
+                            Set.of("ItemReader.read/3",
+                                    "ManagedSnapshotStore.decode/1",
+                                    "SnapshotReadLease.check/0",
+                                    "SnapshotReadLease.close/0")),
                     Map.entry("ManagedTaskEventStore.java",
                             Set.of("ManagedTaskEventStore.eventRow/2")),
                     Map.entry("ManagedToolResultProjector.java",
@@ -177,6 +198,8 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedWorkspaceRegistry.findReadable/3")),
                     Map.entry("SessionMessageRelayStore.java",
                             Set.of("SessionMessageRelayStore.pending/2")),
+                    Map.entry("SessionResourceCollectionCollector.java",
+                            Set.of("SessionResourceCollectionCollector.runOnce/0")),
                     Map.entry("ToolPublicationAdmissionStore.java",
                             Set.of("AcknowledgementBundle.captureIdentity/0",
                                     "AcknowledgementBundle.finished/0",
@@ -207,18 +230,23 @@ class SessionRowLockOrderTest {
                                     "ToolPublicationStore.usesDataSource/1")),
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
-                                    "WorkspaceCsiCheckpointSnapshotStore.parse/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
-                            Set.of("WorkspaceCsiWorkerAckStore.decode/1")),
+                            Set.of("WorkspaceCsiWorkerAckStore.decode/1",
+                                    "WorkspaceCsiWorkerAckStore.hash/1")),
+                    Map.entry("WorkspaceEvidenceResources.java",
+                            Set.of("WorkspaceEvidenceResources.digest/1")),
                     Map.entry("WorkspaceExecutionStore.java",
                             Set.of("WorkspaceExecutionStore.digest/1")),
                     Map.entry("WorkspaceMigrationStore.java",
                             Set.of("WorkspaceMigrationStore.inspect/0",
                                     "WorkspaceMigrationStore.path/1")),
+                    Map.entry("WorkspaceOperations.java",
+                            Set.of("WorkspaceOperations.key/3")),
                     Map.entry("WorkspaceOperatorRecoveryStore.java",
                             Set.of("WorkspaceOperatorRecoveryStore.blocked/0",
-                                    "WorkspaceOperatorRecoveryStore.digest/1")),
+                                    "WorkspaceOperatorRecoveryStore.digest/1",
+                                    "WorkspaceOperatorRecoveryStore.operation/1")),
                     Map.entry("WorkspaceProfileLifecycleVerifier.java",
                             Set.of("WorkspaceProfileLifecycleVerifier.digest/0",
                                     "WorkspaceProfileLifecycleVerifier.source/1")),
@@ -228,6 +256,17 @@ class SessionRowLockOrderTest {
                                     "WorkspaceRecoveryStore.parse/1")),
                     Map.entry("WorkspaceStorageGuard.java",
                             Set.of("IdentityReader.read/1")));
+
+    // Held bodies whose invocation the parse cannot see but whose
+    // transaction it can: ManagedSnapshotStore.afterCommit registers a
+    // post-commit synchronization, and the build it runs opens its own
+    // REQUIRES_NEW transaction, so that body's session lock can never
+    // order against a row its registering caller touched. A deferred body
+    // is dropped rather than folded at its declaration, and the set is
+    // asserted exactly per file, so a new held body reaching a side still
+    // fails closed.
+    private static final Set<String> DEFERRED_BODIES = Set.of(
+            "ManagedSnapshotStore.afterCommit/2");
 
     private record Key(String owner, String name, List<String> paramTypes) {
         int arity() {
@@ -258,7 +297,8 @@ class SessionRowLockOrderTest {
     private record Audit(List<String> members, Set<String> lockers,
             List<String> violations, Set<String> lockersWithoutTurnAccess,
             Set<String> turnRowAccessors, Set<String> exemptions,
-            boolean locksSessionRow, boolean touchesTurnRow) { }
+            Set<String> deferredBodies, boolean locksSessionRow,
+            boolean touchesTurnRow) { }
 
     @Test
     void mutationEntriesAcquireTheSessionRowLockBeforeAnyTurnRowAccess()
@@ -293,13 +333,16 @@ class SessionRowLockOrderTest {
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
                 "beginSessionRename", "completeSessionRename",
-                "abandonSessionRename", "claimRename");
+                "abandonSessionRename", "claimRename",
+                // Main's internal child close (#14069) locks the child's
+                // session row before its operation-row work.
+                "beginChildClose");
         // The comparison population is pinned as exactly as the locker set:
         // a locker that loses its turn-row access must shrink this set
         // loudly instead of silently dropping out of the ordering
         // comparison.
         assertThat(audit.lockersWithoutTurnAccess())
-                .containsExactlyInAnyOrder("advanceReplayFloor",
+                .containsExactlyInAnyOrder(
                         "appendLiveSessionEventIfAbsent",
                         "appendPublicEventIfAbsent", "beginSessionMutation",
                         "beginTaskCancelOperation", "completeOperation",
@@ -311,14 +354,16 @@ class SessionRowLockOrderTest {
         // never enters `lockers`, so this assertion — not the violation
         // check — is what fails loudly when one appears.
         assertThat(audit.turnRowAccessors())
-                .containsExactlyInAnyOrder("beginCwdChangeOperation",
+                .containsExactlyInAnyOrder("advanceReplayFloor",
+                        "beginChildClose", "beginCwdChangeOperation",
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
                         "deferTurnRetry", "failTurn", "findActiveTurns",
-                        "findDispatchable", "findLatestTurns", "findTurn",
+                        "findDispatchable", "findLatestTurns",
+                        "findReplayFloorTargets", "findTurn",
                         "findTurnSummary", "hasActiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand",
@@ -341,7 +386,7 @@ class SessionRowLockOrderTest {
         // a new unresolvable reference fails here, and an entry goes stale
         // the day the call is typed or moved.
         assertThat(audit.exemptions())
-                .containsExactly("ItemRow.toRecord/1",
+                .containsExactly("ItemRow.toRecord/0",
                         "ManagedAgentStore.renameDelivery/2");
         // The harvest is asserted against the bytecode's own enumeration,
         // recursively over nested types and as a multiset: a member the
@@ -428,6 +473,15 @@ class SessionRowLockOrderTest {
             }
         }
         assertThat(exemptions).isEqualTo(AMBIGUITY_EXEMPTIONS);
+        Map<String, Set<String>> deferred = new TreeMap<>();
+        for (Map.Entry<String, Audit> entry : audits.entrySet()) {
+            if (!entry.getValue().deferredBodies().isEmpty()) {
+                deferred.put(entry.getKey(),
+                        entry.getValue().deferredBodies());
+            }
+        }
+        assertThat(deferred).isEqualTo(Map.of("ManagedSnapshotStore.java",
+                DEFERRED_BODIES));
     }
 
     // The derivation must report a writer that reaches the turn row through
@@ -446,14 +500,14 @@ class SessionRowLockOrderTest {
 
                     private void deferTurnRetry(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -472,7 +526,7 @@ class SessionRowLockOrderTest {
 
                     @Transactional
                     public void newWriter(String tenantId, String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'RUNNING'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -480,7 +534,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session for update");
+                                + " ma_session for update");
                     }
                 }
                 """;
@@ -503,21 +557,21 @@ class SessionRowLockOrderTest {
                     public void existingWriter(String tenantId,
                             String sessionId) {
                         requireSessionForUpdate(tenantId, sessionId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'RUNNING'");
                     }
 
                     @Transactional
                     public void turnOnlyWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -540,7 +594,7 @@ class SessionRowLockOrderTest {
                     public void proseWriter(String tenantId,
                             String sessionId) {
                         // ordering mirrors requireSessionForUpdate
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -548,7 +602,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -568,7 +622,7 @@ class SessionRowLockOrderTest {
                     public void helperLockWriter(String tenantId,
                             String sessionId) {
                         lockSession(tenantId, sessionId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'RUNNING'");
                     }
 
@@ -580,7 +634,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -605,14 +659,14 @@ class SessionRowLockOrderTest {
 
                     private void deferTurnRetry(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -634,12 +688,12 @@ class SessionRowLockOrderTest {
                     public void lateLockWriter(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session WHERE session_id"
+                                + " ma_session WHERE session_id"
                                 + " = ?");
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -659,9 +713,9 @@ class SessionRowLockOrderTest {
                     public void mixedLockWriter(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT operation_id FROM"
-                                + " managed_agent_operation WHERE"
+                                + " ma_operation WHERE"
                                 + " operation_id = ? FOR UPDATE");
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -669,7 +723,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -700,14 +754,14 @@ class SessionRowLockOrderTest {
 
                     private void markTurn(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -732,7 +786,7 @@ class SessionRowLockOrderTest {
 
                     private void writeTurnRow(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
@@ -749,7 +803,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -770,7 +824,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void inlineWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -778,7 +832,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void nestedLockWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         Nested.lockSession(tenantId, sessionId);
                     }
@@ -786,7 +840,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
 
                     static class Nested {
@@ -794,7 +848,7 @@ class SessionRowLockOrderTest {
                         static void lockSession(String tenantId,
                                 String sessionId) {
                             jdbc.queryForMap("SELECT session_id FROM"
-                                    + " managed_agent_session FOR UPDATE");
+                                    + " ma_session FOR UPDATE");
                         }
                     }
                 }
@@ -818,7 +872,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void fieldLockWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         nested.lockSession(tenantId, sessionId);
                     }
@@ -828,7 +882,7 @@ class SessionRowLockOrderTest {
                         void lockSession(String tenantId,
                                 String sessionId) {
                             jdbc.queryForMap("SELECT session_id FROM"
-                                    + " managed_agent_session FOR UPDATE");
+                                    + " ma_session FOR UPDATE");
                         }
                     }
                 }
@@ -851,7 +905,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void writer(String tenantId, String sessionId) {
                         helper(tenantId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
@@ -865,7 +919,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -889,7 +943,7 @@ class SessionRowLockOrderTest {
                     public void writer(String tenantId, String sessionId) {
                         requireSessionForUpdate(tenantId, sessionId);
                         format(tenantId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'RUNNING'");
                     }
 
@@ -902,7 +956,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -929,14 +983,14 @@ class SessionRowLockOrderTest {
                     }
 
                     private void writeTurnRow() {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -960,9 +1014,9 @@ class SessionRowLockOrderTest {
                     public void conditionalLockWriter(String tenantId,
                             String sessionId, boolean locking) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session WHERE session_id"
+                                + " ma_session WHERE session_id"
                                 + " = ?" + (locking ? " FOR UPDATE" : ""));
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
                 }
@@ -986,15 +1040,15 @@ class SessionRowLockOrderTest {
                     public void conditionalTurnWriter(String tenantId,
                             String sessionId, boolean counting) {
                         jdbc.queryForMap(counting
-                                ? "SELECT COUNT(*) FROM managed_agent_turn"
-                                : "SELECT COUNT(*) FROM managed_agent_event");
+                                ? "SELECT COUNT(*) FROM ma_turn"
+                                : "SELECT COUNT(*) FROM ma_public_event");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1015,13 +1069,13 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void embeddingWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_event SET note = '"
+                        jdbc.update("UPDATE ma_public_event SET note = '"
                                 + auditTrail() + "'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
 
                     private String auditTrail() {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         return "m";
                     }
@@ -1029,7 +1083,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1051,14 +1105,14 @@ class SessionRowLockOrderTest {
                     public void concatReader(String tenantId,
                             String sessionId) {
                         jdbc.query("SELECT * FROM "
-                                + jdbcSupport.tableName("managed_agent_turn"));
+                                + jdbcSupport.tableName("ma_turn"));
                         requireSessionForUpdate(tenantId, sessionId);
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1081,12 +1135,12 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void embeddingLockWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_session SET note"
+                        jdbc.update("UPDATE ma_session SET note"
                                 + " = '" + turnDigest() + "'");
                     }
 
                     private String turnDigest() {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         return "m";
                     }
@@ -1107,7 +1161,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void switchWriter(String tenantId,
                             String sessionId, int kind) {
-                        jdbc.update("UPDATE managed_agent_" + switch (kind) {
+                        jdbc.update("UPDATE ma_" + switch (kind) {
                             case 1 -> "turn SET status = 'FAILED'";
                             default -> "event SET note = 'm'";
                         } + " WHERE session_id = ?");
@@ -1117,7 +1171,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1139,7 +1193,7 @@ class SessionRowLockOrderTest {
                             String sessionId) {
                         Runnable lock = () -> lockSession(tenantId,
                                 sessionId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         lock.run();
                     }
@@ -1147,7 +1201,7 @@ class SessionRowLockOrderTest {
                     private void lockSession(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1170,7 +1224,7 @@ class SessionRowLockOrderTest {
                             String sessionId) {
                         Runnable outer = () -> {
                             Runnable inner = () -> jdbc.update("UPDATE"
-                                    + " managed_agent_turn SET status"
+                                    + " ma_turn SET status"
                                     + " = 'FAILED'");
                             inner.run();
                         };
@@ -1181,7 +1235,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1208,7 +1262,7 @@ class SessionRowLockOrderTest {
                                 lockSession(tenantId, sessionId);
                             }
                         };
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         lock.run();
                     }
@@ -1216,7 +1270,7 @@ class SessionRowLockOrderTest {
                     private void lockSession(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1244,7 +1298,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void writerB(String tenantId, String sessionId) {
                         writerA(tenantId, sessionId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -1252,7 +1306,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1276,8 +1330,8 @@ class SessionRowLockOrderTest {
                     public void reassignedLocalWriter(String tenantId,
                             String sessionId) {
                         String sql = "SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE";
-                        sql = "UPDATE managed_agent_turn SET status"
+                                + " ma_session FOR UPDATE";
+                        sql = "UPDATE ma_turn SET status"
                                 + " = 'FAILED'";
                         jdbc.update(sql);
                         requireSessionForUpdate(tenantId, sessionId);
@@ -1286,7 +1340,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1311,11 +1365,11 @@ class SessionRowLockOrderTest {
                         class HeldLocker {
                             void run() {
                                 jdbc.queryForMap("SELECT session_id FROM"
-                                        + " managed_agent_session"
+                                        + " ma_session"
                                         + " FOR UPDATE");
                             }
                         }
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         new HeldLocker().run();
                     }
@@ -1343,11 +1397,11 @@ class SessionRowLockOrderTest {
                             String sessionId, boolean chooseLock) {
                         jdbc.queryForMap(chooseLock
                                 ? "SELECT session_id FROM"
-                                        + " managed_agent_session"
+                                        + " ma_session"
                                         + " FOR UPDATE"
-                                : "UPDATE managed_agent_turn SET status"
+                                : "UPDATE ma_turn SET status"
                                         + " = 'FAILED'");
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'BROKEN'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -1355,7 +1409,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1375,7 +1429,7 @@ class SessionRowLockOrderTest {
                             String sessionId) {
                         requireSessionForUpdate(tenantId, sessionId);
                         runInTransaction(() -> jdbc.update("UPDATE"
-                                + " managed_agent_turn SET status"
+                                + " ma_turn SET status"
                                 + " = 'FAILED'"));
                     }
 
@@ -1385,7 +1439,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1405,7 +1459,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     public void localSqlWriter(String tenantId,
                             String sessionId) {
-                        String failTurn = "UPDATE managed_agent_turn SET"
+                        String failTurn = "UPDATE ma_turn SET"
                                 + " status = 'FAILED'";
                         requireSessionForUpdate(tenantId, sessionId);
                         jdbc.update(failTurn, tenantId, sessionId);
@@ -1414,7 +1468,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1444,9 +1498,9 @@ class SessionRowLockOrderTest {
                     private void beginLifecycle(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session WHERE session_id"
+                                + " ma_session WHERE session_id"
                                 + " = ?");
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -1454,7 +1508,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1473,7 +1527,7 @@ class SessionRowLockOrderTest {
                     @Transactional
                     protected void protectedWriter(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
@@ -1481,7 +1535,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1512,14 +1566,14 @@ class SessionRowLockOrderTest {
 
                     private void writeTurnRow(String tenantId,
                             String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                     }
 
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1542,13 +1596,13 @@ class SessionRowLockOrderTest {
                     public void lateLockWriter(String tenantId,
                             String sessionId) {
                         helper(tenantId);
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         requireSessionForUpdate(tenantId, sessionId);
                     }
 
                     private void helper(String tenantId) {
-                        jdbc.update("UPDATE managed_agent_operation SET"
+                        jdbc.update("UPDATE ma_operation SET"
                                 + " state = 'DONE'");
                     }
 
@@ -1559,7 +1613,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1576,7 +1630,7 @@ class SessionRowLockOrderTest {
                 class SyntheticStore {
 
                     private static final String FAIL_TURN = "UPDATE"
-                            + " managed_agent_turn SET status = 'FAILED'";
+                            + " ma_turn SET status = 'FAILED'";
 
                     @Transactional
                     public void constantWriter(String tenantId,
@@ -1588,7 +1642,7 @@ class SessionRowLockOrderTest {
                     private void requireSessionForUpdate(String tenantId,
                             String sessionId) {
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1606,10 +1660,10 @@ class SessionRowLockOrderTest {
 
                     @Transactional
                     public void badWriter(String tenantId, String sessionId) {
-                        jdbc.update("UPDATE managed_agent_turn SET status"
+                        jdbc.update("UPDATE ma_turn SET status"
                                 + " = 'FAILED'");
                         jdbc.queryForMap("SELECT session_id FROM"
-                                + " managed_agent_session FOR UPDATE");
+                                + " ma_session FOR UPDATE");
                     }
                 }
                 """;
@@ -1628,17 +1682,27 @@ class SessionRowLockOrderTest {
                 harvest(type, "", methods, constants);
             }
         }
+        // A call through a type the file imports leaves the file: no
+        // same-file member can share an imported type's simple name.
+        Set<String> importedTypes = unit.getImports().stream()
+                .filter(declaration -> !declaration.isStatic())
+                .map(declaration -> declaration.getQualifiedIdentifier()
+                        .toString())
+                .filter(name -> !name.endsWith(".*"))
+                .map(name -> name.substring(name.lastIndexOf('.') + 1))
+                .collect(Collectors.toSet());
         List<Ambiguous> ambiguous = new ArrayList<>();
         Map<Key, List<Event>> events = new LinkedHashMap<>();
         Map<Key, List<List<Event>>> heldLambdas = new LinkedHashMap<>();
         for (Map.Entry<Key, MethodTree> member : methods.entrySet()) {
             MemberScan scan = eventsOf(member.getValue(), member.getKey(),
-                    methods, constants, ambiguous);
+                    methods, constants, importedTypes, ambiguous);
             events.put(member.getKey(), scan.events());
             heldLambdas.put(member.getKey(), scan.heldLambdas());
         }
         Set<Key> lockReaching = reaching(events, true);
         Set<Key> turnReaching = reaching(events, false);
+        Set<String> deferredBodies = new TreeSet<>();
         // A held lambda or anonymous-class body is benign only while
         // every event it carries provably reaches neither side — like an
         // ambiguous reference; the moment one does, the audit fails closed
@@ -1653,6 +1717,11 @@ class SessionRowLockOrderTest {
                                 : lockReaching.contains(event.callee())
                                         || turnReaching.contains(
                                                 event.callee()));
+                if (sideReaching && DEFERRED_BODIES.contains(
+                        member.getKey().handle())) {
+                    deferredBodies.add(member.getKey().handle());
+                    continue;
+                }
                 if (sideReaching) {
                     throw new IllegalStateException("a lambda,"
                             + " anonymous-class or local-class body in "
@@ -1665,12 +1734,16 @@ class SessionRowLockOrderTest {
         }
         // An unresolvable reference is exempt only while every candidate
         // provably reaches neither side; the moment one does, the audit
-        // fails closed instead of guessing an attribution.
+        // fails closed instead of guessing an attribution. The one
+        // exception is a file no member of which reaches the turn row:
+        // there an attribution can move only the session lock, and a lock
+        // with no turn access anywhere in the file orders nothing.
         Set<String> exemptions = new TreeSet<>();
         for (Ambiguous reference : ambiguous) {
             boolean sideReaching = reference.candidates().stream()
-                    .anyMatch(candidate -> lockReaching.contains(candidate)
-                            || turnReaching.contains(candidate));
+                    .anyMatch(candidate -> turnReaching.contains(candidate)
+                            || (lockReaching.contains(candidate)
+                                    && !turnReaching.isEmpty()));
             if (sideReaching) {
                 throw new IllegalStateException("cannot resolve the '"
                         + reference.handle() + "' reference in "
@@ -1717,7 +1790,7 @@ class SessionRowLockOrderTest {
                 .sorted().collect(Collectors.toCollection(ArrayList::new));
         return new Audit(members, lockers, violations,
                 lockersWithoutTurnAccess, turnRowAccessors, exemptions,
-                events.values().stream().flatMap(List::stream)
+                deferredBodies, events.values().stream().flatMap(List::stream)
                         .anyMatch(Event::lock),
                 events.values().stream().flatMap(List::stream)
                         .anyMatch(Event::turn));
@@ -1850,9 +1923,9 @@ class SessionRowLockOrderTest {
     // statement's own SQL takes effect.
     private static MemberScan eventsOf(MethodTree method, Key caller,
             Map<Key, MethodTree> methods, Map<String, String> constants,
-            List<Ambiguous> ambiguous) {
+            Set<String> importedTypes, List<Ambiguous> ambiguous) {
         EventScanner scanner = new EventScanner(new ArrayList<>(), caller,
-                methods, new HashMap<>(constants), ambiguous);
+                methods, new HashMap<>(constants), importedTypes, ambiguous);
         if (method.getBody() != null) {
             scanner.scan(method.getBody(), null);
         }
@@ -1876,6 +1949,7 @@ class SessionRowLockOrderTest {
         private final Key caller;
         private final Map<Key, MethodTree> methods;
         private final Map<String, String> constants;
+        private final Set<String> importedTypes;
         private final List<Ambiguous> ambiguous;
         // The lambda nodes passed straight into a call, marked at the call
         // site: only their bodies fold into the enclosing member.
@@ -1884,11 +1958,12 @@ class SessionRowLockOrderTest {
 
         EventScanner(List<Event> events, Key caller,
                 Map<Key, MethodTree> methods, Map<String, String> constants,
-                List<Ambiguous> ambiguous) {
+                Set<String> importedTypes, List<Ambiguous> ambiguous) {
             this.events = events;
             this.caller = caller;
             this.methods = methods;
             this.constants = constants;
+            this.importedTypes = importedTypes;
             this.ambiguous = ambiguous;
         }
 
@@ -2013,7 +2088,7 @@ class SessionRowLockOrderTest {
             // audit() folds the provably benign ones and fails closed on
             // any that reach a side.
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, ambiguous);
+                    methods, constants, importedTypes, ambiguous);
             held.scan(node.getBody(), null);
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
@@ -2035,7 +2110,7 @@ class SessionRowLockOrderTest {
             scan(node.getTypeArguments(), null);
             scan(node.getArguments(), null);
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, ambiguous);
+                    methods, constants, importedTypes, ambiguous);
             for (Tree member : node.getClassBody().getMembers()) {
                 if (member instanceof MethodTree method) {
                     if (method.getBody() != null) {
@@ -2058,7 +2133,7 @@ class SessionRowLockOrderTest {
             // an anonymous-class body; folding them inline would score the
             // session lock the body takes where it never runs.
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, ambiguous);
+                    methods, constants, importedTypes, ambiguous);
             for (Tree member : node.getMembers()) {
                 if (member instanceof MethodTree method
                         && method.getBody() != null
@@ -2111,7 +2186,7 @@ class SessionRowLockOrderTest {
 
         private void addCall(MethodInvocationTree node) {
             resolve(node.getMethodSelect(), node.getArguments().size(),
-                    caller, methods, ambiguous).forEach(key ->
+                    caller, methods, importedTypes, ambiguous).forEach(key ->
                     events.add(new Event(false, false, key)));
         }
 
@@ -2140,7 +2215,8 @@ class SessionRowLockOrderTest {
     // call is never resolved — it is exempt when every same-named member
     // is benign and throws otherwise.
     private static List<Key> resolve(Tree select, int argCount, Key caller,
-            Map<Key, MethodTree> methods, List<Ambiguous> ambiguous) {
+            Map<Key, MethodTree> methods, Set<String> importedTypes,
+            List<Ambiguous> ambiguous) {
         if (select instanceof IdentifierTree identifier) {
             return resolveInOwnerChain(identifier.getName().toString(),
                     argCount, caller, methods, ambiguous);
@@ -2164,6 +2240,9 @@ class SessionRowLockOrderTest {
                 if (!inType.isEmpty()) {
                     ambiguous.add(new Ambiguous(caller,
                             inType.getFirst().handle(), inType));
+                    return List.of();
+                }
+                if (importedTypes.contains(base.getName().toString())) {
                     return List.of();
                 }
             }
@@ -2212,9 +2291,8 @@ class SessionRowLockOrderTest {
         // needles fold once before matching: a lowercase `for update`
         // takes the same lock the canary exists to order.
         String folded = text.toLowerCase(Locale.ROOT);
-        boolean lock = folded.contains("insert into " + SESSION_TABLE)
-                || folded.contains("update " + SESSION_TABLE)
-                || (folded.contains(SESSION_TABLE)
+        boolean lock = SESSION_WRITE.matcher(folded).find()
+                || (SESSION_NAMED.matcher(folded).find()
                         && folded.contains(
                                 LOCK_MODE.toLowerCase(Locale.ROOT)));
         boolean turn = folded.contains(TURN_TABLE);

@@ -16,10 +16,15 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -35,7 +40,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import org.assertj.core.api.ThrowableAssert;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -122,19 +126,19 @@ class ManagedAgentWorkspaceReplayTest {
     }
 
     private String boundSession(String tenant) {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')",
                 tenant, "ws-a", "storage-a", "ws-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, "ws-a",
                 "actor-a".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, "ws-a",
@@ -151,8 +155,8 @@ class ManagedAgentWorkspaceReplayTest {
         source.setURL("jdbc:h2:mem:workspace-replay-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
                 + ";LOCK_TIMEOUT=10000");
-        Flyway.configure().dataSource(source).load().migrate();
-        jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         transaction = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
         registry = new ManagedWorkspaceRegistry(jdbc);
@@ -253,24 +257,8 @@ class ManagedAgentWorkspaceReplayTest {
         // The delete flow's durable footprint for a bound Session: the
         // operation row records the last-visible status — CLOSED or
         // ARCHIVED, the two pre-delete states a bound delete admits — and
-        // the Session row becomes a tombstone. The command-row fallback can
-        // never serve a bound delete: its only writer refused bound
-        // Sessions since the binding existed.
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, available_at, created_at,"
-                        + " updated_at, completed_at) VALUES (?, ?, 'op-del',"
-                        + " 'DELETE', '', 'delete', 'delete-digest',"
-                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'CLOSED', 0, 0, 0, 0)",
-                tenant, sessionId);
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
-                        + " deleted_at = 1, updated_at = 1, version ="
-                        + " version + 1 WHERE tenant_id = ? AND session_id"
-                        + " = ?",
-                tenant, sessionId);
+        // the Session row becomes a tombstone.
+        recordDelete(tenant, sessionId, "CLOSED");
 
         transaction.executeWithoutResult(status -> {
             var replay = service.renameSession(tenant, "actor-a", "rename",
@@ -286,11 +274,10 @@ class ManagedAgentWorkspaceReplayTest {
         });
     }
 
-    // The pre-V17 footprint, on the only shape it can legitimately serve: an
-    // unbound Session's delete wrote a DELETE_SESSION command row, and the
-    // fallback query answers its last-visible status.
+    // The unbound shape: a legacy Session's delete admits from ACTIVE, its
+    // operation row records that status, and the replay answers with it.
     @Test
-    void aDeletedLegacySessionReplaysItsRenameFromTheCommandRowFallback() {
+    void aDeletedLegacySessionReplaysItsRenameAsLastVisible() {
         freshDatabase();
         String tenant = "tenant-" + UUID.randomUUID();
         ManagedAgentService service = service(new AtomicBoolean(true));
@@ -304,19 +291,7 @@ class ManagedAgentWorkspaceReplayTest {
                 service.renameSession(tenant, "actor-a", "rename", sessionId,
                         "new title").replayed()).isFalse());
 
-        jdbc.update("INSERT INTO managed_agent_command (tenant_id,"
-                        + " operation, idempotency_key, request_digest,"
-                        + " session_id, turn_id, command_status,"
-                        + " session_status_before, created_at, updated_at)"
-                        + " VALUES (?, 'DELETE_SESSION', 'delete',"
-                        + " 'delete-digest', ?, NULL, 'COMPLETED', 'ACTIVE',"
-                        + " 0, 0)",
-                tenant, sessionId);
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
-                        + " deleted_at = 1, updated_at = 1, version ="
-                        + " version + 1 WHERE tenant_id = ? AND session_id"
-                        + " = ?",
-                tenant, sessionId);
+        recordDelete(tenant, sessionId, "ACTIVE");
 
         transaction.executeWithoutResult(status -> {
             var replay = service.renameSession(tenant, "actor-a", "rename",
@@ -355,7 +330,7 @@ class ManagedAgentWorkspaceReplayTest {
                         null, null, List.of(), null)
                 .sessionId());
         for (String sessionId : new String[] {bound, legacy}) {
-            jdbc.update("UPDATE managed_agent_session SET status ="
+            jdbc.update("UPDATE ma_session SET status ="
                             + " 'DELETED', deleted_at = 1, updated_at = 1,"
                             + " version = version + 1 WHERE tenant_id = ?"
                             + " AND session_id = ?",
@@ -392,7 +367,7 @@ class ManagedAgentWorkspaceReplayTest {
         transaction.executeWithoutResult(status -> assertThat(
                 service.submitTurn(tenant, "actor-a", "submit", bound, input)
                         .replayed()).isFalse());
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+        jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1, updated_at = 1, version ="
                         + " version + 1 WHERE tenant_id = ? AND session_id"
                         + " = ?",
@@ -428,21 +403,7 @@ class ManagedAgentWorkspaceReplayTest {
                 service.renameSession(tenant, "actor-a", "rename", sessionId,
                         "new title").replayed()).isFalse());
 
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, available_at, created_at,"
-                        + " updated_at, completed_at) VALUES (?, ?, 'op-del',"
-                        + " 'DELETE', '', 'delete', 'delete-digest',"
-                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ARCHIVED', 0, 0, 0, 0)",
-                tenant, sessionId);
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
-                        + " deleted_at = 1, updated_at = 1, version ="
-                        + " version + 1 WHERE tenant_id = ? AND session_id"
-                        + " = ?",
-                tenant, sessionId);
+        recordDelete(tenant, sessionId, "ARCHIVED");
 
         transaction.executeWithoutResult(status -> {
             var replay = service.renameSession(tenant, "actor-a", "rename",
@@ -509,7 +470,7 @@ class ManagedAgentWorkspaceReplayTest {
                                         .isEqualTo("workspace_unavailable")));
     }
 
-    // The recorder admission (V69): a non-creator OPERATOR's retry of his
+    // The recorder admission: a non-creator OPERATOR's retry of his
     // own recorded key replays the recorded outcome — the retry an
     // idempotency key exists for — while another OPERATOR who never
     // recorded the key keeps the refusal.
@@ -519,7 +480,7 @@ class ManagedAgentWorkspaceReplayTest {
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         // A third actor holding OPERATOR who never records a key.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
                         + " ?, 'OPERATOR')",
                 tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
@@ -580,11 +541,11 @@ class ManagedAgentWorkspaceReplayTest {
         String sessionId = boundSession(tenant);
         // actor-r can read the Workspace but is below OPERATOR; actor-c
         // holds OPERATOR but never records a key.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
                         + " ?, 'READER')",
                 tenant, "actor-r".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
                         + " ?, 'OPERATOR')",
                 tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
@@ -609,7 +570,7 @@ class ManagedAgentWorkspaceReplayTest {
                         .isInstanceOfSatisfying(ApiException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("workspace_unavailable")));
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+        jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1, updated_at = 1, version ="
                         + " version + 1 WHERE tenant_id = ? AND session_id"
                         + " = ?",
@@ -647,7 +608,7 @@ class ManagedAgentWorkspaceReplayTest {
         freshDatabase();
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
                         + " ?, 'OPERATOR')",
                 tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
@@ -732,7 +693,7 @@ class ManagedAgentWorkspaceReplayTest {
         freshDatabase();
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
                         + " ?, 'OPERATOR')",
                 tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
@@ -756,14 +717,15 @@ class ManagedAgentWorkspaceReplayTest {
                             .isEqualTo("workspace_unavailable"));
             // The leaked claim never happened: the recorder's command is
             // still PENDING and its delivery never handed out an attempt.
-            assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                            + " managed_agent_command WHERE tenant_id = ?"
+            assertThat(jdbc.queryForObject("SELECT state FROM"
+                            + " ma_request_receipt WHERE namespace ="
+                            + " 'SESSION_COMMAND' AND tenant_id = ?"
                             + " AND operation = 'RENAME_SESSION'"
-                            + " AND idempotency_key = 'rename-race'",
-                    String.class, tenant)).isEqualTo("PENDING");
+                            + " AND idempotency_key = ?",
+                    String.class, tenant, "rename-race")).isEqualTo("PENDING");
             assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
-                            + " managed_session_rename_delivery"
-                            + " WHERE tenant_id = ? AND session_id = ?",
+                            + " ma_operation WHERE operation_kind = 'RENAME'"
+                            + " AND tenant_id = ? AND session_id = ?",
                     Integer.class, tenant, sessionId)).isZero();
             // The recorder's own retry passes the same discovery gate, not
             // only refuses other actors: it resumes the delivery to
@@ -821,5 +783,36 @@ class ManagedAgentWorkspaceReplayTest {
             commit.countDown();
             gate.through.countDown();
         }
+    }
+
+    // The delete flow's durable footprint, as the lifecycle admission
+    // writes it: a DELETE operation row naming the last-visible status,
+    // then the Session row as a tombstone.
+    private void recordDelete(String tenant, String sessionId,
+            String statusBefore) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String target = ManagedSchemaKeys.key(sessionId);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
+                        + " session_scope_key, operation_id, operation_kind,"
+                        + " tenant_id, session_id, target_kind, target_key,"
+                        + " target_id, actor_digest, idempotency_key,"
+                        + " idempotency_digest, request_digest, request_json,"
+                        + " state, phase, admission_stage, delivery_state,"
+                        + " session_status_before, available_at, created_at,"
+                        + " updated_at, completed_at) VALUES (?, ?, ?,"
+                        + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
+                        + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
+                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
+                        + " 0, 0)",
+                ManagedSchemaKeys.operationKey(
+                        ManagedSchemaContract.OperationKind.DELETE, scope,
+                        target, "op-del"),
+                scope, scope, tenant, sessionId, target, sessionId,
+                ManagedSchemaKeys.key("delete"), statusBefore);
+        jdbc.update("UPDATE ma_session SET status = 'DELETED',"
+                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ?",
+                tenant, sessionId);
     }
 }

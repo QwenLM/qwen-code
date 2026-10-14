@@ -5,13 +5,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -28,8 +28,8 @@ class ManagedAgentTurnDeferralTest {
         source.setURL("jdbc:h2:mem:defer-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
                 + ";LOCK_TIMEOUT=10000");
-        Flyway.configure().dataSource(source).load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), events -> { },
                 org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class),
@@ -51,23 +51,23 @@ class ManagedAgentTurnDeferralTest {
                 "owner-a", retryAfter);
 
         assertThat(jdbc.queryForObject("SELECT status FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " turn_id = ?", String.class, tenant, turn.turnId()))
                 .isEqualTo("ACCEPTED");
         assertThat(jdbc.queryForObject("SELECT retry_count FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " turn_id = ?", Integer.class, tenant,
                 turn.turnId())).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT retry_after FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " turn_id = ?", Long.class, tenant, turn.turnId()))
                 .isEqualTo(retryAfter);
         assertThat(jdbc.queryForObject("SELECT dispatch_owner FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " turn_id = ?", String.class, tenant,
                 turn.turnId())).isNull();
         assertThat(jdbc.queryForObject("SELECT dispatch_lease_until FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " turn_id = ?", Long.class, tenant,
                 turn.turnId())).isNull();
 

@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.service.OwnerSubscriptions;
 import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
 import java.util.concurrent.ScheduledFuture;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientException;
@@ -90,9 +89,8 @@ public class EventTransportConfiguration {
     }
 
     @Bean
-    public TransportConsumerStore transportConsumerStore(JdbcTemplate jdbc,
-            Clock clock) {
-        return new TransportConsumerStore(jdbc, clock);
+    public TransportConsumerStore transportConsumerStore(JdbcTemplate jdbc) {
+        return new TransportConsumerStore(jdbc);
     }
 
     @Bean(destroyMethod = "close")

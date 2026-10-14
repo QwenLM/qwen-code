@@ -120,10 +120,10 @@ public interface AgentStateStore {
             List<Map<String, Object>> input, String payloadDigest);
 
     /**
-     * The actor-carrying variant records the caller on the command row
-     * (V69), so the row's replay answers the actor who recorded it — an
+     * The actor-carrying variant records the caller on the command receipt,
+     * so the receipt's replay answers the actor who recorded it — an
      * OPERATOR's own retry of his own key — and not only the creator. The
-     * default drops the actor for implementations without the column.
+     * default drops the actor for implementations that cannot record it.
      */
     default Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
@@ -137,7 +137,7 @@ public interface AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId);
 
-    /** The actor-carrying twin of {@link #insertTurnCommand} (V69). */
+    /** The actor-carrying twin of {@link #insertTurnCommand}. */
     default Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
@@ -149,7 +149,7 @@ public interface AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
 
-    /** The actor-carrying twin of {@link #insertTurnCommand} (V69). */
+    /** The actor-carrying twin of {@link #insertTurnCommand}. */
     default SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
@@ -160,7 +160,7 @@ public interface AgentStateStore {
     SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
             String requestDigest, String sessionId, String title);
 
-    /** The actor-carrying twin (V69): the recorded rename answers its recorder. */
+    /** The actor-carrying twin: the recorded rename answers its recorder. */
     default SessionMutationCommand beginSessionRename(String tenantId,
             String idempotencyKey, String requestDigest, String sessionId,
             String title, String actorId) {
@@ -171,6 +171,8 @@ public interface AgentStateStore {
     SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
             String sessionId, String title, String harnessBootId, long revision);
 
+    SessionRecord completeSessionRename(StoreModels.RenameDelivery delivery, String owner, String bootId);
+
     void abandonSessionRename(String tenantId, String idempotencyKey,
             String sessionId, long revision, String owner);
 
@@ -178,6 +180,8 @@ public interface AgentStateStore {
 
     Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
             String owner, Duration lease);
+
+    void markRenameSubmitted(StoreModels.RenameDelivery delivery, String owner);
 
     void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
 
@@ -220,6 +224,12 @@ public interface AgentStateStore {
     OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
+
+    default OperationAdmission beginChildClose(String tenantId, String parentSessionId,
+            String childSessionId, String childRunId, String actorDigest, String key,
+            String digest, boolean supported) {
+        throw new UnsupportedOperationException("Internal child close is unavailable");
+    }
 
     default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
@@ -430,6 +440,8 @@ public interface AgentStateStore {
 
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
+
+    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
 
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);

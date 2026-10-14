@@ -11,16 +11,17 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -38,9 +39,9 @@ class ManagedAgentReplayOutageTest {
         source.setURL("jdbc:h2:mem:replay-outage-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
                 + ";LOCK_TIMEOUT=10000");
-        Flyway.configure().dataSource(source).load().migrate();
+        ManagedSchema.initialize(source);
         ManagedAgentStore store = new ManagedAgentStore(
-                new JdbcTemplate(source), new ObjectMapper(),
+                new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
                 Clock.systemUTC(), events -> { },
                 mock(ManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties());

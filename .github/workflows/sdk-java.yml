@@ -662,6 +662,14 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
+      - name: 'Configure MariaDB packet budget for large-object tests'
+        env:
+          MARIADB_CONTAINER: '${{ job.services.mariadb.id }}'
+        run: |-
+          # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
+          # Set this job's disposable service before its first JDBC connection.
+          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
+
       - name: 'Run Runtime Broker MySQL integration tests'
         working-directory: 'packages/sdk-java/runtime-broker'
         env:
@@ -738,14 +746,17 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (35 + 9×10 + 20 + 50 = 195 — the Verify, admission
+    # The step ceilings (45 + 9×10 + 20 + 50 = 205 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
-    # classes raised the hosted fork 900→1200 s; the admission gates share
-    # a 2400 s fork for both witness classes)) plus ~13 minutes for the
-    # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~208; 210 keeps a thin margin, and each arm buys its
-    # own 10 instead of sharing an envelope.
-    timeout-minutes: 210
+    # classes raised the hosted fork 900→1200 s and the L4 recovery class
+    # 1200→1800 s; the admission gates share a 2400 s fork for both witness
+    # classes)) plus ~13 minutes for the uncapped setup steps
+    # (Checkout..Install MySQL binaries, the report checks) need ~218; 220
+    # keeps a thin margin, and each arm buys its own 10 instead of sharing
+    # an envelope.
+    timeout-minutes: 220
+    env:
+      QWEN_E2E_REGISTER_STORAGE: '1'
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -796,13 +807,14 @@ jobs:
           cd integration-tests
           npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        # Must outlive the hosted-harness-mysql failsafe fork timeout (1200 s,
-        # raised 900→1200 for the FG7 channel classes) plus the wrapped
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (1800 s,
+        # raised 900→1200 for the FG7 channel classes and 1200→1800 for the
+        # L4 recovery class after its #14125 per-commit kill) plus the wrapped
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering.
-        timeout-minutes: 35
+        timeout-minutes: 45
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

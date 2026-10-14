@@ -5,15 +5,16 @@ import static org.mockito.Mockito.mock;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -29,8 +30,8 @@ class ManagedAgentStoreLocaleTest {
         source.setURL("jdbc:h2:mem:locale-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
                 + ";LOCK_TIMEOUT=10000");
-        Flyway.configure().dataSource(source).load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), events -> { },
                 mock(ManagedWorkspaceRegistry.class),
@@ -58,10 +59,10 @@ class ManagedAgentStoreLocaleTest {
         }
 
         String itemStatus = jdbc.queryForObject(
-                "SELECT item_status FROM managed_agent_item WHERE tenant_id"
-                        + " = 'tenant-locale' AND session_id = ? AND item_id"
-                        + " = 'item-tool-1'",
-                String.class, session.sessionId());
+                "SELECT item_status FROM ma_message WHERE tenant_id"
+                        + " = ? AND session_id = ? AND item_id = ?",
+                String.class, "tenant-locale", session.sessionId(),
+                "item-tool-1");
         assertThat(itemStatus).isEqualTo("failed");
     }
 }
