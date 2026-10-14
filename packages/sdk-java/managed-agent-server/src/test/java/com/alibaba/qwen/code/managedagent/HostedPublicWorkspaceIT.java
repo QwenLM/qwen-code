@@ -712,18 +712,24 @@ class HostedPublicWorkspaceIT {
             // Keep initialized-root mtime distinct from birth time without relying on sleeps.
             Files.setLastModifiedTime(root, FileTime.fromMillis(1));
         }
-        port = freePort();
-        int harnessPort = freePort();
-        int brokerPort = freePort();
-        model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        model.createContext("/v1/chat/completions", this::modelReply);
-        model.start();
-        if (shellFault != null) {
-            storeRelay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            relayExecutor = Executors.newVirtualThreadPerTaskExecutor();
-            storeRelay.setExecutor(relayExecutor);
-            storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
-            storeRelay.start();
+        int harnessPort;
+        int brokerPort;
+        try (var springSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
+                var harnessSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
+                var brokerSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+            port = springSocket.getLocalPort();
+            harnessPort = harnessSocket.getLocalPort();
+            brokerPort = brokerSocket.getLocalPort();
+            model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            model.createContext("/v1/chat/completions", this::modelReply);
+            model.start();
+            if (shellFault != null) {
+                storeRelay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+                relayExecutor = Executors.newVirtualThreadPerTaskExecutor();
+                storeRelay.setExecutor(relayExecutor);
+                storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
+                storeRelay.start();
+            }
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
@@ -1436,9 +1442,7 @@ class HostedPublicWorkspaceIT {
         assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
-    }
+
 
     @AfterEach
     void stop() throws Exception {
