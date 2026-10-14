@@ -82,6 +82,7 @@ class HostedPublicWorkspaceIT {
     private String shellDecision = "allow";
     private boolean durableClose;
     private boolean shellLifecycleV2;
+    private Map<String, byte[]> publicationObjects;
     private String shellFault;
     private HttpServer storeRelay;
     private ExecutorService relayExecutor;
@@ -189,17 +190,29 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
-        assertThat(modelRequests).hasSize(8);
+        assertThat(modelRequests).hasSize(shellLifecycleV2 ? 4 : 8);
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
-        var output = jdbc.queryForList("SELECT resource_id, byte_length FROM ma_resource r"
-                + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-content'"
-                + " AND state = 'PUBLISHED' AND storage_kind = 'MYSQL_INLINE' AND LOCATE('G0_SHELL_STDOUT', inline_bytes) > 0"
-                + " AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
-                + " WHERE f.session_scope_key = r.session_scope_key AND f.resource_id = r.resource_id)", tenant, session);
+        var publications = jdbc.queryForList("SELECT publication_id FROM ma_output_capture"
+                + " WHERE tenant_id = ? AND session_id = ? AND capture_bytes = 1048576", String.class, tenant, session);
+        assertThat(publications).hasSize(1);
+        var output = jdbc.queryForList("SELECT o.capture_object_key AS object_key, o.byte_length, o.sha256,"
+                + " o.capture_state AS state, o.slot_key FROM ma_resource o JOIN ma_output_capture p"
+                + " ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id"
+                + " WHERE p.tenant_id = ? AND p.session_id = ? AND o.capture_object_key IS NOT NULL", tenant, session);
         assertThat(output).as("the public Shell captured real stdout before deletion").isNotEmpty();
-        long outputBytes = output.stream().mapToLong(row -> ((Number) row.get("byte_length")).longValue()).sum();
+        boolean stdout = false;
+        for (var object : output) {
+            assertThat(object.get("state")).isEqualTo("VERIFIED");
+            byte[] bytes = publicationObjects.get(object.get("object_key").toString());
+            assertThat(bytes).hasSize(((Number) object.get("byte_length")).intValue());
+            assertThat(java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)))
+                    .isEqualTo(object.get("sha256"));
+            stdout |= object.get("slot_key").toString().startsWith("segment:stdout:")
+                    && new String(bytes, StandardCharsets.UTF_8).contains("G0_SHELL_STDOUT");
+        }
+        assertThat(stdout).isTrue();
         String companion = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code", "input", List.of(),
                 "workspace", Map.of("workspace_id", workspace, "cwd_relative", "child")),
                 "companion-" + workspace, "actor", 202).path("id").asText();
@@ -223,13 +236,14 @@ class HostedPublicWorkspaceIT {
             assertThat(ledgers).hasSize(1);
             var collected = ledgers.getFirst();
             assertThat(collected.get("collected_at")).isNotNull();
-            assertThat(((Number) collected.get("collected_bytes")).longValue()).isGreaterThanOrEqualTo(outputBytes);
-            for (var resource : output) {
-                var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM ma_resource"
-                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", tenant, session, resource.get("resource_id"));
-                assertThat(stored.get("state")).isEqualTo("COLLECTED");
-                assertThat(stored.get("inline_bytes")).isNull();
-                assertThat(stored.get("byte_length")).isEqualTo(resource.get("byte_length"));
+            var publication = jdbc.queryForMap("SELECT retention_state, collected_at FROM ma_output_capture"
+                    + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ?", tenant, session, publications.getFirst());
+            assertThat(publication.get("retention_state")).isEqualTo("COLLECTED");
+            assertThat(publication.get("collected_at")).isNotNull();
+            for (var object : output) {
+                assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE capture_object_key = ?",
+                        String.class, object.get("object_key"))).isEqualTo("COLLECTED");
+                assertThat(publicationObjects).doesNotContainKey(object.get("object_key").toString());
             }
         });
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
@@ -698,18 +712,24 @@ class HostedPublicWorkspaceIT {
             // Keep initialized-root mtime distinct from birth time without relying on sleeps.
             Files.setLastModifiedTime(root, FileTime.fromMillis(1));
         }
-        port = freePort();
-        int harnessPort = freePort();
-        int brokerPort = freePort();
-        model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        model.createContext("/v1/chat/completions", this::modelReply);
-        model.start();
-        if (shellFault != null) {
-            storeRelay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            relayExecutor = Executors.newVirtualThreadPerTaskExecutor();
-            storeRelay.setExecutor(relayExecutor);
-            storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
-            storeRelay.start();
+        int harnessPort;
+        int brokerPort;
+        try (var springSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
+                var harnessSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
+                var brokerSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+            port = springSocket.getLocalPort();
+            harnessPort = harnessSocket.getLocalPort();
+            brokerPort = brokerSocket.getLocalPort();
+            model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            model.createContext("/v1/chat/completions", this::modelReply);
+            model.start();
+            if (shellFault != null) {
+                storeRelay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+                relayExecutor = Executors.newVirtualThreadPerTaskExecutor();
+                storeRelay.setExecutor(relayExecutor);
+                storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
+                storeRelay.start();
+            }
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
@@ -1071,7 +1091,7 @@ class HostedPublicWorkspaceIT {
             arguments.add("--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou");
             arguments.add("--qwen.managed-agent.tool-publication.oss-bucket=private-test-bucket");
             arguments.add("--qwen.managed-agent.tool-publication.service-base-url=http://127.0.0.1:" + port);
-            arguments.add("--qwen.managed-agent.tool-publication.execution-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.execution-bytes=1048576");
             arguments.add("--qwen.managed-agent.tool-publication.session-bytes=1073741824");
             arguments.add("--qwen.managed-agent.tool-publication.tenant-bytes=1073741824");
             arguments.add("--qwen.managed-agent.tool-publication.active-captures=4");
@@ -1096,14 +1116,38 @@ class HostedPublicWorkspaceIT {
                 .initializers(context -> {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
                     if (shellLifecycleV2) {
+                        publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
                         var acl = new com.aliyun.oss.model.AccessControlList();
                         acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
                         var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class, invocation -> switch (invocation.getMethod().getName()) {
                             case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
                             case "getBucketAcl" -> acl;
+                            case "putObject" -> {
+                                var put = (com.aliyun.oss.model.PutObjectRequest) invocation.getArgument(0);
+                                byte[] bytes = put.getInputStream().readAllBytes();
+                                if (publicationObjects.putIfAbsent(put.getKey(), bytes) != null) {
+                                    throw new com.aliyun.oss.OSSException("Object already exists", "FileAlreadyExists",
+                                            "request", "host", put.getBucketName(), put.getKey(), "resource");
+                                }
+                                yield new com.aliyun.oss.model.PutObjectResult();
+                            }
+                            case "getObject" -> {
+                                byte[] bytes = publicationObjects.get(invocation.<String>getArgument(1));
+                                if (bytes == null) {
+                                    throw new com.aliyun.oss.OSSException("Object not found", "NoSuchKey",
+                                            "request", "host", invocation.getArgument(0), invocation.getArgument(1), "resource");
+                                }
+                                var object = new com.aliyun.oss.model.OSSObject();
+                                object.setObjectContent(new java.io.ByteArrayInputStream(bytes));
+                                yield object;
+                            }
+                            case "deleteObject" -> {
+                                publicationObjects.remove(invocation.<String>getArgument(1));
+                                yield null;
+                            }
                             case "shutdown" -> null;
-                            case "toString" -> "inline-capture-oss-fixture";
-                            default -> throw new AssertionError("Unexpected OSS access in inline capture fixture: " + invocation.getMethod().getName());
+                            case "toString" -> "publication-oss-fixture";
+                            default -> throw new AssertionError("Unexpected OSS access in publication fixture: " + invocation.getMethod().getName());
                         });
                         context.addBeanFactoryPostProcessor(beanFactory -> beanFactory.registerSingleton("toolPublicationOss", oss));
                     }
@@ -1280,21 +1324,22 @@ class HostedPublicWorkspaceIT {
             }
             int step = results.size();
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
+            boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) assertThat(results.get(2).toString()).contains("after");
-            if (runShell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            if (runShell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            if (runShell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
-                assertThat(results.get(2).toString()).contains("G0_SHELL_STDOUT");
+            if (runShell && shellFault == null && !foregroundOnly && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
+            if (runShell && shellFault == null && !foregroundOnly && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
+                assertThat(results.get(foregroundOnly ? 0 : 2).toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "g0-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
             var delta = choice.putObject("delta").put("role", "assistant");
-            boolean toolCall = step < (shellFault == null ? 3 : 1);
+            boolean toolCall = step < (shellFault != null || foregroundOnly ? 1 : 3);
             if (toolCall) {
-                String name = runShell ? (shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
                         : List.of("write_file", "edit", "read_file").get(step);
-                Map<String, Object> args = runShell ? switch (step) {
+                Map<String, Object> args = runShell ? switch (foregroundOnly ? 2 : step) {
                     case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
                     case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
                     default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");
@@ -1397,9 +1442,7 @@ class HostedPublicWorkspaceIT {
         assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
     }
 
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
-    }
+
 
     @AfterEach
     void stop() throws Exception {

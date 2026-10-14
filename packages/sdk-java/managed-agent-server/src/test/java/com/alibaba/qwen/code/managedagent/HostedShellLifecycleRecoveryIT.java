@@ -107,6 +107,7 @@ class HostedShellLifecycleRecoveryIT {
             Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
             Files.createDirectory(root.resolve("broker"), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
             Files.createDirectory(root.resolve("decoy"));
+            Files.createDirectory(root.resolve("objects"));
             var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
                     System.getProperty("mysql.password", ""));
             jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
@@ -154,6 +155,9 @@ class HostedShellLifecycleRecoveryIT {
             worker = ProcessHandle.of(registration.path("pid").asLong()).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
             writer = writerIdentity();
+            var publications = jdbc.queryForList("SELECT publication_id FROM ma_output_capture"
+                    + " WHERE tenant_id = ? AND session_id = ? AND capture_bytes = 1048576", String.class, tenant, session);
+            assertThat(publications).hasSize(1);
             var manifests = jdbc.queryForList("SELECT resource_id, sha256, inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-manifest'", tenant, session);
             assertThat(manifests).hasSize(1);
@@ -161,12 +165,14 @@ class HostedShellLifecycleRecoveryIT {
             JsonNode capture = JSON.readTree((byte[]) manifest.get("inline_bytes"));
             var execution = executions.getFirst();
             var reference = JSON.readTree(execution.get("reference_json").toString());
+            assertThat(reference.path("dispatchMode").asText()).isEqualTo("deferred_v3");
+            assertThat(reference.path("argsDigest").asText()).matches("sha256:[0-9a-f]{64}");
             assertThat(capture.path("tenantId").asText()).isEqualTo(tenant);
             assertThat(capture.path("sessionId").asText()).isEqualTo(session);
             assertThat(capture.path("turnId").asText()).isEqualTo(execution.get("turn_id"));
             assertThat(capture.path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
             assertThat(capture.path("callId")).isEqualTo(reference.path("callId"));
-            assertThat(capture.path("invocationDigest")).isEqualTo(reference.path("inputDigest"));
+            assertThat(capture.path("invocationDigest")).isEqualTo(reference.path("argsDigest"));
             assertThat(capture.path("bindingGeneration").asLong()).isEqualTo(originalBinding.getGeneration());
             assertThat(capture.path("captureStatus").asText()).isEqualTo("complete");
             assertThat(capture.path("executionStatus").asText()).isEqualTo("success");
@@ -178,13 +184,21 @@ class HostedShellLifecycleRecoveryIT {
             }
             assertThat(streams).containsExactlyInAnyOrder("stdout", "stderr");
             assertManifestUnchanged();
-            var outputs = jdbc.queryForList("SELECT resource_id, byte_length FROM ma_resource r"
-                    + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-content'"
-                    + " AND storage_kind = 'MYSQL_INLINE' AND state = 'PUBLISHED' AND LOCATE('L4_CAPTURE_STDOUT', inline_bytes) > 0"
-                    + " AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
-                    + " WHERE f.session_scope_key = r.session_scope_key AND f.resource_id = r.resource_id)",
+            var outputs = jdbc.queryForList("SELECT capture_object_key, byte_length, sha256, slot_key, capture_state"
+                    + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND capture_object_key IS NOT NULL",
                     tenant, session);
-            assertThat(outputs).as("real foreground stdout before lifecycle admission").isNotEmpty();
+            assertThat(outputs).as("real foreground capture before lifecycle admission").isNotEmpty();
+            boolean stdout = false;
+            for (var output : outputs) {
+                assertThat(output.get("capture_state")).isEqualTo("VERIFIED");
+                byte[] bytes = Files.readAllBytes(root.resolve("objects").resolve(output.get("capture_object_key").toString()));
+                assertThat(bytes).hasSize(((Number) output.get("byte_length")).intValue());
+                assertThat(java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)))
+                        .isEqualTo(output.get("sha256"));
+                stdout |= output.get("slot_key").toString().startsWith("segment:stdout:")
+                        && new String(bytes, StandardCharsets.UTF_8).contains("L4_CAPTURE_STDOUT");
+            }
+            assertThat(stdout).isTrue();
             String companion = create("companion");
             await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
@@ -234,20 +248,21 @@ class HostedShellLifecycleRecoveryIT {
             request("GET", "/v1/agents/sessions/" + session, null, null, 404);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                     Integer.class, tenant, session)).isEqualTo(1);
-            await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
+            // The restarted ledger scan and capture GC each retry on a one-minute cadence.
+            await().atMost(Duration.ofSeconds(150)).untilAsserted(() -> {
                 var collections = jdbc.queryForList("SELECT completed_at AS collected_at, CAST(JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.collectedBytes')) AS UNSIGNED) AS collected_bytes FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
                         + " AND tenant_id = ? AND session_id = ?", tenant, session);
                 assertThat(collections).hasSize(1);
                 assertThat(collections.getFirst().get("collected_at")).isNotNull();
                 assertThat(((Number) collections.getFirst().get("collected_at")).longValue()).isPositive();
-                assertThat(((Number) collections.getFirst().get("collected_bytes")).longValue()).isGreaterThanOrEqualTo(
-                        outputs.stream().mapToLong(row -> ((Number) row.get("byte_length")).longValue()).sum());
+                var publication = jdbc.queryForMap("SELECT retention_state, collected_at FROM ma_output_capture"
+                        + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ?", tenant, session, publications.getFirst());
+                assertThat(publication.get("retention_state")).isEqualTo("COLLECTED");
+                assertThat(publication.get("collected_at")).isNotNull();
                 for (var output : outputs) {
-                    var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM ma_resource"
-                            + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", tenant, session, output.get("resource_id"));
-                    assertThat(stored.get("state")).isEqualTo("COLLECTED");
-                    assertThat(stored.get("inline_bytes")).isNull();
-                    assertThat(stored.get("byte_length")).isEqualTo(output.get("byte_length"));
+                    assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE capture_object_key = ?",
+                            String.class, output.get("capture_object_key"))).isEqualTo("COLLECTED");
+                    assertThat(root.resolve("objects").resolve(output.get("capture_object_key").toString())).doesNotExist();
                 }
             });
             assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
@@ -277,6 +292,8 @@ class HostedShellLifecycleRecoveryIT {
             evidence.put("finalClaimGeneration", jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_id = ?",
                     Long.class, operation));
             if (oldRequest.get() != null) evidence.put("oldClaimGeneration", JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong());
+            evidence.put("publicationId", publications.getFirst());
+            evidence.put("collectedObjects", outputs.size());
             evidence.put("manifestId", manifest.get("resource_id"));
             evidence.put("manifestDigest", manifest.get("sha256"));
             evidence.put("originalStopProofVerified", true);
@@ -474,8 +491,9 @@ class HostedShellLifecycleRecoveryIT {
             properties.put(prefix + "tool-publication.oss-region", "cn-hangzhou");
             properties.put(prefix + "tool-publication.oss-bucket", "private-test-bucket");
             properties.put(prefix + "tool-publication.service-base-url", store.uri());
-            for (String quota : List.of("execution-bytes", "session-bytes", "tenant-bytes"))
-                properties.put(prefix + "tool-publication." + quota, 1073741824);
+            properties.put(prefix + "tool-publication.execution-bytes", 1048576);
+            properties.put(prefix + "tool-publication.session-bytes", 1073741824);
+            properties.put(prefix + "tool-publication.tenant-bytes", 1073741824);
             properties.put(prefix + "tool-publication.active-captures", 4);
             properties.put(prefix + "tool-publication.entry-concurrency", 4);
             properties.put(prefix + "tool-publication.operation-timeout", "10s");
@@ -488,7 +506,8 @@ class HostedShellLifecycleRecoveryIT {
             Path config = root.resolve("spring-" + boot + ".json");
             Path ready = root.resolve("ready-" + boot + ".json");
             properties.replaceAll((key, value) -> value.toString());
-            JSON.writeValue(config.toFile(), Map.of("tenant", tenant, "properties", properties, "ready", ready.toString()));
+            JSON.writeValue(config.toFile(), Map.of("tenant", tenant, "properties", properties, "ready", ready.toString(),
+                    "objects", root.resolve("objects").toString()));
             Files.setPosixFilePermissions(config, PosixFilePermissions.fromString("rw-------"));
             String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
             var process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-cp", classpath,
