@@ -9133,6 +9133,10 @@ export class Session implements SessionContext {
       ]);
     }
 
+    if (options.consumeInitialMemory) {
+      llmClient.drainPendingMcpReminders();
+    }
+
     const chat = this.#getCurrentChat();
     const request = {
       message,

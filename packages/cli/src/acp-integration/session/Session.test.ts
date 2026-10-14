@@ -589,6 +589,7 @@ describe('Session', () => {
     isInitialized: ReturnType<typeof vi.fn>;
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
+    drainPendingMcpReminders: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
     activatePreparedMemoryRecallTransition: ReturnType<typeof vi.fn>;
     beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
@@ -852,6 +853,7 @@ describe('Session', () => {
       isInitialized: vi.fn().mockReturnValue(true),
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
+      drainPendingMcpReminders: vi.fn(),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -3985,6 +3987,12 @@ describe('Session', () => {
       expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledWith(
         'hello',
         expect.any(AbortSignal),
+      );
+      expect(mockLlmClient.drainPendingMcpReminders).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.drainPendingMcpReminders.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(mockChat.sendMessageStream).mock.invocationCallOrder[0]!,
       );
       expect(
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
