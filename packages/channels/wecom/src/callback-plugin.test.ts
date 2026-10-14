@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { callbackPlugin } from './callback-plugin.js';
+import { parseCallbackConfig } from './wecom-callback-adapter.js';
 
 const config = {
   corpId: 'corp',
@@ -21,11 +22,28 @@ describe('callback plugin configuration', () => {
   });
 
   it.each([
+    { agentId: '$WECOM_AGENT_ID' },
+    { encodingAESKey: '$WECOM_ENCODING_AES_KEY' },
+    { agentId: '$WECOM_AGENT_ID', encodingAESKey: '$WECOM_ENCODING_AES_KEY' },
+  ])('accepts environment references for management saves %s', (override) => {
+    const input = Object.freeze({ ...config, ...override });
+    expect(callbackPlugin.management?.validateConfig?.(input)).toBeUndefined();
+    expect(input).toEqual({ ...config, ...override });
+    expect(() => parseCallbackConfig(input)).toThrow();
+  });
+
+  it.each([
     { corpId: '' },
     { agentId: 'not-number' },
     { agentId: '0' },
     { agentId: '9007199254740993' },
     { encodingAESKey: 'wrong' },
+    { agentId: '$9BAD' },
+    { agentId: '${WECOM_AGENT_ID}' },
+    { encodingAESKey: '$9BAD' },
+    { encodingAESKey: '${WECOM_ENCODING_AES_KEY}' },
+    { agentId: '$WECOM_AGENT_ID', encodingAESKey: 'wrong' },
+    { agentId: '0', encodingAESKey: '$WECOM_ENCODING_AES_KEY' },
     { webhookPort: 0 },
     { webhookPort: 65536 },
     { webhookPort: '8645' },

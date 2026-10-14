@@ -69,7 +69,21 @@ export const callbackPlugin: ChannelPlugin = {
     ],
     validateConfig: (config) => {
       try {
-        parseCallbackConfig(config);
+        const probe = { ...config };
+        for (const [field, placeholder] of Object.entries({
+          agentId: '1',
+          encodingAESKey: 'A'.repeat(43),
+        })) {
+          const value = probe[field];
+          if (
+            typeof value === 'string' &&
+            /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value)
+          ) {
+            // Environment values receive full validation when the channel starts.
+            probe[field] = placeholder;
+          }
+        }
+        parseCallbackConfig(probe);
         return undefined;
       } catch (error) {
         return error instanceof Error
