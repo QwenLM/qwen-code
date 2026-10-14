@@ -239,9 +239,7 @@ export class BridgeChannelMemoryIntentClassifier
         } else if (bridge.discardSession) {
           await bridge.discardSession(sessionId);
         } else {
-          await bridge.cancelSession(sessionId, {
-            cancelReason: 'interrupted',
-          });
+          await bridge.cancelSession(sessionId);
         }
       } catch (error) {
         // session cleanup must not mask a successful classification

@@ -288,11 +288,7 @@ export class DaemonSessionClient {
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
-  private cancelling?: {
-    reason: 'user' | 'interrupted';
-    sent: boolean;
-    promise: Promise<void>;
-  };
+  private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly attachmentCache = new Map<
     string,
@@ -660,10 +656,13 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.cancel({
-            cancelReason:
-              signal?.reason === 'qwen:user-cancel' ? 'user' : 'interrupted',
-          }).catch(() => {});
+          const cancellation =
+            signal?.reason === 'qwen:user-cancel'
+              ? this.cancel()
+              : this.client.cancel(this.sessionId, this.clientId, {
+                  cancelReason: 'interrupted',
+                });
+          cancellation.catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -872,35 +871,12 @@ export class DaemonSessionClient {
     }
   }
 
-  async cancel(options?: {
-    cancelReason?: 'user' | 'interrupted';
-  }): Promise<void> {
-    const reason = options?.cancelReason ?? 'user';
-    let cancelling = this.cancelling;
-    if (cancelling && !cancelling.sent && reason === 'user') {
-      cancelling.reason = reason;
-    }
-    if (
-      !cancelling ||
-      (cancelling.sent &&
-        cancelling.reason === 'interrupted' &&
-        reason === 'user')
-    ) {
-      const request: NonNullable<DaemonSessionClient['cancelling']> = {
-        reason,
-        sent: false,
-        promise: Promise.resolve().then(() => {
-          request.sent = true;
-          return this.client.cancel(this.sessionId, this.clientId, {
-            cancelReason: request.reason,
-          });
-        }),
-      };
-      cancelling = request;
-      this.cancelling = request;
-    }
+  async cancel(): Promise<void> {
+    const cancelling =
+      this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
+    this.cancelling = cancelling;
     try {
-      await cancelling.promise;
+      await cancelling;
     } finally {
       if (this.cancelling === cancelling) {
         this.cancelling = undefined;

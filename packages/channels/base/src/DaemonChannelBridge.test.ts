@@ -4564,9 +4564,7 @@ describe('DaemonChannelBridge', () => {
 
     bridge.stop();
     await expect(promptPromise).rejects.toThrow('aborted');
-    expect(session.cancel).toHaveBeenCalledWith({
-      cancelReason: 'interrupted',
-    });
+    expect(session.cancel).toHaveBeenCalledOnce();
     expect(sessionDied).toHaveBeenCalledWith({
       sessionId: 'session-1',
       reason: 'bridge_stopped',
@@ -4608,73 +4606,10 @@ describe('DaemonChannelBridge', () => {
     await expect(promptPromise).rejects.toThrow('aborted');
     expect(session.cancel).toHaveBeenCalledOnce();
     expect(order).toEqual(['abort', 'cancel']);
-    expect(session.prompt.mock.calls[0]?.[1]?.reason).toBe('qwen:user-cancel');
 
     events.close();
     bridge.stop();
   });
-
-  it.each([
-    ['prompt', 'user'],
-    ['prompt', 'interrupted'],
-    ['upload', 'user'],
-    ['upload', 'interrupted'],
-  ] as const)(
-    'rejects an in-flight %s with an AbortError on %s cancellation',
-    async (leg, cancelReason) => {
-      const events = new EventQueue();
-      const session = createFakeSession(events);
-      let activeSignal: AbortSignal | undefined;
-      const rejectOnAbort = (signal?: AbortSignal) => {
-        activeSignal = signal;
-        return new Promise<never>((_resolve, reject) => {
-          signal?.addEventListener('abort', () => reject(signal.reason), {
-            once: true,
-          });
-        });
-      };
-      session.prompt.mockImplementation((_req: unknown, signal?: AbortSignal) =>
-        rejectOnAbort(signal),
-      );
-      session.uploadAttachment.mockImplementation(
-        (_blob: Blob, _name: string, _mimeType: string, signal?: AbortSignal) =>
-          rejectOnAbort(signal),
-      );
-      const bridge = new DaemonChannelBridge({
-        cwd: '/repo',
-        sessionFactory: vi.fn().mockResolvedValue(session),
-        sessionAttachments: leg === 'upload',
-      });
-
-      await bridge.start();
-      await bridge.newSession('/repo');
-      const promptPromise = bridge.prompt(
-        'session-1',
-        'hello',
-        leg === 'upload'
-          ? { imageBase64: 'AQID', imageMimeType: 'image/png' }
-          : undefined,
-      );
-      void promptPromise.catch(() => {});
-      await waitFor(() =>
-        expect(
-          leg === 'upload' ? session.uploadAttachment : session.prompt,
-        ).toHaveBeenCalledOnce(),
-      );
-      await bridge.cancelSession(
-        'session-1',
-        cancelReason === 'user' ? undefined : { cancelReason },
-      );
-      await expect(promptPromise).rejects.toMatchObject({ name: 'AbortError' });
-      expect(activeSignal?.reason).toBe(
-        cancelReason === 'user'
-          ? 'qwen:user-cancel'
-          : 'qwen:prompt-interrupted',
-      );
-      events.close();
-      bridge.stop();
-    },
-  );
 
   it('clears permission ownership when daemon permission responses fail', async () => {
     const events = new EventQueue();
@@ -4915,9 +4850,7 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.loadSession('existing-session', '/repo')).resolves.toBe(
       'existing-session',
     );
-    await bridge.cancelSession('existing-session', {
-      cancelReason: 'interrupted',
-    });
+    await bridge.cancelSession('existing-session');
     await bridge.setSessionModel('existing-session', 'qwen3-coder-plus');
 
     expect(factory).toHaveBeenCalledWith({

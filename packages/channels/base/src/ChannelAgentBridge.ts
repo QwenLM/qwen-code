@@ -289,10 +289,7 @@ export interface ChannelAgentBridge {
     question: string,
     signal?: AbortSignal,
   ): Promise<ChannelBtwResult>;
-  cancelSession(
-    sessionId: string,
-    options?: { cancelReason?: 'user' | 'interrupted' },
-  ): Promise<void>;
+  cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(
     sessionId: string,

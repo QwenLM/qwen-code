@@ -58,9 +58,7 @@ describe('BridgeChannelMemoryIntentClassifier', () => {
       expect.stringContaining('"你记一下以后回复前说 1122"'),
       { displayText: '' },
     );
-    expect(bridge.cancelSession).toHaveBeenCalledWith('classifier-session', {
-      cancelReason: 'interrupted',
-    });
+    expect(bridge.cancelSession).toHaveBeenCalledWith('classifier-session');
   });
 
   it('discards the internal classifier session when supported', async () => {

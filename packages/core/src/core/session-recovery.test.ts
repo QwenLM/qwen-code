@@ -510,26 +510,30 @@ describe('explicitly cancelled recorded turns', () => {
     expect(plan.canAutoContinue).toBe(false);
     expect(plan.requiresUserConfirmation).toBe(true);
   });
-  it('keeps an unanswered reminder-bearing notification after an older user cancellation', () => {
+  it('an unidentified notification cannot override user cancellation', () => {
     const notification = notificationRecord(2, 'Agent done.');
     notification.message!.parts!.unshift({
       text: '<system-reminder>Plan mode is active.</system-reminder>',
     });
     expect(
       planFor(conversationFromRecords([prompt(), result(), notification])).kind,
-    ).toBe('interrupted_prompt');
+    ).toBe('clean');
   });
   it.each([undefined, 'session-1########2'])(
-    'does not let an old cancel suppress later input with ID=%s',
+    'requires recorded identity to supersede cancellation with newer input ID=%s',
     (promptId) => {
       const newer = {
         ...record(3, userText('read file')),
         promptId,
         daemonPromptId: 'daemon-2',
       };
-      expect(
-        planFor(conversationFromRecords([prompt(), result(), newer])).kind,
-      ).toBe('interrupted_prompt');
+      const plan = planFor(
+        conversationFromRecords([prompt(), result(), newer]),
+      );
+      expect(plan.kind).toBe(
+        promptId === undefined ? 'clean' : 'interrupted_prompt',
+      );
+      expect(plan.canContinue).toBe(promptId !== undefined);
     },
   );
   it('does not reuse a terminal that precedes its user record', () => {
@@ -537,7 +541,7 @@ describe('explicitly cancelled recorded turns', () => {
       planFor(conversationFromRecords([result(), prompt()])).canContinue,
     ).toBe(true);
   });
-  it('keeps duplicate compressed prompt identities on the unknown path', () => {
+  it('duplicate projected identities do not override a proven user cancellation', () => {
     const compression: ChatRecord = {
       ...record(2, userText('')),
       type: 'system',
@@ -558,13 +562,20 @@ describe('explicitly cancelled recorded turns', () => {
       conversation: conversationFromRecords([prompt(), result(), compression]),
       options: { allowAutoContinue: true },
     });
-    expect(plan.kind).toBe('interrupted_prompt');
-    expect(plan.cancellationConfirmationId).toBe('daemon-1');
+    expect(plan.kind).toBe('clean');
+    expect(plan.cancellationConfirmationId).toBeUndefined();
+    expect(plan.canContinue).toBe(false);
     expect(plan.canAutoContinue).toBe(false);
-    expect(plan.requiresUserConfirmation).toBe(true);
+    expect(plan.requiresUserConfirmation).toBe(false);
   });
   it('retains resolved legacy confirmation after a completed local command', () => {
     const original = prompt();
+    const response = {
+      ...toolResult(),
+      uuid: 'response',
+      parentUuid: original.uuid,
+      promptId: original.promptId,
+    };
     const terminal = result();
     delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
     const command = {
@@ -598,6 +609,7 @@ describe('explicitly cancelled recorded turns', () => {
       sessionId: 'session-1',
       conversation: conversationFromRecords([
         original,
+        response,
         terminal,
         command,
         output,
@@ -607,6 +619,7 @@ describe('explicitly cancelled recorded turns', () => {
     });
     expect(structuredClone(plan.originalApiHistory)).toEqual([
       original.message,
+      response.message,
     ]);
     expect(plan.canContinue).toBe(true);
     expect(plan.cancellationConfirmationId).toBe('daemon-1');

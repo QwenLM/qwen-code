@@ -26,7 +26,6 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
 import { extractErrorMessage } from '@qwen-code/acp-bridge/bridge';
-import { USER_CANCEL_ABORT_REASON } from '@qwen-code/acp-bridge/bridgeTypes';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   HOST_PROTOCOL_VERSION,
@@ -258,7 +257,6 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
     cancelled?: unknown;
-    cancelReason?: unknown;
   } & T;
   if (!response.ok) {
     throw Object.assign(
@@ -267,13 +265,7 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
       ),
       {
         status: response.status,
-        ...(result.cancelled === true
-          ? {
-              cancelled: true,
-              cancelReason:
-                result.cancelReason === 'user' ? 'user' : 'interrupted',
-            }
-          : {}),
+        ...(result.cancelled === true ? { cancelled: true } : {}),
       },
     );
   }
@@ -780,18 +772,11 @@ async function connectAgentHost(
    * Stops a turn this Host may no longer finish: the adapter is cancelled,
    * then the `session_send` relay closes, and no result is posted.
    */
-  const loseTurn = (
-    turn: HostTurn,
-    reason: string,
-    cancelled = false,
-    cancelReason?: unknown,
-  ) => {
+  const loseTurn = (turn: HostTurn, reason: string, cancelled = false) => {
     if (turn.lost) return;
     turn.lost = true;
     const error = new Error(reason);
-    turn.controller.abort(
-      cancelled && cancelReason === 'user' ? USER_CANCEL_ABORT_REASON : error,
-    );
+    turn.controller.abort(error);
     turn.relay?.close();
     if (turn.flushTimer) {
       clearTimeout(turn.flushTimer);
@@ -808,13 +793,8 @@ async function connectAgentHost(
     refreshDecisionPoll();
   };
 
-  const cancelTurn = (turn: HostTurn, cancelReason: unknown) =>
-    loseTurn(
-      turn,
-      'The run was cancelled on the coordinator.',
-      true,
-      cancelReason,
-    );
+  const cancelTurn = (turn: HostTurn) =>
+    loseTurn(turn, 'The run was cancelled on the coordinator.', true);
 
   /** Hands decision `key` to the current waiter of `requestId`. */
   const takeDecision = (
@@ -963,7 +943,7 @@ async function connectAgentHost(
     } catch (error) {
       const status = (error as { status?: number }).status;
       if (isCancellation(error)) {
-        cancelTurn(turn, (error as { cancelReason?: unknown }).cancelReason);
+        cancelTurn(turn);
         return;
       }
       if (status === 409 || status === 404 || isRevocation(error)) {
@@ -1294,7 +1274,7 @@ async function connectAgentHost(
       for (const lease of response.leases ?? []) {
         const turn = turns.get(lease.runId);
         if (!turn) continue;
-        if (lease.cancelled === true) cancelTurn(turn, lease.cancelReason);
+        if (lease.cancelled === true) cancelTurn(turn);
         else if (lease.ok) turn.renewedAt = now;
         else loseTurn(turn, 'The coordinator refused this run lease.');
       }

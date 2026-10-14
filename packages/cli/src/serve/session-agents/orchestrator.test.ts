@@ -621,12 +621,7 @@ describe('SessionAgentOrchestrator', () => {
     );
 
     expect(await orchestrator.cancel(SESSION, runId)).toBe(true);
-    const cancelled = {
-      ok: false,
-      reason: 'cancelled',
-      cancelled: true,
-      cancelReason: 'user',
-    };
+    const cancelled = { ok: false, reason: 'cancelled', cancelled: true };
     expect(
       orchestrator.renewLease('h1', runId, 1, assignment!.leaseId),
     ).toEqual(cancelled);
@@ -654,13 +649,8 @@ describe('SessionAgentOrchestrator', () => {
     await vi.waitFor(async () =>
       expect((await fileFor()).runs[0]).toMatchObject({
         status: 'cancelled',
-        lease: { leaseId: assignment!.leaseId, cancelReason: 'user' },
+        lease: { leaseId: assignment!.leaseId },
       }),
-    );
-    const restarted = harness({ roster: [carol] }).orchestrator;
-    await restarted.ready();
-    expect(restarted.renewLease('h1', runId, 1, assignment!.leaseId)).toEqual(
-      cancelled,
     );
   });
 
@@ -954,12 +944,6 @@ describe('SessionAgentOrchestrator', () => {
           createdAt: 1,
           startedAt: 2,
           attempts: 1,
-          lease: {
-            hostId: 'h1',
-            leaseId: 'old-lease',
-            attempt: 1,
-            expiresAt: 0,
-          },
         },
         {
           id: 'sr_gone',
@@ -1019,13 +1003,6 @@ describe('SessionAgentOrchestrator', () => {
         events: [],
       }),
     ).toMatchObject({ ok: true });
-
-    expect(orchestrator.renewLease('h1', 'sr_old', 1, 'old-lease')).toEqual({
-      ok: false,
-      reason: 'cancelled',
-      cancelled: true,
-      cancelReason: 'interrupted',
-    });
 
     // The local ones are failed and offered for retry.
     const snapshot = await orchestrator.snapshot(SESSION);
