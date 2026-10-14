@@ -26,6 +26,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
@@ -692,7 +693,11 @@ class HostedPublicWorkspaceIT {
         }
         List<Path> roots = List.of(Files.createDirectory(temporary.resolve("workspace-a")),
                 Files.createDirectory(temporary.resolve("workspace-b")));
-        for (Path root : roots) Files.createDirectory(root.resolve("child"));
+        for (Path root : roots) {
+            Files.createDirectory(root.resolve("child"));
+            // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+            Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+        }
         port = freePort();
         int harnessPort = freePort();
         int brokerPort = freePort();
