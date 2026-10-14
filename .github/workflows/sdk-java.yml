@@ -88,7 +88,9 @@ env:
 
 concurrency:
   group: 'sdk-java-${{ github.event.pull_request.number || github.ref }}'
-  cancel-in-progress: true
+  # Post-merge runs must not cancel each other: cancelled push runs would erase
+  # the only post-merge regression evidence (see e2e.yml / pnpm-worktree-smoke.yml).
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
 
 jobs:
   test:

@@ -329,7 +329,7 @@ public final class ChildWorktreeGit {
     private static void requireNoLinks(Path commonDir, String name, int depth) {
         Path directory = commonDir.resolve(name);
         try {
-            if (!"objects".equals(name) && !Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 return;
             }
             if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
