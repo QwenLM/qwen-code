@@ -1370,7 +1370,7 @@ public final class JdbcRuntimeBindingRepository
         lockPlacementDomain(connection, tenantId, 0);
     }
 
-    private static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
+    static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
         String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(
@@ -1395,16 +1395,35 @@ public final class JdbcRuntimeBindingRepository
 
     private void requireRecoverablePlacement(Connection connection, RuntimeProvisionRequest request)
             throws SQLException {
+        RuntimeScope scope = request.getScope();
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT " + BINDING_COLUMNS + " FROM ma_runtime_binding WHERE tenant_id = ? "
-                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED', 'DRAINING')")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, request.getScope().getTenantId());
+                "SELECT 1 FROM ma_runtime_binding WHERE tenant_id = ? "
+                        + "AND CAST(tenant_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED', 'DRAINING') "
+                        + "AND (binding_state IN ('LOST', 'OPERATOR_RECOVERY', 'DRAINING') "
+                        + "OR (binding_state = 'FAILED' AND (provision_request_id IS NOT NULL "
+                        + "OR provision_seed_ciphertext IS NOT NULL OR credential_key_id IS NOT NULL)) "
+                        + "OR (binding_state = 'RECOVERY_BLOCKED' AND ("
+                        + "CAST(provisioner_kind AS BINARY(2048)) <> CAST(? AS BINARY(2048)) "
+                        + "OR attestation_generation > 0 OR runtime_instance_id IS NOT NULL "
+                        + "OR runtime_endpoint IS NOT NULL OR runtime_lease_id IS NOT NULL OR runtime_epoch IS NOT NULL "
+                        + "OR runtime_credential_ciphertext IS NOT NULL OR runtime_credential_key_id IS NOT NULL "
+                        + "OR ((provision_request_id IS NOT NULL OR provision_seed_ciphertext IS NOT NULL OR credential_key_id IS NOT NULL) "
+                        + "AND (provision_request_id IS NULL OR provision_seed_ciphertext IS NULL OR credential_key_id IS NULL))))) "
+                        + "AND (storage_id IS NULL "
+                        + "OR CAST(storage_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "OR CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "OR CAST(workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048))) LIMIT 1")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 3, LocalProcessRuntimeProvisioner.KIND);
+            JdbcRepositorySupport.setIdentity(statement, 4, request.getStorageId());
+            JdbcRepositorySupport.setIdentity(statement, 5, scope.getCanonicalCwd());
+            JdbcRepositorySupport.setIdentity(statement, 6, scope.getWorkspaceId());
             try (ResultSet result = statement.executeQuery()) {
-                while (result.next()) {
-                    if (mapBinding(result).blocksPlacement(request)) {
-                        throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",
-                                "An earlier runtime placement still requires physical recovery", false);
-                    }
+                if (result.next()) {
+                    throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",
+                            "An earlier runtime placement still requires physical recovery", false);
                 }
             }
         }
