@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.ByteBuffer;
@@ -397,7 +398,7 @@ class EventTransportBrokerGate {
 
         // The journal freed (the new owner sealed it): a later notice of the
         // same wake still finds it unclaimed.
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET state ="
+        jdbc.update("UPDATE ma_session_head SET state ="
                 + " 'SEALED' WHERE tenant_id = ? AND session_id = ?",
                 TENANT, session);
         inject(bootstrapLiteTopic(), wake);
@@ -599,7 +600,7 @@ class EventTransportBrokerGate {
 
     private String session(String status) {
         String session = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id,"
                 + " agent_id, status, created_at, updated_at,"
                 + " workspace_storage_id, workspace_id, workspace_generation,"
                 + " cwd_relative, context_config_ref, context_revision,"
@@ -609,25 +610,28 @@ class EventTransportBrokerGate {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_agent_consumer_progress (tenant_id,"
-                + " session_id, consumer_name, covered_sequence, updated_at)"
-                + " VALUES (?, ?, 'message_projection', 0, 1)",
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
+                + " session_id, stream_kind, stream_id, covered_sequence, updated_at)"
+                + " VALUES (?, ?, 'SESSION', X'', 0, 1)",
                 TENANT, session);
         return session;
     }
 
     private void head(String session, String state, long committed,
             int leaseOffsetSeconds, String writer) {
-        jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                 + " workspace_id, session_id, storage_version, state,"
                 + " writer_generation, writer_id, writer_lease_until,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, recovery_status, created_at,"
-                + " updated_at) VALUES (?, ?, ?, 1, ?, 1, ?, TIMESTAMPADD("
+                + " updated_at, tenant_key, harness_key, harness_session_id,"
+                + " head_kind) VALUES (?, ?, ?, 1, ?, 1, ?, TIMESTAMPADD("
                 + "SECOND, " + leaseOffsetSeconds + ", CURRENT_TIMESTAMP(6)),"
                 + " 3, ?, 0, 0, 'READY', CURRENT_TIMESTAMP(6),"
-                + " CURRENT_TIMESTAMP(6))",
-                TENANT, WORKSPACE, session, state, writer, committed);
+                + " CURRENT_TIMESTAMP(6), ?, ?, ?, 'MANAGED_SESSION')",
+                TENANT, WORKSPACE, session, state, writer, committed,
+                ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
+                session);
     }
 
     private static JsonNode journalEvent(String session, long sequence,
@@ -668,13 +672,14 @@ class EventTransportBrokerGate {
     private EventRecord storedPublicEvent(String session, long sequence,
             String type) {
         EventRecord event = publicEvent(session, sequence, type);
-        jdbc.update("INSERT INTO managed_agent_event (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                 + " sequence_id, event_id, turn_id, event_type, data_json,"
                 + " terminal, source_key, created_at) VALUES (?, ?, ?, ?, ?,"
                 + " ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
                 event.eventId(), event.turnId(), type, event.createdAt());
-        jdbc.update("UPDATE managed_agent_session SET last_sequence = ? WHERE"
-                + " tenant_id = ? AND session_id = ?", sequence, TENANT,
+        jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE"
+                + " tenant_id = ? AND session_id = ? AND stream_kind ="
+                + " 'SESSION' AND stream_id = X''", sequence, TENANT,
                 session);
         return event;
     }
@@ -704,17 +709,18 @@ class EventTransportBrokerGate {
     }
 
     private Long wakeWatermark(String session) {
-        List<Long> covered = jdbc.queryForList("SELECT covered_sequence FROM"
-                + " managed_agent_consumer_progress WHERE tenant_id = ? AND"
-                + " session_id = ? AND consumer_name = ?", Long.class, TENANT,
-                session, TransportConsumerStore.WAKE_CONSUMER);
+        List<Long> covered = jdbc.queryForList("SELECT"
+                + " wake_covered_sequence FROM ma_event_stream WHERE"
+                + " tenant_id = ? AND session_id = ? AND stream_kind ="
+                + " 'SESSION' AND stream_id = X''", Long.class, TENANT,
+                session);
         return covered.isEmpty() ? null : covered.getFirst();
     }
 
     private long projectionWatermark(String session) {
         return jdbc.queryForObject("SELECT covered_sequence FROM"
-                + " managed_agent_consumer_progress WHERE tenant_id = ? AND"
-                + " session_id = ? AND consumer_name = 'message_projection'",
+                + " ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
+                + " stream_kind = 'SESSION' AND stream_id = X''",
                 Long.class, TENANT, session);
     }
 }

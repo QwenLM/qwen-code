@@ -146,7 +146,8 @@ binding, or for an unbound Session its journal's workspace). The wiring:
   journal `ACTIVE` or `SEALED`, and no writer holds it — an `ACTIVE` journal
   under an unexpired lease (database time), as `hasLiveWriter` decides, so a
   sealed journal's leftover lease does not count. The wake is then claimed
-  on a consumer-progress watermark (`journal_wake`) — a redelivered,
+  on the Session event stream's wake watermark
+  (`ma_event_stream.wake_covered_sequence`) — a redelivered,
   duplicated or older wake is refused even when two nodes race. Those checks
   and the claim run on the listener; the load runs on a small bounded pool,
   so one slow load never holds the ordered bootstrap lane. The load takes the
