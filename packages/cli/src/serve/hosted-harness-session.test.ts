@@ -13832,30 +13832,42 @@ describe('Hosted Harness no-tool session', () => {
           .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
           .expect(200);
       }
-      await vi.waitFor(async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
-            tenantId: 'tenant',
-            workspaceId: 'workspace',
-            sessionId: SESSION_ID,
-          },
-        );
-        expect(
-          journal.events.filter((event) => event.kind === 'turn.settled'),
-        ).toHaveLength(1);
-      });
+      await vi.waitFor(
+        async () => {
+          const journal = await LocalJsonlManagedSessionJournalStore.read(
+            path.join(state.root, `${SESSION_ID}.jsonl`),
+            {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          );
+          expect(
+            journal.events.filter((event) => event.kind === 'turn.settled'),
+          ).toHaveLength(1);
+        },
+        // The recovered turn's settlement crosses fsync-backed journal
+        // commits; the default 1s waitFor window is too tight under CI
+        // contention (same class as #14101).
+        { timeout: 10_000 },
+      );
       expect(state.model).toHaveBeenCalledTimes(1);
       expect(release).not.toHaveBeenCalled();
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', loaded.body.clientId);
-        expect(status.body).toMatchObject({
-          hasActivePrompt: false,
-          recoveryBlocked: false,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId);
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        // The active prompt clears only after the recovered turn's
+        // cleanup and its remaining journal commits finish, after the
+        // settlement above became visible.
+        { timeout: 10_000 },
+      );
       await headers(
         supertest(replacementServer).post(`/session/${SESSION_ID}/detach`),
       )
