@@ -65,6 +65,7 @@ public final class WorkspaceRecoveryMain {
                         && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() == null, "invalid_oss_endpoint");
                 var settings = new ClientBuilderConfiguration();
                 settings.setSignatureVersion(SignVersion.V4);
+                AliyunToolPublicationObjectStore.configureClientRetries(settings);
                 oss = OSSClientBuilder.create().endpoint(endpoint.toString()).region(region)
                         .credentialsProvider(CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider())
                         .clientConfiguration(settings).build();
