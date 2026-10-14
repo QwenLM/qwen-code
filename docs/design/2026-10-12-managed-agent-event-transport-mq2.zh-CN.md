@@ -61,7 +61,7 @@ MQ2c 不包含:真实 broker 故障行(MQ2d)、接收侧对 journal 事实的 di
 - **重复与乱序注入。** 发两次的唤醒,或先新后旧的唤醒,只激活一次;水位保持较高的序号。在 owner 通道上,重复或更旧的公开通知会到达消费者,但不会触发物化批次。
 - **owner 通道。** 本节点持有 attachment 的两个 Session 中,只有 journal 由本节点 Harness 写入的那一个会被订阅。
 - **owner 交接。** owner 组里的旧订阅者(其 writer 已失效、另一 writer 持有 journal)收到唤醒,不加载、不认领、直接 ACK。它退订之后,新 owner 订阅,永远收不到这条通知——那次 ACK 推进了组位点——而在它订阅之前发往同一 lite topic、无人 ACK 的通知会作为积压到达它,之后的通知也会到达它,所以收不到确是 ACK 所致。该唤醒在 SQL 中保持未认领,journal 空出后,后来的通知仍能激活它。在新 owner 持有的 Session 上,由其 Harness 从 journal 执行该唤醒输入——通知从来不是承载者。
-- **提交后延迟。** 已部署的 composite(先 hub、后公开 transport)与关闭开关的 composite(只有 hub)交替发布同样的批次:提交线程的 publish 耗时与 hub 订阅者的投递耗时在 p95 上增加不得超过 1 毫秒,journal 线的 after-commit 交接 p95 须低于 20 毫秒。三次本地运行(macOS,各 300 轮)中,transport 在 p95 上增加 13–186 微秒,journal 交接为 0.35–1.5 毫秒;CI 会把自己的数据写到 `target/event-transport-latency.json`。
+- **提交后延迟。** 已部署的 composite(先 hub、后公开 transport)与关闭开关的 composite(只有 hub)交替发布同样的批次:提交线程的 publish 耗时与 hub 订阅者的投递耗时在本地 p95 上增加不得超过 1 毫秒。共享 CI runner 使用 20 毫秒容差以容纳调度噪声,仍记录原始测量结果;journal 线的 after-commit 交接 p95 须低于 20 毫秒。三次本地运行(macOS,各 300 轮)中,transport 在 p95 上增加 13–186 微秒,journal 交接为 0.35–1.5 毫秒;CI 会把自己的数据写到 `target/event-transport-latency.json`。
 - **配错即启动失败。** NORMAL(非 LITE)topic 能骗过单纯的订阅探针,现在由新增的发送探针拒绝——向探针自己的 lite topic 同步发一条消息——赶在任何信封被丢弃之前;没人预建的探针组会让订阅探针失败。探针组现在是可配置属性(`capability-probe-group`),代码里打印的每条 `mqadmin` 命令都写明了集群;既不写集群也不写 broker 的话,mqadmin 什么也不建。
 - **开关关闭。** 以结构方式而非经 broker 钉住:`EventTransportConfigurationTest` 证明开关关闭的上下文里不存在任何生产者、消费者、transport 或消费者 store,模块其余测试集也都在开关关闭下运行。
 
