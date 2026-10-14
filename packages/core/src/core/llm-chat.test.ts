@@ -28,7 +28,6 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './llm-chat.js';
-import { LlmClient } from './client.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   convertResponsesEventToGemini,
@@ -40,7 +39,6 @@ import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
-  markApiHistoryPrompt,
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
@@ -266,50 +264,6 @@ describe('LlmChat', async () => {
   let chat: LlmChat;
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
-
-  it('preserves cancellation when failed setup rolls a new user push back', async () => {
-    const original = userText('unfinished');
-    markApiHistoryPrompt(original, 'client-1');
-    chat.setHistory([original]);
-    const client = new LlmClient(mockConfig);
-    client['chat'] = chat;
-    Object.assign(mockConfig, { getLlmClient: () => client });
-    client.acceptTurnInput('daemon-1');
-    client.settleTurn({
-      promptId: 'daemon-1',
-      state: 'cancelled',
-      cancelledAt: 0,
-      cancelReason: 'user',
-      endedAt: 1,
-    });
-    const before = chat.getHistory();
-    const countBefore = chat.getUserContentPushCount();
-    vi.spyOn(
-      chat as unknown as { getRequestHistoryForRoute: () => unknown },
-      'getRequestHistoryForRoute',
-    ).mockImplementation(() => {
-      throw new Error('post-push setup failure');
-    });
-    await expect(
-      chat.sendMessageStream(
-        'test-model',
-        { message: 'new prompt' },
-        'new-prompt',
-        undefined,
-        { promptId: 'client-1' },
-      ),
-    ).rejects.toThrow('post-push setup failure');
-    expect(chat.getHistory()).toEqual(before);
-    expect(chat.getUserContentPushCount()).toBe(countBefore);
-    expect(
-      findApiHistoryPromptIndex(chat.getHistoryShallow(), 'client-1'),
-    ).toBe(0);
-    expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
-    expect(client.getTurnCancellation()).toEqual({
-      reason: 'user',
-      promptId: 'daemon-1',
-    });
-  });
 
   beforeEach(() => {
     vi.clearAllMocks();

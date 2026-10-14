@@ -6385,8 +6385,7 @@ export class DaemonClient {
           (err instanceof DOMException && err.name === 'AbortError'))
       ) {
         this.cancel(sessionId, clientId, {
-          cancelReason:
-            signal.reason === 'qwen:user-cancel' ? 'user' : 'interrupted',
+          cancelReason: 'interrupted',
         }).catch(() => {});
         throw err instanceof Error
           ? err

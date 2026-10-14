@@ -61,7 +61,6 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
   sessionId: string;
   apiHistory: Content[];
   completedToolCallIds?: readonly string[];
-  turnCancellation?: { reason: 'user' | 'unknown'; promptId: string };
   /**
    * Authoritative count of trailing `apiHistory` entries whose source record
    * the recorder stamped as a system-injected notification AND that is a cold
@@ -139,7 +138,6 @@ export function buildSessionRecoveryPlanFromApiHistory({
   sessionId,
   apiHistory: inputApiHistory,
   completedToolCallIds,
-  turnCancellation,
   trailingSystemNotifications,
   historyGaps,
   options,
@@ -190,7 +188,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
     completedToolCallIds,
     trailingSystemNotifications,
   );
-  if (turnCancellation || interruption.kind === 'none') {
+  if (interruption.kind === 'none') {
     return {
       planId,
       sessionId,

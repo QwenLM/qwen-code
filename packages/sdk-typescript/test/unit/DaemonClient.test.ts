@@ -4615,7 +4615,7 @@ describe('DaemonClient', () => {
     });
 
     it.each([
-      { reason: 'qwen:user-cancel', expected: 'user' },
+      { reason: 'caller stopped', expected: 'interrupted' },
       { reason: undefined, expected: 'interrupted' },
       { reason: new Error('caller stopped'), expected: 'interrupted' },
     ])(
@@ -4696,7 +4696,7 @@ describe('DaemonClient', () => {
         )
         .catch((error: unknown) => error);
       await vi.waitFor(() => expect(reading).toBe(true));
-      controller.abort('qwen:user-cancel');
+      controller.abort('caller stopped');
       expect(await result).toMatchObject({ name: 'AbortError' });
       await vi.waitFor(() =>
         expect(
@@ -4705,7 +4705,7 @@ describe('DaemonClient', () => {
       );
       expect(
         JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
-      ).toEqual({ _meta: { 'qwen.cancelReason': 'user' } });
+      ).toEqual({ _meta: { 'qwen.cancelReason': 'interrupted' } });
     });
 
     it('releases the local pending prompt slot after caller abort', async () => {

@@ -352,21 +352,25 @@ describe('runNonInteractiveStreamJson', () => {
     const getHistoryTail = vi.fn().mockReturnValue(historyTail);
     const llmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
-      getTurnCancellation: vi
-        .fn<
-          () => { reason: 'user' | 'unknown'; promptId: string } | undefined
-        >()
-        .mockReturnValue(undefined),
       getChat: vi
         .fn<
           () => {
             getHistoryTail: ReturnType<typeof vi.fn>;
+            getHistoryShallow: ReturnType<typeof vi.fn>;
           }
         >()
-        .mockReturnValue({ getHistoryTail }),
+        .mockReturnValue({
+          getHistoryTail,
+          getHistoryShallow: vi.fn(() => historyTail),
+        }),
     };
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(llmClient),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
+        flush: vi.fn().mockResolvedValue(undefined),
+        finalize: vi.fn(),
+      }),
     });
     return { llmClient, getHistoryTail };
   }
@@ -558,13 +562,23 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('refuses stream-json continuation of an unknown legacy cancellation', async () => {
     const { continueResults } = installContinueDispatch();
-    const { llmClient } = createInitializedLlmClient([
+    createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
     ]);
-    llmClient.getTurnCancellation.mockReturnValue({
-      reason: 'unknown',
-      promptId: 'legacy-daemon',
-    });
+    vi.mocked(
+      config.getChatRecordingService()!.readActiveTranscriptChain,
+    ).mockResolvedValue([
+      {
+        ...createResumedTelemetryRecord('legacy-daemon'),
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'legacy-daemon',
+          state: 'cancelled',
+          cancelledAt: 1,
+          endedAt: 2,
+        },
+      },
+    ]);
     mockInputReader.read = async function* () {
       yield createControlRequest('initialize');
       yield createContinueRequest();
@@ -805,6 +819,7 @@ describe('runNonInteractiveStreamJson', () => {
         return vi.fn();
       },
       getChatRecordingService: () => ({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         finalize: () => order.push('finalize'),
         flush: async () => {
           order.push('flush');
