@@ -346,15 +346,20 @@ describe('email admission and delivery', () => {
 
   it('admits control replies at capacity without executing excess tasks', async () => {
     const releases: Array<(text: string) => void> = [];
-    prompt.mockImplementation(
-      () => new Promise((resolve) => releases.push(resolve)),
-    );
+    const atCapacity = new Promise<void>((resolveAtCapacity) => {
+      prompt.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            releases.push(resolve);
+            if (releases.length === 32) resolveAtCapacity();
+          }),
+      );
+    });
     const { channel } = make();
     await channel.connect();
     for (let i = 0; i < 32; i++) append(raw(`pending-${i}`));
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(32), {
-      timeout: 3000,
-    });
+    await atCapacity;
+    expect(prompt).toHaveBeenCalledTimes(32);
     append(raw('busy', 'MUST_NOT_EXECUTE_WHILE_FULL'));
     await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(1));
     expect(fixture.sent.mock.calls[0][0].text).toContain('at capacity');
