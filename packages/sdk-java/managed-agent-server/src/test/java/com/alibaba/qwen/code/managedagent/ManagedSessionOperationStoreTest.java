@@ -19,7 +19,10 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -56,7 +59,7 @@ class ManagedSessionOperationStoreTest {
         // newer claim may finish.
         now.addAndGet(200);
         assertThat(targets(store)).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET lease_until = 0 WHERE operation_id = ?", operationId);
+        jdbc.update("UPDATE ma_operation SET claim_until = ? WHERE operation_id = ?", new java.sql.Timestamp(0), operationId);
         assertThat(targets(store)).containsExactly(operationId);
         OperationRecord second = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
@@ -73,7 +76,7 @@ class ManagedSessionOperationStoreTest {
         store.retryOperation(TENANT, sessionId, operationId, "worker",
                 second.claimGeneration(), now.get() + retryDelay);
         long after = databaseTime();
-        assertThat(jdbc.queryForObject("SELECT available_at FROM managed_agent_operation WHERE operation_id = ?",
+        assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_id = ?",
                 Long.class, operationId)).isBetween(before + retryDelay, after + retryDelay);
         OperationRecord waiting = operation(store, sessionId, operationId);
         assertThat(waiting.deliveryState()).isEqualTo("PENDING");
@@ -84,7 +87,7 @@ class ManagedSessionOperationStoreTest {
 
         now.addAndGet(retryDelay);
         assertThat(targets(store)).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE operation_id = ?", operationId);
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_id = ?", operationId);
         OperationRecord third = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.completeOperation(TENANT, sessionId, operationId,
@@ -136,13 +139,48 @@ class ManagedSessionOperationStoreTest {
                                 .isEqualTo("idempotency_conflict"));
     }
 
+    @Test
+    void unrelatedOperationKindsCannotBeScannedOrClaimed() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+                null, null, List.of(), null).sessionId();
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String target = ManagedSchemaKeys.key(sessionId);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
+                        + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_until,"
+                        + " created_at, updated_at) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
+                        + " 'digest', '{}', 'RUNNING', 'CAPTURING', 'LEASED', ?, 0, 0)",
+                ManagedSchemaKeys.key("background"), scope, TENANT, sessionId, target, new java.sql.Timestamp(0));
+        assertThat(targets(store)).isEmpty();
+        assertThat(store.findOperation(TENANT, sessionId, "background")).isEmpty();
+        assertThat(store.claimOperation(TENANT, sessionId, "background", "worker", Duration.ofMinutes(1))).isEmpty();
+        assertThat(store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").replayed()).isFalse();
+    }
+
+    @Test
+    void unknownOutcomeBlocksAdmissionAndAutomaticReplay() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+                null, null, List.of(), null).sessionId();
+        var operation = store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").operation();
+        var claim = store.claimOperation(TENANT, sessionId, operation.operationId(), "worker", Duration.ofMinutes(1)).orElseThrow();
+        jdbc.update("UPDATE ma_operation SET state = 'UNKNOWN', phase = 'UNKNOWN', claim_until = ? WHERE operation_id = ?",
+                new java.sql.Timestamp(0), operation.operationId());
+        assertThat(targets(store)).isEmpty();
+        assertThat(store.claimOperation(TENANT, sessionId, operation.operationId(), "replacement", Duration.ofMinutes(1))).isEmpty();
+        store.retryOperation(TENANT, sessionId, operation.operationId(), "worker", claim.claimGeneration(), 0);
+        assertThat(operation(store, sessionId, operation.operationId()).state()).isEqualTo("UNKNOWN");
+        assertThat(store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").replayed()).isTrue();
+        assertThatThrownBy(() -> store.beginOperation(TENANT, sessionId, OperationKind.DELETE, "", "delete", "digest"))
+                .isInstanceOf(ApiException.class);
+    }
+
     private ManagedAgentStore store() {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:operation-store-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         return new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
