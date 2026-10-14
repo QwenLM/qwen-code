@@ -73,9 +73,20 @@ public final class HarnessEventStream implements AutoCloseable {
             try {
                 SseReader.Frame frame = reader.next();
                 // A close() that raced this read (a buffered frame, or the
-                // end of the body) reports as closed, not as an event or
-                // as the server ending the stream.
-                ensureOpen();
+                // end of the body) reports the same signal the interrupted
+                // read would have raised — one cause, one exception type
+                // however it raced — never as an event or the server
+                // ending the stream. The closed guard's programming-error
+                // type stays reserved for a caller that arrives after the
+                // close (the pre-park guards above).
+                if (closed.get()) {
+                    if (idleTimedOut.get()) {
+                        throw new DaemonTransportException(
+                                "Hosted Harness SSE idle timeout");
+                    }
+                    throw new DaemonTransportException(
+                            "HarnessEventStream is closed");
+                }
                 if (frame == null) {
                     close();
                     return null;
@@ -205,13 +216,6 @@ public final class HarnessEventStream implements AutoCloseable {
             throw new DaemonTransportException(
                     "Hosted Harness SSE idle watchdog could not be scheduled",
                     e);
-        }
-    }
-
-    private void ensureOpen() {
-        if (closed.get()) {
-            throw new IllegalStateException(
-                    "HarnessEventStream is closed");
         }
     }
 }

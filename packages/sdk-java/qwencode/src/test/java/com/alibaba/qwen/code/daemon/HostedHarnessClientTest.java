@@ -3288,8 +3288,10 @@ class HostedHarnessClientTest {
     @Test
     void aRefusedCloseStillTearsDownTheHeartbeat() throws Exception {
         // Mirror of the detach teardown rule on the close path: a
-        // definitive refusal (DELETE 403) still retires the attachment
-        // and the ledger.
+        // definitive refusal (DELETE 403) still retires the attachment,
+        // but it proves the DELETE did not run — the session and its turn
+        // are still alive — so the admission ledger stays and keeps
+        // vetoing a different identity locally.
         createSessionRoute();
         AtomicInteger heartbeats = new AtomicInteger();
         server.createContext("/session/" + SESSION_ID + "/heartbeat",
@@ -3304,9 +3306,16 @@ class HostedHarnessClientTest {
         server.createContext("/session/" + SESSION_ID + "/prompt",
                 exchange -> {
                     int call = promptCalls.incrementAndGet();
+                    if (call > 1) {
+                        // Reached only when the refused close dropped the
+                        // ledger: the production route answers a second
+                        // admission on a live turn with this refusal.
+                        sendSessionJson(exchange, 409,
+                                "{\"code\":\"hosted_turn_active\"}");
+                        return;
+                    }
                     sendSessionJson(exchange, 202,
-                            "{\"promptId\":\"" + (call == 1 ? PROMPT_ID
-                                    : SECOND_PROMPT_ID)
+                            "{\"promptId\":\"" + PROMPT_ID
                                     + "\",\"lastEventId\":0,"
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
@@ -3341,19 +3350,20 @@ class HostedHarnessClientTest {
             int first = heartbeats.get();
             Thread.sleep(60);
             assertEquals(first, heartbeats.get());
-            // The ledger retired with the attachment: a different identity
-            // is not vetoed locally and reaches the wire.
-            PromptReceipt receipt = client.submitTurn(
-                    SubmitHarnessTurn.builder()
+            // The ledger survived the refused close: a different
+            // identity is vetoed locally and never reaches the wire.
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
                             .promptId(SECOND_PROMPT_ID)
                             .addContent(block)
                             .payloadDigest(
                                     SubmitHarnessTurn.computePayloadDigest(
                                             List.of(block)))
-                            .build());
-            assertEquals(SECOND_PROMPT_ID, receipt.getPromptId());
-            assertEquals(2, promptCalls.get());
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+            assertEquals(1, promptCalls.get());
         } finally {
             client.close();
         }
@@ -3361,7 +3371,8 @@ class HostedHarnessClientTest {
 
     @Test
     void aRefusedCloseByIdStillTearsDownTheHeartbeat() throws Exception {
-        // Same teardown rule for the by-id overload.
+        // Same teardown rule for the by-id overload: the attachment
+        // retires, the admission ledger stays.
         createSessionRoute();
         AtomicInteger heartbeats = new AtomicInteger();
         server.createContext("/session/" + SESSION_ID + "/heartbeat",
@@ -3376,9 +3387,15 @@ class HostedHarnessClientTest {
         server.createContext("/session/" + SESSION_ID + "/prompt",
                 exchange -> {
                     int call = promptCalls.incrementAndGet();
+                    if (call > 1) {
+                        // Same wire refusal the production route answers a
+                        // second admission on a live turn with.
+                        sendControlPlaneSessionJson(exchange, 409,
+                                "{\"code\":\"hosted_turn_active\"}");
+                        return;
+                    }
                     sendSessionJson(exchange, 202,
-                            "{\"promptId\":\"" + (call == 1 ? PROMPT_ID
-                                    : SECOND_PROMPT_ID)
+                            "{\"promptId\":\"" + PROMPT_ID
                                     + "\",\"lastEventId\":0,"
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
@@ -3413,18 +3430,21 @@ class HostedHarnessClientTest {
             int first = heartbeats.get();
             Thread.sleep(60);
             assertEquals(first, heartbeats.get());
-            // The ledger retired with the attachment here too.
-            PromptReceipt receipt = client.submitTurn(
-                    SubmitHarnessTurn.builder()
+            // The ledger survived the refused close here too: a
+            // different identity is vetoed locally and never reaches the
+            // wire.
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
                             .session(session)
                             .promptId(SECOND_PROMPT_ID)
                             .addContent(block)
                             .payloadDigest(
                                     SubmitHarnessTurn.computePayloadDigest(
                                             List.of(block)))
-                            .build());
-            assertEquals(SECOND_PROMPT_ID, receipt.getPromptId());
-            assertEquals(2, promptCalls.get());
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+            assertEquals(1, promptCalls.get());
         } finally {
             client.close();
         }
@@ -4438,6 +4458,17 @@ class HostedHarnessClientTest {
         assertTrue(heartbeats.get() > 0, "heartbeat never fired");
     }
 
+    private static void awaitSchedulerDrained(HostedHarnessClient client)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!client.scheduler().getQueue().isEmpty()
+                && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(client.scheduler().getQueue().isEmpty(),
+                "the scheduler queue never drained");
+    }
+
     @Test
     void oversizedLoadRefusalCodeStaysOutcomeUnknown() {
         // The refusal code flows into the turn's error_code column, a
@@ -4934,6 +4965,86 @@ class HostedHarnessClientTest {
             releaseRetry.countDown();
             caller.shutdownNow();
             client.close();
+        }
+
+        assertEquals(3, promptCalls.get());
+    }
+
+    @Test
+    void anOwningReplayedAdmissionAfterTerminalEventPlantsNoMarker()
+            throws Exception {
+        // R17-2: the owning ordering of
+        // aReplayedAdmissionAfterTerminalEventPlantsNoMarker — the turn's
+        // terminal event is consumed BEFORE the same-identity retry, so
+        // the ledger is empty and the retry OWNS the marker it plants. The
+        // route answers the replay from its journal with a bare 202 and
+        // emits no event, so that marker could never be cleared: the 202
+        // arm retires it instead, and a different identity reaches the
+        // wire.
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    int call = promptCalls.incrementAndGet();
+                    String promptId = call == 3 ? SECOND_PROMPT_ID
+                            : PROMPT_ID;
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + promptId
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    sendSseHeaders(exchange);
+                    exchange.getResponseBody().write(terminalEvent(1,
+                            PROMPT_ID).getBytes(StandardCharsets.UTF_8));
+                    exchange.getResponseBody().flush();
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "owning-replay-after-terminal");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            SubmitHarnessTurn first = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build();
+            assertNotNull(client.submitTurn(first));
+            HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build());
+            try {
+                // The terminal event is consumed before the retry:
+                // observeEvent clears the marker and records the terminal
+                // promptId.
+                DaemonEvent ended = assertTimeoutPreemptively(
+                        Duration.ofSeconds(5), stream::next);
+                assertEquals("turn_complete", ended.getType());
+            } finally {
+                stream.closeQuietly();
+            }
+            // The owning replay is answered from the journal with a bare
+            // 202: the marker it just planted owes no future terminal
+            // event and must not survive.
+            assertNotNull(client.submitTurn(first));
+            // A different identity reaches the wire.
+            PromptReceipt receipt = client.submitTurn(
+                    SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build());
+            assertEquals(SECOND_PROMPT_ID, receipt.getPromptId());
         }
 
         assertEquals(3, promptCalls.get());
@@ -5464,6 +5575,103 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void aRetryBeginningBetweenTheStatusSnapshotReadsKeepsTheMarker()
+            throws Exception {
+        // R17-3: getStatus reads the marker's clock before its settledness
+        // and re-checks both inside the bin-locked clear, so a
+        // same-identity retry whose beginSend lands between the two
+        // snapshot reads keeps the marker — the status answer the server
+        // evaluated before the retry's send landed must not clear it.
+        createSessionRoute();
+        CountDownLatch sawRetry = new CountDownLatch(1);
+        CountDownLatch releaseRetry = new CountDownLatch(1);
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    int call = promptCalls.incrementAndGet();
+                    if (call == 1) {
+                        sendSessionJson(exchange, 503, "{\"error\":\"x\"}");
+                        return;
+                    }
+                    if (call == 2) {
+                        sawRetry.countDown();
+                        try {
+                            releaseRetry.await(15, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + (call == 2 ? PROMPT_ID
+                                    : SECOND_PROMPT_ID)
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":false}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "status-snapshot-race");
+        String digest = SubmitHarnessTurn.computePayloadDigest(
+                List.of(block));
+
+        HostedHarnessClient client = newClient();
+        ExecutorService callers = Executors.newSingleThreadExecutor();
+        try {
+            HarnessSessionRef session = createSession(client);
+            SubmitHarnessTurn first = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(digest)
+                    .build();
+            // Outcome-unknown: the marker is retained and settled.
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(first));
+            AtomicReference<Future<?>> retry = new AtomicReference<>();
+            client.statusSnapshotProbe = () -> {
+                // The seam between the two snapshot reads: the retry's
+                // beginSend lands here, after the clock read and before
+                // the settledness read.
+                retry.set(callers.submit(() -> {
+                    client.submitTurn(first);
+                    return null;
+                }));
+                try {
+                    assertTrue(sawRetry.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            };
+            // The retry's send is parked: the status answer must not clear
+            // the marker underneath its open admission window.
+            assertFalse(client.getStatus(session).hasActivePrompt());
+            client.statusSnapshotProbe = () -> {};
+            releaseRetry.countDown();
+            retry.get().get(5, TimeUnit.SECONDS);
+            // The re-admitted marker is live: a different identity is
+            // vetoed locally and never reaches the wire.
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(digest)
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+            assertEquals(2, promptCalls.get());
+        } finally {
+            client.statusSnapshotProbe = () -> {};
+            releaseRetry.countDown();
+            callers.shutdownNow();
+            client.close();
+        }
+    }
+
+    @Test
     void aStaleRefCloseKeepsTheCurrentOwnersMarker() {
         // R3-2 (e): the close twin of the stale-detach entrance — the
         // widened 404 tolerance must not land a stale ref's fenced
@@ -5641,14 +5849,18 @@ class HostedHarnessClientTest {
     }
 
     @Test
-    void aSuccessfulCloseByIdRetiresAnAttachmentRegisteredMidFlight()
+    void aSuccessfulCloseByIdKeepsAnAttachmentRegisteredMidFlight()
             throws Exception {
-        // R10-2: the by-id close's success arm proves the session deleted
-        // outright, so every attachment for the id is stale — including
-        // one a concurrent loadSession registered while the DELETE was in
-        // flight. A survivor would beat against the deleted session
-        // forever: scheduleHeartbeat swallows the 404, so the periodic
-        // task never suppresses itself.
+        // R17-4: the by-id close's success arm proves the session it
+        // OBSERVED deleted, but the 204 answers a DELETE dispatched before
+        // a concurrent loadSession re-registered the id — the peer still
+        // accepts the replacement's heartbeats, so discarding the
+        // replacement would leave the re-opened session without a
+        // heartbeat for the client's lifetime. The success arm retires the
+        // observed attachment only; a registration whose session is in
+        // fact gone self-retires on its heartbeat's definitive
+        // hosted_session_not_found 404 (pinned by
+        // aSessionNotFoundHeartbeatRetiresTheAttachment).
         createSessionRoute();
         AtomicInteger heartbeats = new AtomicInteger();
         server.createContext("/session/" + SESSION_ID + "/heartbeat",
@@ -5702,18 +5914,154 @@ class HostedHarnessClientTest {
             client.loadSession(new LoadHarnessSession(SESSION_ID));
             releaseDelete.countDown();
             assertNull(close.get(5, TimeUnit.SECONDS));
-            // The successful close deleted the session: the mid-flight
-            // replacement attachment retired with the observed one, so no
-            // heartbeat survives.
+            // The mid-flight replacement attachment postdates the
+            // observation the 204 answers, so it survives the close and
+            // keeps beating.
+            Thread.sleep(100);
+            int beating = heartbeats.get();
+            Thread.sleep(60);
+            assertTrue(heartbeats.get() > beating,
+                    "the re-registered attachment must keep beating");
+        } finally {
+            releaseDelete.countDown();
+            caller.shutdownNow();
+            client.close();
+        }
+    }
+
+    @Test
+    void aCloseByRefKeepsAMidFlightAttachmentUntilItsHeartbeat404()
+            throws Exception {
+        // R16-1: the ref close's deletion arm retires the attachment
+        // identity-matched, so an attachment a concurrent load registered
+        // under a different client id survives it; the session the 204
+        // deleted is gone, so the survivor's heartbeat meets a definitive
+        // hosted_session_not_found 404 and self-retires — the periodic
+        // task leaves the scheduler and no heartbeat is issued again,
+        // instead of beating against the dead session forever.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    if ("client-2".equals(exchange.getRequestHeaders()
+                            .getFirst(HostedHarnessClient.CLIENT_ID_HEADER))) {
+                        exchange.getResponseHeaders().set(
+                                HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                        sendJson(exchange, 404,
+                                "{\"code\":\"hosted_session_not_found\"}",
+                                false);
+                        return;
+                    }
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 200,
+                            sessionJson().replace(CLIENT_ID, "client-2"),
+                            false);
+                });
+        CountDownLatch deleteSeen = new CountDownLatch(1);
+        CountDownLatch releaseDelete = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            deleteSeen.countDown();
+            try {
+                releaseDelete.await(15, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            assertPrivateHeaders(exchange, true);
+            exchange.getResponseHeaders().set(
+                    HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            exchange.getResponseHeaders().set("Connection", "close");
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            Future<Throwable> close = caller.submit(() -> {
+                try {
+                    client.closeSession(session);
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertTrue(deleteSeen.await(5, TimeUnit.SECONDS));
+            // A concurrent caller re-registers the session under a new
+            // client identity while the DELETE is in flight.
+            client.loadSession(new LoadHarnessSession(SESSION_ID));
+            releaseDelete.countDown();
+            assertNull(close.get(5, TimeUnit.SECONDS));
+            // The close retired only its own identity's attachment; the
+            // survivor's heartbeat met the definitive 404 and
+            // self-retired: the scheduler queue drains and the heartbeats
+            // stop.
+            awaitSchedulerDrained(client);
             Thread.sleep(100);
             int last = heartbeats.get();
             Thread.sleep(60);
             assertEquals(last, heartbeats.get(),
-                    "no heartbeat may survive a close that deleted the"
-                            + " session");
+                    "no heartbeat may survive the definitive 404");
         } finally {
             releaseDelete.countDown();
             caller.shutdownNow();
+            client.close();
+        }
+    }
+
+    @Test
+    void aSessionNotFoundHeartbeatRetiresTheAttachment()
+            throws Exception {
+        // R17-4/R16-1: a heartbeat answered with a definitive fenced 404
+        // hosted_session_not_found proves the session record is gone
+        // server-side — the same proof a deleting close or detach rides —
+        // so the attachment retires itself: it leaves the attachments map
+        // and cancels its periodic task instead of beating against the
+        // dead session for the client's lifetime.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 404,
+                            "{\"code\":\"hosted_session_not_found\"}",
+                            false);
+                });
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            createSession(client);
+            // The first heartbeat self-retires the attachment: the
+            // scheduler queue drains and no further heartbeat is issued.
+            awaitSchedulerDrained(client);
+            Thread.sleep(100);
+            int last = heartbeats.get();
+            Thread.sleep(60);
+            assertEquals(last, heartbeats.get(),
+                    "no heartbeat may be issued after the definitive 404");
+        } finally {
             client.close();
         }
     }
@@ -6848,6 +7196,49 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void anUnfencedCodelessConflictIsOutcomeUnknown() {
+        // R15-3: an unfenced 409 whose body carries no refusal-vocabulary
+        // code is not the route's answer — the intermediary that stripped
+        // the boot header produced it — so it cannot prove this submission
+        // was refused: the outcome is unknown and the owned marker stays
+        // vetoing until a status read. Surfacing it as
+        // DaemonHttpException(409) instead would let the turn consumer
+        // retry the identical refused submission forever.
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sendJson(exchange, 409, "{\"error\":\"conflict\"}",
+                            false);
+                });
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "unfenced-codeless-conflict");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(PromptAdmissionUnknownException.class,
+                    () -> client.submitTurn(requestForSession(block,
+                            session)));
+            // The retained marker still owns the session: a different
+            // identity is vetoed locally and never reaches the wire.
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+        }
+
+        assertEquals(1, promptCalls.get());
+    }
+
+    @Test
     void overlappingSameIdentityRefusalsReleaseTheMarker()
             throws Exception {
         // R11-3: when both the owning attempt and the joined same-identity
@@ -6953,6 +7344,106 @@ class HostedHarnessClientTest {
         } finally {
             releaseOwner.countDown();
             releaseRetry.countDown();
+            callers.shutdownNow();
+            client.close();
+        }
+    }
+
+    @Test
+    void aRetryDropThenAnOwnerRefusalKeepsTheMarker() throws Exception {
+        // R15-4: the reverse conclusion order of
+        // overlappingSameIdentityRefusalsReleaseTheMarker — the joined
+        // retry's outcome-unknown drop concludes FIRST (blocking the owed
+        // release), then the owner's definitive refusal concludes the
+        // entry. The owner's settled release must honour the block: this
+        // promptId may be admitted server-side, so the marker keeps
+        // vetoing until a status read clears it.
+        createSessionRoute();
+        CountDownLatch ownerSeen = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    int call = promptCalls.incrementAndGet();
+                    if (call == 1) {
+                        ownerSeen.countDown();
+                        try {
+                            releaseOwner.await(15, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        sendSessionJson(exchange, 400,
+                                "{\"code\":\"bad_prompt\"}");
+                        return;
+                    }
+                    if (call == 2) {
+                        // The retry's send is dropped before any answer.
+                        exchange.close();
+                        return;
+                    }
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + SECOND_PROMPT_ID
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "retry-drop-then-refusal");
+        String digest = SubmitHarnessTurn.computePayloadDigest(
+                List.of(block));
+
+        HostedHarnessClient client = newClient();
+        ExecutorService callers = Executors.newFixedThreadPool(2);
+        try {
+            HarnessSessionRef session = createSession(client);
+            SubmitHarnessTurn first = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(digest)
+                    .build();
+            Future<Throwable> owner = callers.submit(() -> {
+                try {
+                    client.submitTurn(first);
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertTrue(ownerSeen.await(5, TimeUnit.SECONDS));
+            Future<Throwable> retry = callers.submit(() -> {
+                try {
+                    client.submitTurn(first);
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            // The retry's dropped send concludes outcome-unknown first.
+            Throwable retryFailure = retry.get(5, TimeUnit.SECONDS);
+            assertTrue(retryFailure
+                            instanceof PromptAdmissionUnknownException,
+                    String.valueOf(retryFailure));
+            // The owner's definitive refusal concludes the entry: the
+            // blocked release keeps the marker.
+            releaseOwner.countDown();
+            Throwable ownerFailure = owner.get(5, TimeUnit.SECONDS);
+            assertTrue(ownerFailure instanceof DaemonHttpException,
+                    String.valueOf(ownerFailure));
+            assertEquals(400,
+                    ((DaemonHttpException) ownerFailure).getStatusCode());
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(digest)
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+            assertEquals(2, promptCalls.get());
+        } finally {
+            releaseOwner.countDown();
             callers.shutdownNow();
             client.close();
         }
