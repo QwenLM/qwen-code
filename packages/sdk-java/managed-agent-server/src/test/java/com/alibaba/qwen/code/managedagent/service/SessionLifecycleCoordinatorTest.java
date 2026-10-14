@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -28,7 +30,8 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -106,16 +109,16 @@ class SessionLifecycleCoordinatorTest {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-takeover-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        var jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         String session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
@@ -183,9 +186,8 @@ class SessionLifecycleCoordinatorTest {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-cascade-" + suffix + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(source)
-                .locations("classpath:db/migration").load().migrate();
-        var jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getDispatch().setLeaseDuration(Duration.ofMillis(200));
@@ -193,14 +195,14 @@ class SessionLifecycleCoordinatorTest {
         var store = new ManagedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {
                 }, new ManagedWorkspaceRegistry(jdbc), properties);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES ('tenant', 'workspace', 1, 'storage',"
                         + " 'Workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 "owner".getBytes(StandardCharsets.UTF_8));
@@ -232,6 +234,25 @@ class SessionLifecycleCoordinatorTest {
                 properties, session, child, operation);
     }
 
+    @Test
+    void durableChildCloseSurvivesRevocationWithoutGrantingSyntheticHeadersAuthority() {
+        World world = closingWorld("revoked-close-");
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(world.jdbc.getDataSource()));
+        assertThatThrownBy(() -> transactions.execute(ignored -> world.store.beginWorkspaceLifecycle(
+                "tenant", world.child, OperationKind.CLOSE, "child:" + world.session, "actor", "spoof", "digest", true)))
+                .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
+        world.jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", "tenant");
+        var admitted = transactions.execute(ignored -> world.store.beginChildClose("tenant", world.session,
+                world.child, "run-1", "actor", "child-close-run-1", "digest", true));
+        assertThat(admitted.operation().sessionId()).isEqualTo(world.child);
+        assertThat(admitted.operation().state()).isEqualTo("PENDING");
+        assertThat(transactions.execute(ignored -> world.store.beginChildClose("tenant", world.session,
+                world.child, "run-1", "actor", "child-close-run-1", "digest", true)).replayed()).isTrue();
+        assertThatThrownBy(() -> transactions.execute(ignored -> world.store.beginChildClose("tenant", world.session,
+                world.child, "wrong-run", "actor", "spoof", "digest", true)))
+                .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
+    }
+
     private static void liveScope(World world, String resourceBody) {
         jdbcLiveScope(world.jdbc, world.session, resourceBody, "child_agent");
     }
@@ -243,33 +264,36 @@ class SessionLifecycleCoordinatorTest {
 
     private static void jdbcLiveScope(JdbcTemplate jdbc, String session,
             String resourceBody, String taskKind) {
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, created_at)"
-                        + " VALUES ('scope-parent', 'run-1-key', 'tenant',"
+                        + " VALUES (?, ?, 'tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
-                        + " 'res-run-1', '" + taskKind + "', 'running',"
-                        + " 'session', 'planned', 1)",
-                session);
+                        + " 'res-run-1', '" + taskKind + "', 'running', 'session',"
+                        + " 'planned', 1)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", session),
+                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(session, "child_run", "run-1"), session);
         byte[] bytes = resourceBody.getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource"
+                        + " (resource_key, session_scope_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, created_at)"
-                        + " VALUES ('scope-parent', 'tenant', 'workspace', ?,"
+                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
                         + " 'res-run-1', 'managed-input', 1, ?,"
                         + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?,"
                         + " 'command', 'REFERENCED', CURRENT_TIMESTAMP)",
-                session, bytes.length, bytes);
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.resourceKey(
+                        com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"),
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, bytes);
     }
 
     private String childCloseOperation(World world) {
         return world.jdbc.query("SELECT operation_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = 'tenant'"
+                        + " ma_operation WHERE tenant_id = X'74656e616e74'"
                         + " AND session_id = ? AND operation_kind = 'CLOSE'",
                 (result, row) -> result.getString("operation_id"),
                 world.child).stream().findFirst().orElse(null);
@@ -496,15 +520,16 @@ class SessionLifecycleCoordinatorTest {
     void aLeadCloseCancelsItsMembersAndNotItsTeamRecord() {
         World world = closingWorld("team-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
-        world.jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        world.jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " created_at)"
-                        + " VALUES ('scope-parent', 'team-1-key', 'tenant',"
+                        + " VALUES (?, ?, 'tenant',"
                         + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
                         + " 'res-team-1', 1)",
-                world.session);
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", world.session),
+                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(world.session, "team_state", "team-1"), world.session);
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
@@ -542,7 +567,7 @@ class SessionLifecycleCoordinatorTest {
             liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
             if ("faltering-closed".equals(start)) {
                 // Nothing else is owed: only the discard holds the close.
-                world.jdbc.update("UPDATE managed_agent_session SET status ="
+                world.jdbc.update("UPDATE ma_session SET status ="
                         + " 'CLOSED' WHERE session_id = ?", world.child);
             }
             var workspaces = new com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore(
@@ -552,8 +577,8 @@ class SessionLifecycleCoordinatorTest {
                 workspaces.admit("tenant", world.session, "run-1", world.store
                         .requireSession("tenant", world.session).workspace(), 1L);
             }
-            world.jdbc.update("UPDATE qwen_managed_child_workspace SET state = ?,"
-                    + " finish_request = ? WHERE child_run_id = 'run-1'",
+            world.jdbc.update("UPDATE ma_workspace SET child_state = ?,"
+                    + " finish_request = ? WHERE child_run_id = X'72756e2d31'",
                     start.startsWith("faltering") ? "ready" : start,
                     "merging".equals(start) ? "merge" : null);
             var faltered = new AtomicBoolean(start.startsWith("faltering"));
@@ -571,7 +596,7 @@ class SessionLifecycleCoordinatorTest {
             // record funnel would: the re-armed close no longer finds it.
             harness.applied = body -> {
                 if ("close_scope".equals(body.get("kind"))) {
-                    world.jdbc.update("UPDATE qwen_managed_session_extension_record"
+                    world.jdbc.update("UPDATE ma_session_record"
                             + " SET task_state = 'cancelled' WHERE record_id = ?",
                             body.get("childRunId"));
                 }
@@ -778,8 +803,8 @@ class SessionLifecycleCoordinatorTest {
         assertThat(claimed).isNotNull();
         world.relayStore.advance(claimed, "owner", "watching", world.child,
                 0, null, 30_000, 100);
-        world.jdbc.update("UPDATE managed_agent_session SET status ="
-                        + " 'CLOSED' WHERE tenant_id = 'tenant'"
+        world.jdbc.update("UPDATE ma_session SET status ="
+                        + " 'CLOSED' WHERE tenant_id = X'74656e616e74'"
                         + " AND session_id = ?",
                 world.child);
         RuntimeBrokerService broker = Mockito.mock(
@@ -827,7 +852,7 @@ class SessionLifecycleCoordinatorTest {
     void aPreAdmissionFailureSettlesTheNamedNeverStartedChild() {
         World world = closingWorld("preadmit-");
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
-        world.jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
                         + " created_at, updated_at, completed_at, version)"
@@ -870,7 +895,7 @@ class SessionLifecycleCoordinatorTest {
     void aCompletedTurnNeverSettlesTheNeverStartedPairing() {
         World world = closingWorld("turnproof-");
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
-        world.jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
                         + " created_at, updated_at, completed_at, version)"
