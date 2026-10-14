@@ -107,6 +107,7 @@ import {
 } from './hosted-tool-approval.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import * as stdio from '../utils/stdioHelpers.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type {
   ManagedHookCatalog,
@@ -1273,6 +1274,84 @@ describe('Hosted Harness no-tool session', () => {
     );
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
+  });
+
+  it('re-answers a drive takeover while the resident model turn is active', async () => {
+    let releaseModel!: () => void;
+    let markFirstChunk!: () => void;
+    const modelHeld = new Promise<void>((resolve) => {
+      releaseModel = resolve;
+    });
+    const firstChunk = new Promise<void>((resolve) => {
+      markFirstChunk = resolve;
+    });
+    const text = 'COORDINATOR_RECOVERED';
+    state.model.mockImplementationOnce(async ({ textDeltas }) => {
+      await textDeltas!.delta('COORDINATOR_');
+      markFirstChunk();
+      await modelHeld;
+      await textDeltas!.delta('RECOVERED');
+      return { text, model: 'test-model' };
+    });
+
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'COORDINATOR_ONLY' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await firstChunk;
+
+    const load = () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        driveRuntimeRecovery: true,
+      });
+    const takeover = await load();
+    expect(takeover.status).toBe(200);
+    expect(takeover.body.clientId).toBe(created.body.clientId);
+    const redriven = await load();
+    expect(redriven.status).toBe(200);
+    expect(redriven.body).toMatchObject({
+      clientId: takeover.body.clientId,
+      eventEpoch: takeover.body.eventEpoch,
+      lastEventId: takeover.body.lastEventId,
+    });
+    expect(state.model).toHaveBeenCalledTimes(1);
+
+    releaseModel();
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
+    ).set('X-Qwen-Client-Id', created.body.clientId as string);
+    expectFullStreamedAnswer(transcript.body, text);
+    expect(
+      transcript.body.events.filter((event: { type: string }) =>
+        ['turn_complete', 'turn_error'].includes(event.type),
+      ),
+    ).toHaveLength(1);
+    expect(state.model).toHaveBeenCalledTimes(1);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it.each(['close', 'delete'] as const)(
@@ -13847,13 +13926,16 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+    );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
@@ -13932,12 +14014,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       clientId,
@@ -14262,7 +14347,7 @@ describe('Hosted Harness no-tool session', () => {
           ).set('X-Qwen-Client-Id', created.body.clientId as string);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: isSlowTestHost() ? 30_000 : 10_000 },
       );
       const transcript = await headers(
         supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
