@@ -95,7 +95,7 @@ describe('ArtifactTool', () => {
 
   it('prefers itself over record_artifact for published HTML', () => {
     expect(tool.description).toContain(
-      'Use this tool, not record_artifact, for published interactive HTML artifacts.',
+      'Use this, not record_artifact, for HTML.',
     );
   });
 
