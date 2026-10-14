@@ -218,6 +218,68 @@ public final class JdbcCsiFilesRetirementGuard {
                 && JdbcRepositorySupport.scopeKey(request.getScope()).equals(binding.scopeKey());
     }
 
+    /**
+     * Lock-free pre-check for {@link #lockManagedSession}: true when the
+     * Session row, its runtime slots, or the bindings they reference carry
+     * any CSI marker. The caller then takes the locked path, which re-reads
+     * all of them under its locks and fails closed on an inconsistent marker.
+     * False means lockManagedSession would find nothing to protect, so an
+     * ordinary Session can skip the tenant-wide placement lock it starts
+     * with (#13800).
+     */
+    public static boolean mayCarryCsi(Connection connection, String tenantId, String sessionId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                        + " AND csi_guard = TRUE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (rows.next()) {
+                    return true;
+                }
+            }
+        }
+        List<String> references = new ArrayList<>();
+        StringBuilder sql = new StringBuilder(
+                "SELECT * FROM ma_runtime_binding WHERE (tenant_id = ? AND isolation_key = ?)");
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT * FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (isProfile(request(rows).getScope())) {
+                        return true;
+                    }
+                    sql.append(" OR request_key = ?");
+                    references.add(rows.getString("request_key"));
+                    String active = com.alibaba.qwen.code.runtimebroker.managedschema
+                            .ManagedSchemaRows.identity(rows, "active_binding_id");
+                    if (active != null) {
+                        sql.append(" OR binding_id = ?");
+                        references.add(active);
+                    }
+                }
+            }
+        }
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
+            for (int index = 0; index < references.size(); index++) {
+                JdbcRepositorySupport.setStringParameter(statement, index + 3, references.get(index));
+            }
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (isProfile(request(rows).getScope())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     private static List<Slot> lockSlots(Connection connection, String tenantId, String sessionId) throws SQLException {
         List<Slot> slots = new ArrayList<>();
         try (PreparedStatement statement = statement(connection,
