@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -170,6 +171,12 @@ class HostedRecoveryWedgeGate {
             assertThat(metadata.toString().toLowerCase())
                     .as("A2 reproduction requires MariaDB/MySQL, got %s", metadata)
                     .containsAnyOf("mysql", "mariadb");
+            // The runtime acquire path resolves the storage owner through the
+            // registered LOCAL alias, and this witness runs the verified
+            // workspace guard disabled, so nothing else registers the mounts.
+            for (int index = 0; index < workspaces.size(); index++) {
+                WorkspaceTestStorage.register(jdbc, tenant, "storage-" + index);
+            }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
             var sessions = new ArrayList<Map<String, Object>>();
             String[] profiles = {"hosted-workspace-shell/1", "hosted-workspace-files/1",
