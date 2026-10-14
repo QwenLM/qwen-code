@@ -90,13 +90,14 @@ async function pasteImages(images: File[]) {
   expect(latest!.pastedImages).toHaveLength(images.length);
 }
 
-function pressKey(key: string) {
+function pressKey(key: string, repeat = false) {
   act(() => {
     latest!.viewRef.current!.focus();
     container!.querySelector('.cm-content')!.dispatchEvent(
       new KeyboardEvent('keydown', {
         key,
         code: key,
+        repeat,
         bubbles: true,
         cancelable: true,
       }),
@@ -105,6 +106,83 @@ function pressKey(key: string) {
 }
 
 describe('useComposerCore issue #10794 attachment deletion', () => {
+  for (const kind of ['images', 'files', 'folded text'] as const) {
+    it.each(['Backspace', 'Delete'])(
+      `preserves remaining ${kind} during key repeat with %s`,
+      async (key) => {
+        await mount();
+        if (kind === 'images') {
+          await pasteImages([
+            new File(['first'], 'first.png', { type: 'image/png' }),
+            new File(['second'], 'second.png', { type: 'image/png' }),
+          ]);
+        } else if (kind === 'files') {
+          await act(async () => {
+            expect(
+              latest!.ingestFiles([
+                new File(['first'], 'first.txt', { type: 'text/plain' }),
+                new File(['second'], 'second.txt', { type: 'text/plain' }),
+              ]),
+            ).toBe(true);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
+        } else {
+          for (const text of ['first\n'.repeat(200), 'second\n'.repeat(200)]) {
+            const paste = new Event('paste', {
+              bubbles: true,
+              cancelable: true,
+            });
+            Object.defineProperty(paste, 'clipboardData', {
+              value: {
+                files: [],
+                items: [],
+                types: ['text/plain'],
+                getData: () => text,
+              },
+            });
+            await act(async () => {
+              container!.querySelector('.cm-content')!.dispatchEvent(paste);
+            });
+          }
+        }
+        const attachments = () =>
+          kind === 'images' ? latest!.pastedImages : latest!.pastedFiles;
+        expect(latest!.getText()).toBe('');
+        expect(attachments()).toHaveLength(2);
+        const first = attachments()[0];
+        pressKey(key);
+        expect(attachments()).toEqual([first]);
+        pressKey(key, true);
+        pressKey(key, true);
+        expect(attachments()).toEqual([first]);
+        pressKey(key);
+        expect(attachments()).toEqual([]);
+      },
+    );
+  }
+
+  it.each(['Backspace', 'Delete'])(
+    'preserves an image when held %s finishes deleting the text',
+    async (key) => {
+      await mount();
+      await pasteImages([
+        new File(['png'], 'photo.png', { type: 'image/png' }),
+      ]);
+      act(() => {
+        latest!.handle.setText('x');
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: key === 'Backspace' ? 1 : 0 },
+        });
+      });
+      pressKey(key);
+      expect(latest!.getText()).toBe('');
+      pressKey(key, true);
+      expect(latest!.pastedImages).toHaveLength(1);
+      pressKey(key);
+      expect(latest!.pastedImages).toEqual([]);
+    },
+  );
+
   it.each(['Backspace', 'Delete'])(
     'removes a removable tag before an image with %s',
     async (key) => {
@@ -157,13 +235,12 @@ describe('useComposerCore issue #10794 attachment deletion', () => {
           resumeRead = () => readAsDataURL.call(this, blob);
         },
       );
-      let pendingPaste!: Promise<void>;
       await act(async () => {
-        pendingPaste = Promise.resolve(
+        expect(
           latest!.ingestFiles([
             new File(['second'], 'second.png', { type: 'image/png' }),
           ]),
-        );
+        ).toBe(true);
         await vi.waitFor(() => expect(resumeRead).toBeDefined());
       });
       expect(latest!.pendingImageBatchCount).toBe(1);
@@ -171,7 +248,6 @@ describe('useComposerCore issue #10794 attachment deletion', () => {
       expect(latest!.pastedImages).toEqual([first]);
       await act(async () => {
         resumeRead!();
-        await pendingPaste;
         await readSettled;
         await new Promise((resolve) => setTimeout(resolve, 0));
       });

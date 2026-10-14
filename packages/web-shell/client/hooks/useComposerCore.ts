@@ -3159,7 +3159,9 @@ export function useComposerCore(
       return true;
     };
 
+    let attachmentKeyRepeat = false;
     const removeLastAttachment = (view: EditorView): boolean => {
+      if (attachmentKeyRepeat) return false;
       if (imageIngestionLaneRef.current.pendingBatches > 0) return false;
       if (view.state.doc.length > 0) return false;
       if (pastedFilesRef.current.length > 0) {
@@ -3590,6 +3592,14 @@ export function useComposerCore(
       doc: initialDraft,
       selection: { anchor: initialDraft.length },
       extensions: [
+        Prec.highest(
+          EditorView.domEventHandlers({
+            keydown(event) {
+              attachmentKeyRepeat = event.repeat;
+              return false;
+            },
+          }),
+        ),
         Prec.highest(submitKeymap),
         minimalSetup,
         history(),
