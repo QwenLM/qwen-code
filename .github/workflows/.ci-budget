@@ -1,0 +1,40 @@
+# PR-stage CI budget, enforced by .github/scripts/check-ci-budget.mjs.
+#
+# One line per workflow that triggers on pull_request / pull_request_target /
+# merge_group. Five fields, in order:
+#
+#   <jobs> <declared timeout-minutes> <jobs with no timeout-minutes> <triggers> <file>
+#
+# The two ratchets already in this repo measure workflow file BYTES
+# (.size-baseline) and test LINE COUNT (check-test-growth.mjs). Neither
+# measures what a contributor waits for. This file does: how many checks one
+# PR push fans out into, and how long they may run.
+#
+# Growing a number is allowed — deliberately. Prefer gating the new lane on
+# paths, moving it to merge_group or post-merge, or splitting it first; if the
+# growth is real, bump the number here in the same PR and say why. That is the
+# point of the ledger: it turns invisible drift into one reviewed line.
+#
+# Jobs with no timeout-minutes inherit GitHub's 360-minute default, so one
+# hung job holds a self-hosted runner for six hours. 14 such jobs are recorded
+# below as of main at bab0e99d89; that column exists so the number can only go
+# down. Declaring a timeout in one of them lowers it — do that instead of
+# raising it.
+1 5 0 pull_request_target assign-pr-owner.yml
+9 225 5 pull_request+merge_group ci.yml
+4 90 1 pull_request live-host-release.yml
+1 30 0 pull_request+merge_group live-host.yml
+2 45 0 pull_request mobile-shell.yml
+1 20 0 pull_request pnpm-worktree-smoke.yml
+1 5 0 pull_request_target pr-force-push-reminder.yml
+1 5 0 pull_request_target pr-self-report-label.yml
+8 590 0 pull_request qwen-autofix.yml
+9 155 4 pull_request_target qwen-code-pr-review.yml
+7 280 2 pull_request_target qwen-triage.yml
+6 510 0 pull_request sdk-java.yml
+2 0 2 pull_request sdk-python.yml
+1 60 0 pull_request serve-ab.yml
+2 60 0 pull_request tui-parity.yml
+3 70 0 pull_request verify-landlock-helper.yml
+1 5 0 pull_request_target web-shell-visuals-cleanup.yml
+1 30 0 pull_request web-shell-visuals.yml
