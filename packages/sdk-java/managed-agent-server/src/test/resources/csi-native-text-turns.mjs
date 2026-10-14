@@ -225,7 +225,7 @@ export async function generateNativeTextTurns(
           { managed, cwd: input.cwd },
           promptId,
           text,
-          new AbortController(),
+          new globalThis.AbortController(),
         );
         observations.push({
           turn,
