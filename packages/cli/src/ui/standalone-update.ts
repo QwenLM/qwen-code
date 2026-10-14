@@ -1150,6 +1150,42 @@ function standaloneUpdateTarget(standaloneDir: string): {
   return { target, runtime, version, isFirstTimeMigration };
 }
 
+function standaloneDirectoryIdentity(standaloneDir: string) {
+  if (!fs.existsSync(standaloneDir)) return undefined;
+  const { dev, ino, birthtimeMs } = fs.statSync(standaloneDir);
+  return { dev, ino, birthtimeMs };
+}
+
+function downloadedStandaloneManifest(standaloneDir: string) {
+  const manifest: unknown = JSON.parse(
+    fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+  );
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Invalid downloaded standalone manifest');
+  }
+  const { name, version, target, runtime } = manifest as Record<
+    string,
+    unknown
+  >;
+  if (
+    name !== '@qwen-code/qwen-code' ||
+    typeof version !== 'string' ||
+    !semver.valid(version)
+  ) {
+    throw new Error('Invalid downloaded standalone name or version');
+  }
+  if (typeof target !== 'string') {
+    throw new Error(
+      'Downloaded standalone manifest requires an explicit target',
+    );
+  }
+  validateTarget(target);
+  if (runtime !== 'node' && runtime !== 'bun') {
+    throw new Error('Downloaded standalone manifest requires a valid runtime');
+  }
+  return { target, runtime, version };
+}
+
 export async function prepareStandaloneUpdate(
   standaloneDir: string,
   newVersion: string,
@@ -1159,7 +1195,8 @@ export async function prepareStandaloneUpdate(
 }> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = resolveUpdateBaseUrl();
-  const { target, runtime } = standaloneUpdateTarget(standaloneDir);
+  const { target, runtime, version } = standaloneUpdateTarget(standaloneDir);
+  const identity = standaloneDirectoryIdentity(standaloneDir);
   const filename = archiveFilename(target, runtime);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   const cleanup = () => {
@@ -1186,6 +1223,8 @@ export async function prepareStandaloneUpdate(
             directory,
             target,
             runtime,
+            version,
+            identity,
           });
         } finally {
           cleanup();
@@ -1209,7 +1248,13 @@ export async function performStandaloneUpdate(
 async function applyStandaloneUpdate(
   standaloneDir: string,
   newVersion: string,
-  preparedArchive?: { directory: string; target: string; runtime: JsRuntime },
+  preparedArchive?: {
+    directory: string;
+    target: string;
+    runtime: JsRuntime;
+    version?: string;
+    identity: ReturnType<typeof standaloneDirectoryIdentity>;
+  },
 ): Promise<'done' | 'deferred'> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = preparedArchive ? undefined : resolveUpdateBaseUrl();
@@ -1229,15 +1274,6 @@ async function applyStandaloneUpdate(
   const lockPath = path.join(parentDir, '.qwen-update.lock');
   if (!acquireLock(lockPath, standaloneDir)) {
     throw new Error('Another update is already in progress');
-  }
-
-  if (isFirstTimeMigration) {
-    try {
-      fs.mkdirSync(standaloneDir, { recursive: true });
-    } catch (err) {
-      releaseLock(lockPath);
-      throw err;
-    }
   }
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
@@ -1274,6 +1310,18 @@ async function applyStandaloneUpdate(
       ) {
         return 'done';
       }
+      const identity = standaloneDirectoryIdentity(standaloneDir);
+      if (
+        installed.version !== preparedArchive.version ||
+        identity?.dev !== preparedArchive.identity?.dev ||
+        identity?.ino !== preparedArchive.identity?.ino ||
+        identity?.birthtimeMs !== preparedArchive.identity?.birthtimeMs
+      ) {
+        throw new Error('The standalone installation changed during download');
+      }
+    }
+    if (isFirstTimeMigration) {
+      fs.mkdirSync(standaloneDir, { recursive: true });
     }
     const archivePath = path.join(tempDir, filename);
     if (!preparedArchive) {
@@ -1302,10 +1350,14 @@ async function applyStandaloneUpdate(
       );
     }
 
-    const extracted = standaloneUpdateTarget(newInstallDir);
-    if (extracted.target !== target || extracted.runtime !== runtime) {
+    const extracted = downloadedStandaloneManifest(newInstallDir);
+    if (
+      extracted.target !== target ||
+      extracted.runtime !== runtime ||
+      !semver.eq(extracted.version, newVersion)
+    ) {
       throw new Error(
-        'Downloaded archive does not match the installed target and runtime',
+        'Downloaded archive does not match the expected target, runtime and version',
       );
     }
     debugLogger.info('Running smoke test...');
