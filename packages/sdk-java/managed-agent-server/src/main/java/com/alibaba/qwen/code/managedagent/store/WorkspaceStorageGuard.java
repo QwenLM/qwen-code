@@ -726,7 +726,7 @@ public class WorkspaceStorageGuard {
         try {
             return identities.read(root);
         } catch (IOException | RuntimeException error) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 
