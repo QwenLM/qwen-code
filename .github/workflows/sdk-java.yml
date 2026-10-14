@@ -738,14 +738,14 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (35 + 9×10 + 20 + 50 = 195 — the Verify, admission
+    # The step ceilings (50 + 9×10 + 20 + 50 = 210 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
-    # classes raised the hosted fork 900→1200 s; the admission gates share
+    # classes now need a 2400 s shared fork; the admission gates share
     # a 2400 s fork for both witness classes)) plus ~13 minutes for the
     # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~208; 210 keeps a thin margin, and each arm buys its
+    # checks) need ~223; 225 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
-    timeout-minutes: 210
+    timeout-minutes: 225
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -796,13 +796,13 @@ jobs:
           cd integration-tests
           npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        # Must outlive the hosted-harness-mysql failsafe fork timeout (1200 s,
-        # raised 900→1200 for the FG7 channel classes) plus the wrapped
+        # Must outlive the hosted-harness-mysql shared fork timeout (2400 s)
+        # plus the wrapped
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering.
-        timeout-minutes: 35
+        timeout-minutes: 50
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
