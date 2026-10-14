@@ -3803,6 +3803,10 @@ export function registerHostedHarnessSessionRoutes(
           promptId: parked,
           brokerOptions,
           passive: false,
+          children: resident.childAgents,
+          teams: resident.teams,
+          messages: resident.messages,
+          commands: resident.commands,
           leaseAlreadyHeld: resident.runtimeLeaseHeld?.promptId === parked,
         });
         if (outcome.kind === 'declined') {
@@ -5084,6 +5088,10 @@ export function registerHostedHarnessSessionRoutes(
               promptId: unsettled,
               brokerOptions,
               passive: body?.['passiveManagedRuntimeRecovery'] === true,
+              children: session.childAgents,
+              teams: session.teams,
+              messages: session.messages,
+              commands: session.commands,
               onPassiveRuntimeAcquired: (runtimeSessionId) => {
                 session.runtimeLeaseHeld = {
                   promptId: unsettled,
