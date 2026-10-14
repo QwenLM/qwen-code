@@ -1368,7 +1368,7 @@ class Issue13183RegressionTest {
         dataSource.setURL("jdbc:h2:mem:issue13183-" + name + "-"
                 + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
-        JdbcRuntimeBrokerSchema.initialize(dataSource);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(dataSource);
         return dataSource;
     }
 
