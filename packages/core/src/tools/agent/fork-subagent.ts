@@ -429,7 +429,9 @@ export function buildChildMessage(
       ? `${ToolNames.EXEC} and ${ToolNames.TOOL_SEARCH}`
       : ToolNames.EXEC;
   const executionRestriction =
-    nestedExecutionAllowedTools !== undefined
+    nestedExecutionAllowedTools !== undefined &&
+    (nestedExecutionAllowedTools.length > 0 ||
+      (executionAllowedTools?.length ?? 0) > 0)
       ? `\n\nTOOL EXECUTION RESTRICTION:
 ${
   toolMode === ToolMode.CodeModeOnly

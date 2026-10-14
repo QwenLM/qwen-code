@@ -91,6 +91,46 @@ describe('Code-mode fork restriction matches declared call surfaces', () => {
     },
   );
 
+  it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+    'tells a fork whose bounds are both empty it may not execute any tools in %s',
+    (mode) => {
+      // fork_tools: [] resolves both bounds to empty and the gate denies
+      // exec there, so the message must not claim exec is callable.
+      const config = makeFakeConfig({ toolMode: mode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      const core = new AgentCore(
+        'deny-all-fork',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        {
+          tools: [ToolNames.EXEC, ToolNames.READ_FILE],
+          executionAllowedTools: [],
+          nestedExecutionAllowedTools: [],
+        },
+      );
+      expect(
+        (
+          core as unknown as { isToolExecutionAllowed: (t: string) => boolean }
+        ).isToolExecutionAllowed.call(core, ToolNames.EXEC),
+      ).toBe(false);
+
+      const message = buildChildMessage(
+        'Inspect the implementation',
+        [],
+        undefined,
+        [],
+        mode,
+      );
+      expect(message).toContain('You may not execute any tools');
+      expect(message).not.toContain('You may call exec');
+    },
+  );
+
   it('declares, executes, and names exec for a hybrid fork that omits it', async () => {
     // The fork shape agent.ts builds for fork_tools: ["read_file"] in hybrid
     // code mode: the parent's declared names stay as the tool list while the

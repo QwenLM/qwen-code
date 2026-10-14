@@ -14467,9 +14467,7 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(responseText()).toContain(
       'Load a skill by name using the tool interface declared in this session',
     );
-    expect(responseText()).not.toContain(
-      'pass its name to the top-level Skill tool',
-    );
+    expect(responseText()).not.toContain('via the Skill tool');
   });
 
   /** runWithSkillManager (App.tsx read) whose activation yields tsx-helper. */
