@@ -578,11 +578,12 @@ final class ManagedSchemaCatalog {
         List<String> result = new ArrayList<>();
         while (tokens.find()) {
             String token = tokens.group();
-            result.add(switch (lower(token)) {
+            String normalized = switch (lower(token)) {
                 case "false" -> "0";
                 case "true" -> "1";
                 default -> token.startsWith("'") ? token : lower(token);
-            });
+            };
+            result.add(normalized);
         }
         return result;
     }

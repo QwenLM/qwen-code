@@ -20,6 +20,13 @@ class BackfillWitnessesTest {
     @Test
     void brokerAndServerInitializeTheSameBaselineAndReplayWithoutAddingTables() {
         var source = source();
+        var migrations = Flyway.configure()
+                .dataSource(source)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .info()
+                .pending();
+        String expectedVersion = migrations[migrations.length - 1].getVersion().toString();
         ManagedSchema.initialize(source);
         activate(source);
         activate(source);
@@ -38,7 +45,7 @@ class BackfillWitnessesTest {
                                         "SELECT version FROM flyway_schema_history"
                                                 + " WHERE success = TRUE AND type = 'BASELINE'",
                                         String.class))
-                .isEqualTo("1");
+                .isEqualTo(expectedVersion);
     }
 
     @Test

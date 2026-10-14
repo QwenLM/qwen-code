@@ -1459,6 +1459,12 @@ describe('Hosted Harness no-tool session', () => {
 
   it('holds the fresh Session open until the never-started reconcile completes', async () => {
     neverStartedReconcile.fn.mockClear();
+    const entered = new Promise<void>((resolve) => {
+      neverStartedReconcile.fn.mockImplementationOnce((input) => {
+        resolve();
+        return input;
+      });
+    });
     let release!: () => void;
     neverStartedReconcile.gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -1469,14 +1475,18 @@ describe('Hosted Harness no-tool session', () => {
       return app;
     });
     try {
-      await vi.waitFor(() =>
-        expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1),
-      );
+      await Promise.race([entered, pending]);
+      expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1);
+      // Observe a premature HTTP response while reconciliation is still gated.
+      await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(resolve, 50)),
+      ]);
       expect(opened).toBe(false);
     } finally {
       release();
+      await pending;
     }
-    await pending;
     expect(opened).toBe(true);
   });
 
