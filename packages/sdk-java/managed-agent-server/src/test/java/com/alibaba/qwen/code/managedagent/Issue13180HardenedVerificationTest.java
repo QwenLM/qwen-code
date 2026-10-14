@@ -206,7 +206,7 @@ class Issue13180HardenedVerificationTest {
 
         // The durable creator record must exist (V40 creator_actor_key).
         byte[] creator = jdbc.queryForObject(
-                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+                "SELECT creator_actor_key FROM ma_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 byte[].class, tenant, session);
         assertThat(creator).as("creator_actor_key recorded").isNotNull();
@@ -215,10 +215,11 @@ class Issue13180HardenedVerificationTest {
                 + UUID.randomUUID().toString().replace("-", "");
         long nowMillis = System.currentTimeMillis();
         jdbc.update(
-                "INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, ?)",
-                tenant, session, actionId,
+                "INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, session_id,"
+                        + " action_id, record_id, action_version, domain, revision, state, options_json, created_at)"
+                        + " VALUES ('ACTION', ?, ?, ?, ?, ?, ?, 1, 'approval', 1, 'requested', ?, ?)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(tenant, session),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session, actionId), tenant, session, actionId, actionId,
                 "{\"v\":1,\"requestId\":\"" + actionId + "\","
                         + "\"turnId\":\"turn-verify\","
                         + "\"functionCallId\":\"call-verify\","

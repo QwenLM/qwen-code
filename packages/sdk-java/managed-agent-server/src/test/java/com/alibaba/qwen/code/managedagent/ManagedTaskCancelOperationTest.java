@@ -30,7 +30,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,6 +53,7 @@ class ManagedTaskCancelOperationTest {
     private static final String RUNNING_CHILD = "task_" + "a".repeat(64);
     private static final String SETTLED_CHILD = "task_" + "b".repeat(64);
     private static final String MONITOR = "task_" + "c".repeat(64);
+    private static final String WORKFLOW = "task_" + "e".repeat(64);
     private final AtomicLong now = new AtomicLong(1_000_000);
     private ManagedAgentStore store;
     private JdbcTemplate jdbc;
@@ -61,9 +64,8 @@ class ManagedTaskCancelOperationTest {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:task-cancel-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         Clock clock = new Clock() {
             @Override
             public ZoneId getZone() {
@@ -85,11 +87,8 @@ class ManagedTaskCancelOperationTest {
         store = new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {
                 }, new ManagedWorkspaceRegistry(jdbc), properties);
-        sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                + " session_id, agent_id, status, created_at, updated_at)"
-                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
-                sessionId);
+        sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+                null, null, List.of(), null).sessionId();
         task(RUNNING_CHILD, "child_run", "child_agent", "running");
         task(SETTLED_CHILD, "child_run", "child_agent", "completed");
         task(MONITOR, "monitor_run", "monitor", "running");
@@ -126,16 +125,16 @@ class ManagedTaskCancelOperationTest {
         OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
                 .operation();
         settle(admitted, TaskCancelOutcome.completed());
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+        jdbc.update("UPDATE ma_session_record SET"
                 + " task_state = 'cancelled'");
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'");
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING'");
         OperationAdmission replay = begin("key-1", "digest-1",
                 RUNNING_CHILD);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().state()).isEqualTo("COMPLETED");
         refused(() -> begin("key-2", "digest-2", RUNNING_CHILD),
                 HttpStatus.CONFLICT, "session_not_active");
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED'");
+        jdbc.update("UPDATE ma_session SET status = 'DELETED'");
         refused(() -> begin("key-2", "digest-2", RUNNING_CHILD),
                 HttpStatus.NOT_FOUND, "session_not_found");
     }
@@ -149,30 +148,66 @@ class ManagedTaskCancelOperationTest {
         refused(() -> begin("key-3", "digest-3", "task_" + "d".repeat(64)),
                 HttpStatus.NOT_FOUND, "task_not_found");
         for (String state : new String[] {"pending", "waiting", "degraded"}) {
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+            jdbc.update("UPDATE ma_session_record SET"
                     + " task_state = ? WHERE record_key = ?", state,
                     "a".repeat(64));
             OperationRecord admitted = begin("key-" + state, "digest-" + state,
                     RUNNING_CHILD).operation();
             settle(admitted, TaskCancelOutcome.completed());
         }
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+        jdbc.update("UPDATE ma_session_record SET"
                 + " task_state = 'recovery_blocked' WHERE record_key = ?",
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
     }
 
+    // H4f-b: a workflow child_run takes the same admission rule as a child
+    // agent's — the cancellable states admit, terminal and
+    // recovery_blocked states refuse, and the retained key replays.
+    @Test
+    void aWorkflowTaskAdmitsCancelUnderTheSameRule() {
+        task(WORKFLOW, "child_run", "workflow", "running");
+        OperationAdmission first = begin("wf-key-1", "wf-digest-1",
+                WORKFLOW);
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.operation().kind()).isEqualTo(
+                OperationKind.TASK_CANCEL);
+        assertThat(first.operation().taskId()).isEqualTo(WORKFLOW);
+        assertThat(begin("wf-key-1", "wf-digest-1", WORKFLOW).replayed())
+                .isTrue();
+        refused(() -> begin("wf-key-1", "wf-digest-2", WORKFLOW),
+                HttpStatus.CONFLICT, "idempotency_conflict");
+        settle(first.operation(), TaskCancelOutcome.completed());
+        for (String state : new String[] {"pending", "waiting",
+                "degraded"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "e".repeat(64));
+            settle(begin("wf-key-" + state, "wf-digest-" + state, WORKFLOW)
+                    .operation(), TaskCancelOutcome.completed());
+        }
+        for (String state : new String[] {"completed", "failed",
+                "cancelled", "recovery_blocked"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "e".repeat(64));
+            refused(() -> begin("wf-key-" + state, "wf-digest-" + state,
+                    WORKFLOW), HttpStatus.CONFLICT,
+                    "task_action_unavailable");
+        }
+    }
+
     // A bound Session under storage migration admits no new cancel, as
     // its sibling bound admissions refuse; a retained key still replays.
     @Test
     void theMigrationFenceRefusesANewCancelButNotItsReplay() {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES (?,"
                 + " 'ws', 1, 'storage-1', 'ws', 'config', 'policy',"
                 + " 'ACTIVE')", TENANT);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES (?, 'ws', ?,"
                 + " 'OPERATOR')", TENANT,
                 "actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -189,9 +224,9 @@ class ManagedTaskCancelOperationTest {
         OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
                 .operation();
         settle(admitted, TaskCancelOutcome.completed());
-        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?,"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?,"
                 + " 'storage-1', ?)",
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
+                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage-1"), JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
                 JdbcRuntimeBindingRepository.storageFenceKey("storage-1"),
                 TENANT, UUID.randomUUID().toString());
         assertThat(begin("key-1", "digest-1", RUNNING_CHILD).replayed())
@@ -267,7 +302,7 @@ class ManagedTaskCancelOperationTest {
                 .isEmpty();
         assertThat(store.findDeliverableTaskCancels(10)).isEmpty();
         assertThat(store.findParkedTaskCancels(10)).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET available_at = 0");
+        jdbc.update("UPDATE ma_operation SET available_at = 0");
         assertThat(store.findParkedTaskCancels(10))
                 .extracting(OperationTarget::operationId)
                 .containsExactly(admitted.operationId());
@@ -330,7 +365,7 @@ class ManagedTaskCancelOperationTest {
         // the per-second scans walk never holds it, however far the clock
         // moves.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_operation WHERE delivery_state = 'BLOCKED'"
+                + " ma_operation WHERE delivery_state = 'BLOCKED'"
                 + " AND available_at <= ?", Integer.class,
                 Long.MAX_VALUE - 1)).isZero();
         assertThat(store.claimOperation(TENANT, sessionId,
@@ -350,7 +385,7 @@ class ManagedTaskCancelOperationTest {
     void onlyAnEffectiveCancelIsTheStopsEvidence() {
         for (String[] turn : new String[][] {{"turn-live", "RUNNING"},
                 {"turn-ended", "FAILED"}}) {
-            jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+            jdbc.update("INSERT INTO ma_turn (tenant_id,"
                     + " session_id, turn_id, prompt_id, input_json,"
                     + " payload_digest, status, created_at, updated_at)"
                     + " VALUES (?, ?, ?, ?, '[]', 'digest', ?, 0, 0)", TENANT,
@@ -382,7 +417,7 @@ class ManagedTaskCancelOperationTest {
         String recordKey = ManagedExtensionProjection.recordKey(sessionId,
                 "child_run", "run-stop");
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
@@ -393,15 +428,15 @@ class ManagedTaskCancelOperationTest {
         byte[] body = ("{\"kind\":\"child_agent\",\"stopRequested\":true,"
                 + "\"run\":{\"state\":\"running\"}}")
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource"
+                        + " (resource_key, session_scope_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, created_at) VALUES (?,"
-                        + " ?, 'workspace', ?, 'resource-stop',"
+                        + " ?, ?, 'workspace', ?, 'resource-stop',"
                         + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                         + " 'command', 'REFERENCED', CURRENT_TIMESTAMP)",
-                scope, TENANT, sessionId, body.length, "c".repeat(64), body);
+                ManagedSchemaKeys.key(scope, "resource-stop"), scope, TENANT, sessionId, body.length, "c".repeat(64), body);
         ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
         assertThat(relay.stopState(TENANT, sessionId, "run-stop"))
                 .isEqualTo(new ChildResultRelayStore.StopState(true, false));
@@ -412,7 +447,7 @@ class ManagedTaskCancelOperationTest {
     private void task(String taskId, String domain, String kind,
             String state) {
         String recordKey = taskId.substring("task_".length());
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"

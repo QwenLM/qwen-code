@@ -6,7 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,12 +40,12 @@ class ManagedWorkspaceRolesMySqlIT {
         }
         String user = System.getProperty("mysql.user");
         String password = System.getProperty("mysql.password", "");
-        admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        admin = new ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
         schema = "workspace_roles_" + UUID.randomUUID().toString().replace("-", "");
         admin.execute("CREATE DATABASE " + schema);
         data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-        jdbc = new JdbcTemplate(data);
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+        jdbc = new ManagedSchemaJdbcTemplate(data);
+        ManagedSchema.initialize(data);
     }
 
     @AfterEach
@@ -56,34 +57,34 @@ class ManagedWorkspaceRolesMySqlIT {
 
     @Test
     void roleCheckStoresOnlyByteExactEnumNames() {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 1, 'storage', 'Workspace',"
                 + " 'config', 'policy', 'ACTIVE')");
         for (String canonical : List.of("READER", "OPERATOR", "OWNER")) {
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                     + " workspace_id, actor_id, role) VALUES ('tenant',"
                     + " 'workspace', ?, ?)",
                     ("actor-" + canonical).getBytes(StandardCharsets.UTF_8),
                     canonical);
         }
         assertThat(jdbc.queryForList("SELECT DISTINCT role FROM"
-                + " managed_workspace_access", String.class))
+                + " ma_workspace_access", String.class))
                 .containsExactlyInAnyOrder("READER", "OPERATOR", "OWNER");
         for (String rejected : List.of("NONE", "SPECTATOR", "reader",
                 "READER ", "OPERATOR ", "OWNER ", "REA DER")) {
             assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                    + " managed_workspace_access (tenant_id, workspace_id,"
+                    + " ma_workspace_access (tenant_id, workspace_id,"
                     + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
                     + " ?)", "padded".getBytes(StandardCharsets.UTF_8),
                     rejected))
                     .as("role %s must be rejected", rejected)
                     .isInstanceOf(DataAccessException.class)
-                    .hasMessageContaining("managed_workspace_access_role");
+                    .hasMessageContaining("ck_ma_access_role");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_workspace_access WHERE actor_id = ?",
+                + " ma_workspace_access WHERE actor_id = ?",
                 Integer.class, "padded".getBytes(StandardCharsets.UTF_8)))
                 .isZero();
     }
