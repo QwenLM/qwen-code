@@ -13398,7 +13398,11 @@ export function createSessionControlPlane(
         const groups = new Map<ChannelInfo, string[]>();
         for (const entry of sessions) {
           const info = channelInfoForEntry(entry);
-          if (!info || info.harness.isDying) {
+          if (
+            isClosingOrAuthorizingClose(entry) ||
+            !info ||
+            info.harness.isDying
+          ) {
             result.sessionsFailed += 1;
             continue;
           }
@@ -13434,6 +13438,19 @@ export function createSessionControlPlane(
           result.configsFailed += counts.configsFailed ?? 0;
         });
         return result as T;
+      }
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh &&
+        liveChannelInfos().length === 0
+      ) {
+        assertRuntimeNotStopping();
+        return {
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+          configsRefreshed: 0,
+          configsFailed: 0,
+          reason: params?.['reason'] ?? 'all',
+        } as T;
       }
       const startsWorkspaceChannel =
         method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart;

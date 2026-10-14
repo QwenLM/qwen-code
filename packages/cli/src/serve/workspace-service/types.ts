@@ -289,7 +289,7 @@ export interface DaemonWorkspaceService {
     sessionIds?: readonly string[],
   ): Promise<ServeWorkspaceSkillsRefreshResult>;
 
-  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
+  /** Refresh selected sessions, or all active sessions when omitted. */
   refreshExtensionsForAllSessions(sessionIds?: readonly string[]): Promise<{
     refreshed: number;
     failed: number;

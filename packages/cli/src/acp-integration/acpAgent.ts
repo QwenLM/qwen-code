@@ -15108,9 +15108,11 @@ class QwenAgent implements Agent {
         const selectedSessions =
           rawSessionIds === undefined
             ? undefined
-            : [...new Set(rawSessionIds as string[])].map((id) =>
-                this.sessionOrThrow(id),
-              );
+            : [
+                ...new Set(
+                  (rawSessionIds as string[]).map(normalizeSessionIdForLookup),
+                ),
+              ].map((id) => this.sessionOrThrow(id));
         if (selectedSessions?.length === 0) {
           return {
             sessionsRefreshed: 0,

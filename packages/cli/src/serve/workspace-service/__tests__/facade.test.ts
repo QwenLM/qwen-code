@@ -3478,33 +3478,34 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('refreshWorkspaceSkills', () => {
-    it.each([undefined, [], ['session-1']])(
-      'passes selection %j without changing the default ACP refresh',
-      async (sessionIds) => {
-        const result = {
-          sessionsRefreshed: 1,
-          sessionsFailed: 0,
-          configsRefreshed: 1,
-          configsFailed: 0,
+    it.each([
+      { name: 'omitted', sessionIds: undefined },
+      { name: 'empty', sessionIds: [] },
+      { name: 'selected', sessionIds: ['session-1'] },
+    ])('passes $name selection to the ACP bridge', async ({ sessionIds }) => {
+      const result = {
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+        configsRefreshed: 1,
+        configsFailed: 0,
+        reason: 'all',
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(result);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+      await expect(
+        svc.refreshWorkspaceSkills(makeCtx(), sessionIds),
+      ).resolves.toEqual(result);
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/skills/refresh',
+        {
+          cwd: '/workspace',
           reason: 'all',
-        };
-        const invokeWorkspaceCommand = vi.fn().mockResolvedValue(result);
-        const svc = createDaemonWorkspaceService(
-          makeDeps({ invokeWorkspaceCommand }),
-        );
-        await expect(
-          svc.refreshWorkspaceSkills(makeCtx(), sessionIds),
-        ).resolves.toEqual(result);
-        expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
-          'qwen/control/workspace/skills/refresh',
-          {
-            cwd: '/workspace',
-            reason: 'all',
-            ...(sessionIds !== undefined ? { sessionIds } : {}),
-          },
-        );
-      },
-    );
+          ...(sessionIds !== undefined ? { sessionIds } : {}),
+        },
+      );
+    });
   });
 
   describe('refreshExtensionsForAllSessions', () => {

@@ -5,6 +5,7 @@ import express, {
 } from 'express';
 import request from 'supertest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { BridgeChannelClosedError } from '@qwen-code/acp-bridge/status';
 import { describe, expect, it, vi } from 'vitest';
 import { sendBridgeError } from '../server/error-response.js';
 import {
@@ -235,6 +236,20 @@ describe('workspace Skill management routes', () => {
     '/workspace/skills/refresh',
     '/workspaces/workspace-1/skills/refresh',
   ])('explicit refresh at %s', (path) => {
+    it('invalidates config status when the refresh loses its channel', async () => {
+      const h = createHarness();
+      h.refreshWorkspaceSkills.mockRejectedValue(
+        new BridgeChannelClosedError('mid-request'),
+      );
+
+      const response = await request(h.app).post(path).send({});
+
+      expect(response.status).toBe(500);
+      expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledExactlyOnceWith(
+        '/workspace',
+      );
+    });
+
     it.each([undefined, [], ['session-1', 'session-1']])(
       'passes the selection %j to the bound workspace service',
       async (sessionIds) => {

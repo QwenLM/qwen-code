@@ -7699,7 +7699,17 @@ describe('DaemonClient', () => {
       await client
         .workspaceById('workspace/id')
         .refreshExtensionRuntime('client-2', {});
+      await client.refreshExtensions('client-3', { sessionIds: undefined });
+      await client
+        .workspaceById('workspace/id')
+        .refreshExtensionRuntime('client-4', { sessionIds: undefined });
       expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['POST', 'http://daemon/workspace/extensions/refresh', '{}'],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/extensions/refresh',
+          '{}',
+        ],
         ['POST', 'http://daemon/workspace/extensions/refresh', '{}'],
         [
           'POST',

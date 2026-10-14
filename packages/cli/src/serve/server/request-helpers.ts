@@ -147,7 +147,7 @@ export function parseRefreshSessionIds(
     });
     return undefined;
   }
-  const selected = [...new Set(sessionIds)];
+  const selected = [...new Set(sessionIds.map(normalizeSessionIdForLookup))];
   for (const sessionId of selected) bridge.getSessionSummary(sessionId);
   return { sessionIds: selected };
 }

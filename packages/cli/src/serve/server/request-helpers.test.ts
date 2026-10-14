@@ -6,7 +6,7 @@
 
 import type { Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
-import { requireSessionId } from './request-helpers.js';
+import { parseRefreshSessionIds, requireSessionId } from './request-helpers.js';
 
 function mockRes(): { res: Response; status: ReturnType<typeof vi.fn> } {
   const status = vi.fn().mockReturnValue({ json: vi.fn() });
@@ -24,5 +24,35 @@ describe('requireSessionId', () => {
       '550e8400-e29b-41d4-a716-446655440000',
     );
     expect(status).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseRefreshSessionIds', () => {
+  it('normalizes caller UUIDs before deduplication and lookup', () => {
+    const { res, status } = mockRes();
+    const getSessionSummary = vi.fn();
+    const id = '550e8400-e29b-41d4-a716-446655440000';
+
+    expect(
+      parseRefreshSessionIds({ sessionIds: [id.toUpperCase(), id] }, res, {
+        getSessionSummary,
+      }),
+    ).toEqual({ sessionIds: [id] });
+    expect(getSessionSummary).toHaveBeenCalledExactlyOnceWith(id);
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('preserves case in legacy and internal session IDs', () => {
+    const { res } = mockRes();
+    const getSessionSummary = vi.fn();
+    const sessionIds = [
+      'Legacy-Session',
+      '550e8400-e29b-41d4-a716-446655440000-agent-MyAgent',
+    ];
+
+    expect(
+      parseRefreshSessionIds({ sessionIds }, res, { getSessionSummary }),
+    ).toEqual({ sessionIds });
+    expect(getSessionSummary.mock.calls).toEqual(sessionIds.map((id) => [id]));
   });
 });

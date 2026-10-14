@@ -35548,6 +35548,7 @@ describe('sessionLanguage multi-session propagation', () => {
   });
 
   it('refreshes only selected skill sessions after validating the entire selection', async () => {
+    const selectedId = '550e8400-e29b-41d4-a716-446655440000';
     const settings = {
       merged: {},
       reloadScopeFromDisk: vi.fn(),
@@ -35561,7 +35562,7 @@ describe('sessionLanguage multi-session propagation', () => {
         .fn()
         .mockReturnValue({ refreshCache: bootstrapRefresh }),
     });
-    const states = ['selected', 'omitted'].map((id) => {
+    const states = [selectedId, 'omitted'].map((id) => {
       const refreshCache = vi.fn().mockResolvedValue(undefined);
       return {
         id,
@@ -35625,14 +35626,14 @@ describe('sessionLanguage multi-session propagation', () => {
         );
       }
       await expect(
-        agent.extMethod(method, { sessionIds: ['selected', 'missing'] }),
+        agent.extMethod(method, { sessionIds: [selectedId, 'missing'] }),
       ).rejects.toThrow('Session not found for id: missing');
       expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
       expect(bootstrapRefresh).not.toHaveBeenCalled();
       await expect(
         agent.extMethod(method, {
           reason: 'all',
-          sessionIds: ['selected', 'selected'],
+          sessionIds: [selectedId, selectedId.toUpperCase()],
         }),
       ).resolves.toEqual({
         sessionsRefreshed: 1,

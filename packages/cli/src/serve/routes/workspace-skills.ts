@@ -500,6 +500,7 @@ export function registerWorkspaceSkillsRoutes(
         deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
         res.status(200).json(result);
       } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
         deps.sendBridgeError(res, error, { route: refreshRoute });
       }
     },
@@ -677,6 +678,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
         invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (error) {
+        invalidateConfigStatus(runtime);
         deps.sendBridgeError(res, error, { route: refreshRoute });
       }
     },
