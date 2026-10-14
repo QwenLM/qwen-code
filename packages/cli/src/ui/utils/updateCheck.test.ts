@@ -557,6 +557,22 @@ describe('classifyUpdateCheckError', () => {
     );
   });
 
+  it('classifies native fetch TimeoutError DOMExceptions as timeout', () => {
+    expect(
+      classifyUpdateCheckError(
+        new DOMException(
+          'The operation was aborted due to timeout',
+          'TimeoutError',
+        ),
+      ),
+    ).toBe('timeout');
+    expect(
+      classifyUpdateCheckError(
+        new DOMException('The operation was aborted', 'AbortError'),
+      ),
+    ).toBe('registry');
+  });
+
   it('classifies execFile timeouts as timeout', () => {
     const error = Object.assign(new Error('Command failed: npm view'), {
       code: null,

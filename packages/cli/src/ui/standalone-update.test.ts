@@ -453,6 +453,7 @@ describe('standalone-update', () => {
         rawManifest?: string;
         target?: string;
         interpreterIdentity?: string;
+        interpreterPath?: string;
       } = {},
     ) {
       const fixtureTarget = options.target ?? 'linux-x64';
@@ -500,6 +501,27 @@ describe('standalone-update', () => {
             options.runtime === 'bun' ? 'cli-entry.js' : 'cli.js',
           ),
           '',
+        );
+      }
+      if (options.interpreterPath) {
+        const runtime = options.runtime ?? 'node';
+        const interpreter = path.join(
+          fixture,
+          'qwen-code',
+          runtime,
+          'bin',
+          runtime,
+        );
+        fs.copyFileSync(options.interpreterPath, interpreter);
+        fs.chmodSync(interpreter, 0o755);
+        fs.writeFileSync(
+          path.join(
+            fixture,
+            'qwen-code',
+            'lib',
+            runtime === 'bun' ? 'cli-entry.js' : 'cli.js',
+          ),
+          'console.log("1.2.3");',
         );
       }
       const archivePath = path.join(tempDir, 'release.tar.gz');
@@ -550,6 +572,65 @@ describe('standalone-update', () => {
       },
     );
 
+    it.skipIf(process.platform === 'win32').each(['direct', 'prepared'])(
+      'rejects a real host interpreter disguised as the other runtime (%s)',
+      async (mode) => {
+        const runtime = process.versions['bun'] ? 'node' : 'bun';
+        const target = `${os.platform()}-${os.arch()}`;
+        const original = JSON.stringify({ target, runtime, version: '0.1.0' });
+        fs.writeFileSync(path.join(standaloneDir, 'manifest.json'), original);
+        fs.writeFileSync(
+          path.join(standaloneDir, 'sentinel'),
+          'active installation',
+        );
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'previous rollback');
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
+        await serveArchive({
+          runnable: true,
+          runtime,
+          target,
+          interpreterPath: process.execPath,
+        });
+        const pending =
+          mode === 'prepared'
+            ? await prepareStandaloneUpdate(standaloneDir, '1.2.3')
+            : undefined;
+        if (pending) mockFetch.mockRejectedValue(new Error('offline'));
+        const fetchCount = mockFetch.mock.calls.length;
+        await expect(
+          pending
+            ? pending.activate()
+            : performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'interpreter identity does not match the expected runtime and target',
+        );
+        if (pending) expect(mockFetch).toHaveBeenCalledTimes(fetchCount);
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(original);
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'sentinel'), 'utf8'),
+        ).toBe('active installation');
+        expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+          'previous rollback',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+          false,
+        );
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .filter(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
+        ).toEqual([]);
+      },
+    );
+
     it.skipIf(process.platform === 'win32').each([
       ['runtime', { runtime: 'node', platform: 'linux', arch: 'x64' }],
       ['platform', { runtime: 'bun', platform: 'darwin', arch: 'x64' }],
@@ -595,14 +676,19 @@ describe('standalone-update', () => {
         expect(
           fs
             .readdirSync(tempDir)
-            .some((entry) => entry.startsWith('.qwen-code-update-')),
+            .some(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
         ).toBe(false);
       },
     );
 
-    it.each(['version', 'directory'])(
+    it.skipIf(process.platform === 'win32').each(['version', 'directory'])(
       'rejects a changed pending installation identity (%s) without touching its backup',
       async (change) => {
+        for (const key of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(key, tempDir);
         vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
         await serveArchive({ runnable: true });
         const backup = `${standaloneDir}.old`;
@@ -644,36 +730,69 @@ describe('standalone-update', () => {
         expect(
           fs
             .readdirSync(tempDir)
-            .some((entry) => entry.startsWith('.qwen-code-update-')),
+            .some(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
         ).toBe(false);
       },
     );
 
-    it.each([
-      ['missing target', { target: undefined }],
-      ['null target', { target: null }],
-      ['unknown target', { target: 'plan9-x64' }],
-      ['wrong target', { target: 'linux-arm64' }],
-      ['missing runtime', { runtime: undefined }],
-      ['null runtime', { runtime: null }],
-      ['unknown runtime', { runtime: 'deno' }],
-      ['wrong runtime', { runtime: 'bun' }],
-      ['missing name', { name: undefined }],
-      ['wrong name', { name: 'unrelated' }],
-      ['missing version', { version: undefined }],
-      ['invalid version', { version: 'invalid' }],
-      ['wrong version', { version: '1.2.4' }],
+    it.skipIf(process.platform === 'win32').each([
+      ['missing target', { target: undefined }, 'requires an explicit target'],
+      ['null target', { target: null }, 'requires an explicit target'],
+      ['unknown target', { target: 'plan9-x64' }, 'Unknown target'],
+      [
+        'wrong target',
+        { target: 'linux-arm64' },
+        'does not match the expected target, runtime and version',
+      ],
+      ['missing runtime', { runtime: undefined }, 'requires a valid runtime'],
+      ['null runtime', { runtime: null }, 'requires a valid runtime'],
+      ['unknown runtime', { runtime: 'deno' }, 'requires a valid runtime'],
+      [
+        'wrong runtime',
+        { runtime: 'bun' },
+        'does not match the expected target, runtime and version',
+      ],
+      [
+        'missing name',
+        { name: undefined },
+        'Invalid downloaded standalone name or version',
+      ],
+      [
+        'wrong name',
+        { name: 'unrelated' },
+        'Invalid downloaded standalone name or version',
+      ],
+      [
+        'missing version',
+        { version: undefined },
+        'Invalid downloaded standalone name or version',
+      ],
+      [
+        'invalid version',
+        { version: 'invalid' },
+        'Invalid downloaded standalone name or version',
+      ],
+      [
+        'wrong version',
+        { version: '1.2.4' },
+        'does not match the expected target, runtime and version',
+      ],
     ] as const)(
       'rejects a downloaded manifest with %s',
-      async (_name, manifest) => {
+      async (_name, manifest, error) => {
+        for (const key of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(key, tempDir);
         vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-        await serveArchive({ manifest });
+        await serveArchive({ manifest, runnable: true });
         const backup = `${standaloneDir}.old`;
         fs.mkdirSync(backup);
         fs.writeFileSync(path.join(backup, 'sentinel'), 'previous rollback');
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
-        ).rejects.toThrow();
+        ).rejects.toThrow(error);
         expect(
           fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
         ).toBe(originalManifest);
@@ -686,7 +805,11 @@ describe('standalone-update', () => {
         expect(
           fs
             .readdirSync(tempDir)
-            .some((entry) => entry.startsWith('.qwen-code-update-')),
+            .some(
+              (entry) =>
+                entry.startsWith('.qwen-code-update-') ||
+                entry.startsWith('qwen-code-update-'),
+            ),
         ).toBe(false);
       },
     );

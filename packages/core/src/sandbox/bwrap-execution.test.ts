@@ -152,7 +152,8 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   ) => (await run(bwrapPolicy, launch)).result;
 
   it('builds a literal launch, transports the payload env privately, and prepares writable masks', async () => {
-    const interpreter = path.join(installation, 'private-bun');
+    const interpreter = path.join(installation, 'bun', 'bin', 'bun');
+    mkdirSync(path.dirname(interpreter), { recursive: true });
     writeFileSync(interpreter, 'fixture');
     vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
       command: interpreter,
@@ -201,6 +202,28 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.isAbsolute(scratch)).toBe(true);
     expect(existsSync(scratch)).toBe(false);
+    expect(readdirSync(state)).toEqual([]);
+  });
+
+  it('protects the private interpreter directory independently of bwrap and the relay', async () => {
+    const interpreter = path.join(root, 'private-runtime', 'bun', 'bin', 'bun');
+    mkdirSync(path.dirname(interpreter), { recursive: true });
+    writeFileSync(interpreter, 'fixture');
+    vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
+      command: interpreter,
+      runtime: 'bun',
+    });
+    const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
+    await expect(
+      run(
+        { ...policy(), workspace: path.dirname(interpreter) },
+        {
+          ...payload(),
+          cwd: path.dirname(interpreter),
+        },
+      ),
+    ).rejects.toThrow('Writable directory overlaps a protected root');
+    expect(launch).not.toHaveBeenCalled();
     expect(readdirSync(state)).toEqual([]);
   });
 
