@@ -23,9 +23,10 @@ import {
 } from './interactive-session.js';
 
 // A model reply to a workflow completion is a full roundtrip that starts only
-// after the run settles and the notification drains; the loaded
-// sandbox:docker shard stalled that window past the old 30s budget (#14191) —
-// the same loaded-runner lesson as the cron suite's #10904.
+// after the run settles and the notification drains, which the previous 30s
+// budget was too tight for on a loaded runner (cf. the cron suite's #10904).
+// NOTE: this is not what failed in #14191 — that was a docker boot stall in
+// InteractiveSession.start, upstream of these waits.
 const MODEL_REPLY_SCREEN_TIMEOUT = 120_000;
 
 // OpenTUI's schedule_tool handler is a separate, unwired entry point.
@@ -101,7 +102,8 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           'SET_TIMEOUT_12176',
         ],
       },
-    ])('delivers $marker once', async (testCase) => {
+      // 90s ready prompt + 90s /about deadline + 2 x 120s reply waits.
+    ])('delivers $marker once', { timeout: 420_000 }, async (testCase) => {
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
