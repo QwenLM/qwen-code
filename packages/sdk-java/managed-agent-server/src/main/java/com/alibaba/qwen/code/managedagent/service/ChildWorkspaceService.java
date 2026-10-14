@@ -178,19 +178,9 @@ public class ChildWorkspaceService {
     @Scheduled(scheduler = "childWorkspaceScheduler", fixedDelayString =
             "${qwen.managed-agent.child-workspace.scan-delay:2s}")
     public void scan() {
-        // First, and on every host: a hold whose claim expired belongs to
-        // no step, and nothing else frees its storage. It needs no Git, so
-        // turning the capability off must not strand it, and it must not
-        // wait behind the steps below. Where steps run, a crashed step's
-        // row is resumed below and its new claimant takes the hold over,
-        // so no tool turn slips in between; that hold is kept. A host that
-        // runs no steps leaves it to one that does for a grace period.
+        // A maintenance claim expiry cannot prove that its Git process stopped.
+        // Physical holds are released only by the original generation's step.
         boolean capable = warmer.childWorkspaces() != null;
-        int released = leases.releaseStaleMaintenance(clock.get(),
-                capable ? Long.MAX_VALUE : RESUMABLE_GRACE_MS);
-        if (released > 0) {
-            LOG.warn("released {} child workspace maintenance hold(s) no step owned", released);
-        }
         if (!capable) {
             return;
         }
@@ -516,11 +506,17 @@ public class ChildWorkspaceService {
                     claimed.workspaceGeneration(), claimed.storageId(), ".",
                     WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
             Path root = provider.storageRoot(storage);
-            leases.holdForMaintenance(storage, claimed.childWorkspaceId(), claimed.claimGeneration());
+            String execution = leases.holdForMaintenance(storage, claimed.childWorkspaceId(), claimed.claimGeneration());
+            boolean stopped = true;
             try {
                 return ChildWorktreeGit.whileLive(live::get, () -> work.apply(root));
+            } catch (ChildWorkspaceException error) {
+                stopped = !ChildWorkspaceException.STOP_UNVERIFIED.equals(error.code());
+                throw error;
             } finally {
-                leases.releaseMaintenance(storage, claimed.childWorkspaceId(), claimed.claimGeneration());
+                if (stopped) {
+                    leases.releaseMaintenance(storage, claimed.childWorkspaceId(), claimed.claimGeneration(), execution);
+                }
             }
         } finally {
             renewal.cancel(false);

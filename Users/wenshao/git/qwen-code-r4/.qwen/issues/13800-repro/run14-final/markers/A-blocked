@@ -1,0 +1,10 @@
+{
+  "sessionId": "513cac04-8f8c-4ebc-8286-21a10114edcb",
+  "promptId": "cd73c7bc-03ee-4d44-b576-04924fba8cc3",
+  "status": {
+    "sessionId": "513cac04-8f8c-4ebc-8286-21a10114edcb",
+    "hasActivePrompt": false,
+    "recoveryBlocked": true
+  },
+  "terminal": 0
+}

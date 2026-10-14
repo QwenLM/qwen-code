@@ -75,7 +75,7 @@ class ManagedSessionStoreCredentialTest {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:credential-check;MODE=MySQL");
         ManagedSessionStore store = new ManagedSessionStore(
-                new JdbcTemplate(dataSource));
+                new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource));
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey(KEY);
         store.setCredentials(new WriterCredentialPolicy(properties));
@@ -96,9 +96,9 @@ class ManagedSessionStoreCredentialTest {
         dataSource.setURL("jdbc:h2:mem:credential-accept;MODE=MySQL;"
                 + "DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
+                .locations("classpath:db/managed-schema").load().migrate();
         ManagedSessionStore store = new ManagedSessionStore(
-                new JdbcTemplate(dataSource));
+                new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource));
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey(KEY);
         WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);

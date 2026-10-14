@@ -1,0 +1,42 @@
+qwen serve: --token is visible in the process command line; prefer the QWEN_SERVER_TOKEN env var for any non-trivial deployment.
+2026-10-10T04:50:45.519Z [INFO] [DAEMON] projectMemoryScope=workspace projectMemoryScopeRaw=workspace projectMemoryScopeSource=default project memory scope resolved
+qwen serve: daemon log → /var/folders/9f/t1s7ryjj12l72zvr529v2cw40000gn/T/qwen-repro-13800-Kfv9Rh/runtime/debug/daemon/daemon.log
+qwen serve listening on http://127.0.0.1:65395 (mode=http-bridge, workspace=/private/var/folders/9f/t1s7ryjj12l72zvr529v2cw40000gn/T/qwen-repro-13800-Kfv9Rh)
+qwen serve: bound to workspace "/private/var/folders/9f/t1s7ryjj12l72zvr529v2cw40000gn/T/qwen-repro-13800-Kfv9Rh"
+qwen serve: startup timing: processToListenMs=459 runQwenServeToListenMs=21
+qwen serve: --require-auth enabled (bearer token mandatory on every route, including loopback /health).
+qwen serve: managed scratch workspaces are unavailable: Managed scratch root conflicts with a startup workspace
+2026-10-10T04:50:45.635Z [INFO] [DAEMON] ideEnvPresent=false primary=/private/var/folders/9f/t1s7ryjj12l72zvr529v2cw40000gn/T/qwen-repro-13800-Kfv9Rh secondary= daemon workspace roots initialized
+qwen serve: session reaper started (interval 60000ms, idle threshold 1800000ms)
+2026-10-10T04:50:45.688Z [INFO] [DAEMON] route=GET /capabilities durationMs=1 status=200 request completed
+2026-10-10T04:50:45.844Z [INFO] [DAEMON] route=POST /session durationMs=153 status=200 request completed
+2026-10-10T04:50:45.874Z [INFO] [DAEMON] route=POST /session/513cac04-8f8c-4ebc-8286-21a10114edcb/prompt sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=29 status=202 request completed
+2026-10-10T04:50:45.875Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=1 status=200 request completed
+2026-10-10T04:50:45.928Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:45.981Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.034Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.087Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=1 status=200 request completed
+2026-10-10T04:50:46.140Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=1 status=200 request completed
+2026-10-10T04:50:46.242Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.321Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.371Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.423Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+qwen serve: Tool publication close was not confirmed: ManagedSessionStoreHttpError: The requested endpoint does not exist.
+qwen serve: Hosted Harness turn cd73c7bc-03ee-4d44-b576-04924fba8cc3 is recovery blocked: ManagedSessionStoreHttpError: The requested endpoint does not exist.
+2026-10-10T04:50:46.474Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.475Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/status sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=0 status=200 request completed
+2026-10-10T04:50:46.481Z [INFO] [DAEMON] route=GET /session/513cac04-8f8c-4ebc-8286-21a10114edcb/transcript sessionId=513cac04-8f8c-4ebc-8286-21a10114edcb clientId=f5e611aa-3a70-42d3-834f-8b865c945157 durationMs=6 status=200 request completed
+2026-10-10T04:50:46.508Z [INFO] [DAEMON] route=POST /session durationMs=26 status=200 request completed
+2026-10-10T04:50:46.524Z [INFO] [DAEMON] route=POST /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/prompt sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=16 status=202 request completed
+2026-10-10T04:50:46.525Z [INFO] [DAEMON] route=GET /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/status sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=0 status=200 request completed
+2026-10-10T04:50:47.528Z [INFO] [DAEMON] route=GET /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/status sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=1 status=200 request completed
+2026-10-10T04:50:47.555Z [INFO] [DAEMON] route=GET /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/transcript sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=26 status=200 request completed
+2026-10-10T04:50:47.556Z [INFO] [DAEMON] route=GET /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/status sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=0 status=200 request completed
+2026-10-10T04:50:48.162Z [INFO] [DAEMON] route=GET /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/status sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=0 status=200 request completed
+2026-10-10T04:50:48.192Z [INFO] [DAEMON] route=POST /session durationMs=29 status=200 request completed
+2026-10-10T04:50:48.208Z [INFO] [DAEMON] route=POST /session/b36e254f-146e-4861-89b4-6759012e33ab/prompt sessionId=b36e254f-146e-4861-89b4-6759012e33ab clientId=499e5594-9392-4a11-91f8-796439603dc7 durationMs=15 status=202 request completed
+2026-10-10T04:50:48.209Z [INFO] [DAEMON] route=GET /session/b36e254f-146e-4861-89b4-6759012e33ab/status sessionId=b36e254f-146e-4861-89b4-6759012e33ab clientId=499e5594-9392-4a11-91f8-796439603dc7 durationMs=0 status=200 request completed
+2026-10-10T04:50:49.212Z [INFO] [DAEMON] route=GET /session/b36e254f-146e-4861-89b4-6759012e33ab/status sessionId=b36e254f-146e-4861-89b4-6759012e33ab clientId=499e5594-9392-4a11-91f8-796439603dc7 durationMs=0 status=200 request completed
+2026-10-10T04:50:49.213Z [INFO] [DAEMON] route=GET /session/504ccd7a-6539-453d-b1ac-9a93ebdb1e56/status sessionId=504ccd7a-6539-453d-b1ac-9a93ebdb1e56 clientId=356f5d93-037a-4492-b469-79d94d149d4e durationMs=0 status=200 request completed
+2026-10-10T04:50:49.214Z [WARN] [DAEMON] received SIGTERM, draining
+2026-10-10T04:50:49.217Z [INFO] [DAEMON] daemon stopped

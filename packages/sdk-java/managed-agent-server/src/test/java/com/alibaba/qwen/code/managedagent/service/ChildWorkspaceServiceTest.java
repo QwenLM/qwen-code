@@ -76,7 +76,7 @@ class ChildWorkspaceServiceTest {
 
     private Path root;
     private Path project;
-    private final AtomicLong clock = new AtomicLong(1_000_000);
+    private final AtomicLong clock = new AtomicLong(System.currentTimeMillis());
     private final StubWarmer warmer = new StubWarmer();
     /** The tenants this test created: the one database is shared by every test of the class. */
     private final Set<String> tenants = ConcurrentHashMap.newKeySet();
@@ -96,6 +96,7 @@ class ChildWorkspaceServiceTest {
     @BeforeEach
     void setUp() throws Exception {
         assumeTrue(unavailable == null, () -> "Git 2.40 or later is unavailable: " + unavailable);
+        clock.set(System.currentTimeMillis());
         root = Files.createDirectory(temp.toRealPath().resolve("root"));
         project = Files.createDirectory(root.resolve("project"));
         plain(project, "init", "-q", "-b", "main");
@@ -111,8 +112,9 @@ class ChildWorkspaceServiceTest {
     @AfterEach
     void parkLeftovers() {
         for (String tenant : tenants) {
-            jdbc.update("UPDATE qwen_managed_child_workspace SET finish_request = NULL, claimed_until = ?,"
-                    + " next_retry_at = ? WHERE tenant_id = ?", Long.MAX_VALUE, Long.MAX_VALUE, tenant);
+            jdbc.update("UPDATE ma_workspace SET finish_request = NULL WHERE tenant_id = ? AND workspace_kind = 'CHILD_GIT'", tenant);
+            jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(? / 1000.0), available_at = ?"
+                    + " WHERE tenant_id = ? AND operation_kind = 'CHILD_WORKSPACE'", System.currentTimeMillis() + 86_400_000, Long.MAX_VALUE, tenant);
         }
     }
 
@@ -144,7 +146,7 @@ class ChildWorkspaceServiceTest {
         assertThat(waiting.nextRetryAt()).isEqualTo(clock.get() + ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
         assertThat(waiting.lastError()).isEqualTo("The child Session bound to this Workspace is not closed.");
         assertThat(child).isDirectory();
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING' WHERE session_id = ?", childSession);
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE session_id = ?", childSession);
         clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
         assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE).state())
                 .isEqualTo(ChildWorkspaceStore.READY);
@@ -163,7 +165,7 @@ class ChildWorkspaceServiceTest {
         assertThat(project.resolve("f.txt")).hasContent("PARENT\nb\nc\nd\nCHILD");
         assertThat(project.resolve("new.txt")).hasContent("new");
         assertThat(root.resolve(ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
-        assertThat(jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
+        assertThat(jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
                 + " WHERE storage_key = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
         assertPinsGone(ready);
         assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE))
@@ -338,8 +340,8 @@ class ChildWorkspaceServiceTest {
         service.prepare(parent.tenantId(), parent.sessionId(), "run-4");
         for (String started : List.of(ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING,
                 ChildWorkspaceStore.APPLIED)) {
-            jdbc.update("UPDATE qwen_managed_child_workspace SET state = ?, finish_request = 'merge'"
-                    + " WHERE tenant_id = ? AND child_run_id = 'run-4'", started, parent.tenantId());
+            updateChild("UPDATE ma_workspace SET child_state = ?, finish_request = 'merge'"
+                    + " WHERE tenant_id = ? AND child_run_id = X'72756e2d34'", started, parent.tenantId());
             assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-4",
                     ChildWorkspaceStore.DISCARD), "child_workspace_finishing");
         }
@@ -408,7 +410,7 @@ class ChildWorkspaceServiceTest {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Files.writeString(root.resolve(ready.childCwdRelative()).resolve("new.txt"), "child\n");
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'blocked', finish_request = 'merge',"
+        updateChild("UPDATE ma_workspace SET child_state = 'blocked', finish_request = 'merge',"
                 + " outcome_code = 'child_workspace_git' WHERE child_workspace_id = ?", ready.childWorkspaceId());
 
         // Recorded only; the scan finds the ended row by its request.
@@ -437,7 +439,7 @@ class ChildWorkspaceServiceTest {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Files.writeString(root.resolve(ready.childCwdRelative()).resolve("new.txt"), "child\n");
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'preparing',"
+        updateChild("UPDATE ma_workspace SET child_state = 'preparing',"
                 + " finish_request = 'discard_pinned' WHERE child_workspace_id = ?",
                 ready.childWorkspaceId());
         service.scan();
@@ -500,8 +502,8 @@ class ChildWorkspaceServiceTest {
             assertThat(retried.attempts()).isEqualTo(1);
             assertThat(root.resolve(ready.childCwdRelative()).resolve("new.txt")).hasContent("child");
             // The last of the bounded retries.
-            jdbc.update("UPDATE qwen_managed_child_workspace SET attempts = ?, next_retry_at = 0"
-                    + " WHERE child_workspace_id = ?", ChildWorkspaceService.MAX_ATTEMPTS - 1,
+            jdbc.update("UPDATE ma_operation SET attempt_count = ?, available_at = 0"
+                    + " WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", ChildWorkspaceService.MAX_ATTEMPTS - 1,
                     ready.childWorkspaceId());
             service.scan();
         } finally {
@@ -542,19 +544,19 @@ class ChildWorkspaceServiceTest {
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative() + "/elsewhere"),
                 "child_workspace_not_ready");
-        for (String moved : List.of("storage_id = 'moved'", "workspace_id = 'moved'", "workspace_generation = 2")) {
-            jdbc.update("UPDATE qwen_managed_child_workspace SET " + moved + " WHERE child_workspace_id = ?",
+        for (String moved : List.of("storage_id = 'moved'", "parent_workspace_id = 'moved'", "workspace_generation = 2")) {
+            updateChild("UPDATE ma_workspace SET " + moved + " WHERE child_workspace_id = ?",
                     ready.childWorkspaceId());
             assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative()), "child_workspace_not_ready");
-            jdbc.update("UPDATE qwen_managed_child_workspace SET storage_id = ?, workspace_id = ?,"
+            updateChild("UPDATE ma_workspace SET storage_id = ?, parent_workspace_id = ?,"
                     + " workspace_generation = ? WHERE child_workspace_id = ?", parent.workspace().getStorageId(),
                     parent.workspace().getWorkspaceId(), parent.workspace().getWorkspaceGeneration(),
                     ready.childWorkspaceId());
         }
-        jdbc.update("UPDATE qwen_managed_child_workspace SET finish_request = 'discard'"
+        updateChild("UPDATE ma_workspace SET finish_request = 'discard'"
                 + " WHERE child_workspace_id = ?", ready.childWorkspaceId());
         assertApi(() -> bindChild(parent, "run-1", ready.childCwdRelative()), "child_workspace_not_ready");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE parent_session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE parent_session_id = ?",
                 Integer.class, parent.sessionId())).isZero();
     }
 
@@ -562,8 +564,7 @@ class ChildWorkspaceServiceTest {
     void aBusyStorageParksTheStepWithoutSpendingAnAttempt() throws Exception {
         var parent = createSession("project");
         String key = storageKey(parent.workspace());
-        jdbc.update("INSERT INTO managed_workspace_execution_lease (storage_key, storage_kind, holder_key)"
-                + " VALUES (?, 'LOCAL', 'a-tool-turn')", key);
+        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'a-tool-turn' WHERE storage_key = ?", key);
 
         Row parked = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         assertThat(parked.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
@@ -575,7 +576,7 @@ class ChildWorkspaceServiceTest {
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
                 .isEqualTo(ChildWorkspaceStore.PREPARING);
-        jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL WHERE storage_key = ?", key);
         clock.addAndGet(ChildWorkspaceService.BUSY_DELAY_MS);
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
@@ -591,24 +592,33 @@ class ChildWorkspaceServiceTest {
         Row first = store.claim(row, "a", clock.get(), 1_000);
         Row rival = store.claim(other, "a", clock.get(), 1_000);
 
-        leases.holdForMaintenance(storage, first.childWorkspaceId(), first.claimGeneration());
+        String firstStep = leases.holdForMaintenance(storage, first.childWorkspaceId(), first.claimGeneration());
         assertBroker(() -> leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration()),
                 "workspace_busy");
         clock.addAndGet(1_001);
+        jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_kind = 'CHILD_WORKSPACE'");
+        assertThat(jdbc.queryForObject("SELECT claim_until < CURRENT_TIMESTAMP(6) FROM ma_operation WHERE tenant_id = ?"
+                + " AND operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", Boolean.class,
+                parent.tenantId(), rival.childWorkspaceId())).isTrue();
+        assertThat(store.claim(row, "b", clock.get(), 1_000)).isNull();
+        assertThat(holder(storage)).isEqualTo(maintenanceHolder(first));
+        assertThat(store.find(parent.tenantId(), parent.sessionId(), "run-1").claimGeneration()).isEqualTo(first.claimGeneration());
+        leases.releaseMaintenance(storage, first.childWorkspaceId(), first.claimGeneration(), firstStep);
         Row second = store.claim(row, "b", clock.get(), 1_000);
         assertBroker(() -> leases.holdForMaintenance(storage, first.childWorkspaceId(), first.claimGeneration()),
                 "workspace_unavailable");
-        leases.holdForMaintenance(storage, second.childWorkspaceId(), second.claimGeneration());
-        leases.releaseMaintenance(storage, first.childWorkspaceId(), first.claimGeneration());
+        String secondStep = leases.holdForMaintenance(storage, second.childWorkspaceId(), second.claimGeneration());
+        leases.releaseMaintenance(storage, first.childWorkspaceId(), first.claimGeneration(), firstStep);
         assertThat(holder(storage)).isEqualTo(maintenanceHolder(second));
-        leases.releaseMaintenance(storage, second.childWorkspaceId(), second.claimGeneration());
+        leases.releaseMaintenance(storage, second.childWorkspaceId(), second.claimGeneration(), secondStep);
         assertThat(holder(storage)).isNull();
-        // An expired claim still of the current generation may take the
-        // hold; the scan frees it once nothing renews that claim.
-        assertThat(rival.claimedUntil()).isLessThan(clock.get());
-        leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration());
-        assertThat(holder(storage)).isEqualTo(maintenanceHolder(rival));
-        leases.releaseMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration());
+        // A new physical step requires a live claim, even after a prior worker returned.
+        assertBroker(() -> leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration()),
+                "workspace_unavailable");
+        Row rivalReplacement = store.claim(other, "c", clock.get(), 1_000);
+        String rivalStep = leases.holdForMaintenance(storage, rivalReplacement.childWorkspaceId(), rivalReplacement.claimGeneration());
+        assertThat(holder(storage)).isEqualTo(maintenanceHolder(rivalReplacement));
+        leases.releaseMaintenance(storage, rivalReplacement.childWorkspaceId(), rivalReplacement.claimGeneration(), rivalStep);
         assertThat(holder(storage)).isNull();
     }
 
@@ -650,7 +660,7 @@ class ChildWorkspaceServiceTest {
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Path child = root.resolve(ready.childCwdRelative());
         plain(project, "worktree", "remove", "--force", child.toString());
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'preparing' WHERE child_workspace_id = ?",
+        updateChild("UPDATE ma_workspace SET child_state = 'preparing' WHERE child_workspace_id = ?",
                 ready.childWorkspaceId());
         Files.writeString(project.resolve("f.txt"), "changed after the base\n");
 
@@ -693,7 +703,7 @@ class ChildWorkspaceServiceTest {
         // committing merged; the storage was free since, and the parent
         // edited a merged path.
         git.apply(root, repository, merge.parentTree(), merge.mergedTree());
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied', finish_request = 'merge',"
+        updateChild("UPDATE ma_workspace SET child_state = 'applied', finish_request = 'merge',"
                 + " result_commit = ?, parent_tree = ?, merged_tree = ? WHERE child_workspace_id = ?",
                 result, merge.parentTree(), merge.mergedTree(), ready.childWorkspaceId());
         Files.writeString(project.resolve("keep.txt"), "the parent's later edit\n");
@@ -719,7 +729,7 @@ class ChildWorkspaceServiceTest {
         String result = git.result(root, repository, ready.childWorkspaceId(), ready.baseCommit());
         git.pin(root, repository, ready.childWorkspaceId(), "result", result);
         var merge = git.merge(root, repository, ready.baseCommit(), result);
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applying', finish_request = 'merge',"
+        updateChild("UPDATE ma_workspace SET child_state = 'applying', finish_request = 'merge',"
                 + " result_commit = ?, parent_tree = ?, merged_tree = ? WHERE child_workspace_id = ?",
                 result, merge.parentTree(), merge.mergedTree(), ready.childWorkspaceId());
         git.apply(root, repository, merge.parentTree(), merge.mergedTree());
@@ -775,7 +785,7 @@ class ChildWorkspaceServiceTest {
         git.pin(root, repository, ready.childWorkspaceId(), "result", result);
         var merge = git.merge(root, repository, ready.baseCommit(), result);
         git.apply(root, repository, merge.parentTree(), merge.mergedTree());
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied', finish_request = 'merge',"
+        updateChild("UPDATE ma_workspace SET child_state = 'applied', finish_request = 'merge',"
                 + " result_commit = ?, parent_tree = ?, merged_tree = ? WHERE child_workspace_id = ?",
                 result, merge.parentTree(), merge.mergedTree(), ready.childWorkspaceId());
         plain(project, "config", "filter.evil.clean", "cat");
@@ -849,11 +859,11 @@ class ChildWorkspaceServiceTest {
             @Override
             public Path storageRoot(ContextBinding binding) {
                 long started = clock.addAndGet(1_000);
-                for (int wait = 0; wait < 200 && renewedUntil.get() != started + ChildWorkspaceService.LEASE_MS;
+                for (int wait = 0; wait < 200 && renewedUntil.get() < started + ChildWorkspaceService.LEASE_MS - 500;
                         wait++) {
                     sleep(10);
-                    renewedUntil.set(jdbc.queryForObject("SELECT claimed_until FROM qwen_managed_child_workspace"
-                            + " WHERE parent_session_id = ?", Long.class, parent.sessionId()));
+                    renewedUntil.set(jdbc.queryForObject("SELECT FLOOR(UNIX_TIMESTAMP(claim_until) * 1000.0) FROM ma_operation"
+                            + " WHERE operation_kind = 'CHILD_WORKSPACE' AND session_id = ?", Long.class, parent.sessionId()));
                 }
                 return slow.storageRoot(binding);
             }
@@ -867,7 +877,8 @@ class ChildWorkspaceServiceTest {
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
 
         assertThat(ready.state()).isEqualTo(ChildWorkspaceStore.READY);
-        assertThat(renewedUntil.get()).isEqualTo(clock.get() + ChildWorkspaceService.LEASE_MS);
+        assertThat(renewedUntil.get()).isBetween(clock.get() + ChildWorkspaceService.LEASE_MS - 500,
+                clock.get() + ChildWorkspaceService.LEASE_MS + 500);
     }
 
     private static void sleep(long millis) {
@@ -931,67 +942,43 @@ class ChildWorkspaceServiceTest {
     }
 
     @Test
-    void theScanReleasesAHoldNoStepOwns() throws Exception {
+    void aSettledProjectionAndExpiredClaimCannotProveTheGitStepStopped() throws Exception {
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
         Row dead = store.claim(row, "dead-worker", clock.get(), 1_000);
-        leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
-        // The worker committed its last state, then died before releasing.
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'merged' WHERE child_workspace_id = ?",
-                dead.childWorkspaceId());
-
-        service.scan();
-        assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
+        String step = leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
+        updateChild("UPDATE ma_workspace SET child_state = 'merged' WHERE child_workspace_id = ?", dead.childWorkspaceId());
         clock.addAndGet(1_001);
         service.scan();
+        assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
+        assertThat(leases.releaseStaleMaintenance(clock.get(), 0)).isZero();
+        assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
+        leases.releaseMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration(), step);
         assertThat(holder(parent.workspace())).isNull();
-        assertThat(jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
-                + " WHERE storage_key = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
     }
 
     @Test
-    void aCrashedStepsHoldPassesToItsResumedStepWithoutAGap() throws Exception {
+    void anExpiredPhysicalStepIsNeverResumedWithoutStopProof() throws Exception {
         for (String state : List.of(ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.MERGING,
                 ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING)) {
             var parent = createSession("project");
             Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
-            jdbc.update("UPDATE qwen_managed_child_workspace SET state = ? WHERE child_workspace_id = ?", state,
-                    row.childWorkspaceId());
-            Row dead = store.claim(store.find(parent.tenantId(), parent.sessionId(), "run-1"), "dead-worker",
-                    clock.get(), 1_000);
-            leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
-            List<String> heldWhenResumed = new java.util.concurrent.CopyOnWriteArrayList<>();
-            ChildWorkspaceProvider real = provider(root);
-            warmer.provider = new ChildWorkspaceProvider() {
-                @Override
-                public Path storageRoot(ContextBinding binding) {
-                    if (heldWhenResumed.isEmpty()) {
-                        heldWhenResumed.add(String.valueOf(jdbc.queryForObject("SELECT maintenance_id FROM"
-                                + " managed_workspace_execution_lease WHERE storage_key = ?", String.class,
-                                storageKeyOf(binding))));
-                    }
-                    return real.storageRoot(binding);
-                }
-
-                @Override
-                public ChildWorktreeGit git() {
-                    return git;
-                }
-            };
+            updateChild("UPDATE ma_workspace SET child_state = ? WHERE child_workspace_id = ?", state, row.childWorkspaceId());
+            Row dead = store.claim(store.find(parent.tenantId(), parent.sessionId(), "run-1"), "dead-worker", clock.get(), 1_000);
+            String step = leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
             clock.addAndGet(1_001);
-
             service.scan();
-
-            // The resumed step may fail on this bare row; what matters is
-            // that it found the hold still standing, and freed it after.
-            assertThat(heldWhenResumed).as(state).containsExactly(dead.childWorkspaceId());
-            assertThat(holder(parent.workspace())).as(state).isNull();
+            assertThat(store.claim(dead, "replacement", clock.get(), 60_000)).as(state).isNull();
+            assertThat(holder(parent.workspace())).as(state).isEqualTo(maintenanceHolder(dead));
+            assertThat(store.find(parent.tenantId(), parent.sessionId(), "run-1").claimGeneration()).isEqualTo(dead.claimGeneration());
+            leases.releaseMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration(), step);
+            assertThat(holder(parent.workspace())).isNull();
             parkLeftovers();
         }
     }
 
     @Test
-    void aStrandedHoldIsReleasedEvenWithTheCapabilityOff() throws Exception {
+    void aStrandedHoldStaysProtectedWithTheCapabilityOff() throws Exception {
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
         Row dead = store.claim(row, "dead-worker", clock.get(), 1_000);
@@ -999,14 +986,13 @@ class ChildWorkspaceServiceTest {
         warmer.provider = null;
         clock.addAndGet(1_001);
 
-        // A step's row: a host that runs steps may resume it, so this one
-        // waits a grace period, then frees the storage anyway.
+        // Neither the capability switch nor a grace period proves the original process stopped.
         service.scan();
         assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
         clock.addAndGet(ChildWorkspaceService.RESUMABLE_GRACE_MS);
         service.scan();
 
-        assertThat(holder(parent.workspace())).isNull();
+        assertThat(holder(parent.workspace())).isEqualTo(maintenanceHolder(dead));
     }
 
     @Test
@@ -1029,10 +1015,11 @@ class ChildWorkspaceServiceTest {
         clock.addAndGet(1);
         store.admit(parent.tenantId(), parent.sessionId(), "run-2", parent.workspace(), clock.get());
         Row dead = store.claim(store.admit(parent.tenantId(), parent.sessionId(), "run-3", parent.workspace(),
-                clock.get()), "dead-worker", clock.get(), 1);
-        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'merged' WHERE child_workspace_id = ?",
+                clock.get()), "dead-worker", clock.get(), 60_000);
+        updateChild("UPDATE ma_workspace SET child_state = 'merged' WHERE child_workspace_id = ?",
                 dead.childWorkspaceId());
-        leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
+        String completedStep = leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
+        leases.releaseMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration(), completedStep);
         clock.addAndGet(2);
 
         service.scan();
@@ -1065,12 +1052,12 @@ class ChildWorkspaceServiceTest {
             for (int wait = 0; wait < 500 && !Files.exists(pid); wait++) {
                 sleep(10);
             }
-            assertThat(jdbc.queryForList("SELECT maintenance_id FROM managed_workspace_execution_lease"
+            assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"
                     + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, key)).hasSize(1);
             // Another worker takes the row over. Done in SQL, not by waiting
             // out the claim, which the running step keeps renewing.
-            assertThat(jdbc.update("UPDATE qwen_managed_child_workspace SET claimed_by = 'thief',"
-                    + " claim_generation = claim_generation + 1 WHERE child_workspace_id = ?",
+            assertThat(jdbc.update("UPDATE ma_operation SET claim_owner = 'thief',"
+                    + " claim_generation = claim_generation + 1 WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?",
                     row.childWorkspaceId())).isEqualTo(1);
 
             Row after = step.get(10, java.util.concurrent.TimeUnit.SECONDS);
@@ -1080,7 +1067,7 @@ class ChildWorkspaceServiceTest {
             assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
             // The worker that gave up its claim still freed the storage it
             // held, though its generation is no longer the row's.
-            assertThat(jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
+            assertThat(jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
                     + " WHERE storage_key = ?", String.class, key)).containsOnlyNulls();
             long blocked = Long.parseLong(Files.readString(pid).strip());
             for (int wait = 0; wait < 100 && ProcessHandle.of(blocked).map(ProcessHandle::isAlive).orElse(false);
@@ -1098,11 +1085,11 @@ class ChildWorkspaceServiceTest {
     void theScanTheMigrationGateAndTheHoldSweepReadThroughIndexes() {
         // None of the three tables is pruned: each read must key on what it
         // filters, not scan the accumulated history.
-        assertThat(indexColumns("qwen_managed_child_workspace", "idx_child_workspace_poll"))
-                .containsExactly("state", "finish_request", "next_retry_at");
-        assertThat(indexColumns("qwen_managed_child_workspace", "idx_child_workspace_storage"))
-                .containsExactly("tenant_id", "storage_id", "state");
-        assertThat(indexColumns("managed_workspace_execution_lease", "idx_execution_lease_maintenance"))
+        assertThat(indexColumns("ma_operation", "ix_ma_operation_due"))
+                .containsExactly("operation_kind", "delivery_state", "available_at");
+        assertThat(indexColumns("ma_operation", "ix_ma_operation_storage"))
+                .containsExactly("storage_key", "operation_kind", "state");
+        assertThat(indexColumns("ma_storage_owner", "idx_execution_lease_maintenance"))
                 .containsExactly("maintenance_id");
     }
 
@@ -1147,6 +1134,19 @@ class ChildWorkspaceServiceTest {
         assertThat(row.claimedBy()).isNull();
     }
 
+    private void updateChild(String sql, Object... args) {
+        jdbc.update(sql, args);
+        for (String tenant : tenants) {
+            jdbc.update("UPDATE ma_operation SET state = (SELECT w.child_state FROM ma_workspace w WHERE w.tenant_id = ma_operation.tenant_id"
+                    + " AND w.child_workspace_id = ma_operation.operation_id), phase = (SELECT w.child_state FROM ma_workspace w"
+                    + " WHERE w.tenant_id = ma_operation.tenant_id AND w.child_workspace_id = ma_operation.operation_id),"
+                    + " delivery_state = CASE WHEN EXISTS (SELECT 1 FROM ma_workspace w WHERE w.tenant_id = ma_operation.tenant_id"
+                    + " AND w.child_workspace_id = ma_operation.operation_id AND (w.child_state IN ('preparing','merging','applying','applied','discarding')"
+                    + " OR w.finish_request IS NOT NULL)) THEN 'PENDING' ELSE 'SETTLED' END"
+                    + " WHERE tenant_id = ? AND operation_kind = 'CHILD_WORKSPACE'", tenant);
+        }
+    }
+
     private ChildWorkspaceService worker(String owner) {
         return new ChildWorkspaceService(sessions, store, leases, warmer, clock::get, owner, 20);
     }
@@ -1160,17 +1160,18 @@ class ChildWorkspaceServiceTest {
     }
 
     private void close(String sessionId) {
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED' WHERE session_id = ?", sessionId);
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE session_id = ?", sessionId);
     }
 
     private StoreModels.SessionRecord createSession(String cwd) {
         String tenant = "tenant-" + UUID.randomUUID();
         tenants.add(tenant);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+        com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage.register(jdbc, tenant, "storage");
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1,"
                 + " 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
                 "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
@@ -1217,7 +1218,7 @@ class ChildWorkspaceServiceTest {
 
     /** The holder of the storage's lease when a maintenance hold holds it, else null. */
     private String holder(ContextBinding storage) throws Exception {
-        List<String> holders = jdbc.queryForList("SELECT holder_key FROM managed_workspace_execution_lease"
+        List<String> holders = jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
                 + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, storageKey(storage));
         return holders.isEmpty() ? null : holders.getFirst();
     }
@@ -1237,8 +1238,7 @@ class ChildWorkspaceServiceTest {
     }
 
     private static String storageKey(ContextBinding binding) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
-                (binding.getTenantId() + "\u0000" + binding.getStorageId()).getBytes(StandardCharsets.UTF_8)));
+        return com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage.key(binding.getTenantId(), binding.getStorageId());
     }
 
     private static void assertApi(Runnable call, String code) {

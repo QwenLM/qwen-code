@@ -1,0 +1,44 @@
+## session blocker 513cac04-8f8c-4ebc-8286-21a10114edcb
+## head (0 rows)
+## agent_session (1 rows)
+{session_id=513cac04-8f8c-4ebc-8286-21a10114edcb, status=ACTIVE, harness_boot_id=null}
+## session fresh 504ccd7a-6539-453d-b1ac-9a93ebdb1e56
+{journal_revision=1, operation=session.create, first_sequence=0, last_sequence=0, created_at=2026-10-10T12:50:46}
+{journal_revision=2, operation=installActivation, first_sequence=1, last_sequence=1, created_at=2026-10-10T12:50:46}
+{journal_revision=3, operation=submitInput, first_sequence=2, last_sequence=3, created_at=2026-10-10T12:50:46}
+{journal_revision=4, operation=commitCheckpoint, first_sequence=4, last_sequence=4, created_at=2026-10-10T12:50:46}
+{journal_revision=5, operation=commitMessage, first_sequence=5, last_sequence=5, created_at=2026-10-10T12:50:46}
+{journal_revision=6, operation=hostedModelAttempt, first_sequence=6, last_sequence=6, created_at=2026-10-10T12:50:46}
+{journal_revision=7, operation=hostedModelAttempt, first_sequence=7, last_sequence=7, created_at=2026-10-10T12:50:46}
+{journal_revision=8, operation=commitMessage, first_sequence=8, last_sequence=8, created_at=2026-10-10T12:50:46}
+{journal_revision=9, operation=toolIntent, first_sequence=9, last_sequence=9, created_at=2026-10-10T12:50:46}
+{journal_revision=10, operation=commitCheckpoint, first_sequence=10, last_sequence=10, created_at=2026-10-10T12:50:46}
+{journal_revision=11, operation=recordToolResult, first_sequence=11, last_sequence=11, created_at=2026-10-10T12:50:47}
+{journal_revision=12, operation=commitMessage, first_sequence=12, last_sequence=12, created_at=2026-10-10T12:50:47}
+{journal_revision=13, operation=commitCheckpoint, first_sequence=13, last_sequence=13, created_at=2026-10-10T12:50:47}
+{journal_revision=14, operation=hostedModelAttempt, first_sequence=14, last_sequence=14, created_at=2026-10-10T12:50:47}
+{journal_revision=15, operation=assistantDelta, first_sequence=15, last_sequence=15, created_at=2026-10-10T12:50:47}
+{journal_revision=16, operation=hostedModelAttempt, first_sequence=16, last_sequence=16, created_at=2026-10-10T12:50:47}
+{journal_revision=17, operation=commitCheckpoint, first_sequence=17, last_sequence=17, created_at=2026-10-10T12:50:47}
+{journal_revision=18, operation=commitMessage, first_sequence=18, last_sequence=18, created_at=2026-10-10T12:50:47}
+{journal_revision=19, operation=commitCheckpoint, first_sequence=19, last_sequence=19, created_at=2026-10-10T12:50:47}
+{journal_revision=20, operation=settleTurn, first_sequence=20, last_sequence=21, created_at=2026-10-10T12:50:47}
+## head (1 rows)
+{state=ACTIVE, writer_generation=1, journal_revision=20, committed_sequence=21, recovery_status=READY, recovery_detail_code=null}
+## agent_session (1 rows)
+{session_id=504ccd7a-6539-453d-b1ac-9a93ebdb1e56, status=ACTIVE, harness_boot_id=null}
+## session postclear b36e254f-146e-4861-89b4-6759012e33ab
+{journal_revision=1, operation=session.create, first_sequence=0, last_sequence=0, created_at=2026-10-10T12:50:48}
+{journal_revision=2, operation=installActivation, first_sequence=1, last_sequence=1, created_at=2026-10-10T12:50:48}
+{journal_revision=3, operation=submitInput, first_sequence=2, last_sequence=3, created_at=2026-10-10T12:50:48}
+{journal_revision=4, operation=commitCheckpoint, first_sequence=4, last_sequence=4, created_at=2026-10-10T12:50:48}
+{journal_revision=5, operation=commitMessage, first_sequence=5, last_sequence=5, created_at=2026-10-10T12:50:48}
+{journal_revision=6, operation=hostedModelAttempt, first_sequence=6, last_sequence=6, created_at=2026-10-10T12:50:48}
+{journal_revision=7, operation=assistantDelta, first_sequence=7, last_sequence=7, created_at=2026-10-10T12:50:48}
+{journal_revision=8, operation=hostedModelAttempt, first_sequence=8, last_sequence=8, created_at=2026-10-10T12:50:48}
+{journal_revision=9, operation=commitMessage, first_sequence=9, last_sequence=9, created_at=2026-10-10T12:50:48}
+{journal_revision=10, operation=settleTurn, first_sequence=10, last_sequence=11, created_at=2026-10-10T12:50:48}
+## head (1 rows)
+{state=ACTIVE, writer_generation=1, journal_revision=10, committed_sequence=11, recovery_status=READY, recovery_detail_code=null}
+## agent_session (1 rows)
+{session_id=b36e254f-146e-4861-89b4-6759012e33ab, status=ACTIVE, harness_boot_id=null}

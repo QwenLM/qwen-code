@@ -20,7 +20,8 @@ import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,8 +37,8 @@ class WorkspaceCsiRuntimeProvisionerTest {
     void setUp() {
         source = new DriverManagerDataSource("jdbc:h2:mem:csi-broker-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        storage = new WorkspaceCsiReservationStore(new JdbcTemplate(source),
+        ManagedSchema.initialize(source);
+        storage = new WorkspaceCsiReservationStore(new ManagedSchemaJdbcTemplate(source),
                 new DataSourceTransactionManager(source), new ObjectMapper());
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test-key", new byte[32]));
     }

@@ -1,0 +1,97 @@
+# sample not-wedged 2026-10-10T04:50:47.842706Z
+## innodb_trx (0 rows)
+## innodb_lock_waits (0 rows)
+## innodb_locks (0 rows)
+## innodb_lock_waits_raw (0 rows)
+## processlist (1 rows)
+{id=6, user=root, host=127.0.0.1:65388, db=qwen_13800, command=Query, time=0, state=Filling schema table, info=SELECT id, user, host, db, command, time, state, info FROM information_schema.processlist WHERE command <> 'Sleep' OR info IS NOT NULL}
+## workspace_execution_lease (13 rows)
+{storage_key=044118305a77a7deeeee598ffc1ba4466272d725eafbe1b01005817b34cde9f3, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=1ae6bd047e2da829dd4de19b9f52977b500e07f602d836aa41251ce419346518, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=3071b8f696794a8ac163cf884a27bd380a9a03da49ec88e155183b4f8e303a93, holder_key=3426f86916dbb2b52635a8bc1c13db695d5de177fcf86760893a744833bd15c7, binding_id=8e9b6228-ae68-4e00-9585-ca4d2829d296, runtime_generation=1, runtime_session_id=4bbcd02b-445e-4ab0-bd5a-2cea9012fa17}
+{storage_key=3aa66f100652e3bce8bd11b533b29ec40164c3046c399aee9a4aedab3c4215df, holder_key=43a4708ac05c2505201a5cc77d85ba17121f1aa830e6657ec25e27d4f894341f, binding_id=8bb94d93-adbf-4d72-81e2-92a6f0fc3bcd, runtime_generation=1, runtime_session_id=2551c638-e6f1-49f2-befc-65461a909597}
+{storage_key=4e3ccb0a47d727cc4634ba387253fc306c574da2fa66a72398862f6d079fd129, holder_key=5651aa7eefcf98a0ee7da6a8d9e257b64a4703c45a3cb9d483a3aed6e9f202a0, binding_id=bf7a7631-da28-49a5-a294-801261728b3d, runtime_generation=1, runtime_session_id=c6c163ae-8a5f-4e5f-8971-7e3b54c5ea97}
+{storage_key=63a1dc400e7865a165667549a9647bfd8636667c9f509811a59312c2897ab7aa, holder_key=66846b376d4b681d06a83d7738e27e6ec84ab2f619553fe2475e74e585c66703, binding_id=a9aca25d-c5e7-42cf-8ea1-5a91cd000d35, runtime_generation=1, runtime_session_id=4f30d228-4c95-4cd2-8735-ada228aa16b8}
+{storage_key=6a7edced8a968e0f1aa437f05713f6ec6c9e50225930d4792965ae6312fed621, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=7c1c610d955b0418d8631e11395167b0e580c0c965933059c36611273c3ff4cb, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=8d0e9fe2a1135476570e4ddeff26188c23f9ac46c0a2039f2b02b7e0cba20fcf, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=947d2022d33337a37ff7765c845ee19cc4884e68833a83d52a02c842107c7cf0, holder_key=20c98ffdf0486bf668e4b07abb9c523e3071c316e6e88f832ec2137dad86af0e, binding_id=de45227e-b8e2-43a7-a642-9ee5a06a4c49, runtime_generation=1, runtime_session_id=47ce6660-ae58-4273-be66-e61aa6238902}
+{storage_key=99a38a99b49656fd8ade3574dff11f6fdff5d2ba76dbfbe96fd7391306f791b4, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=b4fc8a1a40e8c3fcf851832abb0ae9053a2c70a499271e744ba11fdd51f4db20, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+{storage_key=cc6cfac6ef0539f19939eb031f10007a1e773c692cf21c9af51616f51895ae9d, holder_key=null, binding_id=null, runtime_generation=null, runtime_session_id=null}
+## runtime_bindings (34 rows)
+{binding_id=0055f785-6eef-4200-96d6-ee4b948948f9, binding_state=READY, runtime_instance_id=0055f785-6eef-4200-96d6-ee4b948948f9, runtime_endpoint=http://127.0.0.1:55850/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=010ad9b4-632b-4c29-8029-566ed2707e15, binding_state=READY, runtime_instance_id=010ad9b4-632b-4c29-8029-566ed2707e15, runtime_endpoint=http://127.0.0.1:53909/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=039c22dc-c6d7-4506-aee6-9419849c2caf, binding_state=READY, runtime_instance_id=039c22dc-c6d7-4506-aee6-9419849c2caf, runtime_endpoint=http://127.0.0.1:50562/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=06e34bd8-5e92-4d15-84f2-2bb90fe049a3, binding_state=READY, runtime_instance_id=06e34bd8-5e92-4d15-84f2-2bb90fe049a3, runtime_endpoint=http://127.0.0.1:49211/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=0a5bf825-d6e5-4e1e-b0d4-1b12b1606929, binding_state=READY, runtime_instance_id=0a5bf825-d6e5-4e1e-b0d4-1b12b1606929, runtime_endpoint=http://127.0.0.1:50713/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=130bc805-cb13-469c-8a56-535e15e45b9a, binding_state=LOST, runtime_instance_id=130bc805-cb13-469c-8a56-535e15e45b9a, runtime_endpoint=http://127.0.0.1:55317/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=2c1b56ed-8f1b-4aea-bdbe-97efab88867a, binding_state=READY, runtime_instance_id=2c1b56ed-8f1b-4aea-bdbe-97efab88867a, runtime_endpoint=http://127.0.0.1:56295/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=2ddd6356-20f1-49f9-a982-0f25d22e5f41, binding_state=LOST, runtime_instance_id=2ddd6356-20f1-49f9-a982-0f25d22e5f41, runtime_endpoint=http://127.0.0.1:63483/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=3a4b8617-6209-404f-a5a6-010db0a54a69, binding_state=READY, runtime_instance_id=3a4b8617-6209-404f-a5a6-010db0a54a69, runtime_endpoint=http://127.0.0.1:64764/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=50b6af5e-377b-44e9-9eac-1b0e25af792f, binding_state=READY, runtime_instance_id=50b6af5e-377b-44e9-9eac-1b0e25af792f, runtime_endpoint=http://127.0.0.1:63875/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=52db32bf-dfc3-4fd5-9cb8-20a7296d904b, binding_state=READY, runtime_instance_id=52db32bf-dfc3-4fd5-9cb8-20a7296d904b, runtime_endpoint=http://127.0.0.1:54973/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=5997c3d0-c833-4011-a81f-58d7eca879e5, binding_state=READY, runtime_instance_id=5997c3d0-c833-4011-a81f-58d7eca879e5, runtime_endpoint=http://127.0.0.1:57602/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=5ad6234f-0203-4ea1-bdcd-16945eeab4df, binding_state=READY, runtime_instance_id=5ad6234f-0203-4ea1-bdcd-16945eeab4df, runtime_endpoint=http://127.0.0.1:62928/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=5f0b5d8e-0c75-4515-ac19-db0a779c1e9b, binding_state=READY, runtime_instance_id=5f0b5d8e-0c75-4515-ac19-db0a779c1e9b, runtime_endpoint=http://127.0.0.1:54994/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=652b3dbf-d5cb-4147-b4a3-e855dd4cf6fa, binding_state=READY, runtime_instance_id=652b3dbf-d5cb-4147-b4a3-e855dd4cf6fa, runtime_endpoint=http://127.0.0.1:53882/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=69091fb7-1b23-4583-8462-0ded92cc88ce, binding_state=READY, runtime_instance_id=69091fb7-1b23-4583-8462-0ded92cc88ce, runtime_endpoint=http://127.0.0.1:62931/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=69244496-3b4e-4e40-b758-f87ef4f3a91e, binding_state=READY, runtime_instance_id=69244496-3b4e-4e40-b758-f87ef4f3a91e, runtime_endpoint=http://127.0.0.1:57750/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=878c25c8-c424-49f1-a4b3-b7d107554643, binding_state=READY, runtime_instance_id=878c25c8-c424-49f1-a4b3-b7d107554643, runtime_endpoint=http://127.0.0.1:53898/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=8bb94d93-adbf-4d72-81e2-92a6f0fc3bcd, binding_state=READY, runtime_instance_id=8bb94d93-adbf-4d72-81e2-92a6f0fc3bcd, runtime_endpoint=http://127.0.0.1:53648/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=8e9b6228-ae68-4e00-9585-ca4d2829d296, binding_state=READY, runtime_instance_id=8e9b6228-ae68-4e00-9585-ca4d2829d296, runtime_endpoint=http://127.0.0.1:63866/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=92754f6c-67b6-4872-8ed9-7ac5ac9ee0fc, binding_state=READY, runtime_instance_id=92754f6c-67b6-4872-8ed9-7ac5ac9ee0fc, runtime_endpoint=http://127.0.0.1:57567/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=9c1044d3-5a83-4001-afc2-690bc6ab4c6f, binding_state=READY, runtime_instance_id=9c1044d3-5a83-4001-afc2-690bc6ab4c6f, runtime_endpoint=http://127.0.0.1:65444/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=9ea9e128-cb0d-4651-b8f2-c4ea0a1047cf, binding_state=READY, runtime_instance_id=9ea9e128-cb0d-4651-b8f2-c4ea0a1047cf, runtime_endpoint=http://127.0.0.1:55830/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=a3eb9825-acee-499a-8e5a-b6127222e7e3, binding_state=LOST, runtime_instance_id=a3eb9825-acee-499a-8e5a-b6127222e7e3, runtime_endpoint=http://127.0.0.1:53658/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=a9aca25d-c5e7-42cf-8ea1-5a91cd000d35, binding_state=READY, runtime_instance_id=a9aca25d-c5e7-42cf-8ea1-5a91cd000d35, runtime_endpoint=http://127.0.0.1:55312/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=afd661c9-b2ad-4f0b-9636-770c958baf10, binding_state=LOST, runtime_instance_id=afd661c9-b2ad-4f0b-9636-770c958baf10, runtime_endpoint=http://127.0.0.1:63162/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=b144f0a4-42a0-444b-b601-6ce65a3028d0, binding_state=READY, runtime_instance_id=b144f0a4-42a0-444b-b601-6ce65a3028d0, runtime_endpoint=http://127.0.0.1:56301/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=bd7814d9-dcc5-4fa8-bfa0-21016adace72, binding_state=READY, runtime_instance_id=bd7814d9-dcc5-4fa8-bfa0-21016adace72, runtime_endpoint=http://127.0.0.1:54967/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=bf7a7631-da28-49a5-a294-801261728b3d, binding_state=READY, runtime_instance_id=bf7a7631-da28-49a5-a294-801261728b3d, runtime_endpoint=http://127.0.0.1:62921/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=bf84af5b-747b-4159-8d65-e46da57003bf, binding_state=LOST, runtime_instance_id=bf84af5b-747b-4159-8d65-e46da57003bf, runtime_endpoint=http://127.0.0.1:63155/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=de45227e-b8e2-43a7-a642-9ee5a06a4c49, binding_state=READY, runtime_instance_id=de45227e-b8e2-43a7-a642-9ee5a06a4c49, runtime_endpoint=http://127.0.0.1:63479/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=dfd67111-10bc-40ab-b723-822cb92f3957, binding_state=READY, runtime_instance_id=dfd67111-10bc-40ab-b723-822cb92f3957, runtime_endpoint=http://127.0.0.1:56536/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=e6a10326-6457-49d9-8aad-82c9ebc95305, binding_state=READY, runtime_instance_id=e6a10326-6457-49d9-8aad-82c9ebc95305, runtime_endpoint=http://127.0.0.1:65404/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+{binding_id=eedd1001-b1a3-498b-b6f6-f58fa2724901, binding_state=READY, runtime_instance_id=eedd1001-b1a3-498b-b6f6-f58fa2724901, runtime_endpoint=http://127.0.0.1:50608/, operation_owner=null, operation_lease_until=null, attestation_generation=1}
+## runtime_sessions (1 rows)
+{error=StatementCallback; bad SQL grammar [SELECT runtime_session_id, harness_session_id, session_state, binding_id, binding_generation FROM qwen_runtime_session]}
+## tool_executions (20 rows)
+{execution_call_id=1071aacf-a854-40d7-b2d0-d26ff79d8b19, execution_state=SETTLED, execution_status=success, harness_session_id=d270f068-dd39-47a4-a13c-bc240aec34d3}
+{execution_call_id=c1a91939-e9ae-43db-a581-985f88ee8ac2, execution_state=SETTLED, execution_status=success, harness_session_id=504ccd7a-6539-453d-b1ac-9a93ebdb1e56}
+{execution_call_id=567991c0-2857-4f16-bc15-5ba806b92588, execution_state=SETTLED, execution_status=not_started, harness_session_id=48b62680-b148-431d-b7ac-7a887193eb08}
+{execution_call_id=2d83ccea-ac15-472e-aed4-978d7e440c43, execution_state=SETTLED, execution_status=not_started, harness_session_id=9c422571-1324-4106-931b-eddcab66ed93}
+{execution_call_id=5da6ed21-4c76-47be-895b-521a5c3be8e2, execution_state=SETTLED, execution_status=success, harness_session_id=3a37cc0d-8f59-418e-9f7c-f570fb6ddb3e}
+{execution_call_id=d29c4b27-513e-4aa8-885b-9471e8247ae4, execution_state=SETTLED, execution_status=not_started, harness_session_id=eb62e6a7-650d-435b-9c0b-99ef853384bd}
+{execution_call_id=21a39b2b-9bed-4290-a11a-c01e4df2fc17, execution_state=SETTLED, execution_status=success, harness_session_id=8309f356-dcc7-4618-b937-84771fba47be}
+{execution_call_id=3ff533be-6d8e-478d-b620-6ade2a77b0e8, execution_state=SETTLED, execution_status=success, harness_session_id=a6c06bae-293b-4549-bbad-7326a201409b}
+{execution_call_id=b5633a7c-592c-4e5e-aea1-22fd3b5565e4, execution_state=SETTLED, execution_status=not_started, harness_session_id=433fa327-51df-4ab2-a782-2aad6388c925}
+{execution_call_id=0a279bc2-7645-4bea-9905-dbfa2cd7c006, execution_state=SETTLED, execution_status=not_started, harness_session_id=513cac04-8f8c-4ebc-8286-21a10114edcb}
+{execution_call_id=2eeb377d-b6f3-4f4b-a2be-223e7a2798e5, execution_state=SETTLED, execution_status=not_started, harness_session_id=4eca7e1c-1348-4566-87d2-8f5eb62838fa}
+{execution_call_id=36817a41-5648-4ad0-b3d2-11074aab31cc, execution_state=SETTLED, execution_status=success, harness_session_id=0f0bdeb0-5833-4b29-9c31-2b853c97df0f}
+{execution_call_id=ccf9c4be-5c18-4e86-b8b9-a46f721e4c01, execution_state=SETTLED, execution_status=not_started, harness_session_id=6a742b01-fea4-4964-afa9-9cd9238b7fb9}
+{execution_call_id=cb7d38e1-ab17-439e-ab20-67e88d23452d, execution_state=SETTLED, execution_status=success, harness_session_id=79e8ce67-f0e7-4841-b0df-8ca5ba7f368a}
+{execution_call_id=b003ba85-3477-4625-9cd1-8f5b75ed925c, execution_state=SETTLED, execution_status=success, harness_session_id=cb27b6e0-8beb-472e-840f-1dadcd12c528}
+{execution_call_id=4daf5611-7539-4fd8-88b4-fea26e503747, execution_state=SETTLED, execution_status=not_started, harness_session_id=7cf641c1-c53b-44d9-a9c3-b80915ae00ce}
+{execution_call_id=b557c6a7-fbcc-499e-9193-272a796a6182, execution_state=SETTLED, execution_status=not_started, harness_session_id=f49b8f01-c6fc-4f66-9072-0010e99d811d}
+{execution_call_id=f5937865-efac-447a-80b6-13045dd1cefd, execution_state=SETTLED, execution_status=success, harness_session_id=1b4fb078-c78e-4124-ab74-4182aa9a531f}
+{execution_call_id=f5b98565-e3ae-492e-b7d7-8879b47edbd9, execution_state=SETTLED, execution_status=not_started, harness_session_id=253f682e-d174-4ece-9a7a-2feee6dd3a9c}
+{execution_call_id=9c192b2b-8a20-4e88-b91d-a9eef8a5bf2a, execution_state=SETTLED, execution_status=success, harness_session_id=ed5b6e24-510c-4571-b88c-2eea7398a206}
+## worker processes (managed-runtime-worker)
+15688 15655       00:02 /Users/wenshao/.nvm/versions/node/v22.22.2/bin/node /Users/wenshao/git/qwen-code-r4/dist/cli.js serve --profile hosted-harness --http-bridge --no-web --hostname 127.0.0.1 --port 0 --token hosted-process-fixture-token --hosted-harness-capability-digest sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --workspace /var/folders/9f/t1s7ryjj12l72zvr529v2cw40000gn/T/qwen-repro-13800-Kfv9Rh --managed-runtime-broker-url http://127.0.0.1:65391/ --managed-runtime-broker-token hosted-tools-broker-token
+15698 15503       00:02 /Users/wenshao/.nvm/versions/node/v22.22.2/bin/node /Users/wenshao/git/qwen-code-r4/dist/cli.js managed-runtime-worker
+15756 15503       00:01 /Users/wenshao/.nvm/versions/node/v22.22.2/bin/node /Users/wenshao/git/qwen-code-r4/dist/cli.js managed-runtime-worker
+39655     1 15-11:02:32 /Users/wenshao/.nvm/versions/node/v22.22.2/bin/node /Users/wenshao/git/qwen-code/node_modules/tsx/dist/cli.mjs --tsconfig /Users/wenshao/git/qwen-code/packages/cli/tsconfig.json /Users/wenshao/git/qwen-code/packages/cli/index.ts serve --port 4170 --workspace /Users/wenshao/git/qwen-code
+53693 53692 02-15:16:29 /Users/wenshao/.nvm/versions/node/v22.22.2/bin/node /Users/wenshao/git/qwen-code/node_modules/tsx/dist/cli.mjs --tsconfig /Users/wenshao/git/qwen-code/packages/cli/tsconfig.json /Users/wenshao/git/qwen-code/packages/cli/index.ts serve --port 4170 --workspace /Users/wenshao/git/qwen-code
+## lsof connections touching spring port 65386 or broker port 65385
+COMMAND     PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+java      15503 wenshao  136u  IPv6  0x2c0a3100584fb8b      0t0  TCP 127.0.0.1:65385 (LISTEN)
+java      15503 wenshao  140u  IPv6 0xf52cdf7731584b6a      0t0  TCP 127.0.0.1:65386 (LISTEN)
+java      15503 wenshao  146u  IPv6 0xacf157d10974dbe1      0t0  TCP 127.0.0.1:65386->127.0.0.1:65399 (ESTABLISHED)
+java      15503 wenshao  147u  IPv6 0x893c2a258c7f80e3      0t0  TCP 127.0.0.1:65386->127.0.0.1:65400 (ESTABLISHED)
+java      15503 wenshao  148u  IPv6 0x83af8df06907dff1      0t0  TCP 127.0.0.1:65385->127.0.0.1:65402 (ESTABLISHED)
+java      15503 wenshao  151u  IPv6 0x1860e8b418d03efa      0t0  TCP 127.0.0.1:65386->127.0.0.1:65452 (ESTABLISHED)
+node      15655 wenshao   24u  IPv4  0x1975bcc8a7812d6      0t0  TCP 127.0.0.1:65402->127.0.0.1:65385 (ESTABLISHED)
+node      15688 wenshao   16u  IPv4 0x6e36fd0407407c6f      0t0  TCP 127.0.0.1:65399->127.0.0.1:65386 (ESTABLISHED)
+node      15688 wenshao   18u  IPv4 0xe35bcc1a434d0d5b      0t0  TCP 127.0.0.1:65400->127.0.0.1:65386 (ESTABLISHED)
+node      15688 wenshao   30u  IPv4 0x4d31e67d698c16a3      0t0  TCP 127.0.0.1:65452->127.0.0.1:65386 (ESTABLISHED)

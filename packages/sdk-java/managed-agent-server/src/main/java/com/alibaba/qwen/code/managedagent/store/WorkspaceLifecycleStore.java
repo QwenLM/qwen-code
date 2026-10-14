@@ -26,12 +26,12 @@ public class WorkspaceLifecycleStore {
     public static boolean legacyClose(JdbcTemplate jdbc, String tenant, String session) {
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
-        return !jdbc.queryForList("SELECT o.operation_id FROM managed_agent_operation o"
-                + " JOIN managed_agent_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
-                + " JOIN qwen_runtime_harness_drain f ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id"
+        return !WorkspaceOperations.rows(jdbc, "SELECT o.operation_id FROM ma_operation o"
+                + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
+                + " JOIN ma_session_head f ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id"
                 + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_kind = 'CLOSE'"
                 + " AND o.lifecycle_protocol_version = 0 AND o.delivery_state = 'LEASED'"
-                + " AND o.lease_until > ? AND s.status = 'CLOSING'"
+                + " AND UNIX_TIMESTAMP(o.claim_until) * 1000.0 > ? AND s.status = 'CLOSING'"
                 + " AND f.tenant_key = ? AND f.harness_key = ?"
                 + " AND f.phase = 'DRAINING' AND f.operation_id IS NULL FOR UPDATE", tenant, session, now,
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session)).isEmpty();
@@ -64,12 +64,12 @@ public class WorkspaceLifecycleStore {
         if (authority == null) {
             throw blocked("workspace_lifecycle_claim_fenced");
         }
-        var rows = jdbc.queryForList("SELECT o.claim_generation, o.lease_until, o.delivery_state, o.lifecycle_protocol_version,"
-                + " s.status, f.phase, f.operation_id FROM managed_agent_operation o"
-                + " JOIN managed_agent_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
-                + " JOIN qwen_runtime_harness_drain f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id"
-                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?"
-                + " AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE", tenant, session, authority.operationId(),
+        var rows = jdbc.query("SELECT o.claim_generation, UNIX_TIMESTAMP(o.claim_until) * 1000.0 AS lease_until, o.delivery_state, o.lifecycle_protocol_version,"
+                + " s.status, f.phase, f.operation_id FROM ma_operation o"
+                + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
+                + " JOIN ma_session_head f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id"
+                + " WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?"
+                + " AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE", (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), tenant, session, authority.operationId(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
@@ -92,9 +92,9 @@ public class WorkspaceLifecycleStore {
             RuntimeLifecycleAuthority authority) {
         requireClaim(jdbc, tenant, session, authority, true);
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT o.lifecycle_protocol_version = 2 AND f.phase = 'DRAINING'"
-                + " FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
+                + " FROM ma_operation o JOIN ma_session_head f"
                 + " ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id AND f.operation_id = o.operation_id"
-                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?", Boolean.class,
+                + " WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?", Boolean.class,
                 tenant, session, authority.operationId()));
     }
 
@@ -107,18 +107,20 @@ public class WorkspaceLifecycleStore {
     }
 
     public static void requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2) {
-        var heads = jdbc.queryForList("SELECT compacted_through_revision FROM qwen_managed_session_journal_head"
-                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
+        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision FROM ma_session_head"
+                + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         if (heads.isEmpty()) {
             return;
         }
-        if (((Number) heads.getFirst().get("compacted_through_revision")).longValue() != 0) {
+        if (!tenant.equals(heads.getFirst().get("tenant_id")) || !session.equals(heads.getFirst().get("session_id"))
+                || ((Number) heads.getFirst().get("compacted_through_revision")).longValue() != 0) {
             throw blocked("workspace_lifecycle_journal_unverified");
         }
         var pending = new java.util.HashSet<String>();
         var cleanup = new java.util.HashMap<String, String>();
         var settled = new java.util.HashSet<String>();
-        jdbc.query("SELECT record_bytes FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+        jdbc.query("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                 + " ORDER BY journal_revision FOR UPDATE", row -> {
                 for (String line : new String(row.getBytes(1), StandardCharsets.UTF_8).split("\n")) {
                     try {
@@ -156,8 +158,8 @@ public class WorkspaceLifecycleStore {
     public JsonNode recoverEffects(OperationRecord operation) {
         lock(operation);
         requireClaim(jdbc, operation.tenantId(), operation.sessionId(), authority(operation), true);
-        String saved = jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM managed_agent_operation"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? FOR UPDATE", String.class,
+        String saved = jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation"
+                + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? FOR UPDATE", String.class,
                 operation.tenantId(), operation.sessionId(), operation.operationId());
         if (saved != null) {
             return parse(saved);
@@ -207,18 +209,18 @@ public class WorkspaceLifecycleStore {
 
     private void saveLocked(OperationRecord operation, JsonNode receipt) {
         verifyEffects(operation, receipt);
-        jdbc.update("UPDATE managed_agent_operation SET lifecycle_effects_receipt_json = ?"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND claim_generation = ?",
+        jdbc.update("UPDATE ma_operation SET lifecycle_effects_receipt_json = ?"
+                + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? AND claim_generation = ?",
                 receipt.toString(), operation.tenantId(), operation.sessionId(), operation.operationId(), operation.claimGeneration());
-        jdbc.update("UPDATE qwen_runtime_harness_drain SET phase = 'DRAINING', claim_lease_until = CASE WHEN ? = 2 THEN claim_lease_until ELSE NULL END"
+        jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING', claim_lease_until = CASE WHEN ? = 2 THEN claim_lease_until ELSE NULL END"
                 + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ?",
                 operation.lifecycleProtocolVersion(), JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()), JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), operation.operationId());
     }
 
     public void verifyCompletion(OperationRecord operation) {
-        String saved = jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM managed_agent_operation"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? FOR UPDATE", String.class,
+        String saved = jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation"
+                + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? FOR UPDATE", String.class,
                 operation.tenantId(), operation.sessionId(), operation.operationId());
         if (saved == null) {
             throw blocked("workspace_lifecycle_hooks_unsettled");
@@ -227,9 +229,14 @@ public class WorkspaceLifecycleStore {
         if (operation.lifecycleProtocolVersion() == 2) {
             verifyResources(operation);
         }
-        var writers = jdbc.queryForList("SELECT state, CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS live_writer"
-                + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
-                operation.tenantId(), operation.sessionId());
+        var writers = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, state, CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS live_writer"
+                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()),
+                JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
+        if (!writers.isEmpty() && (!operation.tenantId().equals(writers.getFirst().get("tenant_id"))
+                || !operation.sessionId().equals(writers.getFirst().get("session_id")))) {
+            throw blocked("workspace_lifecycle_claim_fenced");
+        }
         if (!writers.isEmpty() && "ACTIVE".equals(writers.getFirst().get("state"))
                 && ((Number) writers.getFirst().get("live_writer")).intValue() != 0) {
             throw blocked("workspace_lifecycle_writer_active");
@@ -280,7 +287,7 @@ public class WorkspaceLifecycleStore {
         }
         var originals = jdbc.execute((ConnectionCallback<List<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>>) connection ->
                 repository.verifyHarnessResources(connection, operation.tenantId(), operation.sessionId()));
-        String profile = jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+        String profile = jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, operation.tenantId(), operation.sessionId());
         try {
             profiles.verifyResources(operation, originals, profile);
@@ -292,7 +299,7 @@ public class WorkspaceLifecycleStore {
     private void lock(OperationRecord operation) {
         lockPlacement(jdbc, operation.tenantId());
         ToolPublicationRetentionStore.lockTenant(jdbc, operation.tenantId());
-        jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+        WorkspaceOperations.rows(jdbc, "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 operation.tenantId(), operation.sessionId());
     }
 
@@ -366,29 +373,32 @@ public class WorkspaceLifecycleStore {
     }
 
     private boolean neverInitialized(OperationRecord operation) {
-        var heads = jdbc.queryForList("SELECT journal_revision, CASE WHEN state = 'ACTIVE' AND"
+        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, journal_revision, CASE WHEN state = 'ACTIVE' AND"
                 + " writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS live_writer"
-                + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
-                operation.tenantId(), operation.sessionId());
-        if (!heads.isEmpty() && (((Number) heads.getFirst().get("journal_revision")).longValue() != 0
+                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()),
+                JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
+        if (!heads.isEmpty() && (!operation.tenantId().equals(heads.getFirst().get("tenant_id"))
+                || !operation.sessionId().equals(heads.getFirst().get("session_id"))
+                || ((Number) heads.getFirst().get("journal_revision")).longValue() != 0
                 || ((Number) heads.getFirst().get("live_writer")).intValue() != 0)) {
             return false;
         }
-        return jdbc.queryForObject("SELECT harness_boot_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+        return jdbc.queryForObject("SELECT harness_boot_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, operation.tenantId(), operation.sessionId()) == null
-                && jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?",
+                && jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?",
                         Integer.class, operation.tenantId(), operation.sessionId()) == 0
                 && records.listRecords(operation.tenantId(), operation.sessionId(), "hook_execution").isEmpty()
                 && records.listRecords(operation.tenantId(), operation.sessionId(), "hook_registration").isEmpty()
-                && (operation.lifecycleProtocolVersion() != 2 || jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_binding"
+                && (operation.lifecycleProtocolVersion() != 2 || jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding"
                         + " WHERE tenant_id = ? AND isolation_class = 'session' AND isolation_key = ?", Integer.class,
                         operation.tenantId(), operation.sessionId()) == 0
-                        && jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record WHERE tenant_id = ? AND session_id = ?",
+                        && jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?",
                                 Integer.class, operation.tenantId(), operation.sessionId()) == 0);
     }
 
     private String latestHookExecutionResource(OperationRecord operation, String occurrence) {
-        return jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+        return jdbc.queryForList("SELECT record_resource_id FROM ma_session_record"
                 + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ?"
                 + " AND domain = 'hook_execution' AND record_id = ? FOR UPDATE", String.class,
                 ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
@@ -397,7 +407,7 @@ public class WorkspaceLifecycleStore {
     }
 
     private JsonNode resourceRef(OperationRecord operation, String resource) {
-        return jdbc.query("SELECT kind, schema_version, byte_length, sha256 FROM qwen_managed_session_resource"
+        return jdbc.query("SELECT kind, schema_version, byte_length, sha256 FROM ma_resource"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?",
                 (row, index) -> json.createObjectNode().put("resourceId", resource).put("kind", row.getString("kind"))
                         .put("schemaVersion", row.getInt("schema_version")).put("byteLength", row.getLong("byte_length"))
@@ -407,7 +417,7 @@ public class WorkspaceLifecycleStore {
     }
 
     private JsonNode header(String tenant, String session) {
-        var rows = jdbc.queryForList("SELECT record_bytes FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+        var rows = jdbc.queryForList("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                 + " ORDER BY journal_revision LIMIT 1", byte[].class, tenant, session);
         if (rows.isEmpty()) {
             return null;
@@ -429,7 +439,7 @@ public class WorkspaceLifecycleStore {
     }
 
     private JsonNode sessionKey(OperationRecord operation) {
-        String workspace = jdbc.queryForObject("SELECT workspace_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+        String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, operation.tenantId(), operation.sessionId());
         return json.createObjectNode().put("tenantId", operation.tenantId()).put("workspaceId", workspace).put("sessionId", operation.sessionId());
     }
