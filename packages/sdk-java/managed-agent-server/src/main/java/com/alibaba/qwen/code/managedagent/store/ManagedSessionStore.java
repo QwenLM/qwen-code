@@ -420,15 +420,17 @@ public class ManagedSessionStore {
         requireCredential(tenant, workspace, session, token);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
         requirePhysicalSessionOpen(tenant, workspace, session);
+        // Publication-lane writer: keeps the tenant CAS row before the
+        // Session root the CSI check locks and before the head row, the
+        // order retention reads take (CAS row, root, head) and the same as
+        // before #13800 decoupled ordinary traffic.
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         var continuation = lockCsiContinuation(tenant, session);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        // Publication-lane writer: keeps the tenant CAS row before the head
-        // row, the same order as before #13800 decoupled ordinary traffic.
-        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
@@ -1708,18 +1710,19 @@ public class ManagedSessionStore {
             throw invalid("Tool result bytes do not match their length or digest.");
         }
         requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
-        // After the bounded placement wait, so the CSI check's read does not
-        // pin this transaction's snapshot ahead of it.
+        // Tool-result publication lane: keeps the tenant CAS row before the
+        // Session root the CSI check locks and before the head row, the
+        // order retention reads take (CAS row, root, head) and the same as
+        // before #13800 decoupled ordinary traffic.
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // After both bounded waits, so the CSI check's read does not pin this
+        // transaction's snapshot ahead of them.
         var continuation = lockCsiContinuation(tenantId, sessionId);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        // Tool-result publication lane: keeps the tenant CAS row before the
-        // head row, the same order as before #13800 decoupled ordinary
-        // traffic.
-        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
-                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even
@@ -2185,8 +2188,9 @@ public class ManagedSessionStore {
 
     private HeadRow requireHeartbeatHead(String tenantId, String sessionId) {
         // An ordinary heartbeat holds no tenant fence (#13800): retirement
-        // serializes with it on the head row alone, so the head is locked
-        // before requireLive takes this transaction's first consistent read.
+        // serializes with it on the Session root, which the CSI check locked
+        // before its first consistent read, and on the head row, locked here
+        // before requireLive reads.
         var heads =
                 jdbc.query(
                         "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
@@ -2232,14 +2236,28 @@ public class ManagedSessionStore {
                                 }
                                 return null;
                             }
-                            // A lock-free read of every CSI marker first: an
-                            // ordinary Session stops here, before the
+                            // An ordinary Session stops here, before the
                             // tenant-wide guard rows and the slot/binding
-                            // range locks. Taking them on every writer path
+                            // range locks: taking them on every writer path
                             // would couple per-turn traffic of unrelated
-                            // Sessions again (#13800). Any marker takes the
-                            // locked path, which re-checks under its locks.
-                            if (!JdbcCsiFilesRetirementGuard.mayCarryCsi(target, tenantId, sessionId)) {
+                            // Sessions again (#13800). The root is locked
+                            // first, by primary key once it exists, so its pin
+                            // is read as committed now even under an older
+                            // REPEATABLE READ snapshot, no gap is taken that
+                            // another tenant's first writer inserts into, and
+                            // no consistent read below runs before this wait.
+                            // The runtime rows are then read plainly: a CSI
+                            // slot or binding is only created under a pinned
+                            // root, a pin never changes after its row is
+                            // inserted, and roots are never deleted, so an
+                            // unpinned root can only have legacy markers,
+                            // which no snapshot here is older than. A pinned
+                            // Session takes the tenant guards behind its root;
+                            // a placement-first operation on that same Session
+                            // meanwhile resolves as an InnoDB deadlock.
+                            if (!ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId)
+                                    && !JdbcCsiFilesRetirementGuard.hasCsiRuntimeMarker(
+                                            target, tenantId, sessionId)) {
                                 return null;
                             }
                             JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);

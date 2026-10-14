@@ -81,12 +81,15 @@ public final class ToolPublicationRetentionStore {
         lockSessionHead(jdbc, tenant, session);
     }
 
-    /** Per-Session root row only; takes no tenant-wide guard (#13800). */
-    static void lockSessionRoot(JdbcTemplate jdbc, String tenant, String session) {
-        lockSessionRoot(jdbc, tenant, session, false);
+    /**
+     * Per-Session root row only; takes no tenant-wide guard (#13800). Returns
+     * the root's {@code csi_guard} as committed now: the read is a locking one.
+     */
+    static boolean lockSessionRoot(JdbcTemplate jdbc, String tenant, String session) {
+        return lockSessionRoot(jdbc, tenant, session, false);
     }
 
-    private static void lockSessionRoot(
+    private static boolean lockSessionRoot(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
         long time = now(jdbc);
         jdbc.update(
@@ -96,16 +99,17 @@ public final class ToolPublicationRetentionStore {
                     + " VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key ="
                     + " VALUES(session_scope_key)",
                 tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
-        jdbc.query(
+        return jdbc.query(
                 "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
                         + " session_id = ? FOR UPDATE",
                 (row, index) -> {
+                    boolean guarded = row.getBoolean("csi_guard");
                     if (legacyMutation) {
-                        ManagedLegacySessionGuard.requireLegacyMutation(row.getBoolean("csi_guard"));
+                        ManagedLegacySessionGuard.requireLegacyMutation(guarded);
                     }
-                    return row.getString(1);
+                    return guarded;
                 },
-                tenant, session);
+                tenant, session).getFirst();
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
