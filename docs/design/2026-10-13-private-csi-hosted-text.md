@@ -5,13 +5,19 @@
 ## Status and source
 
 This is an independently reviewable feature extraction from #13526. It now targets
-main at `2fa791f55b41b08df9459b7cd53c3a758f6f34a4`, after the private Session and
+main at `31e02ace6135d244a67247c8e8f12c1e6096c89c`, after the private Session and
 SQL authority in #13996 merged as `3a9bbd7216d67a101e70f8c60e1a92dc0d7a3746`.
 The original stacked baseline was `c0d930c066624988126e22aee2ee30417d45d391`.
 The initial text-only implementation
 is taken from `06a1a868568683211986aa6cfa665309fce0e2e9`, checked against the
 proposal's current `0a88d72f824d47a7bfe6ec8c0861b7a6a67b3b95`. Historical test
 reports do not qualify this extraction. The source proposal is unchanged.
+
+The first main validation used `2fa791f55b41b08df9459b7cd53c3a758f6f34a4`.
+A subsequent merge of main inherits #14177's generated-column validation,
+first-writer locking and baseline witness fixes without rewriting review history.
+The integrated candidate requires fresh validation; earlier green reports remain
+bound to their recorded revisions. This extraction adds no schema changes.
 
 ## Problem and scope
 
