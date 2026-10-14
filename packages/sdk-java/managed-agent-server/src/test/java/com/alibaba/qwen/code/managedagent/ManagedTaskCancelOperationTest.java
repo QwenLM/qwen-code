@@ -53,6 +53,7 @@ class ManagedTaskCancelOperationTest {
     private static final String RUNNING_CHILD = "task_" + "a".repeat(64);
     private static final String SETTLED_CHILD = "task_" + "b".repeat(64);
     private static final String MONITOR = "task_" + "c".repeat(64);
+    private static final String WORKFLOW = "task_" + "e".repeat(64);
     private final AtomicLong now = new AtomicLong(1_000_000);
     private ManagedAgentStore store;
     private JdbcTemplate jdbc;
@@ -159,6 +160,42 @@ class ManagedTaskCancelOperationTest {
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
+    }
+
+    // H4f-b: a workflow child_run takes the same admission rule as a child
+    // agent's — the cancellable states admit, terminal and
+    // recovery_blocked states refuse, and the retained key replays.
+    @Test
+    void aWorkflowTaskAdmitsCancelUnderTheSameRule() {
+        task(WORKFLOW, "child_run", "workflow", "running");
+        OperationAdmission first = begin("wf-key-1", "wf-digest-1",
+                WORKFLOW);
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.operation().kind()).isEqualTo(
+                OperationKind.TASK_CANCEL);
+        assertThat(first.operation().taskId()).isEqualTo(WORKFLOW);
+        assertThat(begin("wf-key-1", "wf-digest-1", WORKFLOW).replayed())
+                .isTrue();
+        refused(() -> begin("wf-key-1", "wf-digest-2", WORKFLOW),
+                HttpStatus.CONFLICT, "idempotency_conflict");
+        settle(first.operation(), TaskCancelOutcome.completed());
+        for (String state : new String[] {"pending", "waiting",
+                "degraded"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "e".repeat(64));
+            settle(begin("wf-key-" + state, "wf-digest-" + state, WORKFLOW)
+                    .operation(), TaskCancelOutcome.completed());
+        }
+        for (String state : new String[] {"completed", "failed",
+                "cancelled", "recovery_blocked"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "e".repeat(64));
+            refused(() -> begin("wf-key-" + state, "wf-digest-" + state,
+                    WORKFLOW), HttpStatus.CONFLICT,
+                    "task_action_unavailable");
+        }
     }
 
     // A bound Session under storage migration admits no new cancel, as

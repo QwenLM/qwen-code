@@ -70,6 +70,7 @@ import {
   type SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 import type {
   AgentMentionRecordPayload,
   AgentMessageRecordPayload,
@@ -87,8 +88,6 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
-
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
 /**
@@ -404,6 +403,7 @@ export interface ChatRecord {
     | 'code_mode_tool_result'
     | 'realtime_message'
     | 'turn_result'
+    | 'turn_attempt'
     | 'managed_session_header_v1'
     | 'managed_session_event_v1'
     | 'managed_session_commit_v1'
@@ -992,8 +992,10 @@ export interface TurnResultRecordPayload {
   error?: TurnResultErrorPayload;
   /** Epoch ms the turn started executing (agent clock). */
   startedAt?: number;
-  /** Epoch ms the user-cancel signal was received (agent clock). */
+  /** Epoch ms the cancellation signal was received (agent clock). */
   cancelledAt?: number;
+  /** Explicit user intent; legacy timestamps alone do not establish it. */
+  cancelReason?: 'user';
   /** Epoch ms the turn settled (agent clock). */
   endedAt: number;
   promptText?: string;
@@ -1036,6 +1038,10 @@ export function isTurnResultRecordPayload(
     !optionalString('stopReason', TURN_RESULT_IDENTIFIER_MAX_CHARS) ||
     !optionalTimestamp('startedAt') ||
     !optionalTimestamp('cancelledAt') ||
+    (payload['cancelReason'] !== undefined &&
+      (payload['cancelReason'] !== 'user' ||
+        payload['state'] !== 'cancelled' ||
+        payload['cancelledAt'] === undefined)) ||
     !optionalString('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('promptTextTruncated') ||
     !optionalString('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
@@ -3703,12 +3709,36 @@ export class ChatRecordingService {
     await this.appendRecordStrict(record);
   }
 
+  /** A resumed attempt must supersede an old cancellation before model execution. */
+  async recordTurnAttempt(
+    promptId: string | undefined,
+    daemonPromptId: string,
+  ): Promise<void> {
+    if (
+      (promptId !== undefined &&
+        (typeof promptId !== 'string' ||
+          promptId.length === 0 ||
+          promptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS)) ||
+      typeof daemonPromptId !== 'string' ||
+      daemonPromptId.length === 0 ||
+      daemonPromptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS
+    ) {
+      throw new TypeError('Invalid turn attempt identity');
+    }
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'turn_attempt',
+      promptId,
+      daemonPromptId,
+    });
+  }
+
   /**
    * Append the settled outcome of a turn. Best-effort by design: a
    * recording failure must never break turn settlement, so this uses the
    * non-strict append path (inactive/failed writers skip silently).
    */
-  recordTurnResult(payload: TurnResultRecordPayload): void {
+  recordTurnResult(payload: TurnResultRecordPayload, promptId?: string): void {
     if (!isTurnResultRecordPayload(payload)) {
       debugLogger.error(
         'Skipping turn result record that violates the bounded contract:',
@@ -3721,6 +3751,11 @@ export class ChatRecordingService {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'turn_result',
+        ...(typeof promptId === 'string' &&
+        promptId.length > 0 &&
+        promptId.length <= TURN_RESULT_IDENTIFIER_MAX_CHARS
+          ? { promptId }
+          : {}),
         systemPayload: payload,
       };
       this.appendRecord(record);
