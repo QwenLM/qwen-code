@@ -22,10 +22,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Principal;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -164,9 +162,12 @@ final class HostedSseGapProbe implements AutoCloseable {
         var execution = rows.getFirst();
         if (!finished) executionId = execution.get("execution_call_id").toString();
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
-        String storageKey = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-0").getBytes(StandardCharsets.UTF_8)));
-        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        String storage = "storage-0";
+        var owner = jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
+                + " AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
         if (finished) assertThat(owner.get("holder_key")).isNull();
         else {
             assertThat(owner.get("holder_key")).isNotNull();
