@@ -43,6 +43,7 @@ interface WorkspaceSelectorProps {
   selectedWorkspaceCwd?: string;
   disabled?: boolean;
   busy?: boolean;
+  alwaysVisible?: boolean;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
   /** Offer a projectless (standalone) target alongside the workspaces. */
@@ -76,6 +77,7 @@ export function WorkspaceSelector({
   selectedWorkspaceCwd,
   disabled,
   busy,
+  alwaysVisible = false,
   scratchSupported,
   existingFolderSupported,
   standaloneSupported,
@@ -102,7 +104,12 @@ export function WorkspaceSelector({
   const standaloneSelectable = Boolean(
     standaloneSupported && onSelectStandalone,
   );
-  if (workspaces.length <= 1 && !canCreate && !standaloneSelectable) {
+  if (
+    !alwaysVisible &&
+    workspaces.length <= 1 &&
+    !canCreate &&
+    !standaloneSelectable
+  ) {
     return null;
   }
   // Group by host in first-appearance order; a single-host list keeps the
@@ -122,7 +129,7 @@ export function WorkspaceSelector({
   const groupedByHost = groups.length > 1;
   const triggerLabel = selectedStandalone
     ? t('sidebar.noWorkspace')
-    : (selected?.label ?? '');
+    : (selected?.label ?? t('sidebar.workspaceSelectLabel'));
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -198,7 +205,7 @@ export function WorkspaceSelector({
           <DropdownMenuRadioGroup
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
-              if (id === STANDALONE_OPTION_ID) {
+              if (standaloneSelectable && id === STANDALONE_OPTION_ID) {
                 onSelectStandalone?.();
                 return;
               }

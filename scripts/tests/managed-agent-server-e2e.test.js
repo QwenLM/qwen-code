@@ -51,6 +51,28 @@ const fencedShellBlocks = (text) =>
   ].map((match) => match[1]);
 
 describe('managed-agent-server e2e runner', () => {
+  it('queries tables from the shared fresh-database baseline', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const baseline = read(
+      'packages/sdk-java/runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+    );
+    const tables = new Set(
+      [...baseline.matchAll(/CREATE TABLE (\w+)/g)].map((match) => match[1]),
+    );
+    const queried = new Set(
+      [...source.matchAll(/qwen_managed_agent\.(\w+)/g)].map(
+        (match) => match[1],
+      ),
+    );
+    expect(queried.size).toBeGreaterThan(0);
+    for (const table of queried) {
+      expect(
+        tables.has(table),
+        `E2E table ${table} is absent from canonical V1`,
+      ).toBe(true);
+    }
+  });
+
   const extracted = (names) => {
     const source = createSourceFile(
       'runner.ts',
@@ -323,13 +345,11 @@ describe('managed-agent-server e2e runner', () => {
       'the Workspace mount root must be created for every mode',
     ).not.toBeNull();
     expect(
-      source.match(
-        /INSERT INTO qwen_managed_agent\.managed_workspace_registry/g,
-      ),
+      source.match(/INSERT INTO qwen_managed_agent\.ma_workspace\b/g),
       'the Workspace registry row must be seeded for every mode',
     ).toHaveLength(1);
     expect(
-      source.match(/INSERT INTO qwen_managed_agent\.managed_workspace_access/g),
+      source.match(/INSERT INTO qwen_managed_agent\.ma_workspace_access/g),
       'the Workspace access grant must be seeded for every mode',
     ).toHaveLength(1);
     // The counts above cannot see WHERE an item sits: the runner before the

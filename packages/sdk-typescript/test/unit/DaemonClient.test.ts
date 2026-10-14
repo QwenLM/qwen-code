@@ -4614,6 +4614,100 @@ describe('DaemonClient', () => {
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
     });
 
+    it.each([
+      { reason: 'caller stopped', expected: 'interrupted' },
+      { reason: undefined, expected: 'interrupted' },
+      { reason: new Error('caller stopped'), expected: 'interrupted' },
+    ])(
+      'cancels an accepted turn when SSE rejects the caller reason ($expected)',
+      async ({ reason, expected }) => {
+        const { fetch, calls } = recordingFetch((req) => {
+          if (req.url.endsWith('/prompt'))
+            return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+          if (req.url.endsWith('/events'))
+            return new Promise<Response>((_resolve, reject) => {
+              req.signal!.addEventListener(
+                'abort',
+                () => reject(req.signal!.reason),
+                { once: true },
+              );
+            });
+          if (req.url.endsWith('/cancel'))
+            return new Response(null, { status: 204 });
+          return jsonResponse(500, { error: 'unexpected request' });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const controller = new AbortController();
+        const result = client
+          .prompt(
+            's-1',
+            { prompt: [{ type: 'text', text: 'work' }] },
+            controller.signal,
+          )
+          .catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(calls.some((call) => call.url.endsWith('/events'))).toBe(true),
+        );
+        controller.abort(reason);
+        const error = await result;
+        expect(error).toBeInstanceOf(Error);
+        if (!(reason instanceof Error))
+          expect(error).toMatchObject({ name: 'AbortError' });
+        else expect(error).toBe(reason);
+        await vi.waitFor(() =>
+          expect(
+            calls.filter((call) => call.url.endsWith('/cancel')),
+          ).toHaveLength(1),
+        );
+        expect(
+          JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
+        ).toEqual({ _meta: { 'qwen.cancelReason': expected } });
+      },
+    );
+
+    it('cancels an accepted turn when an already connected SSE body is aborted', async () => {
+      let reading = false;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/prompt'))
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        if (req.url.endsWith('/events'))
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(stream) {
+                stream.enqueue(new TextEncoder().encode(': connected\n\n'));
+              },
+              pull() {
+                reading = true;
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          );
+        if (req.url.endsWith('/cancel'))
+          return new Response(null, { status: 204 });
+        return jsonResponse(500, { error: 'unexpected request' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+      const result = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'work' }] },
+          controller.signal,
+        )
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(reading).toBe(true));
+      controller.abort('caller stopped');
+      expect(await result).toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() =>
+        expect(
+          calls.filter((call) => call.url.endsWith('/cancel')),
+        ).toHaveLength(1),
+      );
+      expect(
+        JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
+      ).toEqual({ _meta: { 'qwen.cancelReason': 'interrupted' } });
+    });
+
     it('releases the local pending prompt slot after caller abort', async () => {
       let nextPromptId = 0;
       const { fetch, calls } = recordingFetch((req) => {
@@ -5393,6 +5487,7 @@ describe('DaemonClient', () => {
       await client.cancel('s-1');
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/cancel');
       expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
     });
 
     it('sends client identity header on cancel', async () => {
@@ -10738,6 +10833,78 @@ describe('DaemonClient', () => {
         url: 'http://daemon/workspaces/workspace%2Fid/session/session%2F1/transcript?cursor=cur+1&limit=500',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it.each(['id', 'cwd'] as const)(
+      'lists the selected workspace over REST with an ACP transport (%s)',
+      async (selector) => {
+        const body = {
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        };
+        const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+        const transportFetch = vi.fn(async () => {
+          throw new Error('must use workspace REST');
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'list-token',
+          fetch,
+          transport: {
+            type: 'acp-http',
+            supportsReplay: true,
+            connected: true,
+            fetch: transportFetch,
+            async *subscribeEvents() {},
+            dispose() {},
+          },
+        });
+        const workspace =
+          selector === 'id'
+            ? client.workspaceById('workspace/id')
+            : client.workspaceByCwd('/tmp/work space');
+        await expect(workspace.dirList('src')).resolves.toEqual(body);
+        expect(transportFetch).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          method: 'GET',
+          url: `http://daemon/workspaces/${selector === 'id' ? 'workspace%2Fid' : '%2Ftmp%2Fwork%20space'}/list?path=src`,
+          headers: { authorization: 'Bearer list-token' },
+        });
+      },
+    );
+
+    it('does not fall back to the primary directory when workspace listing is rejected', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(403, {
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        }),
+      );
+      const transportFetch = vi.fn(async () => {
+        throw new Error('must use workspace REST');
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: {
+          type: 'acp-http',
+          supportsReplay: true,
+          connected: true,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        },
+      });
+      await expect(
+        client.workspaceById('removed-owner').dirList('.'),
+      ).rejects.toThrow();
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspaces/removed-owner/list?path=.',
+      ]);
     });
 
     it('reads complete turn calls through encoded workspace REST without pagination', async () => {
