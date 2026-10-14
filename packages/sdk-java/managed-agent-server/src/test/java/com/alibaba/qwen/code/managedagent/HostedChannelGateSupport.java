@@ -212,7 +212,7 @@ class HostedChannelGateSupport {
             String deliveryId) {
         var rows = jdbc.queryForList(
                 "SELECT revision, delivery_state, record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE"
                         + " tenant_id = ? AND session_id = ? AND domain ="
                         + " 'channel_delivery' AND record_id = ?", tenant,
                 sessionId, deliveryId);
@@ -222,24 +222,24 @@ class HostedChannelGateSupport {
     Map<String, Object> ledger(String tenant, String channelId,
             String deliveryId) {
         var rows = jdbc.queryForList(
-                "SELECT state, provider_receipt, segment_id, segment_ordinal"
-                        + " FROM qwen_managed_channel_delivery WHERE tenant_id"
-                        + " = ? AND channel_instance_id = ? AND delivery_id = ?",
+                "SELECT transport_state AS state, JSON_UNQUOTE(provider_receipt_json) AS provider_receipt, segment_id, segment_ordinal"
+                        + " FROM ma_delivery WHERE delivery_kind = 'CHANNEL' AND tenant_id"
+                        + " = ? AND channel_id = ? AND delivery_id = ?",
                 tenant, channelId, deliveryId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     int ledgerRows(String tenant, String channelId) {
         Integer count = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_channel_delivery WHERE"
-                        + " tenant_id = ? AND channel_instance_id = ?",
+                "SELECT COUNT(*) FROM ma_delivery WHERE delivery_kind = 'CHANNEL' AND"
+                        + " tenant_id = ? AND channel_id = ?",
                 Integer.class, tenant, channelId);
         return count == null ? 0 : count;
     }
 
     int claimRows(String tenant, String channelId) {
         Integer count = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_channel_claim WHERE"
+                "SELECT COUNT(*) FROM ma_delivery WHERE delivery_kind = 'CHANNEL' AND claimed_at IS NOT NULL AND"
                         + " tenant_id = ? AND channel_id = ?",
                 Integer.class, tenant, channelId);
         return count == null ? 0 : count;
@@ -247,16 +247,16 @@ class HostedChannelGateSupport {
 
     Map<String, Object> routeRow(String tenant, String channelId) {
         var rows = jdbc.queryForList(
-                "SELECT state, input_id, session_id FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ? AND"
-                        + " channel_instance_id = ?", tenant, channelId);
+                "SELECT state, JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.inputId')) AS input_id, session_id FROM"
+                        + " ma_operation WHERE operation_kind = 'CHANNEL_INGRESS' AND tenant_id = ? AND"
+                        + " JSON_UNQUOTE(JSON_EXTRACT(request_json, '$.channelId')) = ?", tenant, channelId);
         assertThat(rows).as("route rows for " + channelId).hasSize(1);
         return rows.getFirst();
     }
 
     String channelSession(String tenant, String channelId) {
         var rows = jdbc.queryForList(
-                "SELECT session_id FROM qwen_managed_channel_binding WHERE"
+                "SELECT session_id FROM ma_channel_binding WHERE"
                         + " tenant_id = ? AND channel_id = ?", tenant,
                 channelId);
         assertThat(rows).as("the channel's binding rows").hasSize(1);
@@ -265,16 +265,16 @@ class HostedChannelGateSupport {
 
     String sessionOfInput(String tenant, String channelId, String inputId) {
         var rows = jdbc.queryForList(
-                "SELECT session_id FROM qwen_managed_channel_route WHERE"
-                        + " tenant_id = ? AND channel_instance_id = ? AND"
-                        + " input_id = ?", tenant, channelId, inputId);
+                "SELECT session_id FROM ma_operation WHERE operation_kind = 'CHANNEL_INGRESS' AND"
+                        + " tenant_id = ? AND JSON_UNQUOTE(JSON_EXTRACT(request_json, '$.channelId')) = ? AND"
+                        + " JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.inputId')) = ?", tenant, channelId, inputId);
         assertThat(rows).as("route row for " + inputId).hasSize(1);
         return rows.getFirst().get("session_id").toString();
     }
 
     Map<String, Object> routeProjection(String tenant, String sessionId) {
         var rows = jdbc.queryForList(
-                "SELECT revision FROM qwen_managed_session_extension_record"
+                "SELECT revision FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? AND domain"
                         + " = 'channel_route'", tenant, sessionId);
         // The route-admit probe awaits this row: empty is legal, ambiguous
@@ -291,7 +291,7 @@ class HostedChannelGateSupport {
         assertThat(projection).as("delivery record " + deliveryId).isNotNull();
         var resources = jdbc.queryForList(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " qwen_managed_session_resource WHERE tenant_id = ?"
+                        + " ma_resource WHERE tenant_id = ?"
                         + " AND session_id = ? AND resource_id = ?", tenant,
                 sessionId, projection.get("record_resource_id"));
         assertThat(resources).hasSize(1);
@@ -302,7 +302,7 @@ class HostedChannelGateSupport {
             throws IOException {
         int count = 0;
         for (Map<String, Object> tx : jdbc.queryForList(
-                "SELECT record_bytes FROM qwen_managed_session_journal_tx"
+                "SELECT record_bytes FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 sessionId)) {
             String bytes = new String((byte[]) tx.get("record_bytes"),
@@ -320,8 +320,8 @@ class HostedChannelGateSupport {
     }
 
     void expireClaims(String tenant, String channelId) {
-        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = 0"
-                + " WHERE tenant_id = ? AND channel_id = ?", tenant,
+        jdbc.update("UPDATE ma_delivery SET claimed_at = 0"
+                + " WHERE delivery_kind = 'CHANNEL' AND claimed_at IS NOT NULL AND tenant_id = ? AND channel_id = ?", tenant,
                 channelId);
     }
 

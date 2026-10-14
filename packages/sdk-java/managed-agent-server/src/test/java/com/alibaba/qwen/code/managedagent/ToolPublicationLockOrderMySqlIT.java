@@ -64,7 +64,7 @@ class ToolPublicationLockOrderMySqlIT {
         try {
             var source = new OwnerPauseDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
-            Flyway.configure().dataSource(source).load().migrate();
+            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
             var journal = PublicationJournalFixture.create(source, false);
             JsonNode reserved = journal.reserve();
             var transaction = new TransactionTemplate(journal.manager);
@@ -237,17 +237,17 @@ class ToolPublicationLockOrderMySqlIT {
                                         try {
                                             if (enabled && call.getName().startsWith("execute")
                                                     && "subject".equals(Thread.currentThread().getName())) {
-                                                if (sql.startsWith("INSERT INTO qwen_runtime_placement_guard")) {
+                                                if (sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
                                                     requestedLocks.add("placement");
                                                     subjectPlacementLocks.set(List.copyOf(requestedLocks));
-                                                } else if (sql.startsWith("INSERT INTO qwen_tool_publication_tenant")) {
+                                                } else if (sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'output_publication'")) {
                                                     requestedLocks.add("retention");
                                                 }
                                             }
                                             Object value = call.invoke(statement, values);
                                             if (enabled && call.getName().startsWith("execute")
                                                     && "owner".equals(Thread.currentThread().getName())
-                                                    && sql.startsWith("SELECT tenant_id FROM qwen_runtime_placement_guard")
+                                                    && sql.startsWith("SELECT tenant_id FROM ma_tenant_guard") && sql.contains("'runtime_placement'")
                                                     && paused.compareAndSet(false, true)) {
                                                 ownerPlacement.countDown();
                                                 if (!releaseOwner.await(30, TimeUnit.SECONDS)) {
