@@ -211,13 +211,19 @@ class HostedShellLifecycleRecoveryIT {
             assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                     String.class, originalBinding.getBindingId())).isEqualTo("RELEASED");
             assertThat(running(worker)).isFalse();
+            // The completion transaction of a DELETE retires the Session and nulls the
+            // head's writer identity with it, so only the writer generation column still
+            // witnesses the writer count: the pre-delete writer alone, plus the reload
+            // that re-acquired the session after the detach-ack cut lost the first reply.
             if (cut.equals("detach-ack")) {
                 assertThat(((Number) writerIdentity().get("writer_generation")).longValue())
                         .isEqualTo(((Number) writer.get("writer_generation")).longValue() + 1);
-                assertThat(writerIdentity().get("writer_id")).isEqualTo(writer.get("writer_id"));
-            } else assertThat(writerIdentity()).isEqualTo(writer);
+            } else {
+                assertThat(((Number) writerIdentity().get("writer_generation")).longValue())
+                        .isEqualTo(((Number) writer.get("writer_generation")).longValue());
+            }
             assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
-                    String.class, tenant, session)).isEqualTo("SEALED");
+                    String.class, tenant, session)).isEqualTo("DELETED");
             assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE operation_id = ?",
                     Integer.class, operation)).isEqualTo(2);
             assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
