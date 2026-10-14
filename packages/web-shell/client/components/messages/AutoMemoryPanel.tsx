@@ -90,7 +90,9 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
     setValue('user', key, next)
       .catch((toggleError: unknown) => {
         const text =
-          toggleError instanceof Error ? toggleError.message : String(toggleError);
+          toggleError instanceof Error
+            ? toggleError.message
+            : String(toggleError);
         setNotice(text);
         onMessage?.(text, 'error');
       })
@@ -213,9 +215,7 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
               <span className={styles.autoToggleLabel}>
                 {t(toggle.labelKey)}
               </span>
-              <span className={styles.autoToggleDesc}>
-                {t(toggle.descKey)}
-              </span>
+              <span className={styles.autoToggleDesc}>{t(toggle.descKey)}</span>
             </div>
           </div>
         ))}
@@ -242,9 +242,7 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
               <div className={styles.detailPath}>{selectedEntry.path}</div>
             </div>
           </header>
-          {contentError && (
-            <div className={styles.status}>{contentError}</div>
-          )}
+          {contentError && <div className={styles.status}>{contentError}</div>}
           <pre className={styles.content}>
             {contentLoading
               ? t('memory.loadingFile')

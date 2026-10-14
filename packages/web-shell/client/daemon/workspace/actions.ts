@@ -643,10 +643,7 @@ export function createDaemonWorkspaceActions({
     },
 
     async readAutoMemoryFile(filePath) {
-      const client = requireClient(
-        getClient,
-        'Read auto-memory file failed',
-      );
+      const client = requireClient(getClient, 'Read auto-memory file failed');
       return withActionTimeout(
         client.workspaceAutoMemoryFile(filePath),
         'Read auto-memory file timed out',
@@ -654,14 +651,9 @@ export function createDaemonWorkspaceActions({
     },
 
     async openAutoMemoryFolder(scope, workspaceCwd) {
-      const client = requireClient(
-        getClient,
-        'Open auto-memory folder failed',
-      );
+      const client = requireClient(getClient, 'Open auto-memory folder failed');
       await withActionTimeout(
-        client
-          .workspaceByCwd(workspaceCwd)
-          .openAutoMemoryFolderLocally(scope),
+        client.workspaceByCwd(workspaceCwd).openAutoMemoryFolderLocally(scope),
         'Open auto-memory folder timed out',
       );
     },
