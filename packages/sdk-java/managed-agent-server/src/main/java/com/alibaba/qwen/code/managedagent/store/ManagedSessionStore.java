@@ -2114,16 +2114,6 @@ public class ManagedSessionStore {
                                 }
                                 return null;
                             }
-                            // A lock-free read of every CSI marker first: an
-                            // ordinary Session stops here, before the
-                            // tenant-wide guard rows and the slot/binding
-                            // range locks. Taking them on every writer path
-                            // would couple per-turn traffic of unrelated
-                            // Sessions again (#13800). Any marker takes the
-                            // locked path, which re-checks under its locks.
-                            if (!JdbcCsiFilesRetirementGuard.mayCarryCsi(target, tenantId, sessionId)) {
-                                return null;
-                            }
                             JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
                             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
                             var original =
