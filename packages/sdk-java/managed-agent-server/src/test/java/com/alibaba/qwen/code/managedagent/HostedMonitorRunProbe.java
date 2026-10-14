@@ -203,7 +203,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     private Map<String, Object> state(String sessionId) {
         var executions = jdbc.queryForList(
                 "SELECT execution_call_id, execution_state, execution_status"
-                        + " FROM qwen_tool_execution WHERE harness_session_id"
+                        + " FROM ma_tool_execution WHERE harness_session_id"
                         + " = ? ORDER BY execution_call_id", sessionId);
         var relayFailure = failure.get();
         return Map.of("executions", executions,
@@ -214,7 +214,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                 // arms the store-proxy faults.
                 "resources", jdbc.queryForList(
                         "SELECT resource_id, kind, byte_length, sha256 FROM"
-                                + " qwen_managed_session_resource WHERE"
+                                + " ma_resource WHERE"
                                 + " tenant_id = ? AND session_id = ? AND kind"
                                 + " LIKE 'managed-tool-result-%' ORDER BY"
                                 + " created_at, resource_id", tenant,
@@ -228,7 +228,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
         try {
             var rows = jdbc.queryForList(
                     "SELECT record_id, record_resource_id FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE"
                             + " tenant_id = ? AND session_id = ? AND domain"
                             + " = ? ORDER BY created_at, record_id", tenant,
                     sessionId, domain);
@@ -236,7 +236,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
             for (var row : rows) {
                 var resources = jdbc.queryForList(
                         "SELECT CONVERT(inline_bytes USING utf8mb4) AS body"
-                                + " FROM qwen_managed_session_resource WHERE"
+                                + " FROM ma_resource WHERE"
                                 + " tenant_id = ? AND session_id = ? AND"
                                 + " resource_id = ?", tenant, sessionId,
                         row.get("record_resource_id"));
@@ -251,8 +251,13 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     }
 
     private List<Map<String, Object>> ledger(String sessionId) {
+        // The surfaces serve the SESSION stream only — a child task's
+        // state_changed audit rows share the sequence space but are never
+        // streamed, so the gate's ground truth filters them out exactly
+        // the way findEvents does.
         return jdbc.queryForList(
-                "SELECT * FROM managed_agent_event WHERE tenant_id = ? AND"
+                "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION'"
+                        + " AND stream_id = X'' AND tenant_id = ? AND"
                         + " session_id = ? ORDER BY sequence_id", tenant,
                 sessionId);
     }

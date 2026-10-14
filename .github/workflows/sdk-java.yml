@@ -810,12 +810,28 @@ jobs:
       # whose supervision needs a delegated cgroup v2 root; ubuntu-latest's
       # kernel has the interface, and the job delegates one subtree to
       # itself (the supervisor uses the core cgroup v2 files only, so no
-      # controller delegation is needed).
+      # controller delegation is needed). Delegation containment: a process
+      # outside the subtree cannot migrate into it — the write to a unit's
+      # cgroup.procs needs the common ancestor's cgroup.procs writable, and
+      # that ancestor is root-owned here — so the Verify step's shell first
+      # moves itself in through the privileged write this step smoke-tests.
       - name: 'Delegate a cgroup v2 root for the process gates'
         run: |-
           sudo mkdir -p /sys/fs/cgroup/fg8
           sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/fg8
           test -f /sys/fs/cgroup/fg8/cgroup.kill
+          # Smoke-test admission the way the gates exercise it: this shell
+          # enters the delegated root through the privileged move, then a
+          # child joins a unit by a non-root write — cgroup.kill existing
+          # alone proves nothing about migration.
+          echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs
+          mkdir /sys/fs/cgroup/fg8/smoke
+          sleep 600 & smoke=$!
+          echo "$smoke" > /sys/fs/cgroup/fg8/smoke/cgroup.procs
+          grep -q "^$smoke\$" /sys/fs/cgroup/fg8/smoke/cgroup.procs
+          echo 1 > /sys/fs/cgroup/fg8/smoke/cgroup.kill
+          wait "$smoke" || true
+          rmdir /sys/fs/cgroup/fg8/smoke
       - name: 'Verify Hosted Java, Spring and MySQL processes'
         # Must outlive the hosted-harness-mysql failsafe fork timeout (1800 s,
         # raised 900→1200 for the FG7 channel classes and 1200→1800 for the
@@ -831,6 +847,7 @@ jobs:
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
           QWEN_MANAGED_HOOK_CGROUP_ROOT: '/sys/fs/cgroup/fg8'
         run: >-
+          echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs &&
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
           -Phosted-harness-mysql
           -Dnode.executable="$(command -v node)"

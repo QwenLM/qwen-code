@@ -212,6 +212,11 @@ branch-tagged 409 arms (decision 4b).
 The public and WebShell streams are served by the in-JVM Spring; the client
 aborts and resumes are the injection, so this letter needs no proxy. A
 background run and a monitor observation supply the in-flight event traffic.
+Each case aborts the stream, advances the capability while disconnected —
+the gate releases first, and the run letter's backlog is a post-gap prompt
+because the exit notification is silent without a scheduler — and reconnects
+only after JDBC proves a committed event beyond the cursor, so the replay
+is never vacuous against a history-dropping endpoint.
 
 | Case                      | Injection                                                            | Expect                                                                                                                                   |
 | ------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -232,7 +237,10 @@ A fixture note that cost a flake: the 60 s events poll/heartbeat interval
 for a full poll cycle, and the monitor watch's idle window must outlive
 it — with a 30 s idle timeout the watch idle-killed the gated producer
 mid-gap and the case hung on a gate that would never reopen. The watch
-runs with `idle_timeout_ms` = 180 s.
+runs with `idle_timeout_ms` = 180 s. The same poll bounds the resumed
+observer's catch-up to the committed ledger — rows committed between the
+replay read and the relay stop arrive a poll cycle late, so the catch-up
+wait runs at 120 s, outliving two cycles.
 
 ### FG8f — output delivery (slice 1, this PR)
 
@@ -247,7 +255,7 @@ Harness in 64 KiB rpc chunks; the Harness-side `HostedShellPublisher` packs
 them into 1 MiB segments and publishes segments, pages and manifest
 revisions as session resources through the Session's
 `managedSessionStore` client, which always lands them `MYSQL_INLINE` in
-`qwen_managed_session_resource` (segment content is idempotent by its
+`ma_resource` (segment content is idempotent by its
 content-addressed resourceId, `sha256([captureId, streamId, ordinal])`).
 The driver therefore fronts that base URL with its store-side proxy — the
 broker proxy stays for the Runtime calls — and arms per request shape:
@@ -286,7 +294,10 @@ output, dropped in teardown (FG8b; slice 1 injects nothing into MySQL).
 `relay-stop` drive the test-owned event relay (the production projector and
 append path; FG8e only), `state` answers the execution-ledger rows, the
 monitor/child-run record bodies and the committed tool-result resource
-metadata, and `ledger` the session's `managed_agent_event` sequence. The IT
+metadata, and `ledger` the session's SESSION-stream `ma_public_event`
+sequence — a child task's `state_changed` audit rows share the sequence
+space but the surfaces never serve them, so the gate's ground truth
+filters exactly the way `findEvents` does. The IT
 keeps every JDBC ground-truth assertion: execution-ledger rows by
 `executionCallId` (including the `:process` suffix), record honesty, and
 the FG8f output chain (manifest revisions, page envelopes, segment digests
@@ -317,12 +328,23 @@ fixed reply per case, like FG7 — the model is never the thing under gate.
 **CI.** The class name places it in the `hosted-harness-mysql` lane
 (`Hosted*IT` include; `check-failsafe-reports.js hosted` enforces it ran).
 The gates need a delegated cgroup v2 root, so the lane gains a setup step
-that creates and chowns `/sys/fs/cgroup/fg8` and exports
-`QWEN_MANAGED_HOOK_CGROUP_ROOT` to the Verify step. The lane's three
+that creates and chowns `/sys/fs/cgroup/fg8`, exports
+`QWEN_MANAGED_HOOK_CGROUP_ROOT` to the Verify step, and smoke-tests
+admission with a real child joining a unit — `cgroup.kill` existing alone
+proves nothing about migration. Delegation containment means a process
+outside the subtree cannot migrate into it (the write to a unit's
+`cgroup.procs` needs the common ancestor's `cgroup.procs` writable, and
+that ancestor is root-owned on the runner), so the Verify step's shell
+first moves itself into the subtree through a privileged `cgroup.procs`
+write; every process the tests spawn is then born inside it. The lane's three
 budgets moved with the new class green, following the FG7 precedent
-(900 s → 1200 s, 25 → 35 min, 148 → 160 min): fork 1200 s → 1800 s, Verify
-35 → 40 min, job 160 → 165 min, with `hosted-process-ci.test.js` updated in
-the same change (the fork-healthy allowance re-measured 650 s → 1100 s).
+(900 s → 1200 s, 25 → 35 min, 148 → 160 min). The merged lane numbers are
+fork 1800 s, Verify 45 min, job 220 min: the L4 shell-lifecycle recovery
+class (#14125) independently landed the 1200 → 1800 s fork bump on main,
+and this class's ~310 s rides inside the same fork; Verify 35 → 45 min and
+job 210 → 220 min are the merged totals covering both classes, with
+`hosted-process-ci.test.js` updated in the same change (the fork-healthy
+allowance re-measured 650 s → 1100 s).
 A `hosted-monitor-run-gates` focused profile is added for local runs; the
 cgroup requirement makes the gates Linux-only, so the local loop runs them
 in a privileged container (kernel ≥ 5.14 for `cgroup.kill`) against a host

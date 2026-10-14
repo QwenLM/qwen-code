@@ -274,6 +274,17 @@ describe('Hosted real-process gates', () => {
     // driver budget before red — so the delegation must land first.
     expect(job.steps.indexOf(delegate)).toBeLessThan(job.steps.indexOf(verify));
     expect(verify.env.QWEN_MANAGED_HOOK_CGROUP_ROOT).toBe('/sys/fs/cgroup/fg8');
+    // Create/export coupling: a path rename on only one side fails the gates
+    // as a missing root, never as a red pin.
+    expect(delegate.run).toContain('mkdir -p /sys/fs/cgroup/fg8');
+    expect(delegate.run).toContain('test -f /sys/fs/cgroup/fg8/cgroup.kill');
+    // The Verify shell must be born inside the subtree: a process outside
+    // it cannot migrate into fg8 — the common ancestor's cgroup.procs is
+    // root-owned (kernel delegation containment).
+    expect(verify.run).toContain('sudo tee /sys/fs/cgroup/fg8/cgroup.procs');
+    // The delegation step smoke-tests admission with a real child joining a
+    // unit — cgroup.kill existing alone proves nothing about migration.
+    expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {

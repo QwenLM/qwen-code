@@ -737,21 +737,19 @@ async function runStreamCase(surface: 'public' | 'web') {
     await observer.task;
     if (observer.failure) throw observer.failure;
     const cursor = observer.frames.at(-1)!.id;
-    resumed = new Observer(surface, current.sessionId);
     step(`stream aborted at ${cursor}`);
-    await resumed.start(cursor);
-    step('stream resumed');
+    // Advance the capability while disconnected so the resume replays a
+    // real backlog — a resume opened against an empty backlog passes
+    // vacuously on a history-dropping endpoint.
     await releaseFifo(current.directory, monitor ? 'monitor-gate' : 'run-gate');
     step('gate released');
-    if (monitor) {
-      // A monitor observation wakes a real turn (monitorWakeKick is wired),
-      // so the stream itself carries the mid-gap traffic.
-      await resumed.terminalOfOtherTurn(promptId);
-    } else {
+    if (!monitor) {
       // A background shell's exit notification input is silent on the
       // stream until a turn consumes it — this topology runs no scheduler,
-      // so the post-gap traffic is a second, ordinary prompt after the run
-      // provably settled.
+      // so the backlog is a second, ordinary prompt after the run provably
+      // settled. A monitor observation instead wakes a real turn
+      // (monitorWakeKick is wired), so its stream carries the mid-gap
+      // traffic itself.
       await waitUntil(async () => {
         checkProxy();
         const state = await probe<ProbeState>(current.sessionId, 'state');
@@ -761,8 +759,21 @@ async function runStreamCase(surface: 'public' | 'web') {
         return child?.run?.state === 'settled';
       }, 120_000);
       await submitPrompt(cli, clientId, `fg8 ${current.name} post-gap`);
-      await resumed.terminalOfOtherTurn(promptId);
     }
+    // JDBC proof of a committed event beyond cursor, then reconnect.
+    await waitUntil(async () => {
+      checkProxy();
+      const ledger = await probe<Array<Record<string, unknown>>>(
+        current.sessionId,
+        'ledger',
+      );
+      return ledger.length > cursor;
+    }, 120_000);
+    step(`backlog committed beyond ${cursor}`);
+    resumed = new Observer(surface, current.sessionId);
+    await resumed.start(cursor);
+    step('stream resumed');
+    await resumed.terminalOfOtherTurn(promptId);
     await waitUntil(async () => {
       checkProxy();
       const state = await probe<ProbeState>(current.sessionId, 'state');
@@ -782,10 +793,13 @@ async function runStreamCase(surface: 'public' | 'web') {
       current.sessionId,
       'ledger',
     );
+    // The fixture's 60 s events poll bounds the resumed observer's
+    // catch-up: rows committed between its replay read and the relay stop
+    // arrive a poll cycle late, so the window must outlive two cycles.
     await waitUntil(() => {
       if (resumed!.failure) throw resumed!.failure;
       return resumed!.frames.some((frame) => frame.id === ledger.length);
-    }, 30_000);
+    }, 120_000);
     await resumed!.close();
     const frames = [...observer.frames, ...resumed!.frames];
     const ids = frames.map((frame) => frame.id);

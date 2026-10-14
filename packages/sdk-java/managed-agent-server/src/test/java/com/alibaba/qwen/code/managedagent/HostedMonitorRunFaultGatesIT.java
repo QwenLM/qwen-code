@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -138,6 +139,8 @@ class HostedMonitorRunFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                        + "Linux".equals(System.getProperty("os.name")),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd="
                         + temporary,
                 "--qwen.managed-agent.runtime-broker.state-directory="
@@ -164,6 +167,9 @@ class HostedMonitorRunFaultGatesIT {
             arguments.add(prefix + "storage-id=storage-" + index);
             arguments.add(prefix + "root=" + workspace);
             Files.createDirectory(workspace.resolve("child"));
+            // The storage guard's fail-closed identity check refuses a
+            // mount root whose mtime still equals its birth time.
+            Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
         }
         var application = new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class);
@@ -196,17 +202,25 @@ class HostedMonitorRunFaultGatesIT {
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
         EmbeddedRuntimeBroker broker = spring.getBean(
                 EmbeddedRuntimeBroker.class);
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            var guard = spring.getBean(
+                    com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class);
+            for (int index = 0; index < cases.size(); index++) {
+                guard.register(tenant, "storage-" + index,
+                        UUID.randomUUID().toString());
+            }
+        }
         var sessions = new ArrayList<Map<String, Object>>();
         for (int index = 0; index < cases.size(); index++) {
             String workspaceId = "workspace-" + index;
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                     + " workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES"
                     + " (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE')", tenant,
                     workspaceId, "storage-" + index,
                     WorkspaceExecutionProfile.CONFIG_REF,
                     WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                     + " workspace_id, actor_id, role) VALUES (?, ?, ?,"
                     + " 'OPERATOR')", tenant, workspaceId,
                     "actor".getBytes(StandardCharsets.UTF_8));
@@ -288,7 +302,7 @@ class HostedMonitorRunFaultGatesIT {
         // the settled assertion here belongs to the record, not the row.
         var processes = jdbc.queryForList(
                 "SELECT execution_call_id, execution_state, execution_status"
-                        + " FROM qwen_tool_execution WHERE harness_session_id"
+                        + " FROM ma_tool_execution WHERE harness_session_id"
                         + " = ? AND execution_call_id LIKE '%:process'",
                 sessionId);
         assertThat(processes).as(name + " process rows").hasSize(1);
@@ -297,9 +311,13 @@ class HostedMonitorRunFaultGatesIT {
             return;
         }
         // The public projection is complete: every stream frame the client
-        // saw is a committed row, and the row count matches exactly.
+        // saw is a committed row, and the row count matches exactly. The
+        // SESSION-stream filter mirrors the serving query — a child task's
+        // state_changed audit rows share the sequence space but are never
+        // streamed.
         Integer events = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_agent_event WHERE tenant_id = ?"
+                "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind ="
+                        + " 'SESSION' AND stream_id = X'' AND tenant_id = ?"
                         + " AND session_id = ?", Integer.class, tenant,
                 sessionId);
         assertThat(events).as(name + " projected events").isNotNull();
@@ -405,7 +423,7 @@ class HostedMonitorRunFaultGatesIT {
         var byId = new HashMap<String, Map<String, Object>>();
         for (var row : jdbc.queryForList(
                 "SELECT resource_id, kind, byte_length, sha256 FROM"
-                        + " qwen_managed_session_resource WHERE tenant_id = ?"
+                        + " ma_resource WHERE tenant_id = ?"
                         + " AND session_id = ? AND kind LIKE"
                         + " 'managed-tool-result-%'", tenant, sessionId)) {
             byId.put(row.get("resource_id").toString(), row);
@@ -413,7 +431,7 @@ class HostedMonitorRunFaultGatesIT {
         var bodies = new HashMap<String, JsonNode>();
         for (var row : jdbc.queryForList(
                 "SELECT resource_id, CONVERT(inline_bytes USING utf8mb4) AS"
-                        + " body FROM qwen_managed_session_resource WHERE"
+                        + " body FROM ma_resource WHERE"
                         + " tenant_id = ? AND session_id = ? AND (kind IN"
                         + " ('managed-tool-result-manifest',"
                         + " 'managed-tool-result-page') OR (kind ="
@@ -659,13 +677,13 @@ class HostedMonitorRunFaultGatesIT {
             String sessionId, String domain) throws Exception {
         var rows = jdbc.queryForList(
                 "SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE"
                         + " tenant_id = ? AND session_id = ? AND domain = ?",
                 tenant, sessionId, domain);
         assertThat(rows).as(domain + " records").hasSize(1);
         var resources = jdbc.queryForList(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " qwen_managed_session_resource WHERE tenant_id = ?"
+                        + " ma_resource WHERE tenant_id = ?"
                         + " AND session_id = ? AND resource_id = ?", tenant,
                 sessionId, rows.getFirst().get("record_resource_id"));
         assertThat(resources).hasSize(1);

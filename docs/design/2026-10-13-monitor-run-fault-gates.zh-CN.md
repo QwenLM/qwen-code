@@ -95,7 +95,7 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 
 ### FG8e —— SSE 断流（片 1，本 PR）
 
-公开流与 WebShell 流由 in-JVM Spring 提供；客户端的中止与续传就是注入，所以本信不需要代理。一个后台 run 与一次 monitor 观测提供在飞的事件流量。
+公开流与 WebShell 流由 in-JVM Spring 提供；客户端的中止与续传就是注入，所以本信不需要代理。一个后台 run 与一次 monitor 观测提供在飞的事件流量。每个用例中止流后，先在断连期间推进能力 —— 先释放 gate；run 字母的积压是一条 post-gap prompt，因为没有调度器时退出通知是静默的 —— 并且只在 JDBC 证明有越过游标的已提交事件之后才重连，所以面对丢历史的端点，重放绝不会空转通过。
 
 | 用例                      | 注入                                                 | 期望                                                                                 |
 | ------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -107,13 +107,13 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 
 `cursor-expired-resync` 暂缓、不进片 1 的字母：重放地板只有会话快照落地才会前移，所以一个诚实的过期游标需要先把重放地板机制驱动到那个点；该用例随片 2 落地，它的变异（下面的第 2 条）一并移动。本次交付的 FG8e 字母覆盖四个中止/续传用例。
 
-一条付出了一个 flake 的 fixture 教训：60 s 的事件轮询/心跳间隔（为强制 live hub 承载投递而设）可把 WebShell 续传压住一个完整轮询周期，而 monitor watch 的空闲窗口必须长过它 —— 空闲超时设 30 s 时，watch 在断流中途把顶在门边的生产者空闲杀掉，用例就吊死在一扇永不再开的门上。watch 以 `idle_timeout_ms` = 180 s 运行。
+一条付出了一个 flake 的 fixture 教训：60 s 的事件轮询/心跳间隔（为强制 live hub 承载投递而设）可把 WebShell 续传压住一个完整轮询周期，而 monitor watch 的空闲窗口必须长过它 —— 空闲超时设 30 s 时，watch 在断流中途把顶在门边的生产者空闲杀掉，用例就吊死在一扇永不再开的门上。watch 以 `idle_timeout_ms` = 180 s 运行。同一轮询也限制续传 observer 追平已提交台账的速度 —— 在重放读取与 relay 停止之间提交的行要晚一个轮询周期才到，所以追平等待设为 120 s，长过两个周期。
 
 ### FG8f —— 输出投递（片 1，本 PR）
 
 publisher 住在 Harness 进程内，所以「杀掉 publisher」是一次只断言输出侧事实的 Harness kill —— 跨 Harness 重启的 Runtime hold 恢复是 #13986 正在动的地面，属于片 3 的 FG8c（那里的 `harness-kill-capture` 断言恢复侧；这里只钉输出侧）。
 
-这些用例把门的字节路径：worker 以 64 KiB rpc 块把子进程管道接力给 Harness；Harness 侧的 `HostedShellPublisher` 把它们装进 1 MiB 段，并通过会话的 `managedSessionStore` 客户端把段、页与 manifest 修订作为会话资源发布，它们始终以 `MYSQL_INLINE` 落在 `qwen_managed_session_resource`（段内容按其内容寻址 resourceId 幂等，`sha256([captureId, streamId, ordinal])`）。因此 driver 给这个 baseUrl 罩一个 store 侧代理 —— broker 代理继续留给 Runtime 调用 —— 按请求形态武装：整段提交在转发前扣留（worker 的 16 MiB 暂停水位必须随之顶到生产者的管道，由生产者自己的进度文件证明），以及一笔 journal 提交应答在提交落库后销毁（客户端有界的不确定错误重试必须按原事务身份重驱）。已提交前缀的读取在门侧以 JDBC 重验 —— manifest 修订、页封套与段摘要按序对着生产者的确定性块模式走查 —— 因为后台通道不投影进 artifact 表（已对 FG8e 遗留数据实证）；会话资源行才是生产读路径所服务的地面真相。
+这些用例把门的字节路径：worker 以 64 KiB rpc 块把子进程管道接力给 Harness；Harness 侧的 `HostedShellPublisher` 把它们装进 1 MiB 段，并通过会话的 `managedSessionStore` 客户端把段、页与 manifest 修订作为会话资源发布，它们始终以 `MYSQL_INLINE` 落在 `ma_resource`（段内容按其内容寻址 resourceId 幂等，`sha256([captureId, streamId, ordinal])`）。因此 driver 给这个 baseUrl 罩一个 store 侧代理 —— broker 代理继续留给 Runtime 调用 —— 按请求形态武装：整段提交在转发前扣留（worker 的 16 MiB 暂停水位必须随之顶到生产者的管道，由生产者自己的进度文件证明），以及一笔 journal 提交应答在提交落库后销毁（客户端有界的不确定错误重试必须按原事务身份重驱）。已提交前缀的读取在门侧以 JDBC 重验 —— manifest 修订、页封套与段摘要按序对着生产者的确定性块模式走查 —— 因为后台通道不投影进 artifact 表（已对 FG8e 遗留数据实证）；会话资源行才是生产读路径所服务的地面真相。
 
 | 用例                           | 注入                                              | 期望                                                                                                                            |
 | ------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
@@ -123,13 +123,13 @@ publisher 住在 Harness 进程内，所以「杀掉 publisher」是一次只断
 
 ## Fixture 设计
 
-**Java。** `HostedMonitorRunFaultGatesIT` 像 `HostedChannelFaultGatesIT` 一样每封信起一个 in-JVM `ManagedAgentServerApplication`（workspace 挂载、registry/access 行 JDBC 播种、MySQL 属性强制 —— 缺失即失败而非跳过），内嵌 broker 在方法级钉死端口。打包 Harness 每用例以 `node dist/cli.js serve --profile hosted-harness` 对着该 broker 启动，每 case 隔离 `HOME` / `QWEN_HOME`。证据落在 `target/fg8-cases/<letter>/<case>/`，每方法重建。存储故障 trigger 复制 FG7b 的 DDL 形态，`SIGNAL SQLSTATE` 文本 `FG8B_<case>`，按 case 租户限定，在被捕获的 Spring 输出里断言，teardown 拆除（FG8b；片 1 不向 MySQL 注入任何东西）。`HostedMonitorRunProbe` 是 in-JVM 的门侧半边：在一个普通 `HttpServer` 上提供 `/fg8/<sessionId>/<phase>` —— `relay-start` / `relay-stop` 驱动测试自有的事件接力（生产投影器与追加路径；仅 FG8e），`state` 回答执行台账行、monitor/child-run 记录体与已提交的 tool-result 资源元数据，`ledger` 回答会话的 `managed_agent_event` 序列。IT 自己持有全部 JDBC ground-truth 断言：按 `executionCallId` 的执行台账行（含 `:process` 后缀）、记录诚实性，以及 FG8f 的输出链（manifest 修订、页封套、对着生产者确定性模式的段摘要）。
+**Java。** `HostedMonitorRunFaultGatesIT` 像 `HostedChannelFaultGatesIT` 一样每封信起一个 in-JVM `ManagedAgentServerApplication`（workspace 挂载、registry/access 行 JDBC 播种、MySQL 属性强制 —— 缺失即失败而非跳过），内嵌 broker 在方法级钉死端口。打包 Harness 每用例以 `node dist/cli.js serve --profile hosted-harness` 对着该 broker 启动，每 case 隔离 `HOME` / `QWEN_HOME`。证据落在 `target/fg8-cases/<letter>/<case>/`，每方法重建。存储故障 trigger 复制 FG7b 的 DDL 形态，`SIGNAL SQLSTATE` 文本 `FG8B_<case>`，按 case 租户限定，在被捕获的 Spring 输出里断言，teardown 拆除（FG8b；片 1 不向 MySQL 注入任何东西）。`HostedMonitorRunProbe` 是 in-JVM 的门侧半边：在一个普通 `HttpServer` 上提供 `/fg8/<sessionId>/<phase>` —— `relay-start` / `relay-stop` 驱动测试自有的事件接力（生产投影器与追加路径；仅 FG8e），`state` 回答执行台账行、monitor/child-run 记录体与已提交的 tool-result 资源元数据，`ledger` 回答会话的 SESSION 流 `ma_public_event` 序列（child task 的 `state_changed` 审计行共享序列号空间但端点从不服务它们，所以门禁的 ground truth 像 `findEvents` 一样过滤）。IT 自己持有全部 JDBC ground-truth 断言：按 `executionCallId` 的执行台账行（含 `:process` 后缀）、记录诚实性，以及 FG8f 的输出链（manifest 修订、页封套、对着生产者确定性模式的段摘要）。
 
 **Driver。** `integration-tests/helpers/hosted-monitor-run-fault-driver.ts`，像每个 FG6/FG7 driver 一样按字母以 `node --import tsx … <driver.json>` 启动。它拥有：broker 前的 lose-once 反向代理（操作日志即派发证据）、罩在会话 `managedSessionStore` baseUrl 前的 store 侧代理（FG8f 的扣留/丢弃武装）、FG8e 的原始 SSE 客户端（公开流带 `Last-Event-ID`、WebShell 流带 `afterSequence`、中止并续传、对重放序列做重复/缺失检测 —— 注意公开面的帧字段是 snake_case 而 WebShell 面是 camelCase），以及脚本化生产者 —— 真实的 `node -e` 后台进程，其块模式按段序号确定（所以逐字节相同在门侧就是摘要比较），其 `progress.txt` 让暂停水位顶到生产者这件事可观测。IT 等待或断言的 marker —— `FG8_CASE_OK <case>`、`FG8_STREAM_GAPS_OK`（FG8e）、`FG8_OUTPUT_DELIVERY_OK`（FG8f）、`FG8_DROPPED <what>` —— 为 IT 定序；`FG8_STEP` / `FG8_PROXY` / `FG8_STORE_PROXY` 追踪流程，`FG8_DIAG` 在失败时转储用例状态。per-case 目录让 Harness 重启是真的冷加载。
 
 **模型。** 一个罐头 OpenAI 兼容模型像 FG7 一样给每个 turn 回一条固定的短应答 —— 模型从不是被门禁的对象。
 
-**CI。** 类名把它放进 `hosted-harness-mysql` lane（`Hosted*IT` include；`check-failsafe-reports.js hosted` 强制它跑过）。这些门需要一个委派的 cgroup v2 根，所以 lane 新增一个 setup 步骤：创建并 chown `/sys/fs/cgroup/fg8`，并把 `QWEN_MANAGED_HOOK_CGROUP_ROOT` 导出给 Verify 步骤。lane 的三项预算随新类全绿而移动，沿用 FG7 先例（900 s → 1200 s、25 → 35 min、148 → 160 min）：fork 1200 s → 1800 s、Verify 35 → 40 min、job 160 → 165 min，同一变更内同步 `hosted-process-ci.test.js`（fork 健康余量重新测量 650 s → 1100 s）。新增 `hosted-monitor-run-gates` 本地聚焦 profile；cgroup 要求使这些门只在 Linux 上成立，所以本地循环在特权容器里跑（内核 ≥ 5.14 提供 `cgroup.kill`）对着宿主 MySQL。本地数据库：系统 `mysqld` 配一次性 datadir，需要 trigger 权限，与 FG6b/FG7b 相同。
+**CI。** 类名把它放进 `hosted-harness-mysql` lane（`Hosted*IT` include；`check-failsafe-reports.js hosted` 强制它跑过）。这些门需要一个委派的 cgroup v2 根，所以 lane 新增一个 setup 步骤：创建并 chown `/sys/fs/cgroup/fg8`、把 `QWEN_MANAGED_HOOK_CGROUP_ROOT` 导出给 Verify 步骤、并用一个真实子进程加入 unit 来冒烟验证准入 —— 光有 `cgroup.kill` 存在证明不了迁移可行。委派遏制（delegation containment）意味着子树外的进程无法迁入子树（写 unit 的 `cgroup.procs` 要求公共祖先的 `cgroup.procs` 可写，而 runner 上该祖先归 root 所有），所以 Verify 步骤的 shell 先通过一次特权 `cgroup.procs` 写入把自己移进子树；测试随后拉起的每个进程都生在子树内。lane 的三项预算随新类全绿而移动，沿用 FG7 先例（900 s → 1200 s、25 → 35 min、148 → 160 min）。合并后的 lane 数值为 fork 1800 s、Verify 45 min、job 220 min：L4 shell-lifecycle 恢复类（#14125）在 main 上独立落地了同样的 1200 → 1800 s fork 提升，本类的 ~310 s 搭乘同一 fork；Verify 35 → 45 min 与 job 210 → 220 min 是覆盖两个类的合并后总量，同一变更内同步 `hosted-process-ci.test.js`（fork 健康余量重新测量 650 s → 1100 s）。新增 `hosted-monitor-run-gates` 本地聚焦 profile；cgroup 要求使这些门只在 Linux 上成立，所以本地循环在特权容器里跑（内核 ≥ 5.14 提供 `cgroup.kill`）对着宿主 MySQL。本地数据库：系统 `mysqld` 配一次性 datadir，需要 trigger 权限，与 FG6b/FG7b 相同。
 
 ## 变异检查
 
