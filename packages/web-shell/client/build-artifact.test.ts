@@ -510,11 +510,9 @@ describe('build artifact — transcript entry (#11031)', () => {
     // preview puts its ten excel.* strings into that same shared table in
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
-    // That is the +2,000 this branch carried over the 1,325,000 budget, so
-    // the merged ceiling is the two budgets added — 1,331,500 — rather than a
-    // fresh measurement of a merged build. The ceiling leaves a small margin
-    // around that intentional UI; re-measure and lower it if the entry gets
-    // leaner.
+    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
+    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
@@ -606,6 +604,18 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]settings\./);
+  });
+
+  it('keeps MCP App message review strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]mcpApp\.message\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('mcpApp.message.title');
+    expect(interactive).toContain('Review App message');
+    expect(interactive).toContain('审阅 App 消息');
   });
 
   it('keeps trajectory filter strings in the interactive entry only', () => {
