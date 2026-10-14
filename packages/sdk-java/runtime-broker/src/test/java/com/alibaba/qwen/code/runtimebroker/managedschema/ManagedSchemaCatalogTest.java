@@ -56,6 +56,37 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
+    void acceptsNumericGeneratedBooleansWithoutAcceptingExpressionDrift() throws Exception {
+        try (var data = fixture(false); var update = data.prepareStatement(
+                "UPDATE catalog_fixture.columns SET generation_expression=?")) {
+            for (String[] literal : new String[][] {{"FALSE", "0"}, {"TRUE", "1"}}) {
+                String expression = "COALESCE(tool_profile = 'csi-files-retirement/1'"
+                        + " OR runtime_request_key IS NOT NULL, " + literal[0] + ")";
+                String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (" + expression + ")\n";
+                String numeric = expression.replace(literal[0], literal[1]);
+                for (String equivalent : new String[] {expression, numeric}) {
+                    update.setString(1, equivalent);
+                    update.executeUpdate();
+                    ManagedSchemaCatalog.validateGeneratedColumns(data, "ma_session", body);
+                }
+                for (String changed : new String[] {
+                        numeric.replace(", " + literal[1] + ")", ", " + (1 - Integer.parseInt(literal[1])) + ")"),
+                        numeric.replace(", " + literal[1] + ")", ", 2)"),
+                        numeric.replace(", " + literal[1] + ")", ", '" + literal[0] + "')"),
+                        numeric.replace("'csi-files-retirement/1'", "'different-profile'"),
+                        numeric.replace(" OR ", " AND "),
+                        numeric.replace("IS NOT NULL", "IS NULL")}) {
+                    update.setString(1, changed);
+                    update.executeUpdate();
+                    assertThrows(SQLException.class,
+                            () -> ManagedSchemaCatalog.validateGeneratedColumns(data, "ma_session", body),
+                            changed);
+                }
+            }
+        }
+    }
+
+    @Test
     void rejectsNonTransactionalTablesWithEitherMariaDbDriverProductName() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false); var statement = data.createStatement()) {
@@ -103,6 +134,11 @@ class ManagedSchemaCatalogTest {
         Connection data = DriverManager.getConnection("jdbc:h2:mem:catalog-" + UUID.randomUUID());
         try (var statement = data.createStatement()) {
             statement.execute("CREATE SCHEMA catalog_fixture");
+            statement.execute("CREATE TABLE catalog_fixture.columns"
+                    + " (column_name VARCHAR, table_schema VARCHAR, table_name VARCHAR,"
+                    + " generation_expression VARCHAR)");
+            statement.execute("INSERT INTO catalog_fixture.columns"
+                    + " VALUES ('csi_guard','PUBLIC','MA_SESSION','')");
             statement.execute("CREATE TABLE catalog_fixture.table_constraints"
                     + " (constraint_name VARCHAR, constraint_schema VARCHAR, table_schema VARCHAR,"
                     + " table_name VARCHAR, constraint_type VARCHAR"
@@ -145,6 +181,7 @@ class ManagedSchemaCatalogTest {
                                                 + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
                                                 + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
                                         : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
+                                        .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns")
                                         .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints");
                     }
                     return invoke(method, data, args);
