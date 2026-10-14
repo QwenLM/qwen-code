@@ -173,12 +173,12 @@ Bun 1.3.14 pin is verified by the packaging acceptance, not here.
 After building, `npm run test:standalone:runtimes` loads the normal CLI build
 under Node 24.19.0 and Bun 1.3.14. Set `PINNED_NODE` and `PINNED_BUN` to the
 respective executable paths if they are not the current Node and PATH Bun.
-The existing script-test CI runs both hosts with both payload interpreters over local HTTPS
+The script-test entry is wired to run both hosts with both payload interpreters over local HTTPS
 with certificate verification enabled. The synthetic unsigned archives exercise
 checksum verification, identity/version rejection, activation and rollback;
 `.sig` 404 is checksum-only coverage, not production signature validation.
 
-Both smoke processes use a single private empty directory, removed in `finally`,
+Both smoke processes use a single private empty directory, with removal attempted in `finally`,
 to avoid executing project or archive `bunfig.toml` preloads. Smoke environment
 copies remove NODE_OPTIONS/BUN_OPTIONS while retaining other variables. Installed
 manifest null, scalars, arrays and invalid runtime declarations are rejected
@@ -194,3 +194,31 @@ archive with its published SHA256 and the fixed @oven Bun package with its
 published integrity, unless executable paths are supplied. It leaves dependency
 manifests and locks untouched, cleans tools in finally, and reports Windows as
 not covered. The existing `test:scripts` entry invokes it before Vitest.
+
+Smoke testing also compares the actual CLI version with the requested version
+using the existing semver rules, including `v` normalization and prereleases.
+Legal older/newer versions must be rejected before replacement in both direct
+and prepared updates. Version-only preload controls match `--version` for both
+CLI entrypoints and verify that the identity probe does not execute the preload.
+Cleanup failures retain the original smoke outcome and may leave a temporary
+directory; swallowing a removal error is not evidence that it was removed.
+
+Remote CI execution is still pending. The frozen PR #14187 head `d14b2ad1`
+has no `ci.yml` run: its stacked base is outside that workflow's branch filter.
+The ECS lane reuses Node 22 and its access to nodejs.org has not been measured;
+neither that installation nor an unverified pool image satisfies the fixed
+Node 24.19.0/Bun 1.3.14 contract. Local script results do not establish a remote
+lane result. Branch filters, the PR base, and manual dispatch remain unchanged.
+
+For a pool with a trusted copy of the Node distribution, CI mode accepts
+`QWEN_TEST_NODE_BASE_URL`: an HTTPS directory ending in `/` containing the
+fixed archive and `SHASUMS256.txt`. The default remains the official directory;
+the checksum and hard version assertions remain mandatory. Alternatively,
+provide real `PINNED_NODE`/`PINNED_BUN` executables; the driver resolves both to
+absolute paths before changing cwd. No mirror or preinstalled fixed tools have
+been established for ECS. The minimal pending workflow change is to pass the
+verified pool resource into the existing script-test step, for example
+`QWEN_TEST_NODE_BASE_URL: ${{ vars.QWEN_TEST_NODE_BASE_URL }}`, or both executable
+paths. It must then produce an actual Actions job log with `test:scripts` rc 0
+and both worker `actualExitCode: 0` records. Until those resources and results
+exist, this is a reviewable provisioning option, not a validated CI lane.

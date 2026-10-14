@@ -188,7 +188,16 @@ async function worker(root, node, bun, expectedHost) {
       );
       filename = `qwen-code-${target}${runtime === 'bun' ? '-opentui-preview' : ''}.tar.gz`;
       archive = path.join(root, filename);
-      const pack = (source) => {
+      const pack = (source, version = '1.2.3') => {
+        fs.writeFileSync(
+          path.join(payload, 'manifest.json'),
+          JSON.stringify({
+            name: '@qwen-code/qwen-code',
+            version,
+            target,
+            runtime,
+          }),
+        );
         fs.writeFileSync(cli, source);
         run('tar', ['-czf', archive, '-C', path.dirname(payload), 'qwen-code']);
         sums = `${sha(archive)}  ${filename}\n`;
@@ -222,8 +231,37 @@ async function worker(root, node, bun, expectedHost) {
         const preload = path.join(cwd, 'preload.cjs');
         fs.writeFileSync(
           preload,
-          `${versionOnly ? "if(process.argv.some(a=>a.endsWith('cli-entry.js'))){" : ''}require('fs').writeFileSync(${JSON.stringify(marker)},'executed');${noisy ? "console.log('project preload output');" : ''}${versionOnly ? '}' : ''}`,
+          `${versionOnly ? "if(process.argv.includes('--version')){" : ''}require('fs').writeFileSync(${JSON.stringify(marker)},'executed');${noisy ? "console.log('project preload output');" : ''}${versionOnly ? '}' : ''}`,
         );
+        if (versionOnly) {
+          run(binaries[runtime], ['-e', ''], {
+            cwd,
+            env: {
+              ...process.env,
+              NODE_OPTIONS: `--require ${preload}`,
+              BUN_OPTIONS: `--preload ${preload}`,
+            },
+          });
+          assert.equal(
+            fs.existsSync(marker),
+            false,
+            'version fixture affected identity',
+          );
+          run(binaries[runtime], [cli, '--version'], {
+            cwd,
+            env: {
+              ...process.env,
+              NODE_OPTIONS: `--require ${preload}`,
+              BUN_OPTIONS: `--preload ${preload}`,
+            },
+          });
+          assert.equal(
+            fs.existsSync(marker),
+            true,
+            'version fixture did not execute',
+          );
+          fs.rmSync(marker);
+        }
         if (!['clean', 'legacy'].includes(scenario))
           fs.writeFileSync(
             path.join(cwd, 'bunfig.toml'),
@@ -314,6 +352,103 @@ async function worker(root, node, bun, expectedHost) {
       }
       delete process.env.NODE_OPTIONS;
       delete process.env.BUN_OPTIONS;
+      for (const mode of ['direct', 'prepared']) {
+        for (const actualVersion of ['0.0.9', '9.9.9']) {
+          pack(
+            `if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log(${JSON.stringify(actualVersion)});`,
+          );
+          const dir = path.join(root, `${runtime}-${mode}-${actualVersion}`);
+          const live = installFixture(dir, {
+            version: '1.0.0',
+            runtime,
+            target,
+          });
+          const before = snapshot(dir);
+          const envBefore = { ...process.env };
+          const pending =
+            mode === 'prepared'
+              ? await prepareStandaloneUpdate(live, '1.2.3')
+              : undefined;
+          try {
+            await assert.rejects(
+              pending
+                ? pending.activate()
+                : performStandaloneUpdate(live, '1.2.3'),
+              {
+                message:
+                  'Smoke test failed: CLI version does not match the expected version',
+              },
+            );
+          } finally {
+            pending?.cleanup();
+          }
+          assert.deepEqual(snapshot(dir), before);
+          assert.deepEqual({ ...process.env }, envBefore);
+          assert.equal(fs.existsSync(archiveMarker), false);
+          clean(dir);
+          console.log(
+            JSON.stringify({
+              host,
+              runtime,
+              mode,
+              actualVersion,
+              rejected: true,
+            }),
+          );
+        }
+        for (const [requested, manifest, actual] of [
+          ['v1.2.3', '1.2.3', 'v1.2.3'],
+          ['1.2.3-rc.1', '1.2.3-rc.1', 'v1.2.3-rc.1'],
+        ]) {
+          pack(`console.log(${JSON.stringify(actual)});`, manifest);
+          const dir = path.join(root, `${runtime}-${mode}-${requested}`);
+          const live = installFixture(dir, {
+            version: '1.0.0',
+            runtime,
+            target,
+          });
+          const before = snapshot(live);
+          const pending =
+            mode === 'prepared'
+              ? await prepareStandaloneUpdate(live, requested)
+              : undefined;
+          try {
+            assert.equal(
+              await (pending
+                ? pending.activate()
+                : performStandaloneUpdate(live, requested)),
+              'done',
+            );
+          } finally {
+            pending?.cleanup();
+          }
+          assert.equal(
+            JSON.parse(fs.readFileSync(path.join(live, 'manifest.json')))
+              .version,
+            manifest,
+          );
+          assert.deepEqual(rollbackStandaloneUpdate(live), { ok: true });
+          assert.deepEqual(
+            snapshot(live).filter(
+              ([name]) => name !== '.qwen-rollback-info.json',
+            ),
+            before,
+          );
+          assert.equal(fs.existsSync(live + '.old'), false);
+          assert.deepEqual(fs.readdirSync(tmp), []);
+          assert.deepEqual(fs.readdirSync(dir), ['installed']);
+          console.log(
+            JSON.stringify({
+              host,
+              runtime,
+              mode,
+              requested,
+              actual,
+              result: 'updated-and-rolled-back',
+            }),
+          );
+        }
+      }
       // Real interpreter failures: malformed CLI version and nonzero exit.
       for (const [failure, source, message] of [
         [
@@ -438,7 +573,17 @@ async function ci() {
     let bun = process.env.PINNED_BUN;
     if (!node) {
       const filename = `node-v24.19.0-${process.platform}-${process.arch}.tar.gz`;
-      const base = 'https://nodejs.org/dist/v24.19.0/';
+      const base =
+        process.env.QWEN_TEST_NODE_BASE_URL ||
+        'https://nodejs.org/dist/v24.19.0/';
+      const source = new URL(base);
+      assert.equal(source.protocol, 'https:', 'runtime source must use HTTPS');
+      assert.equal(
+        source.username + source.password,
+        '',
+        'runtime source must not contain credentials',
+      );
+      assert(base.endsWith('/'), 'runtime source must end with /');
       const sums = (await download(base + 'SHASUMS256.txt')).toString();
       const expected = sums
         .split('\n')
@@ -500,7 +645,10 @@ if (process.argv[2] === '--ci') {
     'win32',
     'This POSIX tar fixture does not cover Windows updates',
   );
-  const node = process.env.PINNED_NODE || process.execPath;
+  const node = run(process.env.PINNED_NODE || process.execPath, [
+    '-p',
+    'process.execPath',
+  ]);
   const bun = run(process.env.PINNED_BUN || 'bun', ['-p', 'process.execPath']);
   assert.equal(run(node, ['--version']), 'v24.19.0');
   assert.equal(run(bun, ['--version']), '1.3.14');

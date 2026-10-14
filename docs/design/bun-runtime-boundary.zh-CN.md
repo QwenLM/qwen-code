@@ -115,12 +115,12 @@ Bun 1.3.14 固定版本由打包验收负责，不在此处。
 
 构建后，`npm run test:standalone:runtimes` 在 Node 24.19.0 与 Bun 1.3.14
 宿主中加载正常 CLI 构建模块。若当前 Node 与 PATH Bun 不是固定版本，可用
-`PINNED_NODE` 和 `PINNED_BUN` 指定解释器路径。现有脚本测试 CI 覆盖双宿主与两种
+`PINNED_NODE` 和 `PINNED_BUN` 指定解释器路径。脚本测试入口已接线为执行双宿主与两种
 payload 解释器，通过开启证书校验的本地 HTTPS 更新。合成 unsigned 归档覆盖
 checksum、身份/版本拒绝、激活和回滚；`.sig` 404 仅属 checksum-only 证据，
 不代表生产签名验证。
 
-两次 smoke 共用一个私有空目录，并在 `finally` 删除，避免执行项目或归档中的
+两次 smoke 共用一个私有空目录，并在 `finally` 尝试删除，避免执行项目或归档中的
 `bunfig.toml` preload。smoke 环境副本移除 NODE_OPTIONS/BUN_OPTIONS，保留
 其他变量。安装 manifest 为 null、标量、数组或非法 runtime 时，在下载或锁
 分配前拒绝；合法对象缺 runtime 仍保留 legacy Node 回退。分配断言必须有
@@ -132,3 +132,26 @@ CI 模式 `test:standalone:runtimes:ci` 在未提供解释器路径时下载固�
 Node 归档（核对发布 SHA256）和固定 @oven Bun 包（核对发布 integrity）。
 不修改依赖 manifest/lock，finally 清理运行时工具，并明确 Windows 未覆盖。
 现有 `test:scripts` 在 Vitest 前执行该入口。
+
+Smoke 同时按既有 semver 规则比较实际 CLI 与请求版本，保留 `v` 规范化和预发布
+兼容。direct 与 prepared 更新的合法旧版/新版错配均须在替换前拒绝。仅版本
+preload 正对照通过 `--version` 匹配两个 CLI 入口，并验证身份探针不会执行
+preload。清理失败保留原 smoke 结果，可能留下临时目录；吞掉删除异常不能证明
+目录已经删除。
+
+真实远端 CI 执行仍待验证。冻结 PR #14187 head `d14b2ad1` 没有 `ci.yml` run：
+堆叠 base 不在该 workflow 的分支过滤范围内。ECS lane 复用 Node 22，尚未实测
+其对 nodejs.org 的可达性；该安装或未经核实的池镜像均不能满足固定
+Node 24.19.0/Bun 1.3.14 合同。本地脚本结果不能代表远端 lane 通过。
+分支过滤、PR base 与手动 dispatch 均维持原状。
+
+若池具有可信 Node 分发副本，CI 模式接受 `QWEN_TEST_NODE_BASE_URL`：以 `/`
+结尾的 HTTPS 目录，包含固定归档和 `SHASUMS256.txt`。默认仍为官方目录，
+checksum 和固定版本硬断言仍必须通过。也可传入真实的 `PINNED_NODE`/
+`PINNED_BUN` 可执行文件；driver 在改变 cwd 前将两者解析为绝对路径。
+ECS 的镜像或固定预装工具尚未落实。待验证的最小 workflow 修改是在既有
+脚本测试步骤传入已核证的池资源，例如
+`QWEN_TEST_NODE_BASE_URL: ${{ vars.QWEN_TEST_NODE_BASE_URL }}`，或两条解释器路径。
+随后必须获得真实 Actions job 日志，证明 `test:scripts` rc 0 和两个 worker 的
+`actualExitCode: 0`。资源与结果未落实前，这只是可评审的配置方案，不是已验证
+的 CI lane。

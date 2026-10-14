@@ -487,6 +487,7 @@ async function smokeTest(
   newInstallDir: string,
   target: string,
   runtime: JsRuntime,
+  expectedVersion: string,
 ): Promise<void> {
   const resolvedInstallDir = path.resolve(newInstallDir);
   const interpreter = target.startsWith('win')
@@ -557,9 +558,24 @@ async function smokeTest(
     if (!SEMVER_RE.test(version)) {
       throw new Error('Smoke test failed: unexpected version output');
     }
+    let versionMatches: boolean;
+    try {
+      versionMatches = semver.eq(version, expectedVersion);
+    } catch {
+      versionMatches = false;
+    }
+    if (!versionMatches) {
+      throw new Error(
+        'Smoke test failed: CLI version does not match the expected version',
+      );
+    }
     debugLogger.info(`Smoke test passed: ${version}`);
   } finally {
-    fs.rmSync(cwd, { recursive: true, force: true });
+    try {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    } catch {
+      debugLogger.warn('Could not remove the smoke test temporary directory');
+    }
   }
 }
 
@@ -1417,7 +1433,7 @@ async function applyStandaloneUpdate(
       );
     }
     debugLogger.info('Running smoke test...');
-    await smokeTest(newInstallDir, target, runtime);
+    await smokeTest(newInstallDir, target, runtime, newVersion);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
