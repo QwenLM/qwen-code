@@ -18,11 +18,13 @@ import java.util.Set;
  * phase MQ2c). Every decision a consumer takes is read here from SQL truth, never from the broker:
  * an MQ offset or a delivered envelope is never evidence of anything.
  *
- * <p>The wake watermark is the SESSION stream's independent wake_covered_sequence, the highest
- * journal sequence a wake activation was attempted for. It only dedups — a redelivered or reordered
- * wake at or below it is a no-op — and is never recovery evidence: a wake whose attempt failed
- * after the claim is recovered by the SQL-side scans and the activated Session's own wake pump,
- * exactly as a missed notice is.
+ * <p>The wake watermark is the SESSION stream's independent
+ * wake_covered_sequence, the highest journal
+ * sequence a wake activation was attempted for. It only dedups — a
+ * redelivered or reordered wake at or below it is a no-op — and is never
+ * recovery evidence: a wake whose attempt failed after the claim recovers
+ * exactly as a missed notice does — through the ledger of the source that
+ * committed its input (see TransportWakeActivator).
  */
 public class TransportConsumerStore {
     private static final int HELD_CHUNK = 200;
