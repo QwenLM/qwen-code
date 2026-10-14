@@ -129,11 +129,11 @@ class HostedConcurrentTurnBurstMySqlIT {
     void endOwedWork() {
         // A round that settled matches nothing.
         for (String tenant : tenants) {
-            jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED'"
+            jdbc.update("UPDATE ma_turn SET status = 'FAILED'"
                     + " WHERE tenant_id = ? AND status NOT IN"
                     + " ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
-            jdbc.update("UPDATE managed_agent_operation SET delivery_state"
-                    + " = 'CONFIRMED' WHERE tenant_id = ? AND delivery_state"
+            jdbc.update("UPDATE ma_operation SET delivery_state"
+                    + " = 'CONFIRMED' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id = ? AND delivery_state"
                     + " IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
         }
     }
@@ -263,7 +263,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             long total = 0;
             for (Map<String, Object> row : jdbc.queryForList(
                     "SELECT session_id, COUNT(*) AS deltas FROM"
-                            + " managed_agent_event WHERE tenant_id = ? AND"
+                            + " ma_public_event WHERE tenant_id = ? AND"
                             + " event_type = 'item.output_text.delta' GROUP"
                             + " BY session_id", tenant)) {
                 total += ((Number) row.get("deltas")).longValue();
@@ -350,7 +350,7 @@ class HostedConcurrentTurnBurstMySqlIT {
 
     private int countTurns(String tenant, String status) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " status = ?", Integer.class, tenant, status);
         return count == null ? 0 : count;
     }
@@ -401,7 +401,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             DataSource source = new DriverManagerDataSource(mysqlUrl(),
                     System.getProperty("mysql.user", "root"),
                     System.getProperty("mysql.password", ""));
-            raw = new JdbcTemplate(source);
+            raw = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
             raw.setQueryTimeout(5);
             thread = new Thread(this::sampleLoop, "issue13333-lock-monitor");
             thread.setDaemon(true);

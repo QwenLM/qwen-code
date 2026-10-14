@@ -52,7 +52,7 @@ import {
   fitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
-  hostedAgentBackgroundStartedText,
+  hostedChildBackgroundStartedText,
   hostedBroadcastCommitted,
   hostedChildRunIdFor,
   hostedMessageToChildText,
@@ -464,10 +464,16 @@ async function answerAbandonedTurnCalls(input: {
     // their answers: what committed is answered as committed, never as a
     // call that never ran.
     const launched =
-      call.name === 'agent' ? input.children?.record(callKey) : undefined;
+      call.name === 'agent' || call.name === 'workflow'
+        ? input.children?.record(callKey)
+        : undefined;
     const sent =
       call.name === 'send_message'
         ? sentMessageText(input, functionCallId, callKey)
+        : undefined;
+    const planDecision =
+      call.name === 'team_plan_approval'
+        ? await input.teams?.planDecisionEvidence(callKey)
         : undefined;
     // A member's board call shares the team tools' names, but once its
     // outbound committed (H4e-b3) it is a command: answered by its own
@@ -483,7 +489,11 @@ async function answerAbandonedTurnCalls(input: {
             callId: functionCallId,
           });
     let parts: Part[];
-    if (
+    if (planDecision !== undefined) {
+      parts = convertToFunctionResponse(call.name, functionCallId, [
+        { text: planDecision },
+      ]);
+    } else if (
       commandId !== undefined &&
       input.commands!.command(commandId) !== undefined
     ) {
@@ -501,7 +511,8 @@ async function answerAbandonedTurnCalls(input: {
       parts = convertToFunctionResponse(call.name, functionCallId, [
         {
           text:
-            hostedAgentBackgroundStartedText(
+            hostedChildBackgroundStartedText(
+              launched.kind,
               managedChildTaskId(
                 input.session.authority.sessionHeader.sessionKey.sessionId,
                 launched.run.executionCallId ?? callKey,
@@ -519,8 +530,12 @@ async function answerAbandonedTurnCalls(input: {
         (uncommitted === 'none' ||
           (uncommitted === 'hosted' &&
             !HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+            call.name !== 'team_plan_approval' &&
             call.name !== 'send_message' &&
-            !(call.name === 'agent' && launched === undefined)))
+            !(
+              (call.name === 'agent' || call.name === 'workflow') &&
+              launched === undefined
+            )))
       )
         continue;
       parts = convertToFunctionErrorResponse(
@@ -920,7 +935,7 @@ export async function fillParkedRoundAgentGaps(input: {
         );
         await writeFold(
           convertToFunctionResponse(name, callId, [
-            { text: hostedAgentBackgroundStartedText(taskId) },
+            { text: hostedChildBackgroundStartedText(admitted.kind, taskId) },
           ]),
         );
         filled += 1;
@@ -980,8 +995,10 @@ export async function fillParkedRoundAgentGaps(input: {
             callId,
             text,
             fits,
-            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
-              input.managed.resources.read(ref),
+            await childWorkspaceAnswerSuffix(
+              record?.kind === 'child_agent' ? record : undefined,
+              acceptance,
+              (ref) => input.managed.resources.read(ref),
             ),
           );
           if (foldOwed) {
@@ -1173,7 +1190,9 @@ export async function fillParkedRoundCommandGaps(input: {
         name,
         callId,
         [],
-        ['task_list', 'task_create', 'task_update'].includes(name)
+        ['task_list', 'task_create', 'task_update', 'exit_plan_mode'].includes(
+          name,
+        )
           ? sessionCommandEvidenceText('planned')
           : input.gapText,
       );

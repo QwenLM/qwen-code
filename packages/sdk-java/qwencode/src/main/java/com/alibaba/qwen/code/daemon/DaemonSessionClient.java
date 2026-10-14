@@ -497,6 +497,8 @@ public final class DaemonSessionClient implements AutoCloseable {
         private volatile CompletableFuture<Void> streamClose =
                 CompletableFuture.completedFuture(null);
         private volatile boolean admissionStarted;
+        // The admission body failed to encode, so no request was ever sent.
+        private volatile boolean bodyRefusedBeforeSend;
         private volatile PromptTerminal terminalResult;
         private volatile Throwable terminalFailure;
         private volatile Thread runner;
@@ -570,8 +572,12 @@ public final class DaemonSessionClient implements AutoCloseable {
                             "Prompt observation failed", e, "");
                 }
             } catch (Throwable failure) {
+                // A determinate refusal, or a body that never left the
+                // client, admitted nothing: the slot is free again. An
+                // outcome-unknown admission keeps it.
                 if (!acceptance.isDone()
-                        && failure instanceof DaemonHttpException) {
+                        && (failure instanceof DaemonHttpException
+                                || bodyRefusedBeforeSend)) {
                     activePrompt.compareAndSet(this, null);
                 }
                 if (!acceptance.isDone()) {
@@ -614,11 +620,17 @@ public final class DaemonSessionClient implements AutoCloseable {
         }
 
         private PromptAcceptance admit() {
+            String body;
+            try {
+                body = JsonSupport.encode(request.toJson());
+            } catch (RuntimeException e) {
+                bodyRefusedBeforeSend = true;
+                throw e;
+            }
             HttpSupport.Response response;
             try {
-                response = client.sendMutation(sessionPath() + "/prompt",
-                        request.toJson(),
-                        session.getClientId());
+                response = client.sendEncodedMutation(sessionPath() + "/prompt",
+                        body, session.getClientId());
             } catch (IOException | InterruptedException e) {
                 restoreInterrupt(e);
                 throw new PromptAdmissionUnknownException(e);
