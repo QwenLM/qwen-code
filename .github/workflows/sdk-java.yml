@@ -662,6 +662,14 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
+      - name: 'Configure MariaDB packet budget for large-object tests'
+        env:
+          MARIADB_CONTAINER: '${{ job.services.mariadb.id }}'
+        run: |-
+          # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
+          # Set this job's disposable service before its first JDBC connection.
+          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
+
       - name: 'Run Runtime Broker MySQL integration tests'
         working-directory: 'packages/sdk-java/runtime-broker'
         env:
@@ -746,6 +754,8 @@ jobs:
     # checks) need ~208; 210 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
     timeout-minutes: 210
+    env:
+      QWEN_E2E_REGISTER_STORAGE: '1'
     services:
       mysql:
         image: 'mysql:8.4.6'

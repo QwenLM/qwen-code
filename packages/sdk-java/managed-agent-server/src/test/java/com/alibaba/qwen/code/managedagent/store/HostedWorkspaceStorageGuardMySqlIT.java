@@ -14,7 +14,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -38,9 +39,9 @@ class HostedWorkspaceStorageGuardMySqlIT {
         assertThat(url).startsWith("jdbc:mysql:");
         assertThat(user).isNotBlank();
         var dataSource = new DriverManagerDataSource(url, user, password);
-        var jdbc = new JdbcTemplate(dataSource);
-        assertThat(jdbc.queryForObject("SELECT @@version_comment", String.class)).containsIgnoringCase("mysql");
-        Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
+        var jdbc = new ManagedSchemaJdbcTemplate(dataSource);
+        assertThat(jdbc.queryForObject("SELECT @@version", String.class)).startsWith("8.4.").doesNotContainIgnoringCase("MariaDB");
+        ManagedSchema.initialize(dataSource);
         Path root = Files.createDirectory(temporary.resolve("root")).toRealPath();
         Files.createDirectory(root.resolve("child"));
         // Keep initialized-root mtime distinct from birth time without relying on sleeps.
@@ -57,7 +58,7 @@ class HostedWorkspaceStorageGuardMySqlIT {
             assertUnavailable(() -> guard.verify(binding));
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
-            var original = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease"
+            var original = jdbc.queryForMap("SELECT * FROM ma_storage_owner"
                     + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
             guard.verify(binding);
             assertThat(original.get("mount_birth_time")).isEqualTo(Files.readAttributes(root,
@@ -65,13 +66,13 @@ class HostedWorkspaceStorageGuardMySqlIT {
             assertThat(original.get("mount_host_id")).isNotEqualTo(Files.readString(Path.of("/etc/machine-id")).strip());
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease"
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner"
                     + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage)).isEqualTo(original);
             String operation = UUID.randomUUID().toString();
             try (var executor = Executors.newFixedThreadPool(2)) {
                 var first = executor.submit(() -> guard.fence(tenant, storage, 1, operation));
                 var otherSource = new DriverManagerDataSource(url, user, password);
-                var other = new WorkspaceStorageGuard(new JdbcTemplate(otherSource),
+                var other = new WorkspaceStorageGuard(new ManagedSchemaJdbcTemplate(otherSource),
                         new DataSourceTransactionManager(otherSource), properties);
                 var second = executor.submit(() -> other.fence(tenant, storage, 1, operation));
                 first.get(10, TimeUnit.SECONDS);
@@ -93,7 +94,7 @@ class HostedWorkspaceStorageGuardMySqlIT {
             assertUnavailable(() -> restarted.restoreOriginal(tenant, storage, 1, operation));
             assertThat(restarted.inspect(tenant, storage)).contains("revision=2", "identity=mismatch");
         } finally {
-            jdbc.update("DELETE FROM managed_workspace_execution_lease WHERE tenant_id = ? AND storage_id = ?",
+            jdbc.update("DELETE FROM ma_storage_owner WHERE tenant_id = ? AND storage_id = ?",
                     tenant, storage);
         }
     }
