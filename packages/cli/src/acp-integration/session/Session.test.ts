@@ -1412,6 +1412,43 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('still projects a roster change that lands inside a reversible close', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      // Same window as the report case above: a join observed while the gate
+      // is held must still reach the client, or membership tracking misses it.
+      const release = session.beginClose();
+      manager.emit('teammate_joined', {
+        agentId: 'a1',
+        name: 'correctness',
+        timestamp: 1,
+      });
+
+      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
+      expect(
+        (
+          sentPeerNotifications()[0]!._meta?.['backgroundTask'] as {
+            status: string;
+          }
+        ).status,
+      ).toBe('joined');
+      release();
+      session.dispose();
+    });
+
     it('projects teammate activity and inter-teammate messages without waking the leader', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();
