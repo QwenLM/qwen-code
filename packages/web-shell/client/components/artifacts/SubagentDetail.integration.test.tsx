@@ -451,3 +451,49 @@ it.each([false, true])(
     }
   },
 );
+
+it.each([true, false])(
+  'only offers standalone agent cancellation (workflow=%s)',
+  async (workflow) => {
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'running',
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="workflow-agent"
+            initialRootTool={{
+              callId: 'workflow-agent',
+              toolName: 'agent',
+              status: 'in_progress',
+              rawOutput: {
+                type: 'task_execution',
+                ...(workflow ? { workflowRunId: 'wf-1' } : {}),
+              },
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop',
+    );
+    expect(Boolean(stop)).toBe(!workflow);
+    if (stop) {
+      workspaceClient.cancelSubagentSession.mockResolvedValue({
+        cancelled: true,
+      });
+      await act(async () => stop.click());
+      expect(workspaceClient.cancelSubagentSession).toHaveBeenCalledWith(
+        'parent-session',
+        'workflow-agent',
+      );
+    }
+  },
+);

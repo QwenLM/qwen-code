@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import {
   buildWorkflowGraphLayout,
   WORKFLOW_GRAPH_RENDER_LIMITS,
@@ -768,5 +770,103 @@ describe('WorkflowExecutionView', () => {
     act(() => confirm?.click());
 
     expect(onDeleteHistory).toHaveBeenCalledWith('wf-abcd');
+  });
+});
+
+describe('workflow agent details', () => {
+  function mount(task = workflowTask(), documentMode = false) {
+    const onOpen = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const render = (next: DaemonSessionWorkflowTaskStatus) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <TranscriptRenderModeProvider
+              value={documentMode ? 'document' : 'interactive'}
+            >
+              <SubagentDetailsProvider onOpen={onOpen}>
+                <WorkflowExecutionView task={next} />
+              </SubagentDetailsProvider>
+            </TranscriptRenderModeProvider>
+          </I18nProvider>,
+        );
+      });
+    render(task);
+    const node = (id: string) =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-workflow-dispatch="${id}"]`,
+      )!;
+    return { onOpen, render, node };
+  }
+
+  it('opens the exact agent on activation, not initial selection, focus or polling', () => {
+    const { onOpen, render, node } = mount();
+    act(() => node('dispatch-2').focus());
+    render(workflowTask({ runtimeMs: 3_000 }));
+    expect(onOpen).not.toHaveBeenCalled();
+    act(() => node('dispatch-2').click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'correctness-agent-1',
+        toolName: 'agent',
+        title: 'Correctness',
+        status: 'in_progress',
+        args: {
+          description: 'Correctness',
+          prompt: 'Review behavior regressions',
+        },
+      }),
+    );
+  });
+
+  it.each(['completed', 'failed', 'cancelled'] as const)(
+    'opens %s executions using their own persisted agent identity',
+    (status) => {
+      const task = workflowTask();
+      task.dispatches[1] = { ...task.dispatches[1]!, status, endedAt: 2_000 };
+      const { onOpen, node } = mount(task);
+      act(() => node('dispatch-2').click());
+      expect(onOpen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          callId: 'correctness-agent-1',
+          status: status === 'completed' ? 'completed' : 'failed',
+          endTime: 2_000,
+          rawOutput: { type: 'task_execution', workflowRunId: 'wf-1', status },
+        }),
+      );
+    },
+  );
+
+  it('keeps missing, queued and cached dispatches as summary-only selections', () => {
+    const task = workflowTask();
+    task.dispatches[1] = { ...task.dispatches[1]!, status: 'cached' };
+    task.dispatches[2] = { ...task.dispatches[2]!, subagentId: 'not-started' };
+    const { onOpen, node } = mount(task);
+    for (const dispatch of task.dispatches) {
+      act(() => node(dispatch.id).click());
+      expect(node(dispatch.id).getAttribute('aria-pressed')).toBe('true');
+    }
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('uses the new agent identity after a run changes without opening automatically', () => {
+    const { onOpen, render, node } = mount();
+    const task = workflowTask({ id: 'rerun' });
+    task.dispatches[1] = { ...task.dispatches[1]!, subagentId: 'rerun-agent' };
+    render(task);
+    expect(onOpen).not.toHaveBeenCalled();
+    act(() => node('dispatch-2').click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'rerun-agent' }),
+    );
+  });
+
+  it('does not open agent tabs from document exports', () => {
+    const { onOpen, node } = mount(workflowTask(), true);
+    act(() => node('dispatch-2').click());
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });

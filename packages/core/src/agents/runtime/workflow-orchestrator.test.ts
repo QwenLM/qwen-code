@@ -5240,6 +5240,64 @@ describe('createProductionDispatch — subagent transcripts', () => {
     expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
   });
 
+  it('persists a resolvable foreground agent identity and lifecycle', async () => {
+    const readMeta = () => {
+      const name = fs
+        .readdirSync(sessionDir())
+        .find((n) => n.endsWith('.meta.json'))!;
+      return JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8'));
+    };
+    nextExecuteHook.value = async () => {
+      expect(readMeta()).toMatchObject({
+        parentSessionId: 'sess-1',
+        status: 'running',
+        isBackgrounded: false,
+        description: 'Inspect the workflow',
+      });
+    };
+    await createProductionDispatch(transcriptConfig())('Inspect the workflow', {
+      label: 'Inspector',
+    });
+    const meta = readMeta();
+    expect(meta).toMatchObject({ agentType: 'Inspector', status: 'completed' });
+    expect(meta.agentId).toBe(recordsIn(transcriptNames()[0]!)[0]!['agentId']);
+  });
+
+  it('persists cancellation without making the workflow child resumable', async () => {
+    const controller = new AbortController();
+    nextExecuteHook.value = async () => {
+      controller.abort();
+      nextTerminateMode.value = 'CANCELLED';
+    };
+    await expect(
+      createProductionDispatch(transcriptConfig(), controller.signal)(
+        'Inspect',
+        {},
+      ),
+    ).rejects.toThrow(/CANCELLED/);
+    const name = fs
+      .readdirSync(sessionDir())
+      .find((n) => n.endsWith('.meta.json'))!;
+    expect(
+      JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8')),
+    ).toMatchObject({ status: 'cancelled', isBackgrounded: false });
+  });
+
+  it('persists failed dispatch metadata when execution throws', async () => {
+    nextExecuteHook.value = async () => {
+      throw new Error('model unavailable');
+    };
+    await expect(
+      createProductionDispatch(transcriptConfig())('Inspect', {}),
+    ).rejects.toThrow('model unavailable');
+    const name = fs
+      .readdirSync(sessionDir())
+      .find((n) => n.endsWith('.meta.json'))!;
+    expect(
+      JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8')).status,
+    ).toBe('failed');
+  });
+
   // An empty prompt seeds no user record, so it is refused before any
   // transcript starts.
   it('rejects an empty or non-string prompt before attaching a transcript', async () => {
@@ -5343,6 +5401,19 @@ describe('createProductionDispatch — subagent transcripts', () => {
       expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
       expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
     }
+    const metaNames = fs
+      .readdirSync(sessionDir())
+      .filter((name) => name.endsWith('.meta.json'));
+    expect(metaNames).toHaveLength(1);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(sessionDir(), metaNames[0]!), 'utf8'),
+      ),
+    ).toMatchObject({
+      agentId: records[0]!['agentId'],
+      status: 'completed',
+      isBackgrounded: false,
+    });
     expect(created).toHaveLength(2);
     expect(created.map((call) => call.agentId)).toEqual([
       records[0]!['agentId'],

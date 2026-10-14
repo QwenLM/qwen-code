@@ -1053,6 +1053,7 @@ export function TasksStatusMessage({
                   <div className={styles.inlineDetail} data-kind={task.kind}>
                     <TaskDetail
                       task={task}
+                      onOpenSubagent={onOpenSubagent}
                       t={t}
                       hideHeader
                       busy={busy}
@@ -1107,6 +1108,7 @@ export function TasksStatusMessage({
           {actionError && <div className={styles.error}>{actionError}</div>}
           <TaskDetail
             task={selectedTask}
+            onOpenSubagent={onOpenSubagent}
             t={t}
             busy={busy}
             showCancelConfirm={pendingCancelId === selectedTask.id}
@@ -1464,6 +1466,7 @@ function MonitorMetric({ label, value }: { label: string; value: string }) {
 
 function TaskDetail({
   task,
+  onOpenSubagent,
   t,
   hideHeader = false,
   busy = false,
@@ -1476,6 +1479,7 @@ function TaskDetail({
   onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
+  onOpenSubagent?: (tool: ACPToolCall) => void;
   t: ReturnType<typeof useI18n>['t'];
   hideHeader?: boolean;
   busy?: boolean;
@@ -1847,6 +1851,7 @@ function TaskDetail({
       {task.kind === 'workflow' && (
         <WorkflowExecutionView
           task={task}
+          onOpenSubagent={onOpenSubagent}
           sourceTask={sourceWorkflowTask}
           historyTasks={workflowHistoryTasks}
           historyActionBusy={busy}

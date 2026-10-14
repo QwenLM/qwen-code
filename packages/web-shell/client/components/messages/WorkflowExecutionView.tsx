@@ -22,6 +22,11 @@ import {
   XIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import {
+  useSubagentDetails,
+  type OpenSubagentDetails,
+} from '../../subagentDetailsContext';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { formatTimestamp } from '../MessageTimestamp';
@@ -319,6 +324,7 @@ export function WorkflowExecutionView({
   historyActionBusy = false,
   onDeleteHistory,
   actions,
+  onOpenSubagent,
 }: {
   task: DaemonSessionWorkflowTaskStatus;
   sourceTask?: DaemonSessionWorkflowTaskStatus;
@@ -327,8 +333,12 @@ export function WorkflowExecutionView({
   onDeleteHistory?: (runId: string) => void;
   /** Run controls (pause / stop / rerun …) shown at the end of the metrics strip. */
   actions?: ReactNode;
+  onOpenSubagent?: OpenSubagentDetails;
 }) {
   const { t } = useI18n();
+  const subagentDetails = useSubagentDetails();
+  const openSubagent = onOpenSubagent ?? subagentDetails?.onOpen;
+  const documentMode = useTranscriptRenderMode() === 'document';
   const markerId = `workflow-arrow-${useId().replaceAll(':', '')}`;
   const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -910,7 +920,44 @@ export function WorkflowExecutionView({
                   data-workflow-approval={approval?.approvalId}
                   data-path-emphasis={pathEmphasis}
                   aria-pressed={dispatch.id === selected?.id}
-                  onClick={() => setSelectedId(dispatch.id)}
+                  onClick={() => {
+                    setSelectedId(dispatch.id);
+                    if (
+                      documentMode ||
+                      !dispatch.subagentId ||
+                      dispatch.status === 'queued' ||
+                      dispatch.status === 'cached'
+                    )
+                      return;
+                    openSubagent?.({
+                      callId: dispatch.subagentId,
+                      toolName: 'agent',
+                      title: dispatch.label,
+                      status:
+                        dispatch.status === 'running'
+                          ? 'in_progress'
+                          : dispatch.status === 'failed' ||
+                              dispatch.status === 'cancelled'
+                            ? 'failed'
+                            : 'completed',
+                      args: {
+                        description: dispatch.label,
+                        prompt: dispatch.prompt,
+                      },
+                      rawOutput: {
+                        type: 'task_execution',
+                        workflowRunId: task.id,
+                        status: dispatch.status,
+                      },
+                      startTime: dispatch.startedAt ?? dispatch.queuedAt,
+                      ...(dispatch.endedAt !== undefined
+                        ? { endTime: dispatch.endedAt }
+                        : {}),
+                      ...(dispatch.status === 'cancelled'
+                        ? { wasCancelled: true }
+                        : {}),
+                    });
+                  }}
                   onMouseEnter={() => setHoveredDispatchId(dispatch.id)}
                   onMouseLeave={() => setHoveredDispatchId('')}
                   onFocus={() => {
