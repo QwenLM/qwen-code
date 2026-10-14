@@ -4,9 +4,11 @@
 
 ## Status and source
 
-This is an independently reviewable feature extraction from #13526. Its base is
-the private Session and SQL authority in #13996 at
-`c0d930c066624988126e22aee2ee30417d45d391`. The initial text-only implementation
+This is an independently reviewable feature extraction from #13526. It now targets
+main at `2fa791f55b41b08df9459b7cd53c3a758f6f34a4`, after the private Session and
+SQL authority in #13996 merged as `3a9bbd7216d67a101e70f8c60e1a92dc0d7a3746`.
+The original stacked baseline was `c0d930c066624988126e22aee2ee30417d45d391`.
+The initial text-only implementation
 is taken from `06a1a868568683211986aa6cfa665309fce0e2e9`, checked against the
 proposal's current `0a88d72f824d47a7bfe6ec8c0861b7a6a67b3b95`. Historical test
 reports do not qualify this extraction. The source proposal is unchanged.
@@ -93,10 +95,11 @@ requires maintainer architecture review.
 
 ## Integration constraints and follow-up
 
-The PR is stacked on #13996 so its review diff contains only this extraction.
-After that dependency lands, rebase on actual main and rerun the gates. The
-32-table fresh-database proposal #14069 remains a separate schema change; do not
-copy its SQL or allocate migrations here. The next extraction is the finite
+The PR targets main and contains only this extraction. The original text commit
+has been replayed onto main after #13996 merged; the old dependency history is
+excluded from this review diff, and validation must use the new baseline.
+The 32-table baseline from #14069 is already inherited from main; this extraction
+does not copy its SQL or allocate migrations. The next extraction is the finite
 native Read/Write/Edit and complete result-consumption chain, followed by
 separately reviewed recovery and retirement. There are no new product decisions
 or public API changes in this text-only block.
