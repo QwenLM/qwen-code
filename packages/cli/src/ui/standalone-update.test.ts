@@ -30,7 +30,10 @@ vi.mock('../utils/load-undici.js', () => ({
 
 // Arms rmSync failures for specific paths only; every other call delegates.
 // (The ESM namespace cannot be spied on directly, so this is the seam.)
-const rmSyncFailures = vi.hoisted(() => ({ targets: [] as string[] }));
+const rmSyncFailures = vi.hoisted(() => ({
+  targets: [] as string[],
+  smoke: false,
+}));
 const allocations = vi.hoisted(() => ({ prefixes: [] as string[] }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -38,12 +41,19 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     mkdtempSync: (...args: Parameters<typeof actual.mkdtempSync>) => {
       allocations.prefixes.push(String(args[0]));
-      return actual.mkdtempSync(...args);
+      const directory = actual.mkdtempSync(...args);
+      if (
+        rmSyncFailures.smoke &&
+        String(args[0]).endsWith('qwen-code-smoke-')
+      ) {
+        rmSyncFailures.targets.push(directory);
+      }
+      return directory;
     },
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       const target = String(args[0]);
       if (rmSyncFailures.targets.includes(target)) {
-        throw new Error('EBUSY: resource busy or locked');
+        throw new Error(`EBUSY: resource busy or locked at ${target}`);
       }
       return actual.rmSync(...args);
     },
@@ -716,6 +726,10 @@ describe('standalone-update', () => {
         vi.stubEnv('NODE_OPTIONS', `--require ${preload}`);
         vi.stubEnv('BUN_OPTIONS', `--preload ${preload}`);
         vi.stubEnv('QWEN_UPDATE_TEST_ENV', 'preserved');
+        vi.stubEnv('CLI_VERSION', '9.9.9');
+        vi.stubEnv('QWEN_CODE_RELAUNCH_ARGS', '["--help"]');
+        vi.stubEnv('cli_version', '9.9.9');
+        vi.stubEnv('qwen_code_relaunch_args', '["--help"]');
         for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
         const installedManifest = JSON.stringify({ target, runtime });
         fs.writeFileSync(
@@ -728,7 +742,7 @@ describe('standalone-update', () => {
           target,
           interpreterPath: process.execPath,
           cliSource:
-            'if (process.env.QWEN_UPDATE_TEST_ENV !== "preserved") process.exit(9); console.log("1.2.3");',
+            'if (process.env.QWEN_UPDATE_TEST_ENV !== "preserved" || Object.keys(process.env).some(key => /^(CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(key))) process.exit(9); console.log("1.2.3");',
         });
         expect(await performStandaloneUpdate(standaloneDir, '1.2.3')).toBe(
           'done',
@@ -740,6 +754,10 @@ describe('standalone-update', () => {
         ).toBe('1.2.3');
         expect(process.env['NODE_OPTIONS']).toContain(preload);
         expect(process.env['BUN_OPTIONS']).toContain(preload);
+        expect(process.env['CLI_VERSION']).toBe('9.9.9');
+        expect(process.env['QWEN_CODE_RELAUNCH_ARGS']).toBe('["--help"]');
+        expect(process.env['cli_version']).toBe('9.9.9');
+        expect(process.env['qwen_code_relaunch_args']).toBe('["--help"]');
         expect(
           fs
             .readdirSync(tempDir)
@@ -827,6 +845,11 @@ describe('standalone-update', () => {
         'console.error("synthetic-secret-stderr"); process.exit(7);',
         'new binary exited with code 7',
       ],
+      [
+        'invalid numeric semver',
+        'console.log("01.2.3");',
+        'CLI version does not match the expected version',
+      ],
     ])(
       'redacts real interpreter %s errors and preserves the rollback installation',
       async (_name, cliSource, message) => {
@@ -871,6 +894,152 @@ describe('standalone-update', () => {
                 entry.startsWith('.qwen-code-update-') ||
                 entry.startsWith('qwen-code-update-'),
             ),
+        ).toEqual([]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([
+      ['direct', '0.0.9', false],
+      ['direct', '9.9.9', false],
+      ['prepared', '0.0.9', false],
+      ['prepared', '9.9.9', false],
+      ['direct', '0.0.9', true],
+      ['direct', '9.9.9', true],
+      ['prepared', '0.0.9', true],
+      ['prepared', '9.9.9', true],
+    ])(
+      'rejects a legal CLI version mismatch before replacing live or backup (%s, %s, ambient: %s)',
+      async (mode, actualVersion, ambient) => {
+        if (ambient) vi.stubEnv('CLI_VERSION', '1.2.3');
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
+        const runtime = process.versions['bun'] ? 'bun' : 'node';
+        const target = `${os.platform()}-${os.arch()}`;
+        originalManifest = JSON.stringify({
+          target,
+          runtime,
+          version: '0.1.0',
+        });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          originalManifest,
+        );
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'backup');
+        await serveArchive({
+          runnable: true,
+          runtime,
+          target,
+          interpreterPath: process.execPath,
+          cliSource: ambient
+            ? `console.log(process.env.CLI_VERSION || ${JSON.stringify(actualVersion)});`
+            : `console.log(${JSON.stringify(actualVersion)});`,
+        });
+        const envBefore = { ...process.env };
+        const pending =
+          mode === 'prepared'
+            ? await prepareStandaloneUpdate(standaloneDir, '1.2.3')
+            : undefined;
+        try {
+          await expect(
+            pending
+              ? pending.activate()
+              : performStandaloneUpdate(standaloneDir, '1.2.3'),
+          ).rejects.toThrow(
+            'Smoke test failed: CLI version does not match the expected version',
+          );
+        } finally {
+          pending?.cleanup();
+        }
+        expect({ ...process.env }).toEqual(envBefore);
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(originalManifest);
+        expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+          'backup',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+          false,
+        );
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .filter((entry) =>
+              /^(?:\.?qwen-code-update-|qwen-code-smoke-)/.test(entry),
+            ),
+        ).toEqual([]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([false, true])(
+      'preserves smoke outcome when cleanup fails (valid CLI: %s)',
+      async (valid) => {
+        for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
+        const runtime = process.versions['bun'] ? 'bun' : 'node';
+        const target = `${os.platform()}-${os.arch()}`;
+        const installedManifest = JSON.stringify({ target, runtime });
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          installedManifest,
+        );
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'backup');
+        await serveArchive({
+          runnable: true,
+          runtime,
+          target,
+          interpreterPath: process.execPath,
+          cliSource: valid
+            ? 'console.log("1.2.3");'
+            : 'console.log("synthetic-secret-version");',
+        });
+        rmSyncFailures.smoke = true;
+        try {
+          if (valid) {
+            expect(await performStandaloneUpdate(standaloneDir, '1.2.3')).toBe(
+              'done',
+            );
+            expect(rollbackStandaloneUpdate(standaloneDir)).toEqual({
+              ok: true,
+            });
+          } else {
+            const error = await performStandaloneUpdate(
+              standaloneDir,
+              '1.2.3',
+            ).catch((error: unknown) => error);
+            expect(error).toBeInstanceOf(Error);
+            expect((error as Error).message).toBe(
+              'Smoke test failed: unexpected version output',
+            );
+            expect(String(error)).not.toContain(tempDir);
+            expect(String(error)).not.toContain('synthetic-secret');
+            expect(
+              fs.readFileSync(
+                path.join(standaloneDir, 'manifest.json'),
+                'utf8',
+              ),
+            ).toBe(installedManifest);
+            expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+              'backup',
+            );
+          }
+          expect(rmSyncFailures.targets).toHaveLength(1);
+          // The injected removal failure leaves a directory; cleanup is retried by the test.
+          expect(fs.existsSync(rmSyncFailures.targets[0])).toBe(true);
+          expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+            false,
+          );
+        } finally {
+          rmSyncFailures.smoke = false;
+          const retained = rmSyncFailures.targets.splice(0);
+          for (const directory of retained)
+            fs.rmSync(directory, { recursive: true, force: true });
+        }
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .filter((entry) => entry.startsWith('qwen-code-smoke-')),
         ).toEqual([]);
       },
     );
