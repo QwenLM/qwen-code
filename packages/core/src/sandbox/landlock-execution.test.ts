@@ -240,7 +240,8 @@ describe('Landlock execution adapter', () => {
 
   it('launches the helper through the relay with read and write grants', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
-    const interpreter = path.join(policy.installation, 'private-bun');
+    const interpreter = path.join(policy.installation, 'bun', 'bin', 'bun');
+    mkdirSync(path.dirname(interpreter), { recursive: true });
     writeFileSync(interpreter, 'fixture');
     vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
       command: interpreter,

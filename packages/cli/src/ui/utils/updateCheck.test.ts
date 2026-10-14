@@ -557,6 +557,22 @@ describe('classifyUpdateCheckError', () => {
     );
   });
 
+  it('classifies native fetch TimeoutError DOMExceptions as timeout', () => {
+    expect(
+      classifyUpdateCheckError(
+        new DOMException(
+          'The operation was aborted due to timeout',
+          'TimeoutError',
+        ),
+      ),
+    ).toBe('timeout');
+    expect(
+      classifyUpdateCheckError(
+        new DOMException('The operation was aborted', 'AbortError'),
+      ),
+    ).toBe('registry');
+  });
+
   it('classifies execFile timeouts as timeout', () => {
     const error = Object.assign(new Error('Command failed: npm view'), {
       code: null,
@@ -715,6 +731,42 @@ describe('standalone update lookup', () => {
           : undefined,
       );
       expect(fetch.mock.calls[0][1].signal).toBe(fetch.mock.calls[1][1].signal);
+    },
+  );
+
+  it.each(['chain', 'loop'])(
+    'rejects a six-request redirect %s within the shared request budget',
+    async (mode) => {
+      vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+        packageManager: installationInfo.PackageManager.STANDALONE,
+        isGlobal: true,
+        isStandalone: true,
+      });
+      // A finite seventh response makes removing the cap fail a business
+      // assertion rather than hanging the test or failing in its loader.
+      const fetch = vi.fn();
+      fetch.mockImplementation(async () =>
+        fetch.mock.calls.length <= 6
+          ? new Response(null, {
+              status: 302,
+              headers: {
+                location:
+                  mode === 'loop' ? '/loop' : `/hop-${fetch.mock.calls.length}`,
+              },
+            })
+          : new Response('{"latest":"1.2.3"}'),
+      );
+      vi.stubGlobal('fetch', fetch);
+      await expect(
+        fetchGlobalNpmUpdateInfo('@qwen-code/qwen-code', '1.0.0', 'latest'),
+      ).rejects.toThrow('Invalid npm registry redirect');
+      expect(fetch).toHaveBeenCalledTimes(6);
+      const signal = fetch.mock.calls[0][1].signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      for (const [, options] of fetch.mock.calls) {
+        expect(options.signal).toBe(signal);
+        expect(options.redirect).toBe('manual');
+      }
     },
   );
 });
