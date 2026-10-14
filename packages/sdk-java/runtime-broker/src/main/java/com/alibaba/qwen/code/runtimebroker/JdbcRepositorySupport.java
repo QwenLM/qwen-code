@@ -167,6 +167,25 @@ final class JdbcRepositorySupport {
         return false;
     }
 
+    static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
+        statement.setBytes(index, value == null ? null
+                : com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(value));
+    }
+
+    static void setStringParameter(java.sql.PreparedStatement statement, int index, String value)
+            throws SQLException {
+        if ("H2".equals(statement.getConnection().getMetaData().getDatabaseProductName())) {
+            int type = statement.getParameterMetaData().getParameterType(index);
+            if (type == java.sql.Types.BINARY
+                    || type == java.sql.Types.VARBINARY
+                    || type == java.sql.Types.LONGVARBINARY) {
+                setIdentity(statement, index, value);
+                return;
+            }
+        }
+        statement.setString(index, value);
+    }
+
     static IllegalStateException failure(SQLException exception) {
         return new IllegalStateException(
                 "Runtime Broker database operation failed", exception);

@@ -31,7 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -54,10 +54,9 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        database = new DriverManagerDataSource("jdbc:h2:mem:snapshot-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(database).load().migrate();
-        jdbc = new JdbcTemplate(database);
+        database = database();
+        ManagedSchema.initialize(database);
+        jdbc = new ManagedSchemaJdbcTemplate(database);
         var protector = new AesGcmSecretProtector("test-key", new byte[32]);
         var runtimeBindings = new JdbcRuntimeBindingRepository(database, protector, () -> "binding-1");
         var manager = new DataSourceTransactionManager(database);
@@ -107,12 +106,12 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         outcomeRef = ref("outcome", "managed-tool-outcome", outcome);
         // SQL mapping fixture only; native journal semantics are tested separately by the TS consumer.
         byte[] records = "{}\n".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id, workspace_id, session_id, storage_version,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                         + " state, writer_generation, journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
                         + " latest_checkpoint_resource_id, compacted_through_revision, recovery_status, created_at, updated_at)"
-                        + " VALUES ('tenant', 'workspace', 'harness', 1, 'SEALED', 1, 1, 1, ?, 1, 'checkpoint', 0, 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                "c".repeat(64));
-        jdbc.update("INSERT INTO qwen_managed_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                        + " VALUES (?, ?, 'MANAGED_SESSION', 'harness', 'tenant', 'workspace', 'harness', 1, 'SEALED', 1, 1, 1, ?, 1, 'checkpoint', 0, 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("harness"), "c".repeat(64));
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                         + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
                         + " event_count, events_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                         + " latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, created_at)"
@@ -123,7 +122,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         resource("outcome", "managed-tool-outcome", outcome);
         resource("manifest", "managed-tool-result-manifest", manifest);
         String publicationScope = ToolPublicationDataStore.scope(key);
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
                         + " execution_key, capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes,"
                         + " admission_bytes, producer_phase, terminal_resource_id, admission_resource_id, receipt_sequence, receipt_revision)"
                         + " VALUES (?, ?, 'tenant', 'workspace', 'harness', 'pub', ?, 'capture', ?, ?, ?, 'FENCED', 0, 0, 0,"
@@ -138,10 +137,15 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         store = new WorkspaceCsiCheckpointSnapshotStore(source, bindings, JSON);
     }
 
+    DataSource database() {
+        return new DriverManagerDataSource("jdbc:h2:mem:snapshot-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+    }
+
     @Test
     void mapsOriginalInlineRowsWithoutWritesOrCredentials() {
-        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT * FROM qwen_managed_session_resource"));
-        var holderBefore = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource"));
+        var holderBefore = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         JsonNode snapshot = export();
         assertThat(snapshot.path("format").asText()).isEqualTo(WorkspaceCsiCheckpointSnapshotStore.FORMAT);
         assertThat(snapshot.path("originalCSI").path("runtimeGeneration").asText()).isEqualTo("1");
@@ -157,75 +161,83 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         assertThat(source.closes).isEqualTo(1);
         assertThat(source.rollbacks).isEqualTo(1);
         assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT"));
-        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT * FROM qwen_managed_session_resource")))
+        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource")))
                 .isEqualTo(resourcesBefore);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(holderBefore);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holderBefore);
     }
 
     @ParameterizedTest
     @ValueSource(strings = {
-        "UPDATE qwen_runtime_binding_slot SET active_binding_id = NULL",
-        "UPDATE qwen_runtime_binding SET binding_state = 'READY'",
-        "UPDATE qwen_runtime_binding SET runtime_credential_ciphertext = 'corrupt'",
-        "UPDATE managed_workspace_execution_lease SET csi_reservation_id = '00000000-0000-0000-0000-000000000000'",
-        "UPDATE managed_workspace_execution_lease SET csi_registration_revision = 2",
-        "UPDATE managed_workspace_csi_registration SET physical_key = 'bad'",
-        "UPDATE managed_workspace_csi_registration SET registration_revision = 9007199254740991",
-        "UPDATE managed_workspace_csi_registration SET registration_json = '{}'",
-        "UPDATE managed_workspace_csi_retirement SET identity_json = '{}'",
-        "UPDATE qwen_tool_execution SET authorized_binding_version = NULL",
-        "UPDATE qwen_tool_execution SET authorized_dispatch_generation = 999",
-        "UPDATE qwen_tool_execution SET result_json = '{}'",
-        "UPDATE qwen_tool_execution SET reference_json = REPLACE(reference_json, 'payloadDigest', 'wrongDigest')",
-        "UPDATE qwen_tool_execution SET reference_json = '{}'",
-        "UPDATE qwen_runtime_session SET binding_id = 'different'",
-        "UPDATE qwen_tool_publication SET quarantined = TRUE",
-        "UPDATE qwen_tool_publication SET producer_phase = 'FINISHED'",
-        "UPDATE qwen_tool_publication SET binding_digest = 'bad'",
-        "UPDATE qwen_tool_publication SET receipt_revision = 2",
-        "UPDATE qwen_managed_session_journal_head SET workspace_id = 'different'",
-        "UPDATE qwen_managed_session_journal_head SET journal_revision = 2",
-        "UPDATE qwen_managed_session_journal_head SET writer_generation = 9007199254740991",
-        "UPDATE qwen_managed_session_journal_head SET compacted_through_revision = 1",
-        "UPDATE qwen_managed_session_journal_head SET activation_epoch = 2",
-        "UPDATE qwen_managed_session_journal_tx SET record_digest = 'bad'",
-        "UPDATE qwen_managed_session_resource SET storage_kind = 'TOOL_PUBLICATION' WHERE resource_id = 'outcome'",
-        "UPDATE qwen_managed_session_resource SET inline_bytes = X'00' WHERE resource_id = 'outcome'",
-        "DELETE FROM qwen_managed_session_resource_ref WHERE resource_id = 'outcome'",
-        "UPDATE qwen_managed_session_resource SET kind = 'managed-checkpoint' WHERE resource_id = 'outcome'",
-        "UPDATE qwen_managed_session_resource_ref SET journal_revision = 2 WHERE resource_id = 'outcome'",
-        "UPDATE qwen_tool_publication_object SET object_key = 'external' WHERE slot_key = 'admission'",
-        "UPDATE qwen_tool_publication_object SET inline_bytes = X'00' WHERE slot_key = 'terminal'"
+        "UPDATE ma_runtime_slot SET active_binding_id = NULL",
+        "UPDATE ma_runtime_binding SET binding_state = 'READY'",
+        "UPDATE ma_runtime_binding SET runtime_credential_ciphertext = 'corrupt'",
+        "UPDATE ma_storage_owner SET csi_reservation_id = '00000000-0000-0000-0000-000000000000'",
+        "UPDATE ma_storage_owner SET csi_registration_revision = 2",
+        "UPDATE ma_storage SET physical_key = 'bad'",
+        "UPDATE ma_storage SET registration_revision = 9007199254740991",
+        "UPDATE ma_storage SET registration_json = '{}'",
+        "UPDATE ma_operation SET result_json = '{\"schemaVersion\":1,\"data\":{\"identity_json\":\"{}\"}}'",
+        "UPDATE ma_tool_execution SET authorized_binding_version = NULL",
+        "UPDATE ma_tool_execution SET authorized_dispatch_generation = 999",
+        "UPDATE ma_tool_execution SET result_json = '{}'",
+        "UPDATE ma_tool_execution SET reference_json = REPLACE(reference_json, 'payloadDigest', 'wrongDigest')",
+        "UPDATE ma_tool_execution SET reference_json = '{}'",
+        "UPDATE ma_runtime_session SET binding_id = 'different'",
+        "UPDATE ma_output_capture SET quarantined = TRUE",
+        "UPDATE ma_output_capture SET producer_phase = 'FINISHED'",
+        "UPDATE ma_output_capture SET binding_digest = 'bad'",
+        "UPDATE ma_output_capture SET receipt_revision = 2",
+        "UPDATE ma_session_head SET workspace_id = X'646966666572656e74'",
+        "UPDATE ma_session_head SET journal_revision = 2",
+        "UPDATE ma_session_head SET writer_generation = 9007199254740991",
+        "UPDATE ma_session_head SET compacted_through_revision = 1",
+        "UPDATE ma_session_head SET activation_epoch = 2",
+        "UPDATE ma_session_journal_tx SET record_digest = 'bad'",
+        "UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION' WHERE resource_id = X'6f7574636f6d65'",
+        "UPDATE ma_resource SET inline_bytes = X'00' WHERE resource_id = X'6f7574636f6d65'",
+        "DELETE FROM ma_resource_ref WHERE resource_id = X'6f7574636f6d65'",
+        "UPDATE ma_resource SET kind = 'managed-checkpoint' WHERE resource_id = X'6f7574636f6d65'",
+        "UPDATE ma_resource_ref SET journal_revision = 2 WHERE resource_id = X'6f7574636f6d65'",
+        "UPDATE ma_resource SET deletion_operation_key = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE slot_key = X'61646d697373696f6e'",
+        "UPDATE ma_resource SET inline_bytes = X'00' WHERE slot_key = X'7465726d696e616c'"
     })
     void refusesBrokenOriginalPinsWithoutMutation(String damage) {
         jdbc.update(damage);
-        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT * FROM qwen_managed_session_resource"));
+        JsonNode resourcesBefore = JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource"));
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Original CSI checkpoint snapshot is unavailable.").hasNoCause();
         assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT"));
         assertThat(source.rollbacks).isEqualTo(1);
-        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT * FROM qwen_managed_session_resource")))
+        assertThat((JsonNode) JSON.valueToTree(jdbc.queryForList("SELECT * FROM ma_resource")))
                 .isEqualTo(resourcesBefore);
+    }
+
+    @Test
+    void verifiedInlineReceiptCanRetainItsOriginalPhysicalPointer() {
+        jdbc.update("UPDATE ma_resource SET capture_object_key = ? WHERE slot_key = ?", "original-physical-object", "admission");
+        assertThat(export().path("original").path("outcomeRef")).isEqualTo(outcomeRef);
+        assertThat(jdbc.queryForObject("SELECT capture_object_key FROM ma_resource WHERE slot_key = ?", String.class, "admission"))
+                .isEqualTo("original-physical-object");
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"registrationRevision", "sealedBindingVersion", "epoch"})
     void refusesFractionalTypedJsonIdentityWithoutTruncation(String identity) {
         boolean registration = "registrationRevision".equals(identity);
-        String table = registration ? "managed_workspace_csi_registration" : "managed_workspace_csi_retirement";
+        String table = registration ? "ma_storage" : "ma_operation";
         String column = registration ? "registration_json" : "identity_json";
         String field = registration ? "revision" : identity;
-        String original = jdbc.queryForObject("SELECT " + column + " FROM " + table, String.class);
+        String original = registration ? jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class) : retirementIdentity();
         var match = java.util.regex.Pattern.compile("\"" + field + "\"\\s*:\\s*([0-9]+)(?=\\s*[,}])").matcher(original);
         assertThat(match.find()).isTrue();
         String fractional = original.substring(0, match.start(1)) + match.group(1) + ".5" + original.substring(match.end(1));
-        jdbc.update("UPDATE " + table + " SET " + column + " = ?", fractional);
+        if (registration) { jdbc.update("UPDATE ma_storage SET registration_json = ?", fractional); } else { saveRetirementIdentity(fractional); }
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Original CSI checkpoint snapshot is unavailable.").hasNoCause();
         assertThat(source.starts).isEqualTo(1);
         assertThat(source.rollbacks).isEqualTo(1);
         assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT") && !sql.contains("FOR UPDATE"));
-        assertThat(jdbc.queryForObject("SELECT " + column + " FROM " + table, String.class)).isEqualTo(fractional);
+        assertThat(registration ? jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class) : retirementIdentity()).isEqualTo(fractional);
     }
 
     @Test
@@ -239,10 +251,10 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
 
     @Test
     void refusesUnqualifiedDriverAndNonInnoDbTable() {
-        var unqualified = new WorkspaceCsiCheckpointSnapshotStore(database,
-                new JdbcRuntimeBindingRepository(database, new AesGcmSecretProtector("test-key", new byte[32])), JSON);
-        assertThatThrownBy(() -> unqualified.exportOriginalPublication(retirementId, "tenant", "workspace", "harness", "pub"))
-                .isInstanceOf(IllegalStateException.class);
+        source.product = "PostgreSQL";
+        assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class);
+        assertThat(source.starts).isZero();
+        source.product = "MySQL";
         source.engine = "MyISAM";
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class);
     }
@@ -268,27 +280,32 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     void refusesFixedCapacityOverflow(String limit) {
         if ("inline".equals(limit)) {
             byte[] bytes = new byte[ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES + 1];
-            jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?, byte_length = ?, sha256 = ?"
-                    + " WHERE resource_id = 'checkpoint'", bytes, bytes.length, hash(bytes));
+            jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ?"
+                    + " WHERE resource_id = X'636865636b706f696e74'", bytes, bytes.length, hash(bytes));
         } else {
             if ("transaction".equals(limit) || "total".equals(limit)) {
                 byte[] bytes = new byte[ManagedSessionStoreModels.MAX_TRANSACTION_BYTES + ("transaction".equals(limit) ? 1 : 0)];
-                jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
+                jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
                         bytes, bytes.length, hash(bytes));
             }
             if ("rows".equals(limit) || "total".equals(limit)) {
                 int count = "rows".equals(limit) ? 4097 : 5;
-                jdbc.update("INSERT INTO qwen_managed_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                List<Object[]> rows = new ArrayList<>();
+                for (int revision = 2; revision <= count; revision++) {
+                    rows.add(new Object[]{revision, String.format("%064d", revision), "transaction-" + revision,
+                            "execution-" + revision, revision, revision});
+                }
+                jdbc.batchUpdate("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
                         + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence,"
                         + " event_count, events_digest, previous_commit_digest, commit_digest, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                         + " latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, record_digest, created_at)"
-                        + " SELECT t.tenant_id, t.workspace_id, t.session_id, r.x, LPAD(CAST(r.x AS VARCHAR), 64, '0'),"
-                        + " CONCAT('transaction-', r.x), t.operation, CONCAT('execution-', r.x), t.content_digest, r.x, r.x,"
+                        + " SELECT t.tenant_id, t.workspace_id, t.session_id, ?, ?,"
+                        + " ?, t.operation, ?, t.content_digest, ?, ?,"
                         + " t.event_count, t.events_digest, t.commit_digest, t.commit_digest, t.writer_generation, t.writer_id, t.writer_token_hash,"
                         + " t.activation_epoch, t.latest_checkpoint_resource_id, t.record_encoding, t.record_bytes,"
-                        + " t.byte_length, t.record_digest, t.created_at FROM qwen_managed_session_journal_tx t, SYSTEM_RANGE(2, ?) r(x)"
-                        + " WHERE t.journal_revision = 1", count);
-                jdbc.update("UPDATE qwen_managed_session_journal_head SET journal_revision = ?, committed_sequence = ?", count, count);
+                        + " t.byte_length, t.record_digest, t.created_at FROM ma_session_journal_tx t"
+                        + " WHERE t.journal_revision = 1", rows);
+                jdbc.update("UPDATE ma_session_head SET journal_revision = ?, committed_sequence = ?", count, count);
             }
         }
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
@@ -315,21 +332,21 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     }
 
     private void numericResults(String terminalScore, String executionScore) {
-        byte[] terminal = jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object WHERE slot_key = 'terminal'", byte[].class);
+        byte[] terminal = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE slot_key = X'7465726d696e616c'", byte[].class);
         String changed = new String(terminal, StandardCharsets.UTF_8).replace("\"responseParts\":[]",
                 "\"responseParts\":[{\"score\":" + terminalScore + "}]");
         byte[] bytes = changed.getBytes(StandardCharsets.UTF_8);
-        jdbc.update("UPDATE qwen_tool_execution SET result_json = ?", changed.replace("\"score\":" + terminalScore, "\"score\":" + executionScore));
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE slot_key = 'terminal'",
+        jdbc.update("UPDATE ma_tool_execution SET result_json = ?", changed.replace("\"score\":" + terminalScore, "\"score\":" + executionScore));
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE slot_key = X'7465726d696e616c'",
                 bytes, bytes.length, hash(bytes));
-        byte[] outcome = jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object WHERE slot_key = 'admission'", byte[].class);
+        byte[] outcome = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE slot_key = X'61646d697373696f6e'", byte[].class);
         byte[] changedOutcome = new String(outcome, StandardCharsets.UTF_8).replace(new String(terminal, StandardCharsets.UTF_8), changed)
                 .getBytes(StandardCharsets.UTF_8);
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE slot_key = 'admission'",
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE slot_key = X'61646d697373696f6e'",
                 changedOutcome, changedOutcome.length, hash(changedOutcome));
-        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE resource_id = 'outcome'",
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE resource_id = X'6f7574636f6d65'",
                 changedOutcome, changedOutcome.length, hash(changedOutcome));
-        jdbc.update("UPDATE qwen_managed_session_journal_tx SET content_digest = ?", hash(changedOutcome));
+        jdbc.update("UPDATE ma_session_journal_tx SET content_digest = ?", hash(changedOutcome));
     }
 
     private JsonNode export() {
@@ -369,20 +386,35 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     private void resource(String id, String kind, JsonNode body) {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                        + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                        + " VALUES (?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', CURRENT_TIMESTAMP)",
-                scope, id, kind, bytes.length, hash(bytes), bytes);
-        jdbc.update("INSERT INTO qwen_managed_session_resource_ref (session_scope_key, tenant_id, workspace_id, session_id,"
-                + " journal_revision, resource_id, created_at) VALUES (?, 'tenant', 'workspace', 'harness', 1, ?, CURRENT_TIMESTAMP)", scope, id);
+        String resource = ManagedSessionStore.resourceKey(scope, id);
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
+                + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
+                + " VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', CURRENT_TIMESTAMP)",
+                resource, scope, id, kind, bytes.length, hash(bytes), bytes);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                + " journal_revision, resource_id, created_at) VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'workspace', 'harness', 1, ?, CURRENT_TIMESTAMP)", scope, scope, resource, id);
     }
 
     private void publicationObject(String scope, String slot, String id, String kind, JsonNode body) {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id, resource_kind,"
-                        + " byte_length, sha256, inline_bytes, state, operation_id, created_at)"
-                        + " VALUES (?, 'pub', ?, ?, ?, ?, ?, ?, 'VERIFIED', 'fixture', CURRENT_TIMESTAMP)",
-                scope, slot, id, kind, bytes.length, hash(bytes), bytes);
+        String sessionScope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
+        String resource = ManagedSessionStore.resourceKey(sessionScope, id);
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_key = ?", Integer.class, resource) == 0) {
+            resource(id, kind, body);
+            jdbc.update("DELETE FROM ma_resource_ref WHERE resource_key = ?", resource);
+        }
+        jdbc.update("UPDATE ma_resource SET scope_key = ?, publication_id = 'pub', slot_key = ?, capture_state = 'VERIFIED', operation_id = X'66697874757265'"
+                + " WHERE resource_key = ?", scope, slot, resource);
+    }
+
+    private String retirementIdentity() {
+        return (String) new WorkspaceOperations(jdbc, "tenant").find(WorkspaceOperations.Kind.CSI_RETIREMENT, retirementId, false).get("identity_json");
+    }
+
+    private void saveRetirementIdentity(String value) {
+        new TransactionTemplate(new DataSourceTransactionManager(database)).executeWithoutResult(ignored ->
+                new WorkspaceOperations(jdbc, "tenant").update(WorkspaceOperations.Kind.CSI_RETIREMENT, retirementId,
+                        WorkspaceOperations.values("identity_json", value)));
     }
 
     private static JsonNode ref(String id, String kind, JsonNode body) {
@@ -400,6 +432,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         private final DataSource database;
         private final List<String> statements = new ArrayList<>();
         private String engine = "InnoDB";
+        private String product = "MySQL";
         private int starts;
         private int rollbacks;
         private int connections;
@@ -425,7 +458,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                 if ("getMetaData".equals(method.getName())) {
                     var metadata = connection.getMetaData();
                     return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.DatabaseMetaData.class},
-                            (ignored, metaMethod, metaArgs) -> "getDatabaseProductName".equals(metaMethod.getName()) ? "MySQL"
+                            (ignored, metaMethod, metaArgs) -> "getDatabaseProductName".equals(metaMethod.getName()) ? product
                                     : invoke(metadata, metaMethod, metaArgs));
                 }
                 if ("createStatement".equals(method.getName())) {
@@ -447,8 +480,11 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     statements.add(sql);
                     assertThat(sql).startsWith("SELECT").doesNotContain("FOR UPDATE");
                     if (sql.contains("information_schema.tables")) {
-                        return connection.prepareStatement(sql.replace("table_name, engine", "table_name, '" + engine + "' AS engine")
-                                .replace("table_schema = DATABASE()", "table_schema = 'public'"));
+                        boolean h2 = "H2".equals(connection.getMetaData().getDatabaseProductName());
+                        if (h2 || !"InnoDB".equals(engine)) {
+                            sql = sql.replace("table_name, engine", "table_name, '" + engine + "' AS engine");
+                        }
+                        return connection.prepareStatement(h2 ? sql.replace("table_schema = DATABASE()", "table_schema = 'public'") : sql);
                     }
                 }
                 if ("close".equals(method.getName())) {

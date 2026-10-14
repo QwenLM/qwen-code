@@ -111,13 +111,16 @@ export function validatePlan(raw: unknown, file: string): BatchPlan {
       throw new Error(`${file}: duplicate item id "${item.id}"`);
     }
     seenIds.add(item.id);
-    const first = targetOf.get(item.target);
+    // Delivery resolves targets with path.resolve, so aliases like
+    // `out/./result.md` collapse onto one file; dedupe on the same footing.
+    const target = path.normalize(item.target);
+    const first = targetOf.get(target);
     if (first !== undefined) {
       throw new Error(
-        `${file}: items "${first}" and "${item.id}" both write "${item.target}"; targets must be unique`,
+        `${file}: items "${first}" and "${item.id}" both write "${target}"; targets must be unique`,
       );
     }
-    targetOf.set(item.target, item.id);
+    targetOf.set(target, item.id);
     const problem = targetProblem(item.target);
     if (problem !== undefined) {
       throw new Error(

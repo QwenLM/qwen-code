@@ -39,7 +39,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -77,13 +78,18 @@ class ToolPublicationAcknowledgementTest {
     private String retirementId;
     private Runnable duringObjectRead = () -> {};
 
-    @BeforeEach
-    void prepareOriginalPublicApiAuthority() {
+    protected javax.sql.DataSource dataSource() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:ack-authority-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000");
-        Flyway.configure().dataSource(source).load().migrate();
-        jdbc = new JdbcTemplate(source);
+        return source;
+    }
+
+    @BeforeEach
+    void prepareOriginalPublicApiAuthority() {
+        var source = dataSource();
+        ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = new ManagedSessionStore(jdbc);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
@@ -212,17 +218,19 @@ class ToolPublicationAcknowledgementTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"quarantine", "object", "seal", "reference", "receipt", "marker", "journal"})
+    @ValueSource(strings = {"quarantine", "object", "seal", "reference", "reference-owner", "receipt", "marker", "journal"})
     void lateAuthorityChangesRefuse(String damage) {
         var bundle = admissions.verifyOriginalAcknowledgement(execution);
         switch (damage) {
-            case "quarantine" -> jdbc.update("UPDATE qwen_tool_publication SET quarantined = TRUE");
-            case "object" -> jdbc.update("UPDATE qwen_tool_publication_object SET state = 'QUARANTINED' WHERE slot_key = 'manifest:1'");
-            case "seal" -> jdbc.update("UPDATE qwen_tool_publication_seal SET segment_count = 9 WHERE stream_id = 'stdout'");
-            case "reference" -> jdbc.update("DELETE FROM qwen_managed_session_resource_ref WHERE journal_revision = ?", revision);
-            case "receipt" -> jdbc.update("UPDATE qwen_tool_publication SET receipt_sequence = 9");
-            case "marker" -> jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = NULL, authorized_dispatch_generation = NULL");
-            default -> jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_digest = ? WHERE journal_revision = ?", "f".repeat(64), revision);
+            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE");
+            case "object" -> jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE slot_key = X'6d616e69666573743a31'");
+            case "seal" -> jdbc.update("UPDATE ma_output_capture SET seal_manifest_sha256 = ?", "f".repeat(64));
+            case "reference" -> jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND journal_revision = ?", revision);
+            case "reference-owner" -> jdbc.update("UPDATE ma_resource_ref SET owner_kind = 'SESSION_RECORD', owner_key = ?"
+                    + " WHERE owner_kind = 'JOURNAL' AND journal_revision = ?", ManagedSchemaKeys.key("non-journal-owner"), revision);
+            case "receipt" -> jdbc.update("UPDATE ma_output_capture SET receipt_sequence = 9");
+            case "marker" -> jdbc.update("UPDATE ma_tool_execution SET authorized_binding_version = NULL, authorized_dispatch_generation = NULL");
+            default -> jdbc.update("UPDATE ma_session_journal_tx SET record_digest = ? WHERE journal_revision = ?", "f".repeat(64), revision);
         }
         assertThatThrownBy(() -> tx().execute(status -> admissions.lockOriginalAcknowledgement(bundle))).isInstanceOf(RuntimeException.class);
         assertThat(csi.inspect(registration).phase()).isEqualTo("DRAINING");
@@ -247,25 +255,25 @@ class ToolPublicationAcknowledgementTest {
 
     @Test
     void rawPrecisionDifferenceCannotBeRoundedIntoOriginalResult() {
-        var object = jdbc.queryForMap("SELECT inline_bytes FROM qwen_tool_publication_object WHERE slot_key = 'terminal'");
+        var object = jdbc.queryForMap("SELECT inline_bytes FROM ma_resource WHERE slot_key = X'7465726d696e616c'");
         String original = new String((byte[]) object.get("inline_bytes"), StandardCharsets.UTF_8);
         byte[] changed = original.replace("\"score\":0.5", "\"score\":0.50000000000000000001").getBytes(StandardCharsets.UTF_8);
         assertThat(changed).isNotEqualTo((byte[]) object.get("inline_bytes"));
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE slot_key = 'terminal'",
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ? WHERE slot_key = X'7465726d696e616c'",
                 changed, changed.length, digest(changed));
         assertThatThrownBy(() -> admissions.verifyOriginalAcknowledgement(execution)).hasMessageContaining("Original complete Broker result");
     }
 
     @Test
     void changedCatalogDuringResourceVerificationCannotBeRecordedAsVerified() {
-        duringObjectRead = () -> jdbc.update("UPDATE qwen_tool_publication_object SET operation_id = 'changed' WHERE slot_key = 'manifest:1'");
+        duringObjectRead = () -> jdbc.update("UPDATE ma_resource SET operation_id = 'changed' WHERE slot_key = X'6d616e69666573743a31'");
         assertThatThrownBy(() -> admissions.verifyOriginalAcknowledgement(execution))
                 .hasMessageContaining("changed during verification");
     }
 
     @Test
     void invalidRawReceiptUtf8RefusesEvenWithUpdatedByteDigest() {
-        var row = jdbc.queryForMap("SELECT record_bytes FROM qwen_managed_session_journal_tx WHERE journal_revision = ?", revision);
+        var row = jdbc.queryForMap("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = ?", revision);
         byte[] valid = (byte[]) row.get("record_bytes");
         byte[] changed = (new String(valid, StandardCharsets.UTF_8).replace(COMMIT_MARKER, "{\"unknown\":\"?\"}\n"))
                 .getBytes(StandardCharsets.UTF_8);
@@ -275,7 +283,7 @@ class ToolPublicationAcknowledgementTest {
                 break;
             }
         }
-        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ? WHERE journal_revision = ?",
+        jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ? WHERE journal_revision = ?",
                 changed, changed.length, digest(changed), revision);
         assertThatThrownBy(() -> admissions.verifyOriginalAcknowledgement(execution)).hasMessageContaining("not UTF-8");
     }
@@ -283,14 +291,14 @@ class ToolPublicationAcknowledgementTest {
     @ParameterizedTest
     @ValueSource(strings = {"v", "sequence", "historyRevision"})
     void rawReceiptIntegerOverflowCannotWrapIntoOriginalFields(String field) {
-        byte[] valid = (byte[]) jdbc.queryForMap("SELECT record_bytes FROM qwen_managed_session_journal_tx WHERE journal_revision = ?",
+        byte[] valid = (byte[]) jdbc.queryForMap("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = ?",
                 revision).get("record_bytes");
         long original = "v".equals(field) ? 1 : sequence;
         String overflow = "v".equals(field) ? "4294967297" : java.math.BigInteger.ONE.shiftLeft(64).add(java.math.BigInteger.valueOf(sequence)).toString();
         byte[] changed = new String(valid, StandardCharsets.UTF_8).replace("\"" + field + "\":" + original,
                 "\"" + field + "\":" + overflow).getBytes(StandardCharsets.UTF_8);
         assertThat(changed).isNotEqualTo(valid);
-        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ? WHERE journal_revision = ?",
+        jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ? WHERE journal_revision = ?",
                 changed, changed.length, digest(changed), revision);
         assertThatThrownBy(() -> admissions.verifyOriginalAcknowledgement(execution)).hasMessageContaining("Original");
     }
@@ -299,16 +307,16 @@ class ToolPublicationAcknowledgementTest {
     @ValueSource(strings = {"legacy", "null", "k1"})
     void coordinatorRefusesUntrustedProvenanceWithoutRpcOrAckWrite(String provenance) {
         if ("null".equals(provenance)) {
-            jdbc.update("UPDATE qwen_runtime_binding SET resource_handle_version = NULL, resource_handle_json = NULL");
+            jdbc.update("UPDATE ma_runtime_binding SET resource_handle_version = NULL, resource_handle_json = NULL");
         } else if ("k1".equals(provenance)) {
-            jdbc.update("UPDATE qwen_runtime_binding SET resource_handle_json = ?",
+            jdbc.update("UPDATE ma_runtime_binding SET resource_handle_json = ?",
                     "{\"cluster\":\"cluster\",\"namespace\":\"runtime\",\"podName\":\"old-pod\",\"podUid\":\"legacy\"}");
         }
         RuntimeTransport transport = mock(RuntimeTransport.class);
         var coordinator = coordinator(transport);
         assertThatThrownBy(() -> coordinator.acknowledge(selector())).isInstanceOf(RuntimeException.class);
         verifyNoInteractions(transport);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_worker_ack", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE work_kind = 'CSI_WORKER_ACK'", Long.class)).isZero();
         assertThat(csi.inspect(registration).phase()).isEqualTo("DRAINING");
     }
 
@@ -329,7 +337,7 @@ class ToolPublicationAcknowledgementTest {
                 bindings, new JdbcRuntimeSessionRepository(other), executions, admissions, transport, Duration.ofSeconds(1)))
                 .hasMessageContaining("one DataSource");
         verifyNoInteractions(transport);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_worker_ack", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE work_kind = 'CSI_WORKER_ACK'", Long.class)).isZero();
     }
 
     @Test
@@ -356,7 +364,7 @@ class ToolPublicationAcknowledgementTest {
     void mismatchedSessionAuthorityAtEveryInjectionSiteRefusesBeforeRpcAndObjectReads(String component) {
         var other = new JdbcDataSource();
         other.setURL("jdbc:h2:mem:foreign-session-" + UUID.randomUUID());
-        var foreignSessions = new ManagedSessionStore(new JdbcTemplate(other));
+        var foreignSessions = new ManagedSessionStore(new ManagedSchemaJdbcTemplate(other));
         var selectedGrants = new ToolPublicationStore(jdbc, manager,
                 "grants".equals(component) ? foreignSessions : sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(2048, 16 * 1024 * 1024, 16 * 1024 * 1024, 10));
@@ -375,7 +383,7 @@ class ToolPublicationAcknowledgementTest {
                 .hasMessageContaining("one DataSource");
         verifyNoInteractions(transport, objects);
         assertThat(objectReads).isEqualTo(reads);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_worker_ack", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE work_kind = 'CSI_WORKER_ACK'", Long.class)).isZero();
     }
 
     private WorkspaceCsiWorkerAckStore coordinator(RuntimeTransport transport) {

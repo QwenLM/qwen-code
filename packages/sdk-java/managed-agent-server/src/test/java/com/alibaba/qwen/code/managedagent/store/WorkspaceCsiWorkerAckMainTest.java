@@ -42,8 +42,8 @@ class WorkspaceCsiWorkerAckMainTest {
         var result = run(settings(url), arguments("acknowledge", fixture.selector()));
         assertFailure(result);
         assertThat(fixture.rows()).isEqualTo(1);
-        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Long.class)).isZero();
-        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_runtime_binding", Long.class)).isZero();
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Long.class)).isZero();
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM ma_runtime_binding", Long.class)).isZero();
     }
 
     @Test
