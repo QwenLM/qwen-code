@@ -80,6 +80,7 @@ class HostedPublicWorkspaceIT {
     private boolean shell;
     private String shellDecision = "allow";
     private boolean durableClose;
+    private boolean shellLifecycleV2;
     private String shellFault;
     private HttpServer storeRelay;
     private ExecutorService relayExecutor;
@@ -111,6 +112,16 @@ class HostedPublicWorkspaceIT {
         assertThat(operatorAnswered).hasSize(2);
     }
 
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(360)
+    void publicShellV2DeletionTriggersCollectionWithoutRetirementSeams() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("L4 public collection requires real MySQL").startsWith("jdbc:mysql:");
+        durableClose = true;
+        shellLifecycleV2 = true;
+        publicForegroundShellUsesMandatoryApprovalOnBothSurfaces("allow");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"allow", "deny"})
     @Timeout(150)
@@ -135,9 +146,9 @@ class HostedPublicWorkspaceIT {
             JsonNode supported = web ? request("POST", "/api/agent/web-shell/v1/sessions/get",
                     Map.of("sessionId", session), null, "actor", 200) : created;
             assertThat(supported.at(web ? "/capabilities/foregroundShell" : "/capabilities/foreground_shell").asBoolean()).isTrue();
-            assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?",
                     String.class, session)).isEqualTo("hosted-workspace-shell/1");
-            assertThat(jdbc.queryForObject("SELECT approval_mode FROM managed_agent_session WHERE session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_session WHERE session_id = ?",
                     String.class, session)).isEqualTo("deny".equals(decision) ? "auto-edit" : "default");
             if (web) request("POST", "/api/agent/web-shell/v1/turns/submit",
                     Map.of("sessionId", session, "idempotencyKey", "shell-turn", "input", List.of(input)),
@@ -146,7 +157,7 @@ class HostedPublicWorkspaceIT {
                         if (modelFailure.get() != null) throw new AssertionError("Model fixture failed", modelFailure.get());
                     }).untilAsserted(() -> {
                         answerActions(session, web);
-                        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?",
+                        assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
                                 String.class, session)).isEqualTo("COMPLETED");
                     });
             Path marker = roots.get(index).resolve("child/shell-proof.txt");
@@ -157,16 +168,20 @@ class HostedPublicWorkspaceIT {
             assertThat(roots.get(index).resolve("child/background-proof.txt")).doesNotExist();
             assertThat(request("POST", route, body, workspace, "actor", 202)
                     .path(web ? "sessionId" : "id").asText()).isEqualTo(session);
-            for (String kind : List.of("close", "archive", "delete")) {
-                boolean restDelete = !web && "delete".equals(kind);
-                String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
-                        : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
-                Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
-                assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
+            if (shellLifecycleV2) {
+                deleteShellAndAwaitCollection(session, workspace, web, marker);
+            } else {
+                for (String kind : List.of("close", "archive", "delete")) {
+                    boolean restDelete = !web && "delete".equals(kind);
+                    String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
+                            : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
+                    Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
+                    assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
+                }
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE session_id = ?"
+                        + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", Integer.class, session)).isZero();
             }
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?"
-                    + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", Integer.class, session)).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE session_id = ?",
                     Integer.class, session)).isEqualTo(1);
             if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
             else assertThat(marker).doesNotExist();
@@ -174,6 +189,53 @@ class HostedPublicWorkspaceIT {
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
         assertThat(modelRequests).hasSize(8);
+    }
+
+    private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
+        var output = jdbc.queryForList("SELECT resource_id, byte_length FROM ma_resource r"
+                + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-content'"
+                + " AND state = 'PUBLISHED' AND storage_kind = 'MYSQL_INLINE' AND LOCATE('G0_SHELL_STDOUT', inline_bytes) > 0"
+                + " AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
+                + " WHERE f.session_scope_key = r.session_scope_key AND f.resource_id = r.resource_id)", tenant, session);
+        assertThat(output).as("the public Shell captured real stdout before deletion").isNotEmpty();
+        long outputBytes = output.stream().mapToLong(row -> ((Number) row.get("byte_length")).longValue()).sum();
+        String companion = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code", "input", List.of(),
+                "workspace", Map.of("workspace_id", workspace, "cwd_relative", "child")),
+                "companion-" + workspace, "actor", 202).path("id").asText();
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, companion)).isEqualTo("ACTIVE"));
+        JsonNode admitted = web ? request("POST", "/api/agent/web-shell/v1/sessions/delete",
+                Map.of("sessionId", session, "idempotencyKey", "l4-delete"), "l4-delete", "actor", 202)
+                : request("DELETE", "/v1/agents/sessions/" + session, null, "l4-delete", "actor", 202);
+        String operation = admitted.path(web ? "operationId" : "id").asText();
+        await().atMost(Duration.ofSeconds(45)).untilAsserted(() -> assertThat(request("GET",
+                "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, "actor", 200)
+                .path("status").asText()).isEqualTo("completed"));
+        assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class, tenant, session, operation)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(1);
+        await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
+            var ledgers = jdbc.queryForList("SELECT completed_at AS collected_at, CAST(JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.collectedBytes')) AS UNSIGNED) AS collected_bytes FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
+                    + " AND tenant_id = ? AND session_id = ?", tenant, session);
+            assertThat(ledgers).hasSize(1);
+            var collected = ledgers.getFirst();
+            assertThat(collected.get("collected_at")).isNotNull();
+            assertThat(((Number) collected.get("collected_bytes")).longValue()).isGreaterThanOrEqualTo(outputBytes);
+            for (var resource : output) {
+                var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM ma_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", tenant, session, resource.get("resource_id"));
+                assertThat(stored.get("state")).isEqualTo("COLLECTED");
+                assertThat(stored.get("inline_bytes")).isNull();
+                assertThat(stored.get("byte_length")).isEqualTo(resource.get("byte_length"));
+            }
+        });
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, companion)).isEqualTo("ACTIVE");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, companion)).isZero();
+        assertThat(Files.readString(marker)).isEqualTo("once\n");
     }
 
     @ParameterizedTest
@@ -197,7 +259,7 @@ class HostedPublicWorkspaceIT {
         if ("receipt-failure".equals(fault)) {
             assertThat(tenant).matches("g0-[0-9a-f-]{36}");
             assertThat(session).matches("[0-9a-f-]{36}");
-            jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON qwen_managed_session_journal_tx FOR EACH ROW BEGIN IF"
+            jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON ma_session_journal_tx FOR EACH ROW BEGIN IF"
                     + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session + "'"
                     + " AND NEW.operation = 'recordToolResult'"
                     + " AND LOCATE('\"kind\":\"tool.receipt\"', CONVERT(NEW.record_bytes USING utf8mb4)) > 0"
@@ -212,7 +274,7 @@ class HostedPublicWorkspaceIT {
             }).untilAsserted(() -> {
                 answerActions(session, false);
                 assertThat(receiptRequests).hasSize(3);
-                assertThat(jdbc.queryForList("SELECT execution_state FROM qwen_tool_execution WHERE harness_session_id = ?",
+                assertThat(jdbc.queryForList("SELECT execution_state FROM ma_tool_execution WHERE harness_session_id = ?",
                         String.class, session)).containsExactly("UNKNOWN");
             });
             var connector = spring.getBean(HarnessConnector.class);
@@ -233,23 +295,23 @@ class HostedPublicWorkspaceIT {
             assertThat(receiptRequests).hasSize(3);
             assertThat(answered).hasSize(1);
             assertThat(modelRequests).hasSize(1);
-            assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session WHERE session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?",
                     String.class, session)).isEqualTo("hosted-workspace-shell/1");
-            assertThat(jdbc.queryForObject("SELECT approval_mode FROM managed_agent_session WHERE session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_session WHERE session_id = ?",
                     String.class, session)).isEqualTo("default");
             var original = json.readTree(receiptRequests.getFirst());
             for (byte[] retry : receiptRequests) assertThat(retry).isEqualTo(receiptRequests.getFirst());
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE tenant_id = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE tenant_id = ?"
                     + " AND session_id = ? AND transaction_id = ?", Integer.class, tenant, session,
                     original.path("transactionId").asText())).isEqualTo("receipt-reply".equals(fault) ? 1 : 0);
-            assertThat(jdbc.queryForObject("SELECT prompt_id FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+            assertThat(jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE session_id = ? AND turn_id = ?",
                     String.class, session, turn)).isEqualTo(jdbc.queryForObject(
-                            "SELECT turn_id FROM qwen_tool_execution WHERE harness_session_id = ?", String.class, session));
+                            "SELECT turn_id FROM ma_tool_execution WHERE harness_session_id = ?", String.class, session));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message", "input", input),
                     "fault-turn", "actor", 202).path("turn_id").asText()).isEqualTo(turn);
             shellProbe.assertPublicFault(faultSession);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
-            assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, session)).isNotEqualTo("COMPLETED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session)).isNotEqualTo("COMPLETED");
             assertThat(decoy.resolve("proof.txt")).doesNotExist();
             assertThat(modelFailure.get()).isNull();
             assertThat(receiptRequests).hasSize(3);
@@ -265,15 +327,33 @@ class HostedPublicWorkspaceIT {
     @EnabledOnOs(OS.LINUX)
     @Timeout(150)
     void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles(boolean crash) throws Exception {
+        runDurableClose(crash);
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(150)
+    void shellProfileClosesAfterNativeFileToolsOnBothSurfaces() throws Exception {
+        shell = true;
+        approvals = true;
+        shellLifecycleV2 = true;
+        runDurableClose(false);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
+                + " AND tool_profile = 'hosted-workspace-shell/1' AND status = 'CLOSED'", Integer.class, tenant)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND tenant_id = ?",
+                Integer.class, tenant)).isZero();
+    }
+
+    private void runDurableClose(boolean crash) throws Exception {
         durableClose = true;
         runFiles();
-        List<String> sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
+        List<String> sessions = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                 + " ORDER BY workspace_id", String.class, tenant);
         for (int index = 0; index < sessions.size(); index++) {
             String session = sessions.get(index);
-            String binding = jdbc.queryForObject("SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?"
+            String binding = jdbc.queryForObject("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?"
                     + " AND isolation_key = ?", String.class, tenant, session);
-            JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM qwen_runtime_binding"
+            JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM ma_runtime_binding"
                     + " WHERE binding_id = ?", String.class, binding));
             Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json");
             long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
@@ -283,20 +363,20 @@ class HostedPublicWorkspaceIT {
                 worker.destroyForcibly();
                 worker.onExit().get(5, TimeUnit.SECONDS);
                 if (index == 1) {
-                    jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                    jdbc.update("UPDATE ma_workspace SET config_ref = ? WHERE tenant_id = ?"
                             + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
                     String failedTurn = request("POST", "/v1/agents/sessions/" + session + "/events",
                             Map.of("type", "agent.session.input.message", "input",
                                     List.of(Map.of("type", "input_text", "text", "G0_AGAIN"))),
                             "after-crash", "actor", 202).path("turn_id").asText();
                     await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                            "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                            "SELECT status FROM ma_turn WHERE session_id = ? AND turn_id = ?",
                             String.class, session, failedTurn)).isEqualTo("FAILED"));
                 }
-                assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+                assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                         String.class, binding)).isEqualTo(index == 0 ? "READY" : "LOST");
             }
-            var retained = jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource"
+            var retained = jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY resource_id", tenant, session);
             assertThat(retained).isNotEmpty();
             assertThat(request("GET", "/v1/agents/sessions/" + session, null, null, "actor", 200)
@@ -311,15 +391,15 @@ class HostedPublicWorkspaceIT {
                             null, null, "actor", 200).path("status").asText()).isEqualTo("completed"));
             assertThat(worker.isAlive()).isFalse();
             assertThat(json.readTree(Files.readString(registration)).path("state").asText()).isEqualTo("RETIRED");
-            assertThat(jdbc.queryForObject("SELECT drain_receipt_json FROM qwen_runtime_binding WHERE binding_id = ?",
+            assertThat(jdbc.queryForObject("SELECT drain_receipt_json FROM ma_runtime_binding WHERE binding_id = ?",
                     String.class, binding)).isNotBlank();
-            assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+            assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                     String.class, binding)).isEqualTo("RELEASED");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session WHERE binding_id = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE binding_id = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?"
                     + " AND holder_key IS NOT NULL", Integer.class, binding)).isZero();
-            assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource WHERE tenant_id = ?"
+            assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
             assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())
                     .contains("G0_DONE");
@@ -328,14 +408,14 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, body, "close", "actor", 202)
                     .path(webShell ? "operationId" : "id").asText()).isEqualTo(operation);
             if (crash) {
-                jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                jdbc.update("UPDATE ma_workspace SET config_ref = ? WHERE tenant_id = ?"
                         + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
                 String nextSession = request("POST", "/v1/agents/sessions",
                         Map.of("agent_id", "qwen-code", "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
                                 "workspace", Map.of("workspace_id", "workspace-" + index, "cwd_relative", "child")),
                         "after-close-" + index, "actor", 202).path("id").asText();
                 await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                        "SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, nextSession))
+                        "SELECT status FROM ma_turn WHERE session_id = ?", String.class, nextSession))
                         .isEqualTo("COMPLETED"));
                 assertThat(Files.readString(temporary.resolve(index == 0 ? "workspace-a" : "workspace-b")
                         .resolve("child/proof.txt"))).isEqualTo("after");
@@ -569,10 +649,10 @@ class HostedPublicWorkspaceIT {
                 throw new AssertionError(String.format("Turn failed. Turn:"
                         + " %s; events: %s; model requests: %s; Harness: %s",
                         jdbc.queryForList("SELECT status, error_code FROM"
-                                + " managed_agent_turn WHERE session_id = ?",
+                                + " ma_turn WHERE session_id = ?",
                                 session),
                         jdbc.queryForList("SELECT event_type, data_json FROM"
-                                + " managed_agent_event WHERE session_id = ?",
+                                + " ma_public_event WHERE session_id = ?",
                                 session), modelRequests.size(),
                         Files.readString(
                                 temporary.resolve("harness.log"))));
@@ -589,10 +669,10 @@ class HostedPublicWorkspaceIT {
     private String turnStatus(String session, String turnId) {
         if (turnId == null) {
             return jdbc.queryForObject("SELECT status FROM"
-                    + " managed_agent_turn WHERE session_id = ?",
+                    + " ma_turn WHERE session_id = ?",
                     String.class, session);
         }
-        return jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+        return jdbc.queryForObject("SELECT status FROM ma_turn"
                 + " WHERE session_id = ? AND turn_id = ?", String.class,
                 session, turnId);
     }
@@ -649,52 +729,52 @@ class HostedPublicWorkspaceIT {
             String session = created.path(webShell ? "sessionId" : "id").asText();
             assertThat(session).isNotBlank();
             await().atMost(Duration.ofSeconds(35)).failFast(() -> {
-                String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?",
+                String status = jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
                         String.class, session);
                 // Diagnostics are built only when the Turn has failed, not on every poll.
                 if ("FAILED".equals(status)) {
                     throw new AssertionError(String.format("Turn failed. Turn: %s; events: %s; model requests: %s;"
                                     + " Harness: %s",
-                            jdbc.queryForList("SELECT status, error_code FROM managed_agent_turn WHERE session_id = ?",
+                            jdbc.queryForList("SELECT status, error_code FROM ma_turn WHERE session_id = ?",
                                     session),
-                            jdbc.queryForList("SELECT event_type, data_json FROM managed_agent_event"
+                            jdbc.queryForList("SELECT event_type, data_json FROM ma_public_event"
                                     + " WHERE session_id = ?", session),
                             modelRequests.size(), Files.readString(temporary.resolve("harness.log"))));
                 }
             }).untilAsserted(() -> {
                 if (approvals) answerActions(session, webShell);
                 assertThat(modelFailure.get()).isNull();
-                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?",
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
                         String.class, session)).isEqualTo("COMPLETED");
             });
             assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(decoy.resolve("proof.txt")).doesNotExist();
             assertThat(decoy.resolve("child/proof.txt")).doesNotExist();
-            assertThat(jdbc.queryForObject("SELECT workspace_id FROM qwen_managed_session_journal_head"
+            assertThat(jdbc.queryForObject("SELECT workspace_id FROM ma_session_head"
                     + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session)).isEqualTo(workspace);
-            String durable = String.join("\n", jdbc.query("SELECT record_bytes FROM qwen_managed_session_journal_tx"
+            String durable = String.join("\n", jdbc.query("SELECT record_bytes FROM ma_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision",
                     (row, n) -> new String(row.getBytes(1), StandardCharsets.UTF_8), tenant, session));
             assertThat(durable).contains("tool_result");
-            String messages = String.join("\n", jdbc.query("SELECT inline_bytes FROM qwen_managed_session_resource"
+            String messages = String.join("\n", jdbc.query("SELECT inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-message'",
                     (row, n) -> new String(row.getBytes(1), StandardCharsets.UTF_8), tenant, session));
             assertThat(messages).contains("write_file", "read_file", "edit", "after");
             JsonNode events = request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200);
             assertThat(events.toString()).contains("G0_DONE");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
                     + " WHERE tenant_id = ? AND session_id = ? AND terminal = TRUE", Integer.class, tenant, session))
                     .isEqualTo(1);
             int requests = modelRequests.size();
-            long executions = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            long executions = jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session);
             assertThat(executions).isEqualTo(3);
             JsonNode replay = request("POST", route, body, workspace, "actor", 202);
             assertThat(replay.path(webShell ? "sessionId" : "id").asText()).isEqualTo(session);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE session_id = ?",
                     Integer.class, session)).isEqualTo(1);
             assertThat(modelRequests).hasSize(requests);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions);
             Map<String, Object> changed = new java.util.LinkedHashMap<>(body);
             changed.put("input", List.of(Map.of("type", "input_text", "text", "CHANGED")));
@@ -722,7 +802,7 @@ class HostedPublicWorkspaceIT {
                     "later-" + workspace, "actor", 202).path("turn_id").asText();
             assertThat(laterTurn).isNotBlank();
             await().atMost(Duration.ofSeconds(35)).failFast(() -> {
-                String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                String status = jdbc.queryForObject("SELECT status FROM ma_turn"
                         + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn);
                 if ("FAILED".equals(status)) {
                     throw new AssertionError("Later Turn failed. Harness: "
@@ -731,11 +811,11 @@ class HostedPublicWorkspaceIT {
             }).untilAsserted(() -> {
                 if (approvals) answerActions(session, webShell);
                 assertThat(modelFailure.get()).isNull();
-                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn"
                         + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn))
                         .isEqualTo("COMPLETED");
             });
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 2);
             assertThat(modelRequests).hasSize(requests + 4);
             assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
@@ -760,11 +840,11 @@ class HostedPublicWorkspaceIT {
             request("POST", "/v1/agents/sessions/" + session + "/events", cancel, "cancel-" + workspace,
                     "actor", 202);
             await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    "SELECT status FROM ma_turn WHERE session_id = ? AND turn_id = ?",
                     String.class, session, heldTurn)).isEqualTo("CANCELLED"));
             heldReply.countDown();
             heldReply = new CountDownLatch(1);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 2);
 
             // Any OPERATOR may rename the bound Session; the READER keeps the refusal.
@@ -778,7 +858,7 @@ class HostedPublicWorkspaceIT {
             // submitter admission: submit, cancel and rename all answer
             // session_operation_forbidden, nothing new executes, and no
             // PENDING command row is left behind.
-            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+            jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -790,18 +870,18 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "nocreate-rename-" + workspace, "actor", 403).path("error").path("code").asText())
                     .isEqualTo("session_operation_forbidden");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 2);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
-                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
-            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt"
+                    + " WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND state = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
 
             // With the running Turn settled, revoking the creator's grant hides the
             // bound Session from every later-Turn path: submit, cancel and rename all fall
             // through to the legacy gate and answer session_not_found.
-            jdbc.update("DELETE FROM managed_workspace_access"
+            jdbc.update("DELETE FROM ma_workspace_access"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -813,7 +893,7 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "revoked-rename-" + workspace, "actor", 404).path("error").path("code").asText())
                     .isEqualTo("session_not_found");
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'OPERATOR')",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
 
@@ -829,7 +909,7 @@ class HostedPublicWorkspaceIT {
                     "operator2-later-" + workspace, "operator2", 202).path("turn_id").asText();
             assertThat(operatorTurn).isNotBlank();
             await().atMost(Duration.ofSeconds(35)).failFast(() -> {
-                String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                String status = jdbc.queryForObject("SELECT status FROM ma_turn"
                         + " WHERE session_id = ? AND turn_id = ?", String.class, session, operatorTurn);
                 if ("FAILED".equals(status)) {
                     throw new AssertionError("Operator later Turn failed. Harness: "
@@ -837,12 +917,12 @@ class HostedPublicWorkspaceIT {
                 }
             }).untilAsserted(() -> {
                 assertThat(modelFailure.get()).isNull();
-                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn"
                         + " WHERE session_id = ? AND turn_id = ?", String.class, session, operatorTurn))
                         .isEqualTo("COMPLETED");
             });
             assertThat(modelRequests).hasSize(beforeOperator + 4);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 3);
             assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(decoy.resolve("child/proof.txt")).doesNotExist();
@@ -855,11 +935,11 @@ class HostedPublicWorkspaceIT {
                     Map.of("type", "agent.session.cancel", "turn_id", heldByOperator),
                     "operator2-cancel-" + workspace, "operator2", 202);
             await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    "SELECT status FROM ma_turn WHERE session_id = ? AND turn_id = ?",
                     String.class, session, heldByOperator)).isEqualTo("CANCELLED"));
             heldReply.countDown();
             heldReply = new CountDownLatch(1);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 3);
 
             Map<String, Object> operatorRename = Map.of("title", "Operator renamed " + workspace);
@@ -872,9 +952,9 @@ class HostedPublicWorkspaceIT {
             // refused synchronously with the family's domain 409 — no
             // command row, no model request, no tool execution, instead of
             // a 202 that could only fail asynchronously.
-            long pendingBefore = jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
-                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Long.class, tenant);
-            long execBefore = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
+            long pendingBefore = jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt"
+                    + " WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND state = 'PENDING'", Long.class, tenant);
+            long execBefore = jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
                     + " WHERE harness_session_id = ?", Long.class, session);
             int modelsBefore = modelRequests.size();
             // A held Turn started while the creator was OPERATOR; after the
@@ -883,7 +963,7 @@ class HostedPublicWorkspaceIT {
             String exemptHeld = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
                     "operator2-exempt-hold-" + workspace, "operator2", 202).path("turn_id").asText();
             await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeExemptHold);
-            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+            jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -896,19 +976,19 @@ class HostedPublicWorkspaceIT {
                     Map.of("type", "agent.session.cancel", "turn_id", exemptHeld),
                     "operator2-exempt-cancel-" + workspace, "operator2", 202);
             await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    "SELECT status FROM ma_turn WHERE session_id = ? AND turn_id = ?",
                     String.class, session, exemptHeld)).isEqualTo("CANCELLED"));
             heldReply.countDown();
             heldReply = new CountDownLatch(1);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
-                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Long.class, tenant))
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt"
+                    + " WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND state = 'PENDING'", Long.class, tenant))
                     .isEqualTo(pendingBefore);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(execBefore);
             // The held Turn accounts for the one request after the
             // snapshot; the refused submit must have added none itself.
             assertThat(modelRequests).hasSize(modelsBefore + 1);
-            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
+            jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
@@ -930,9 +1010,9 @@ class HostedPublicWorkspaceIT {
         Map<String, Object> unknown = new java.util.LinkedHashMap<>(denied);
         unknown.put("workspace", Map.of("workspace_id", "unknown"));
         request("POST", "/v1/agents/sessions", unknown, "unknown", "actor", 404);
-        jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING' WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_workspace SET state = 'DRAINING' WHERE tenant_id = ?", tenant);
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "draining", "actor", 409));
-        jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE' WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE' WHERE tenant_id = ?", tenant);
         register("unmounted", "unmounted-storage");
         unknown.put("workspace", Map.of("workspace_id", "unmounted"));
         assertUnavailable(request("POST", "/v1/agents/sessions", unknown, "unmounted", "actor", 409));
@@ -940,12 +1020,12 @@ class HostedPublicWorkspaceIT {
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", "other-tenant")
                 .header("X-G0-Fixture-Actor", "actor").build(), HttpResponse.BodyHandlers.ofString());
         assertThat(crossTenant.statusCode()).isEqualTo(403);
-        jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
         request("POST", "/v1/agents/sessions", denied, "read-only", "actor", 403);
-        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
-        jdbc.update("UPDATE managed_workspace_registry SET config_ref = 'unsupported' WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_workspace SET config_ref = 'unsupported' WHERE tenant_id = ?", tenant);
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
         assertThat(modelRequests).hasSize(approvals ? 16 : 30);
     }
@@ -976,12 +1056,31 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
+                "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode="
                 + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
         if (shell) arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
+        if (shellLifecycleV2) {
+            arguments.add("--qwen.managed-agent.tool-publication.enabled=true");
+            arguments.add("--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com");
+            arguments.add("--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou");
+            arguments.add("--qwen.managed-agent.tool-publication.oss-bucket=private-test-bucket");
+            arguments.add("--qwen.managed-agent.tool-publication.service-base-url=http://127.0.0.1:" + port);
+            arguments.add("--qwen.managed-agent.tool-publication.execution-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.session-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.tenant-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.active-captures=4");
+            arguments.add("--qwen.managed-agent.tool-publication.entry-concurrency=4");
+            arguments.add("--qwen.managed-agent.tool-publication.operation-timeout=10s");
+            arguments.add("--qwen.managed-agent.tool-publication.claim-timeout=5s");
+            arguments.add("--qwen.managed-agent.tool-publication.verification-bytes-per-second=1048576");
+            arguments.add("--qwen.managed-agent.tool-publication.max-verification-timeout=20m");
+            arguments.add("--qwen.managed-agent.tool-publication.gc-enabled=true");
+            arguments.add("--qwen.managed-agent.tool-publication.deletion-grace=0s");
+        }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                + "Linux".equals(System.getProperty("os.name")));
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -989,9 +1088,29 @@ class HostedPublicWorkspaceIT {
             arguments.add(prefix + "root=" + roots.get(i));
         }
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
-                .initializers(context -> context.getBeanFactory().registerSingleton("g0Authentication", authentication()))
+                .initializers(context -> {
+                    context.getBeanFactory().registerSingleton("g0Authentication", authentication());
+                    if (shellLifecycleV2) {
+                        var acl = new com.aliyun.oss.model.AccessControlList();
+                        acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
+                        var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class, invocation -> switch (invocation.getMethod().getName()) {
+                            case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
+                            case "getBucketAcl" -> acl;
+                            case "shutdown" -> null;
+                            case "toString" -> "inline-capture-oss-fixture";
+                            default -> throw new AssertionError("Unexpected OSS access in inline capture fixture: " + invocation.getMethod().getName());
+                        });
+                        context.addBeanFactoryPostProcessor(beanFactory -> beanFactory.registerSingleton("toolPublicationOss", oss));
+                    }
+                })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class);
+            for (int index = 0; index < roots.size(); index++) {
+                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
+            }
+        }
     }
 
     private FilterRegistrationBean<Filter> authentication() {
@@ -1014,20 +1133,20 @@ class HostedPublicWorkspaceIT {
     }
 
     private void register(String workspace, String storage) {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                         + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, ?, 1, ?, 'G0', ?, ?, 'ACTIVE')",
                 tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         // The reader grant exists in both runs so the later-Turn block can also run under
         // approval-mode=default without colliding with the access table's primary key.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'READER')", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8));
         // R1's second operator, in both runs: in the approvals run they answer
         // a pending approval; in the files run they drive a later Turn, a
         // cancel and a rename, and their widened then re-blocked submits
         // pin the creator-keyed execution facts.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace,
                 "operator2".getBytes(StandardCharsets.UTF_8));
     }
@@ -1106,6 +1225,9 @@ class HostedPublicWorkspaceIT {
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+        if (shellLifecycleV2) {
+            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
+        }
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
@@ -1152,10 +1274,11 @@ class HostedPublicWorkspaceIT {
                 return;
             }
             int step = results.size();
-            if (!shell && step == 3) assertThat(results.get(2).toString()).contains("after");
-            if (shell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            if (shell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            if (shell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
+            boolean runShell = shell && prompt.get().contains("G0_SHELL");
+            if (!runShell && step == 3) assertThat(results.get(2).toString()).contains("after");
+            if (runShell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
+            if (runShell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            if (runShell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
                 assertThat(results.get(2).toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
@@ -1164,9 +1287,9 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean toolCall = step < (shellFault == null ? 3 : 1);
             if (toolCall) {
-                String name = shell ? (shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? (shellFault == null && step == 0 ? "monitor" : "run_shell_command")
                         : List.of("write_file", "edit", "read_file").get(step);
-                Map<String, Object> args = shell ? switch (step) {
+                Map<String, Object> args = runShell ? switch (step) {
                     case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
                     case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
                     default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");

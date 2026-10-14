@@ -8,7 +8,7 @@
 
 Issue #13753 对 I2 的要求是：“relay 在 child 自己的 Workspace 中创建 `worktree` child；关闭与 settle 路径执行合并策略；`MANAGED_CHILD_ADMITTED_WORKSPACE_MODES` 放行 `worktree`。”其退出检查是：“worktree child 的写入在其合并策略执行之前不出现在父的树中，被取消的 child 的 worktree 会被丢弃。”
 
-I1 交付了能力，但没有调用方。本变更把唯一的生产方——hosted Agent 工具——接入 H4b 建成的 child agent 管线。`workflow` 仍然禁用（H4c 决策 5 与 6）：relay 与级联仍只处理 `child_agent` run，所以在 workflow 的运行时切片同时放宽两者之前，放行 `worktree` 对 workflow 没有任何影响。
+I1 交付了能力，但没有调用方。本变更把唯一的生产方——hosted Agent 工具——接入 H4b 建成的 child agent 管线。`workflow` 仍然禁用（H4c 决策 5 与 6）：relay 与级联仍只处理 `child_agent` run，所以在 workflow 的运行时切片同时放宽两者之前，放行 `worktree` 对 workflow 没有任何影响。（已被 [workflow 运行时切片](2026-10-10-managed-workflow-child-runtime.zh-CN.md)取代：它启用 `workflow` 并把 relay 与级联放宽到 workflow；workflow launch 仍只以 `workspaceMode: shared` 准入，所以 `worktree` 仍只是 child agent 的能力。）
 
 ## 现状
 
@@ -62,7 +62,7 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 ## 非目标
 
 - `snapshot`，以及串行化的裁定（I3）。
-- `workflow` child：该 kind 仍禁用；它的运行时切片会放宽 relay 与级联。
+- `workflow` child：该 kind 仍禁用；它的运行时切片会放宽 relay 与级联。（已被取代：运行时切片启用该 kind 并放宽两者；workflow launch 只用 `shared`。）
 - continuation（H4d）的 hosted 生产方。continuation 沿用其前驱的模式，所以被续接的 `worktree` run 会以当时父的树准备一个自己的 Workspace。
 - 按 launch 选择合并策略、自动解决冲突，或替父提交合并后的变更。
 - 父与 child 之间的并发：同一个 storage lease 仍串行化它们的 tool turn（I1 决策 1）。
@@ -95,7 +95,7 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 - `worktree` child 的写入在其合并执行之前不出现在父的树中；完成的 child 的合并在父看到结果之前以未提交变更的形式落地，冲突连同其路径与保存 child 工作的 ref 一起送达父的模型。
 - 失败或被取消的 `worktree` child 的 worktree 被丢弃，父的关闭从不等待这次丢弃。
 - 不提供 child Workspace 的主机在任何提交之前拒绝 `isolation: "worktree"`。
-- `shared` child 的行为与之前完全一致，`workflow` 仍禁用。
+- `shared` child 的行为与之前完全一致，`workflow` 仍禁用（已被取代：workflow 运行时切片启用了它，只用 `shared`）。
 
 ## 评审延后项的跟进
 

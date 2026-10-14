@@ -975,6 +975,56 @@ describe('verifyRecoverySession', () => {
     ).rejects.toThrow('resource bytes conflict');
   });
 
+  it('refuses agent instructions over the 64 KiB cap with a self-consistent digest', async () => {
+    const bytes = Buffer.alloc(64 * 1024 + 1, 0x20);
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'agent instructions exceed 64 KiB',
+    );
+  });
+
+  it('refuses agent instructions bytes that are not valid UTF-8 with a self-consistent digest', async () => {
+    const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'The encoded data was not valid for encoding utf-8',
+    );
+  });
+
   it.each([
     {},
     { undoReceipts: undefined },
@@ -1038,6 +1088,63 @@ describe('verifyRecoverySession', () => {
     });
     expect(f.io.read).toHaveBeenCalledWith(f.checkpointRef);
     expect(f.complete.size).toBe(f.refs.size);
+  });
+
+  it('roundtrips fully collected retirement counters without replay or activation', async () => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+      },
+    };
+    const roundtrip = JSON.parse(
+      JSON.stringify(source),
+    ) as RecoverySessionSource;
+    const io = {
+      ...f.io,
+      async *transactions() {},
+      nextReference: vi.fn(async () => null),
+      enqueue: vi.fn(async () => {}),
+    };
+    await expect(
+      verifyRecoverySession(roundtrip, io, 'migration'),
+    ).resolves.toEqual({ fileHistory: 'not_captured' });
+    expect(roundtrip.retiredHead).toEqual(source.retiredHead);
+    expect(io.read).not.toHaveBeenCalled();
+    expect(io.enqueue).not.toHaveBeenCalled();
+    expect(roundtrip.publicSession.status).toBe('DELETED');
+  });
+
+  it.each([
+    { state: 'ACTIVE' },
+    { compactedThroughRevision: 0 },
+    { tenantId: 'other' },
+    { sessionId: 'other' },
+    { writerId: 'late-writer' },
+    { lastCommitDigest: 'bad' },
+    { writerGeneration: Number.MAX_SAFE_INTEGER + 1 },
+    { committedSequence: -1 },
+    { activationEpoch: 0.5 },
+  ])('rejects damaged collected retirement authority (%j)', async (damage) => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+        ...damage,
+      },
+    };
+    await expect(
+      verifyRecoverySession(source, {
+        ...f.io,
+        async *transactions() {},
+      }),
+    ).rejects.toThrow('invalid collected retirement head');
   });
 
   it('requires retirement evidence before accepting a cleared checkpoint pointer', async () => {

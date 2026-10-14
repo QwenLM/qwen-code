@@ -8431,9 +8431,11 @@ export class WorkspaceDaemonClient {
 
   dirList(dirPath: string): Promise<unknown> {
     const query = new URLSearchParams({ path: dirPath });
-    return this.get(
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
       `/list?${query.toString()}`,
       'GET /workspaces/:workspace/list',
+      { mode: 'rest' },
     );
   }
 
