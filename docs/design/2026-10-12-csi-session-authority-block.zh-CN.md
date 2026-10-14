@@ -80,6 +80,8 @@ Worker path、input bytes 与 preparation evidence 来自已提交 record，不�
 
 已有的普通 Session 加锁读取直接检查生成列 `csi_guard`，同时保留请求 pin 的拒绝边界，不再重复读取同一 Session。没有现成父行读取的变更继续使用专用加锁检查。placement、retention 和 Session 的锁顺序保持不变。
 
+MQ wake claim 在插入或推进 `journal_wake` 进度、调度 Hosted activation 之前使用相同的持久化 legacy 变更守卫。私有 writer 租约到期不会准入 legacy claim：私有 profile 与持久化 request pin 都在改变 Session、journal head 或既有进度前拒绝。普通 wake claim、重投去重和 activation 保留主干行为。
+
 普通 publication 在分配读取租约和 PUT attempt 时拒绝私有 Session。Session 的 profile 与请求 pin 在创建时确定，支持的 API 不会将普通 Session 转换为私有 Session。已准入租约继续检查到期与退役，close 只清除该租约；已准入 PUT 必须记录 RETURNED 或 UNKNOWN，不能因再次准入而丢失物理写入证据。这些收尾操作无需再次锁 journal head。collector 的私有检查和锁顺序继续保留。主干的预算断言不变：空 materialize tick 为 4 条语句，完整批次为 35 条、末批为 17 条，受测 publish 路径为 6 次 head 加锁读取。
 
 身份实现由 Broker 与 Server 共享；旧 `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` 保留已公开的 `verify`、`boot` 与 `expectedPod` 静态方法，并委托给 Broker 实现。旧入口标记为 deprecated，不复制身份验证逻辑。新增的 Broker API 与本 feature 仍需 maintainer 评审。

@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer.Materia
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +24,8 @@ import java.util.UUID;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -96,6 +99,52 @@ class EventTransportConsumerSqlTest {
 
         verify(harness, times(2)).activateForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aPrivateWakeCannotInsertOrAdvanceProgressOrActivate(boolean requestPinned) {
+        String session = session("ACTIVE");
+        if (requestPinned) {
+            jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ?"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    DIGEST, TENANT, session);
+        } else {
+            jdbc.update("UPDATE managed_agent_session SET tool_profile = ?"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    CsiFilesRetirementProfile.PROFILE, TENANT, session);
+        }
+        head(session, "ACTIVE", 5, -60);
+        var sessionBefore = jdbc.queryForMap("SELECT * FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, session);
+        var headBefore = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, session);
+        assertThat(sessionBefore.get("csi_guard")).isEqualTo(true);
+
+        deliver(wake(session, WORKSPACE, 3));
+        assertThat(wakeWatermark(session)).isNull();
+
+        jdbc.update("INSERT INTO managed_agent_consumer_progress (tenant_id,"
+                + " session_id, consumer_name, covered_sequence, updated_at)"
+                + " VALUES (?, ?, ?, 1, 1)", TENANT, session,
+                TransportConsumerStore.WAKE_CONSUMER);
+        var progressBefore = jdbc.queryForMap("SELECT * FROM managed_agent_consumer_progress"
+                + " WHERE tenant_id = ? AND session_id = ? AND consumer_name = ?",
+                TENANT, session, TransportConsumerStore.WAKE_CONSUMER);
+        deliver(wake(session, WORKSPACE, 5));
+
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_consumer_progress"
+                + " WHERE tenant_id = ? AND session_id = ? AND consumer_name = ?",
+                TENANT, session, TransportConsumerStore.WAKE_CONSUMER))
+                .isEqualTo(progressBefore);
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, session))
+                .isEqualTo(sessionBefore);
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, session))
+                .isEqualTo(headBefore);
+        verify(harness, never()).activateForWake(anyString(), anyString());
+        assertThat(activated).isEmpty();
     }
 
     @Test

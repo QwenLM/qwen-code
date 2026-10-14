@@ -120,6 +120,7 @@ public class TransportConsumerStore {
      */
     public boolean claimWake(String tenantId, String sessionId,
             long sequence) {
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         if (advanceWake(tenantId, sessionId, sequence)) {
             return true;
         }
