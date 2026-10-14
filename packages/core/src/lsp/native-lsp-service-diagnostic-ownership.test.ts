@@ -157,10 +157,8 @@ async function document(fileName: string) {
 
 describe('diagnostic ownership from explicit declarations', () => {
   it.each([
-    'main.mts',
-    'main.cts',
-    'main.mjs',
-    'main.cjs',
+    'main.ps1',
+    'main.unknown',
     'main.sql',
     'main.custom',
     'Dockerfile',
@@ -188,6 +186,125 @@ describe('diagnostic ownership from explicit declarations', () => {
       expect((await document(fileName)).error).toBeUndefined();
     },
   );
+
+  it.each(['cmake', 'graphql', 'less', 'nix', 'prisma', 'scss', 'sql', 'toml'])(
+    'accepts self-naming %s ownership omitted from the attribution allowlist',
+    async (language) => {
+      const unsupported = connection();
+      unsupported.request.mockRejectedValue(
+        new LspJsonRpcError('Method not found', -32601),
+      );
+      await start([
+        { language, connection: connection() },
+        {
+          language: 'remote-lsp',
+          mapping: { [`.${language}`]: language },
+          connection: unsupported,
+        },
+      ]);
+      const result = await document(`schema.${language}`);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('No diagnostics found');
+    },
+  );
+
+  it.each(['main.constructor', 'main.__proto__'])(
+    'does not treat inherited mapping key %s as attributable',
+    async (fileName) => {
+      await start([
+        { language: 'typescript', connection: connection() },
+        {
+          language: 'remote-lsp',
+          mapping: { '.custom': 'custom' },
+          connection: connection(),
+        },
+      ]);
+      const result = await document(fileName);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('No diagnostics found');
+    },
+  );
+
+  it.each([
+    ['typescript', 'main.mts'],
+    ['typescript', 'main.cts'],
+    ['javascript', 'main.mjs'],
+    ['javascript', 'main.cjs'],
+    ['cpp', 'main.h'],
+    ['cpp', 'main.hpp'],
+    ['cpp', 'main.cc'],
+    ['cpp', 'main.cxx'],
+    ['cpp', 'main.cu'],
+    ['c', 'main.h'],
+    ['python', 'main.pyi'],
+  ])(
+    'keeps a failed %s owner as a veto for mapped %s',
+    async (language, fileName) => {
+      await start([
+        { language, connection: connection(), failed: true },
+        {
+          language: 'remote-lsp',
+          mapping: { [path.extname(fileName)]: 'custom' },
+          connection: connection(),
+        },
+      ]);
+      expect((await document(fileName)).error?.message).toContain('server-0');
+    },
+  );
+
+  it('accepts the TypeScript owner despite a foreign .mts refusal', async () => {
+    const unsupported = connection();
+    unsupported.request.mockRejectedValue(
+      new LspJsonRpcError('Method not found', -32601),
+    );
+    await start([
+      { language: 'typescript', connection: connection() },
+      {
+        language: 'remote-lsp',
+        mapping: { '.mts': 'custom-mts' },
+        connection: unsupported,
+      },
+    ]);
+    expect((await document('main.mts')).error).toBeUndefined();
+  });
+
+  it('matches ownership to an untrimmed mapping key', async () => {
+    await start([
+      {
+        language: 'remote-lsp',
+        mapping: { '. csv': 'custom' },
+        connection: connection(),
+      },
+    ]);
+    const result = await document('report. csv');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('No diagnostics found');
+  });
+
+  it('accepts a dotless mapping key from the config loader', async () => {
+    await start([
+      {
+        language: 'remote-lsp',
+        mapping: { custom: 'custom' },
+        connection: connection(),
+      },
+      { language: 'python', connection: connection(), failed: true },
+    ]);
+    expect((await document('main.custom')).error).toBeUndefined();
+  });
+
+  it('reports an answering foreign server as unattributed', async () => {
+    await start([
+      {
+        language: 'remote-lsp',
+        mapping: { '.custom': 'custom' },
+        connection: connection(),
+      },
+    ]);
+    expect((await document('main.ts')).error?.message).toContain(
+      'could not be attributed',
+    );
+  });
 
   it('preserves the veto of an unnormalized language declaration', async () => {
     await start([

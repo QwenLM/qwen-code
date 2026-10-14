@@ -188,16 +188,17 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
 };
 
 /**
- * Diagnostics-local aliases for language IDs that do not name their
- * extension (`rust` serves `.rs`, `yaml` serves `.yml`): the `?? [id]`
- * fallback would otherwise guess the ID as the extension and an ownership
- * check misreads the server. Kept OUT of LANGUAGE_ID_TO_EXTENSIONS, which
- * also feeds the warmup-file chooser — these rows exist only for veto
- * decisions. A row must still carry its own ID when that ID is in
- * DIAGNOSTIC_LANGUAGE_IDS: the row shadows the `?? [id]` fallback, so
- * dropping the ID would leave the server with nothing attributable.
+ * Diagnostics-local aliases and additional served extensions. Kept OUT of
+ * LANGUAGE_ID_TO_EXTENSIONS, which also feeds the warmup-file chooser — these
+ * rows exist only for ownership and veto decisions. A row must carry every
+ * extension it serves because it shadows the other fallbacks below.
  */
 const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
+  typescript: ['ts', 'tsx', 'mts', 'cts'],
+  javascript: ['js', 'jsx', 'mjs', 'cjs'],
+  python: ['py', 'pyi'],
+  c: ['c', 'h'],
+  cpp: ['cpp', 'h', 'hpp', 'cc', 'cxx', 'cu'],
   rust: ['rs', 'rust'],
   yaml: ['yml', 'yaml'],
   markdown: ['md', 'markdown'],
@@ -261,13 +262,26 @@ const DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Every extension the diagnostics tables can place: the mapping above, the
- * alias rows, and the identity-mapped language IDs. An extension outside this
- * set (`h`, `mts`, `ps1`, an extensionless file) cannot be attributed to any
- * language at all, so neither an answer about it can be required to be
- * positively owned nor a server excused for it — those files are undecidable
- * and fall back to the relevance ledger, as they did before ownership became a
- * requirement. Only a placeable extension can carry either decision.
+ * Real language IDs that name their own extension but must not make an
+ * arbitrary queried extension attributable. This remains separate from the
+ * attribution set so an unrecognized ID such as `custom` is never guessed.
+ */
+const SELF_NAMING_DIAGNOSTIC_LANGUAGE_IDS: ReadonlySet<string> = new Set([
+  'cmake',
+  'graphql',
+  'less',
+  'nix',
+  'prisma',
+  'scss',
+  'sql',
+  'toml',
+]);
+
+/**
+ * Every extension the diagnostics tables can place. An extension outside this
+ * set can still be attributed through an explicit `extensionToLanguage` key;
+ * only an extension in neither route is undecidable and falls back to the
+ * relevance ledger.
  */
 const ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set([
   ...KNOWN_DIAGNOSTIC_EXTENSIONS,
@@ -290,7 +304,8 @@ const JS_TS_FAMILY_LANGUAGE_IDS = [
   'javascriptreact',
 ];
 const JS_TS_FAMILY_EXTENSIONS = JS_TS_FAMILY_LANGUAGE_IDS.flatMap(
-  (id) => LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
+  (id) =>
+    DIAGNOSTIC_LANGUAGE_ALIASES[id] ?? LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
 );
 
 /**
@@ -888,12 +903,10 @@ export class NativeLspService {
   ): Set<string> {
     const owned = new Set(
       Object.keys(handle.config.extensionToLanguage ?? {})
-        .map((extension) => extension.replace(/^\./, ''))
-        .filter(
-          (extension) =>
-            extension.length > 0 &&
-            extension === extension.trim().toLowerCase(),
-        ),
+        .map((extension) =>
+          extension.startsWith('.') ? extension.slice(1) : extension,
+        )
+        .filter((extension) => extension.length > 0),
     );
     const ids = [...handle.config.languages];
     const extMapping = handle.config.extensionToLanguage;
@@ -913,7 +926,10 @@ export class NativeLspService {
       }
       for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
         LANGUAGE_ID_TO_EXTENSIONS[id] ??
-        (ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id) ? [id] : [])) {
+        (SELF_NAMING_DIAGNOSTIC_LANGUAGE_IDS.has(id) ||
+        ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id)
+          ? [id]
+          : [])) {
         owned.add(ext);
       }
     }
@@ -923,11 +939,14 @@ export class NativeLspService {
   private isAttributableDiagnosticExtension(extension: string): boolean {
     return (
       ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension) ||
-      Array.from(this.serverManager.getHandles().values()).some(
-        (handle) =>
-          (handle.config.extensionToLanguage?.[extension] ??
-            handle.config.extensionToLanguage?.['.' + extension]) !== undefined,
-      )
+      Array.from(this.serverManager.getHandles().values()).some((handle) => {
+        const mapping = handle.config.extensionToLanguage;
+        return (
+          mapping !== undefined &&
+          (Object.hasOwn(mapping, extension) ||
+            Object.hasOwn(mapping, '.' + extension))
+        );
+      })
     );
   }
 
@@ -935,9 +954,10 @@ export class NativeLspService {
    * Whether the queried file's extension positively proves this server
    * cannot own the file. Fails closed on every uncertainty: an undefined
    * extension (extensionless or unparseable file), an extension no diagnostics
-   * table or explicit mapping can place, or a server whose declared set holds no
-   * attributable extension can prove nothing, so the veto stands. Only a
-   * positively attributable extension the server does not declare excuses it —
+   * table or explicit mapping can place, or a server that declares nothing at
+   * all can prove nothing, so the veto stands. Only an attributable extension
+   * that the server's own declarations and explicit mappings do not cover
+   * excuses it —
    * `python`'s `py` vs a queried `.ts` is the canonical case, and `go`'s
    * identity-mapped `.go` is the one that keeps a downed python server from
    * vetoing a clean gopls answer.
@@ -2220,9 +2240,12 @@ export class NativeLspService {
       handle: LspServerHandle;
     }> = [];
     // Queried servers that answered with a usable report, including an
+    // authoritative empty one, before ownership relevance is considered.
+    let answeredAny = 0;
+    // Queried servers that answered with a usable report, including an
     // authoritative empty one, and that `serverDeclaredIrrelevant` does not
-    // exclude. This is the fallback backing for an extension the tables cannot
-    // place, where no declaration can be required to prove ownership.
+    // exclude. This backs an extension neither the tables nor an explicit
+    // mapping can place, where no declaration can prove ownership.
     let answeredRelevant = 0;
     // Of those, the answers that positively own an attributable queried
     // extension. TypeScript answers widen directionally to the JS/TS family;
@@ -2286,13 +2309,16 @@ export class NativeLspService {
                 handle,
                 error: new Error('server returned only unusable diagnostics'),
               });
-            } else if (!this.serverDeclaredIrrelevant(handle, extension)) {
-              answeredRelevant++;
-              if (
-                extension !== undefined &&
-                this.declaredOwnerExtensions(handle, true).has(extension)
-              ) {
-                answeredOwner++;
+            } else {
+              answeredAny++;
+              if (!this.serverDeclaredIrrelevant(handle, extension)) {
+                answeredRelevant++;
+                if (
+                  extension !== undefined &&
+                  this.declaredOwnerExtensions(handle, true).has(extension)
+                ) {
+                  answeredOwner++;
+                }
               }
             }
           } else {
@@ -2384,7 +2410,7 @@ export class NativeLspService {
         throw blame.length > 0
           ? nothingRetrievedForDiagnostics(blame, unreachable)
           : new Error(
-              answeredRelevant > 0
+              answeredAny > 0
                 ? 'No LSP diagnostics could be retrieved (a server answered but its answer could not be attributed to the queried file)'
                 : 'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
             );
