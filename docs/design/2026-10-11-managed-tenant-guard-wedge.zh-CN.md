@@ -343,6 +343,41 @@ O4 门控的迟到 writer 在应被拒绝处径直获得授权
 `acquireWriter` 现在依次执行有界 placement 获取、有界 CAS 获取，然后
 才是 `requireSessionOpen`，快照在等待之后钉住，可见赢家的提交。
 
+## Schema 整合（#14069，2026-10-14）
+
+32 表 baseline（#14069）在本改动评审期间合入。上文各节保留整合前的表名。
+合并后的 baseline 上：
+
+- `qwen_runtime_placement_guard` 与 `qwen_tool_publication_tenant` 成为
+  `ma_tenant_guard` 的 `runtime_placement` 与 `output_publication` 两个
+  domain，仍是每租户每 domain 一行。D2 的有界获取对两个 domain 原样适用。
+- journal head 与 Harness drain 行合并为每 Session 一行 `ma_session_head`，
+  drain 准入读取与 head 锁落在同一行上。
+- baseline 在租户守卫与 head 之间加入了每 Session 一行的 `ma_session` 根行
+  （`lockSessionHead`），记录提交在 head 之后还会再锁该根行
+  （`isBeingDeleted`）。普通写路径保留根行：`findHeadForUpdate` 先锁根行
+  再锁 head，只去掉租户级行。`authorizeOrdinary` 在读 drain 之前先锁根行，
+  `ensureSessionRoot` 在 `INSERT IGNORE` 之前先以排他锁取根行。因此所有
+  不持租户守卫的写路径都是先根行后 head，也不会有共享锁排在别的写者的
+  排他请求之后再升级。
+- baseline 给记录提交、工具结果发布与 publication writer 加了
+  `requirePhysicalSessionOpen`（placement 加物理存储准入），其中的
+  placement 获取同样走有界包装。
+- baseline 的心跳锁（`requireHeartbeatHead`）依赖 `checkLifecycleWriter`
+  过去持有的租户守卫。现在它先锁 head 再做 `requireLive`，与
+  `findHeadForUpdate` 顺序一致。
+- `commit()` 保留 baseline 的顺序：重放查找在 head 锁之前。重复提交仍能
+  重放，因为两次提交都先取有界的 placement 守卫，落后者的第一次一致性读
+  发生在胜者提交之后。
+- `requireNoLifecycleClaim` 按 Session scope key 与生命周期种类（`CLOSE`、
+  `ARCHIVE`、`DELETE`）读 `ma_operation`。与 PR 之前的探测不同，它不 join
+  drain 行：只要存在 v2 生命周期操作就拦截，包括 drain 行尚未写入该操作 id
+  的窗口。没有任何代码路径会清除 drain 行上的操作或把其 phase 重新打开，
+  因此两个谓词结论不同时 drain 守卫本来就会拒绝该写入，差别只在错误码。
+- 在工具结果通道上，claim 检查对生命周期调用方同样生效。这保持了 baseline
+  的行为：它在调用方自身检查之后再调用一次
+  `checkLifecycleWriter(…, null)`，对所有调用方拦截 v2 Session。
+
 ## 后续（不在本次改动）
 
 - 生命周期恢复事务的守卫窗口压界（`recoverEffects`/`saveEffects`/

@@ -408,6 +408,51 @@ required
 CAS acquisition, and only then `requireSessionOpen`, so the snapshot is
 pinned after the waits and sees the winner's commit.
 
+## Schema consolidation (#14069, 2026-10-14)
+
+The 32-table baseline (#14069) landed while this change was in review.
+The sections above keep the pre-consolidation table names. On the merged
+baseline:
+
+- `qwen_runtime_placement_guard` and `qwen_tool_publication_tenant` are
+  the `runtime_placement` and `output_publication` domains of
+  `ma_tenant_guard`, still one row per tenant and domain. D2's bounded
+  acquisitions apply to both domains unchanged.
+- The journal head and the Harness drain row are now one `ma_session_head`
+  row per Session, so the drain admission read and the head lock take the
+  same row.
+- The baseline inserts a per-Session `ma_session` root row between the
+  tenant guard and the head (`lockSessionHead`), and a record commit locks
+  that root again after the head (`isBeingDeleted`). Ordinary writers keep
+  the root: `findHeadForUpdate` locks root, then head, and drops only the
+  tenant-wide row. `authorizeOrdinary` locks the root before its drain
+  read, and `ensureSessionRoot` takes the root exclusively before its
+  `INSERT IGNORE`. Every writer that runs without the tenant guard
+  therefore locks root before head, and none upgrades a shared lock behind
+  another writer's exclusive request.
+- The baseline added `requirePhysicalSessionOpen` (placement plus physical
+  storage admission) to commits, tool-result publication and the
+  publication writer. Its placement acquisition goes through the same
+  bounded wrapper.
+- The baseline's heartbeat lock (`requireHeartbeatHead`) relied on the
+  tenant fence that `checkLifecycleWriter` used to hold. It now locks the
+  head before `requireLive`, the order `findHeadForUpdate` uses.
+- `commit()` keeps the baseline's order: the replay lookup runs before
+  the head lock. A duplicate still replays because both commits take the
+  bounded placement guard first, so the loser's first consistent read
+  comes after the winner commits.
+- `requireNoLifecycleClaim` reads `ma_operation` by Session scope key and
+  the lifecycle kinds (`CLOSE`, `ARCHIVE`, `DELETE`). Unlike the pre-PR
+  probe, it does not join the drain row. It fences as soon as a v2
+  lifecycle operation exists, including the window before the drain row
+  carries that operation's id. No code path clears a drain row's
+  operation or reopens its phase, so wherever the two predicates differ
+  the drain fence refuses the write anyway; only the error code differs.
+- On the tool-result lane the claim check also runs for lifecycle
+  callers. That keeps the baseline's behavior: its second
+  `checkLifecycleWriter(…, null)` call fenced v2 Sessions for every
+  caller.
+
 ## Follow-ups (not in this change)
 
 - Bound the lifecycle recovery transactions' guard window (snapshot-then-
