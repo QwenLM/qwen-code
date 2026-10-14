@@ -262,12 +262,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (50 + 9x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (45 + 9x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(210);
+    expect(summed).toBe(205);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(225);
+    expect(job['timeout-minutes']).toBe(220);
   });
 
   it.each([
@@ -374,18 +374,26 @@ describe('Hosted real-process gates', () => {
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
       );
-      // Two CI runs exhausted 1200 s while the shared fork still made
-      // progress. Pin the aggregate budget as well as its step envelope.
+      // The hosted fork bumps were deliberate (FG7a,b,d–f plus the FG7c
+      // crash class, ~150 s of wall clock at 2x headroom; then the L4
+      // recovery class's four real-process cuts, ~300 s more the FG7
+      // sizing never covered — #14125's per-commit kill): the relational
+      // check above tolerates anything up to step*60, so the value is
+      // pinned literally here — an unnoticed raise has no other red to
+      // land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(2400);
+        expect(forkSeconds).toBe(1800);
       }
     },
   );
 
-  // Recent CI completed 13 classes in roughly 1200 s before the final
-  // crash case began. Its 420 s deadline plus startup/teardown headroom
-  // makes 1800 s a conservative healthy-suite allowance.
-  const hostedForkHealthySeconds = 1800;
+  // The Hosted*IT classes share one failsafe fork, so a case stalled to its
+  // @Timeout must still leave the fork its healthy runtime: on main the
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
+  // the fork itself ~14s, so 650s covers them. A larger ceiling lets
+  // failsafe kill the fork mid-run, and the classes left unrun never report,
+  // failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 650;
   const hostedForkSeconds = () =>
     Number(
       read('packages/sdk-java/managed-agent-server/pom.xml')
