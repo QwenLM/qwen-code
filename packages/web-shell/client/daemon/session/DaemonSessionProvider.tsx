@@ -74,6 +74,8 @@ import {
   isAcpChildCapacityError,
 } from './httpErrors.js';
 import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import { createTrajectoryLiveStore } from '../../trajectory/trajectory-live-store.js';
+import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -988,6 +990,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   // load-older fetch captures it before the await and drops the page if it
   // moved mid-fetch, so a stale page can never advance the anchor below the
   // evicted band.
+  const trajectoryLiveStore = useMemo(() => createTrajectoryLiveStore(), []);
   const paginationGenerationRef = useRef(0);
   const store = useMemo(
     () =>
@@ -2623,8 +2626,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // The deferred store.reset() runs here — in the same synchronous
           // block as store.dispatch() — so the queueMicrotask notification
           // only fires once with the fully-populated state.
-          const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
+          const {
+            compactedReplay,
+            liveJournal,
+            lifecycleReplay,
+            lifecycleReplayIncomplete,
+          } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          trajectoryLiveStore.begin(activeSession, {
+            sessionId: activeSession.sessionId,
+            scope: sessionContextKey(activeProductSessionContext),
+            epoch: activeSession.eventEpoch,
+            lastEventId: activeSession.lastEventId,
+            events: lifecycleReplay
+              ? [...replayEvents, ...lifecycleReplay]
+              : replayEvents,
+            incomplete:
+              lifecycleReplayIncomplete === true ||
+              (historyPageSizeRef.current !== undefined &&
+                lifecycleReplay === undefined) ||
+              activeSession.replayDegraded === true ||
+              activeSession.replayPartial === true ||
+              activeSession.historyHasMore === true ||
+              !activeSession.replaySnapshotComplete,
+          });
           const markerStillVisible =
             repairingEpisode?.markerBlockId !== undefined &&
             store
@@ -3523,6 +3548,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const sseConnectReason = nextSseConnectReason;
           nextSseConnectReason = undefined;
           const recoveryEventCursor = activeSession.lastEventId ?? 0;
+          trajectoryLiveStore.reconnect(
+            activeSession,
+            activeSession.lastEventId === undefined,
+          );
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -3531,6 +3560,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (sessionRef.current !== activeSession) {
               break;
             }
+            trajectoryLiveStore.ingest(
+              activeSession,
+              event,
+              activeSession.eventEpoch,
+            );
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
@@ -4051,6 +4085,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
           }
+          trajectoryLiveStore.invalidate(activeSession, 'stream_closed');
           if (
             sessionRef.current !== activeSession &&
             !resyncRequested &&
@@ -4169,6 +4204,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }));
           }
         } catch (error) {
+          if (runnerSession)
+            trajectoryLiveStore.invalidate(runnerSession, 'stream_error');
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
           if (session && sessionRef.current !== session) {
@@ -4553,6 +4590,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     void run();
     return () => {
       const session = runnerSession;
+      if (session) trajectoryLiveStore.invalidate(session, 'stream_closed');
       disposed = true;
       abort.abort();
       const ownsCurrentSession =
@@ -4576,6 +4614,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
+        if (!keepSessionForNextEffect || isUnmounting || !session) {
+          trajectoryLiveStore.clear();
+        }
         // A same-attachment effect restart must flush events already yielded by
         // the SSE client, because its resume cursor has advanced past them.
         flushTranscriptSync();
@@ -4639,6 +4680,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxRetainedBytes,
     store,
     turnNavigationStore,
+    trajectoryLiveStore,
     restoreSessionId,
     restoreSessionContext,
     restoreMode,
@@ -4740,6 +4782,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             AUTH_FAILURE_HTTP_STATUSES.has(errorStatus);
           const missingSession = isMissingSessionHttpStatus(errorStatus);
           if (authFailure || missingSession) {
+            trajectoryLiveStore.invalidate(
+              session,
+              authFailure ? 'auth_failure' : 'session_missing',
+            );
             const deadSessionId = session.sessionId;
             if (missingSession) {
               console.warn(
@@ -4808,6 +4854,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     connection.status,
     heartbeatFailureThreshold,
     heartbeatIntervalMs,
+    trajectoryLiveStore,
   ]);
 
   const settleAdmittedPrompt = useCallback(
@@ -5414,37 +5461,39 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [appSession, connection.sessionId]);
 
   return (
-    <McpAppToolsContext.Provider value={mcpAppTools}>
-      <DaemonStoreContext.Provider value={store}>
-        <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
-          <DaemonConnectionContext.Provider value={connection}>
-            <DaemonPromptStatusContext.Provider value={promptStatus}>
-              <DaemonSessionNoticesContext.Provider value={noticesValue}>
-                <DaemonWorkspaceEventSignalsContext.Provider
-                  value={workspaceEventSignals}
-                >
-                  <DaemonActionsContext.Provider value={actions}>
-                    <DaemonSessionOwnerGuardContext.Provider
-                      value={ownerGuardValue}
-                    >
-                      <DaemonTranscriptHistoryContext.Provider
-                        value={transcriptHistoryValue}
+    <TrajectoryLiveContext.Provider value={trajectoryLiveStore}>
+      <McpAppToolsContext.Provider value={mcpAppTools}>
+        <DaemonStoreContext.Provider value={store}>
+          <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
+            <DaemonConnectionContext.Provider value={connection}>
+              <DaemonPromptStatusContext.Provider value={promptStatus}>
+                <DaemonSessionNoticesContext.Provider value={noticesValue}>
+                  <DaemonWorkspaceEventSignalsContext.Provider
+                    value={workspaceEventSignals}
+                  >
+                    <DaemonActionsContext.Provider value={actions}>
+                      <DaemonSessionOwnerGuardContext.Provider
+                        value={ownerGuardValue}
                       >
-                        <DaemonPromptSettlementContext.Provider
-                          value={subscribeToPromptSettlement}
+                        <DaemonTranscriptHistoryContext.Provider
+                          value={transcriptHistoryValue}
                         >
-                          {children}
-                        </DaemonPromptSettlementContext.Provider>
-                      </DaemonTranscriptHistoryContext.Provider>
-                    </DaemonSessionOwnerGuardContext.Provider>
-                  </DaemonActionsContext.Provider>
-                </DaemonWorkspaceEventSignalsContext.Provider>
-              </DaemonSessionNoticesContext.Provider>
-            </DaemonPromptStatusContext.Provider>
-          </DaemonConnectionContext.Provider>
-        </DaemonTurnNavigationContext.Provider>
-      </DaemonStoreContext.Provider>
-    </McpAppToolsContext.Provider>
+                          <DaemonPromptSettlementContext.Provider
+                            value={subscribeToPromptSettlement}
+                          >
+                            {children}
+                          </DaemonPromptSettlementContext.Provider>
+                        </DaemonTranscriptHistoryContext.Provider>
+                      </DaemonSessionOwnerGuardContext.Provider>
+                    </DaemonActionsContext.Provider>
+                  </DaemonWorkspaceEventSignalsContext.Provider>
+                </DaemonSessionNoticesContext.Provider>
+              </DaemonPromptStatusContext.Provider>
+            </DaemonConnectionContext.Provider>
+          </DaemonTurnNavigationContext.Provider>
+        </DaemonStoreContext.Provider>
+      </McpAppToolsContext.Provider>
+    </TrajectoryLiveContext.Provider>
   );
 }
 

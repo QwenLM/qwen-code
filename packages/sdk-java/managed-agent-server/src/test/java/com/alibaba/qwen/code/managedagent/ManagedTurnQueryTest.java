@@ -214,7 +214,7 @@ class ManagedTurnQueryTest {
     void readsTurnsWithoutTheirInput() throws Exception {
         String tenant = tenant();
         String sessionId = emptySession(tenant);
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, created_at, updated_at, completed_at)"
                         + " VALUES (?, ?, 'turn_input', ?, 'not json',"
@@ -319,10 +319,10 @@ class ManagedTurnQueryTest {
                 .header(TENANT, tenant)), 404, "session_not_found");
         error(turnRead(tenant, unknown, "turn_own"), 404, "session_not_found");
 
-        jdbc.update("UPDATE managed_agent_session SET status = 'ARCHIVED'"
+        jdbc.update("UPDATE ma_session SET status = 'ARCHIVED'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
         turnRead(tenant, sessionId, "turn_own").andExpect(status().isOk());
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+        jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1 WHERE tenant_id = ? AND"
                         + " session_id = ?", tenant, sessionId);
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
@@ -333,12 +333,12 @@ class ManagedTurnQueryTest {
     @Test
     void readsABoundSessionOnlyWithAReadGrant() throws Exception {
         String tenant = tenant();
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'ws-a', 1, 'storage-a', 'ws-a',"
                         + " 'config', 'policy', 'ACTIVE')", tenant);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')", tenant,
                 "actor-a".getBytes(StandardCharsets.UTF_8));
@@ -406,7 +406,7 @@ class ManagedTurnQueryTest {
     private void turn(String tenant, String sessionId, String turnId,
             String status, long createdAt, Long completedAt,
             String errorCode) {
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, dispatch_owner, dispatch_lease_until,"
                         + " error_code, created_at, updated_at, completed_at)"
