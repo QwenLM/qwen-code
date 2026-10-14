@@ -22,7 +22,10 @@ import type {
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  WORKSPACE_CAPABILITY_DIGEST,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
@@ -76,6 +79,7 @@ export function isHostedFileHistoryRefusal(
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
+  private capability?: string;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -92,6 +96,12 @@ export class HostedWorkspaceBroker {
 
   get acquired(): boolean {
     return this.leaseAcquired;
+  }
+
+  get capabilityDigest(): string {
+    if (this.capability === undefined)
+      throw new Error('Runtime capability is unavailable before resolution.');
+    return this.capability;
   }
 
   constructor(
@@ -181,11 +191,18 @@ export class HostedWorkspaceBroker {
     if (
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
-      scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
+      (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        !(
+          scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
+          scope['isolationClass'] === 'workspace'
+        )) ||
+      (this.capability !== undefined &&
+        this.capability !== scope['capabilityDigest'])
     )
       throw new Error(
         'Hosted Workspace Broker scope does not match the saved Session.',
       );
+    this.capability = scope['capabilityDigest'] as string;
     const runtime = response['runtime'];
     if (runtime !== undefined) {
       const binding = object(runtime);

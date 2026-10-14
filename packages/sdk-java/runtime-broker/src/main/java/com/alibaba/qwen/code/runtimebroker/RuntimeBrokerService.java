@@ -308,6 +308,51 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return drainBindings(tenantId, harnessSessionId, null);
     }
 
+    public CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId) {
+        requireOpen();
+        if (!ResidentWorkspaceProfile.selects(request)
+                || !bindingRepository.isHarnessDraining(request.getScope().getTenantId(), harnessSessionId)) {
+            return failed(conflict("runtime_admission_closed", "Resident close requires the original Session fence"));
+        }
+        var binding = bindingRepository.findActive(request);
+        if (binding == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!request.equals(binding.getRequest()) || binding.getState() != RuntimeBindingRecord.State.READY
+                || binding.isDrainRequested()) {
+            return failed(conflict("workspace_close_identity_unverified", "Original resident binding is unavailable"));
+        }
+        return closeResidentSessions(binding, harnessSessionId, null);
+    }
+
+    private CompletionStage<Void> closeResidentSessions(RuntimeBindingRecord binding, String harnessSessionId, String cursor) {
+        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
+        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
+        for (var record : batch) {
+            if (record.isActive()) {
+                if (!harnessSessionId.equals(record.getSession().getHarnessSessionId())) {
+                    return failed(conflict("workspace_close_execution_unsettled", "Another resident Session remains active"));
+                }
+                work = work.thenCompose(ignored -> releaseSavedSession(binding, record, null));
+            }
+        }
+        return work.thenCompose(ignored -> {
+            if (batch.size() == 100) {
+                return closeResidentSessions(binding, harnessSessionId, batch.getLast().getRuntimeSessionId());
+            }
+            var current = bindingRepository.findActive(binding.getRequest());
+            if (current == null || !current.getBindingId().equals(binding.getBindingId())
+                    || current.getGeneration() != binding.getGeneration() || current.getState() != RuntimeBindingRecord.State.READY
+                    || current.isDrainRequested() || !current.hasSameLease(binding.getLease())
+                    || !java.util.Objects.equals(current.getResourceHandle(), binding.getResourceHandle())
+                    || sessionRepository.countActiveByBinding(binding.getBindingId(), binding.getGeneration()) != 0
+                    || executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
+                return failed(conflict("workspace_close_execution_unsettled", "Original resident work remains unsettled"));
+            }
+            return CompletableFuture.completedFuture(null);
+        });
+    }
+
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority, boolean stoppedOnly) {
         requireOpen();
@@ -532,8 +577,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal) {
         if (binding.getLease() == null || binding.getProvisionSeed() == null || binding.getResourceHandle() == null
-                || !binding.getRequest().getIsolationKey()
-                .equals(record.getSession().getHarnessSessionId())
+                || !(ResidentWorkspaceProfile.selects(binding.getRequest())
+                        || record.getSession().getHarnessSessionId().equals(binding.getRequest().getIsolationKey()))
                 || !binding.getRequest().getScope().equals(record.getSession().getScope())) {
             return failed(conflict("workspace_close_identity_unverified", "Saved release identity is incomplete"));
         }
@@ -550,6 +595,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 && observation.getLossEvidence() != null
                                 && observation.getLossEvidence().matches(binding.getProvisionSeed(),
                                         binding.getResourceHandle(), binding.getLease())) {
+                            if (ResidentWorkspaceProfile.selects(binding.getRequest())) {
+                                return failed(conflict("workspace_close_identity_unverified", "Original resident worker is unavailable"));
+                            }
                             if (renewal == null) {
                                 return drainBinding(binding);
                             }

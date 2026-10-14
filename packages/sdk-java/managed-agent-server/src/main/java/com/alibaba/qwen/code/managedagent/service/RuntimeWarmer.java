@@ -49,6 +49,10 @@ public interface RuntimeWarmer {
         throw WorkspaceExecutionStore.unavailable();
     }
 
+    default boolean supportsWorkspaceCwdChange(ContextBinding binding) {
+        return true;
+    }
+
     /**
      * The child Workspace capability of the isolation slice (#13753 I1),
      * or null when this host cannot create a child Workspace: it is off

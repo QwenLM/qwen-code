@@ -462,6 +462,11 @@ public final class JdbcRuntimeBindingRepository
                 throw new RuntimeBrokerException(409, "runtime_session_not_ready",
                         "Runtime Session is not ready", false);
             }
+            if (ResidentWorkspaceProfile.selects(binding.getRequest())
+                    && JdbcRuntimeSessionRepository.hasActiveByBinding(connection, binding)) {
+                throw new RuntimeBrokerException(409, "workspace_busy",
+                        "The resident Workspace already has an active tool context", true);
+            }
             JdbcRuntimeSessionRepository.insertSession(connection, candidate);
             return candidate;
         });
@@ -789,11 +794,31 @@ public final class JdbcRuntimeBindingRepository
 
     private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook, boolean retirement, boolean cleanup) throws SQLException {
-        if (!"session".equals(scope.getIsolationClass())) {
+        if (!"session".equals(scope.getIsolationClass())
+                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)) {
             if (authority != null) {
                 throw admissionClosed();
             }
             return;
+        }
+        if (ResidentWorkspaceProfile.selects(scope)) {
+            try (PreparedStatement session = connection.prepareStatement(
+                    "SELECT status, workspace_id, workspace_generation, context_config_ref, tool_profile"
+                            + " FROM ma_session WHERE tenant_id = ? AND session_id = ?")) {
+                JdbcRepositorySupport.setIdentity(session, 1, scope.getTenantId());
+                JdbcRepositorySupport.setIdentity(session, 2, harnessSessionId);
+                try (ResultSet row = session.executeQuery()) {
+                    if (!row.next() || !scope.getWorkspaceId().equals(row.getString("workspace_id"))
+                            || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
+                            || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))
+                            || !"hosted-workspace-files/1".equals(row.getString("tool_profile"))
+                            || !(authority == null && !cleanup && !retirement && !legacyHook
+                                    ? "ACTIVE".equals(row.getString("status"))
+                                    : List.of("CLOSING", "DELETING").contains(row.getString("status")))) {
+                        throw admissionClosed();
+                    }
+                }
+            }
         }
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase, operation_id,"
@@ -1149,12 +1174,18 @@ public final class JdbcRuntimeBindingRepository
         }
         RuntimeBindingRecord hint = findById(expected.getBindingId());
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            if (hint != null && ResidentWorkspaceProfile.selects(hint.getRequest())) {
+                lockPlacementDomain(connection, hint.getRequest().getScope().getTenantId());
+            }
             var original = JdbcCsiActivationAdmission.lockForExecution(connection, hint, this);
             JdbcCsiActivationAdmission.requireExecution(original, expected);
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true, 10);
             RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
             RuntimeAdmission.requireSession(jdbcSessions.findByIdForUpdate(
                     connection, binding.getRequest().getScope(), expected.getRuntimeSessionId()), expected);
+            if (ResidentWorkspaceProfile.selects(binding.getRequest())) {
+                requireHarnessAdmission(connection, binding.getRequest().getScope(), expected.getHarnessSessionId(), null);
+            }
             if (original != null) {
                 if (JdbcCsiExecutionAdmission.legacyReference(expected)) {
                     throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
@@ -1193,7 +1224,7 @@ public final class JdbcRuntimeBindingRepository
                 return active;
             }
 
-            if (csiFiles && slot.lastGeneration != 0) {
+            if ((csiFiles || ResidentWorkspaceProfile.selects(request)) && slot.lastGeneration != 0) {
                 throw new RuntimeBrokerException(409, "csi_original_binding_unavailable",
                         "The original CSI request cannot create a replacement generation.", false);
             }

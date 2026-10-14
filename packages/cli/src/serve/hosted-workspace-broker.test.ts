@@ -10,7 +10,10 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  WORKSPACE_CAPABILITY_DIGEST,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 let server: Server;
 afterEach(async () => {
@@ -97,6 +100,45 @@ it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
     await expect(broker.acquire()).rejects.toThrow('scope');
   },
 );
+
+it('pins the resident capability and refuses a later profile change', async () => {
+  let resident = true;
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      acquired: true,
+      scope: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        isolationClass: 'workspace',
+        capabilityDigest: resident
+          ? RESIDENT_WORKSPACE_CAPABILITY_DIGEST
+          : WORKSPACE_CAPABILITY_DIGEST,
+      },
+    },
+  }));
+  expect(() => broker.capabilityDigest).toThrow('before resolution');
+  await broker.acquire();
+  expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+  resident = false;
+  await expect(broker.acquire()).rejects.toThrow('scope');
+});
+
+it('refuses the resident capability with Session isolation', async () => {
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      acquired: true,
+      scope: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        isolationClass: 'session',
+        capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+      },
+    },
+  }));
+  await expect(broker.acquire()).rejects.toThrow('scope');
+});
 
 it('preserves payload identity separately from the explicitly selected v3 input digest', async () => {
   const requests: Array<Record<string, unknown>> = [];

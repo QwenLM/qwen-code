@@ -71,6 +71,8 @@ import * as stdio from '../utils/stdioHelpers.js';
 import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 
 const broker = vi.hoisted(() => ({
+  capabilityDigest:
+    'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -98,6 +100,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    readonly capabilityDigest = broker.capabilityDigest;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;

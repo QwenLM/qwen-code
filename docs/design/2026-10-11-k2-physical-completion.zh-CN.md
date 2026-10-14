@@ -2,6 +2,8 @@
 
 [English](2026-10-11-k2-physical-completion.md) | [简体中文](2026-10-11-k2-physical-completion.zh-CN.md)
 
+2026-10-14 已调整首版范围：[常驻 Workspace 设计](2026-10-14-k2-resident-workspace.zh-CN.md)保留各 Workspace 的 Pod/PVC，支持逻辑 Session 切换。本文自动物理退役和卷复用延后；后续实现物理释放时仍须满足这些要求。
+
 [标准结构适配](k2-canonical-schema-port.zh-CN.md)更新当前表及键。下文历史验收仍绑定其原 62 表/847 列候选，不授予本合并结构资格。
 状态：私有进度实施候选。已实现 same-Connection DRAINED 验证、不可变 plan、stop intent、持久正常 DELETE attempts 和观测的 source prefixes。封存的 `1169bfd7` 候选已通过独立真实 Hosted/application-to-physical SQL 验收、完整 coordinator 窗口及窄私有 Main plan/status/replay。其 node source 与 Kubernetes 服务明示为协议/API 夹具。该验收仅适用于精确候选，不能资格化后续 Pod 构造变化或 ACK 部署。修订后的 exact host units 已通过自有 Linux 功能测试，runtime/CSI backend 明示为协议夹具。尚无合格 release writer、完整历史 release reader 或 public selector。本设计继续 #13395 和 Draft PR #13526，不授权在 ACK 安装。
 

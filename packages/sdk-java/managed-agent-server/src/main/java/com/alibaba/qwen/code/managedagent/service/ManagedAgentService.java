@@ -1260,7 +1260,8 @@ public class ManagedAgentService {
 
     private boolean mayChangeCwdShape(SessionRecord session) {
         return session.workspace() != null && "ACTIVE".equals(session.status())
-                && session.deletedAt() == null && store.workspaceFilesEnabled();
+                && session.deletedAt() == null && store.workspaceFilesEnabled()
+                && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceCwdChange(session.workspace()));
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

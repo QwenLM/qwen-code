@@ -2,6 +2,8 @@
 
 [English](2026-10-11-k2-physical-completion.md) | [简体中文](2026-10-11-k2-physical-completion.zh-CN.md)
 
+First-release scope changed on 2026-10-14: the [resident Workspace design](2026-10-14-k2-resident-workspace.md) retains each Workspace's Pod/PVC and supports logical Session handoff. Automatic physical retirement and volume reuse described here are deferred; their requirements remain applicable to any future physical release implementation.
+
 The [canonical schema port](k2-canonical-schema-port.md) updates current tables and keys. The historical acceptance results below retain their original 62-table/847-column candidate boundary and provide no qualification for this merged schema.
 Status: private progress implementation candidate. Same-Connection DRAINED validation, immutable plans, stop intent, persisted normal DELETE attempts and observed source prefixes are implemented. The sealed `1169bfd7` candidate passed independent real Hosted/application-to-physical SQL acceptance, complete coordinator windows and narrow private Main plan/status/replay. Its node source and Kubernetes services were explicit protocol/API fixtures. That acceptance applies only to its exact candidate and cannot qualify later Pod-construction changes or ACK deployment. The exact revised host units passed owned Linux functional tests with explicit runtime/CSI protocol fixtures. No qualified release writer, complete historical release reader or public selector exists. This design continues #13395 and Draft PR #13526; it does not authorize installation in ACK.
 

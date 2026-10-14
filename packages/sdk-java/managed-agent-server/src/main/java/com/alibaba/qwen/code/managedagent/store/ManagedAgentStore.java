@@ -135,6 +135,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
+    private final ResidentWorkspaces residentWorkspaces;
     private static final String SESSION_WITH_STREAM =
             "SELECT ma_session.*, es.last_sequence AS list_last_sequence, es.replay_floor_sequence"
                 + " AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON"
@@ -295,6 +296,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
+        this.residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         if (agentRevision == null || agentRevision.isBlank()
                 || agentRevision.length() > 128) {
             throw new IllegalArgumentException(
@@ -345,9 +347,18 @@ public class ManagedAgentStore implements AgentStateStore {
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        boolean resident = residentWorkspaces.find(workspace.binding()) != null;
+        if (resident) {
+            if (!workspaceFilesEnabled) {
+                throw workspaceExecutionUnavailable();
+            }
+            residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
+        } else {
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
+        }
         // Admission already proved the agent is qwen-code or a compiled
         // definition, so only the deployment mounts gate execution here.
-        if (!input.isEmpty()
+        if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
                         || workspaceMounts.stream().noneMatch(mount ->
@@ -513,7 +524,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         SessionRecord parent = requireSessionForUpdate(tenantId,
                 parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+        if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
@@ -1964,6 +1975,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!cwdAccess.atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
                     "Only a Workspace operator may change the Session directory.");
+        }
+        if (residentWorkspaces.find(binding) != null) {
+            throw workspaceExecutionUnavailable();
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
                 binding.getStorageId());
