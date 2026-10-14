@@ -366,5 +366,32 @@
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
         </profile>
+        <profile>
+            <!-- MQ2d: the EventTransport against a real RocketMQ LiteTopic
+                 cluster (scripts/rocketmq-lite-broker.sh start). The unit
+                 suite is the test job's; this profile runs only the gate,
+                 and the broker coordinates are required system properties
+                 (qwen.gate.rocketmq.endpoints / topic / normal-topic). -->
+            <id>event-transport-broker-gates</id>
+            <build><plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration><skipTests>true</skipTests></configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <includes><include>**/EventTransportBrokerGate.java</include></includes>
+                        <failIfNoTests>true</failIfNoTests>
+                        <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                        <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+                    </configuration>
+                    <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+                </plugin>
+            </plugins></build>
+        </profile>
     </profiles>
 </project>

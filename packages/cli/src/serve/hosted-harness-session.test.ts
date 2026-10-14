@@ -18839,6 +18839,17 @@ describe('Hosted Harness refusal reasons', () => {
     await headers(
       supertest(result).delete(`/session/${DECLINE_SESSION}`),
     ).expect(204);
+    // R3-1's stamp needs a shape that still declines: a durably blocked
+    // checkpoint verdict keeps its typed terminal (`checkpoint_blocked`)
+    // where the journal-only park above now settles (#13847).
+    const blockedVerdict = {
+      status: 'blocked',
+      reason: 'opaque_state',
+    };
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue(blockedVerdict as never);
     const declined = await headers(
       supertest(result).post(`/session/${DECLINE_SESSION}/load`),
     ).send({
@@ -18848,13 +18859,13 @@ describe('Hosted Harness refusal reasons', () => {
     });
     expect(declined.status).toBe(409);
     expect(declined.body.code).toBe('hosted_turn_recovery_declined');
-    expect(declined.body.reason).toBe('unresolved_after_settle');
+    expect(declined.body.reason).toBe('checkpoint_blocked');
     expect(logger.warn).toHaveBeenCalledWith(
       'request completed',
       expect.objectContaining({
         status: 409,
         code: 'hosted_turn_recovery_declined',
-        reason: 'unresolved_after_settle',
+        reason: 'checkpoint_blocked',
       }),
     );
   });
@@ -24338,21 +24349,31 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
-  it('refuses a takeover whose parked turn is not a Runtime wait', async () => {
+  it('settles a takeover whose parked turn holds nothing unanswerable (#13847)', async () => {
     await parkBlockedTextTurn(true);
     const server = await replacementApp();
-    const loaded = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({
+    const loadBody = {
       managedSessionStore: storeFor(BOOT_ID_2),
       toolProfile: FILE_PROFILE,
       driveRuntimeRecovery: true,
-    });
-    // G3: a park that never reached the Runtime is a typed terminal
-    // decline, not a retriable refusal — retrying can never change it.
+    };
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(loadBody);
+    // G3 declined this park terminally and bricked the Session. #13847
+    // settles it instead: the interrupted Turn owes no Runtime work and
+    // nothing the takeover cannot answer, so it is cancelled durably and
+    // this drive keeps only the plain retriable refusal…
     expect(loaded.status).toBe(409);
-    expect(loaded.body.code).toBe('hosted_turn_recovery_declined');
-    expect(loaded.body.reason).toBe('unresolved_after_settle');
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('takeover_unrecovered');
+    // …and the next drive attaches, because the Turn's settle landed the
+    // input: the Session is never bricked.
+    const reloaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(loadBody);
+    expect(reloaded.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
   async function loadParkedRecovery() {
