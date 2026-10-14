@@ -352,6 +352,35 @@ describe('attachTeamSink', () => {
     );
   });
 
+  it('does not tell the leader the host failed to answer once the host has answered', async () => {
+    attachTeamSink(deps);
+    let offeredId: string | undefined;
+    requestPermission.mockImplementation(
+      async (params: RequestPermissionRequest) => {
+        offeredId = params.options[0]!.optionId;
+        return {
+          outcome: { outcome: 'selected', optionId: offeredId },
+        };
+      },
+    );
+
+    // agent-core re-throws a failure from the resumed tool body, so `respond`
+    // rejects *after* the user's answer was accepted.
+    const respond = vi.fn(async (..._args: unknown[]) => {
+      throw new Error('resumed tool body failed');
+    });
+    const { event } = approvalEvent({ respond });
+    manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, event);
+
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(respond.mock.calls[0]![0]).toBe(offeredId);
+    // The host did answer and the tool ran with its outcome, so a second
+    // Cancel is a no-op and a "could not answer" notice would be false.
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(injectLeaderMessage).not.toHaveBeenCalled();
+  });
+
   it('auto-approves under YOLO when the request carries no renderable details', async () => {
     const yolo = makeConfig(manager, ApprovalMode.YOLO);
     attachTeamSink({ ...deps, config: yolo as unknown as Config });

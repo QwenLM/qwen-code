@@ -11239,8 +11239,13 @@ export class Session implements SessionContext {
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
       reportTeammateActivity: (activity) =>
         this.#emitTeammateActivity(activity),
+      // Not `#requestPermissionQueued`: a teammate approval is session-scoped,
+      // so no leader turn ending bounds it — one ignored card left on the
+      // shared tail would wedge every later prompt, including the leader's own.
+      // Skipping the queue costs nothing here: `#withBackgroundPermission`
+      // early-returns on the `permissionScope: 'session'` these params carry.
       requestPermission: (params, signal) =>
-        this.#requestPermissionQueued(params, signal),
+        requestPermissionWithAbort(this.client, params, signal),
     });
   }
 
@@ -11249,7 +11254,14 @@ export class Session implements SessionContext {
     displayText: string,
     senders?: readonly string[],
   ): void {
-    if (this.disposed || this.closing) return;
+    // Only `disposed` may drop a report. `TeamManager.pollLeaderInbox()`
+    // consumes the mailbox and marks it read *before* invoking this callback,
+    // so returning on `closing` would turn "retained, undelivered" into
+    // "consumed, lost" — the exact state `team-sink.ts`'s `injectLeaderMessage`
+    // contract forbids. Enqueueing is safe during a reversible close:
+    // `#drainNotificationQueue` has its own `closing` gate, and `beginClose`'s
+    // release drains the queue, so the report still reaches the leader.
+    if (this.disposed) return;
     // A single-sender batch is attributable; a mixed batch is not, so it stays
     // unattributed rather than naming one teammate for several reports.
     const sender = senders?.length === 1 ? senders[0] : undefined;
@@ -11289,7 +11301,9 @@ export class Session implements SessionContext {
     name: string;
     status?: string;
   }): void {
-    if (this.disposed || this.closing) return;
+    // Same reasoning as `#enqueueTeammateMessage`: a reversible close must not
+    // swallow the notice, since the queue is drained when the gate releases.
+    if (this.disposed) return;
     const joined = change.type === 'joined';
     const tail = joined
       ? 'joined the team'

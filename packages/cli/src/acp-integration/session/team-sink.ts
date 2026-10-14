@@ -239,12 +239,21 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
         if (signal.aborted) return;
         signal.removeEventListener('abort', cancelOnAbort);
         const outcome = resolvePermissionOutcome(output, offered);
-        await event.respond(outcome, {
-          answers:
-            'answers' in output
-              ? (output['answers'] as Record<string, string> | undefined)
-              : undefined,
-        });
+        // Past this point the host *has* answered, so a rejection from
+        // `respond` is the resumed tool body failing, not an unanswered
+        // approval. It must not reach the fail-closed branch: the cancel there
+        // is a no-op (`agent-core` latches `responded` before awaiting
+        // `onConfirm`) and its leader notice would say something false.
+        try {
+          await event.respond(outcome, {
+            answers:
+              'answers' in output
+                ? (output['answers'] as Record<string, string> | undefined)
+                : undefined,
+          });
+        } catch (error) {
+          swallow(error, 'post-answer respond');
+        }
       } catch (error) {
         if (signal.aborted) return;
         debugLogger.error('Teammate permission request failed:', error);

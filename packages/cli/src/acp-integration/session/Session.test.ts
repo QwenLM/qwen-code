@@ -1358,6 +1358,60 @@ describe('Session', () => {
       expect(manager.listenerCount('teammate_approval_request')).toBe(0);
     });
 
+    it('still delivers a teammate report that lands inside a reversible close', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      const release = session.beginClose();
+      // `TeamManager.pollLeaderInbox()` has already consumed the mailbox row and
+      // written `read: true` by the time this callback runs, so dropping it here
+      // would leave the report neither queued nor persisted while the disk says
+      // it was delivered.
+      manager.leaderCallback?.(
+        '<teammate_message from="security">found an injection</teammate_message>',
+        '[team] security: found an injection',
+        ['security'],
+      );
+
+      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalled();
+
+      // The queued report reaches the leader's model once the gate releases,
+      // rather than starting a turn early or vanishing.
+      release();
+      await vi.waitFor(() =>
+        expect(
+          vi.mocked(mockChat.sendMessageStream).mock.calls.length,
+        ).toBeGreaterThanOrEqual(1),
+      );
+      const prompted = vi
+        .mocked(mockChat.sendMessageStream)
+        .mock.calls.map((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      expect(prompted).toContain(
+        '<teammate_message from="security">found an injection</teammate_message>',
+      );
+      session.dispose();
+    });
+
     it('projects teammate activity and inter-teammate messages without waking the leader', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();
@@ -1527,6 +1581,54 @@ describe('Session', () => {
       await vi.waitFor(() => expect(respond).toHaveBeenCalled());
       expect(promptedTitle).toContain('security');
       expect(respond.mock.calls[0]![0]).toBe(offeredId);
+      session.dispose();
+    });
+
+    it('does not let an unanswered teammate approval wedge the next one', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      // The user ignores the first card, so its promise never settles — and a
+      // teammate approval is session-scoped, so no leader turn ending ever will.
+      const seen: string[] = [];
+      vi.mocked(mockClient.requestPermission).mockImplementation(
+        async (params) => {
+          seen.push((params.toolCall.rawInput as { path: string }).path);
+          return new Promise<never>(() => {});
+        },
+      );
+
+      const approval = (path: string) => ({
+        teammateName: 'security',
+        toolName: 'write_file',
+        toolInput: { path },
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Edit file',
+          fileName: path,
+          filePath: path,
+          fileDiff: '',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+        timestamp: 1,
+        respond: vi.fn(async () => {}),
+      });
+      manager.emit('teammate_approval_request', approval('/first.ts'));
+      manager.emit('teammate_approval_request', approval('/second.ts'));
+
+      // Parked on the shared serialization queue, the second card would wait
+      // behind the first's unsettled tail and never be published at all.
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      expect(seen).toEqual(['/first.ts', '/second.ts']);
       session.dispose();
     });
 

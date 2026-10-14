@@ -17,6 +17,7 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import type { MessageRewriteMiddleware } from './rewrite/index.js';
+import { DEFAULT_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core/subagents/builtin-agents.js';
 
 export type { ApprovalModeValue };
 
@@ -126,16 +127,17 @@ export interface SubagentMeta {
 /**
  * Derives a subagent's identity from the agent that spawned it.
  *
- * The name segment is the subagent type, which `SubagentValidator` already
- * constrains to `^[\p{L}\p{N}_-]+$` — so it cannot contain `/` and the path
- * stays unambiguous. An empty type degrades to `subagent` rather than
- * producing a trailing slash.
+ * The segment is the requested `subagent_type` as given: core resolves it to a
+ * definition name case-insensitively and asynchronously, which this synchronous
+ * mint cannot follow. Only the empty request is reproduced exactly, by
+ * degrading to the same default core uses — so the documented default path
+ * agrees with the name replay rebuilds from the persisted `subagentName`.
  */
 export function deriveSubagentIdentity(
   subagentType: string,
   parent: AgentIdentity = ROOT_AGENT_IDENTITY,
 ): AgentIdentity {
-  const segment = subagentType.trim() || 'subagent';
+  const segment = subagentType.trim() || DEFAULT_BUILTIN_SUBAGENT_TYPE;
   return {
     agentName: `${parent.agentName}/${segment}`,
     depth: parent.depth + 1,
