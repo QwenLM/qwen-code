@@ -279,7 +279,6 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import {
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
-  markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
