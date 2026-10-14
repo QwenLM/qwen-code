@@ -7,21 +7,30 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.PublishToolResultRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredTransaction;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
-import java.nio.ByteBuffer;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -40,13 +49,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DuplicateKeyException;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
-import org.springframework.stereotype.Repository;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -98,21 +100,25 @@ public class ManagedSessionStore {
                     result.getObject("activation_head_revision", Long.class));
     private final RowMapper<TransactionRow> transactionMapper =
             (result, row) -> transactionRow(result);
-    private final RowMapper<ResourceRow> resourceMapper = (result, row) ->
-            new ResourceRow(result.getString("tenant_id"),
-                    result.getString("workspace_id"),
-                    result.getString("session_id"),
-                    result.getString("resource_id"),
-                    result.getString("kind"),
-                    result.getInt("schema_version"),
-                    result.getLong("byte_length"),
-                    result.getString("sha256"),
-                    result.getString("storage_kind"),
-                    result.getBytes("inline_bytes"),
-                    result.getString("object_key"),
-                    result.getString("object_version_id"),
-                    result.getString("encryption_key_id"),
-                    result.getString("state"));
+    private final RowMapper<ResourceRow> resourceMapper =
+            (result, row) ->
+                    new ResourceRow(
+                            result.getString("tenant_id"),
+                            result.getString("workspace_id"),
+                            result.getString("session_id"),
+                            result.getString("resource_id"),
+                            result.getString("kind"),
+                            result.getInt("schema_version"),
+                            result.getLong("byte_length"),
+                            result.getString("sha256"),
+                            result.getString("storage_kind"),
+                            result.getBytes("inline_bytes"),
+                            result.getString("object_key"),
+                            result.getString("object_version_id"),
+                            result.getString("encryption_key_id"),
+                            result.getString("state"),
+                            result.getString("capture_state"),
+                            result.getString("deletion_operation_key"));
 
     public ManagedSessionStore(JdbcTemplate jdbc) {
         this(jdbc, new ManagedExtensionRecordStore(jdbc));
@@ -153,18 +159,36 @@ public class ManagedSessionStore {
                 writerToken);
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenantId, sessionId);
+        ensureSessionRoot(tenantId, sessionId);
+        jdbc.queryForList(
+                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
+                    + " UPDATE",
+                tenantId,
+                sessionId);
         WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
         if (request.kind() != null) {
-            String kind = jdbc.queryForObject("SELECT operation_kind FROM managed_agent_operation WHERE tenant_id = ?"
-                    + " AND session_id = ? AND operation_id = ?", String.class, tenantId, sessionId, authority.operationId());
+            String kind =
+                    jdbc.queryForObject(
+                            "SELECT operation_kind FROM ma_operation WHERE tenant_id = ?"
+                                    + " AND session_id = ? AND operation_id = ?",
+                            String.class,
+                            tenantId,
+                            sessionId,
+                            authority.operationId());
             if (!kind.toLowerCase(java.util.Locale.ROOT).equals(request.kind())) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_operation_conflict");
             }
-        } else if (!"DRAINING".equals(jdbc.queryForObject("SELECT phase FROM qwen_runtime_harness_drain"
-                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?", String.class,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
-                tenantId, sessionId))) {
+        } else if (!"DRAINING"
+                .equals(
+                        jdbc.queryForObject(
+                                "SELECT phase FROM ma_session_head WHERE tenant_key = ? AND"
+                                    + " harness_key = ? AND tenant_id = ? AND harness_session_id ="
+                                    + " ?",
+                                String.class,
+                                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                                tenantId,
+                                sessionId))) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
@@ -183,12 +207,37 @@ public class ManagedSessionStore {
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        boolean v2 = !jdbc.queryForList("SELECT o.operation_id FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
+        boolean v2 = !jdbc.queryForList("SELECT o.operation_id FROM ma_operation o JOIN ma_session_head f"
                 + " ON o.tenant_id = f.tenant_id AND o.session_id = f.harness_session_id AND o.operation_id = f.operation_id"
-                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty();
+                + " WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty();
         if (authority != null || v2) {
             WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
         }
+    }
+
+    private void requirePhysicalSessionOpen(String tenantId, String workspaceId, String sessionId) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        WorkspaceMigrationAdmission.requirePhysicalOpen(jdbc, tenantId,
+                WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
+    }
+
+    private void bindControlSessionStorage(String tenantId, String workspaceId, String sessionId) {
+        String storage = WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId);
+        if (storage == null) {
+            return;
+        }
+        var rows = jdbc.queryForList("SELECT session_kind, workspace_id, workspace_storage_id FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenantId, sessionId);
+        if (rows.size() != 1 || !"CONTROL".equals(rows.getFirst().get("session_kind"))) {
+            return;
+        }
+        var row = rows.getFirst();
+        if (row.get("workspace_id") != null && !workspaceId.equals(row.get("workspace_id"))
+                || row.get("workspace_storage_id") != null && !storage.equals(row.get("workspace_storage_id"))) {
+            throw conflict("managed_session_scope_conflict", "The Managed Session Workspace binding conflicts.");
+        }
+        jdbc.update("UPDATE ma_session SET workspace_id = ?, workspace_storage_id = ? WHERE tenant_id = ? AND session_id = ? AND session_kind = 'CONTROL'",
+                workspaceId, storage, tenantId, sessionId);
     }
 
     @Transactional
@@ -209,22 +258,33 @@ public class ManagedSessionStore {
 
     private void requireOrdinaryAdmission(String tenantId, String sessionId) {
         if (lifecycleFenced(tenantId, sessionId)) {
-            throw conflict("managed_session_lifecycle_active", "Ordinary execution admission is closed.");
+            throw conflict(
+                    "managed_session_lifecycle_active", "Ordinary execution admission is closed.");
         }
     }
 
     private boolean lifecycleFenced(String tenantId, String sessionId) {
-        return !jdbc.queryForList("SELECT phase FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ?"
-                + " AND tenant_id = ? AND harness_session_id = ? FOR UPDATE",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
-                tenantId, sessionId).isEmpty();
+        return !jdbc.queryForList(
+                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND tenant_key = ?"
+                            + " AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                            + " FOR UPDATE",
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId)
+                .isEmpty();
     }
 
     private boolean lifecycleProtocolFenced(String tenantId, String sessionId) {
-        return !jdbc.queryForList("SELECT operation_id FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ?"
-                + " AND tenant_id = ? AND harness_session_id = ? AND operation_id IS NOT NULL FOR UPDATE",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
-                tenantId, sessionId).isEmpty();
+        return !jdbc.queryForList(
+                        "SELECT operation_id FROM ma_session_head WHERE tenant_key = ? AND"
+                            + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
+                            + " operation_id IS NOT NULL FOR UPDATE",
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId)
+                .isEmpty();
     }
 
     boolean usesDataSource(javax.sql.DataSource source) {
@@ -272,6 +332,7 @@ public class ManagedSessionStore {
             String session, String writer, long generation, String token) {
         validateScope(tenant, workspace, session);
         requireCredential(tenant, workspace, session, token);
+        requirePhysicalSessionOpen(tenant, workspace, session);
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
@@ -296,18 +357,26 @@ public class ManagedSessionStore {
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
+        validateStableId(request.writerId(), "writerId");
+        validateLeaseMillis(request.leaseMillis());
+        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId, request.workspaceId());
+        ensureSessionRoot(tenantId, sessionId);
+        bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
+        // Materialize the key before any locking read: missing-key RR locks can
+        // deadlock independent tenants when both first writers insert a head.
+        jdbc.update("INSERT IGNORE INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+                + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
+                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'OPEN', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId, sessionId);
         if (authority != null) {
             WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority,
                     WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority));
         } else {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
-        validateStableId(request.writerId(), "writerId");
-        validateLeaseMillis(request.leaseMillis());
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
-        List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
+        List<String> closed = jdbc.query("SELECT status FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
                 (row, index) -> row.getString("status"), tenantId, sessionId);
         if (authority == null && !closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
@@ -318,26 +387,66 @@ public class ManagedSessionStore {
         Timestamp createdAt = databaseNow();
         Timestamp initialLeaseUntil = plusMillis(createdAt,
                 request.leaseMillis());
+        List<String> kinds =
+                jdbc.queryForList(
+                        "SELECT head_kind FROM ma_session_head WHERE tenant_key = ? AND harness_key"
+                            + " = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                        String.class,
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId);
+        if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
+            jdbc.update(
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?,"
+                        + " storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id"
+                        + " = ?, writer_lease_until = TIMESTAMPADD(MICROSECOND, ?, CAST(? AS DATETIME(6))), lease_token_hash = ?, journal_revision ="
+                        + " 0, committed_sequence = 0, activation_epoch = 0,"
+                        + " compacted_through_revision = 0, recovery_status = 'READY',"
+                        + " o3_backfill_through = 0, o3_backfill_pending = FALSE, updated_at = ?"
+                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND"
+                        + " session_id = ? AND head_kind = 'HARNESS'",
+                    request.workspaceId(),
+                    STORAGE_VERSION,
+                    request.writerId(),
+                    initialLeaseUntil.getNanos() / 1_000,
+                    wholeSeconds(initialLeaseUntil),
+                    tokenHash,
+                    createdAt,
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId,
+                    sessionId);
+            return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0, null, 0, false);
+        }
         try {
             // Connector/J drops Timestamp fractions with MariaDB's handshake.
             // Bind whole seconds for timezone conversion and add micros in SQL.
-            jdbc.update("INSERT INTO qwen_managed_session_journal_head"
-                            + " (tenant_id, workspace_id, session_id,"
-                            + " storage_version, state, writer_generation,"
-                            + " writer_id, writer_lease_until,"
-                            + " lease_token_hash, journal_revision,"
-                            + " committed_sequence, activation_epoch,"
-                            + " compacted_through_revision, recovery_status,"
-                            + " o3_backfill_through, o3_backfill_pending, created_at, updated_at) VALUES (?, ?, ?, ?,"
-                            + " 'ACTIVE', 1, ?, TIMESTAMPADD(MICROSECOND, ?,"
-                            + " CAST(? AS DATETIME(6))),"
-                            + " ?, 0, 0, 0, 0, 'READY',"
-                            + " 0, FALSE, ?, ?)",
-                    tenantId, request.workspaceId(), sessionId,
-                    STORAGE_VERSION, request.writerId(),
+            jdbc.update(
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id,"
+                        + " head_kind, tenant_id, workspace_id, session_id, storage_version, state,"
+                        + " writer_generation, writer_id, writer_lease_until, lease_token_hash,"
+                        + " journal_revision, committed_sequence, activation_epoch,"
+                        + " compacted_through_revision, recovery_status, o3_backfill_through,"
+                        + " o3_backfill_pending, created_at, updated_at) VALUES (?, ?, ?,"
+                        + " 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?,"
+                        + " TIMESTAMPADD(MICROSECOND, ?, CAST(? AS DATETIME(6))), ?, 0, 0, 0, 0,"
+                        + " 'READY', 0, FALSE, ?, ?)",
+                    com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
+                            .harnessDrainKey(tenantId),
+                    com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
+                            .harnessDrainKey(sessionId),
+                    sessionId,
+                    tenantId,
+                    request.workspaceId(),
+                    sessionId,
+                    STORAGE_VERSION,
+                    request.writerId(),
                     initialLeaseUntil.getNanos() / 1_000,
                     wholeSeconds(initialLeaseUntil),
-                    tokenHash, createdAt, createdAt);
+                    tokenHash,
+                    createdAt,
+                    createdAt);
             return new WriterGrant(1, databaseEpochMillis(initialLeaseUntil), 0, 0,
                     null, 0, false);
         } catch (DuplicateKeyException ignored) {
@@ -365,28 +474,37 @@ public class ManagedSessionStore {
             }
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                     plusMillis(now, request.leaseMillis()));
-            jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                            + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
-                            + " CAST(? AS DATETIME(6))),"
-                            + " updated_at = ?"
-                            + " WHERE tenant_id = ? AND session_id = ?",
-                    leaseUntil.getNanos() / 1_000, wholeSeconds(leaseUntil),
-                    now, tenantId, sessionId);
+            jdbc.update(
+                    "UPDATE ma_session_head SET writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
+                        + " CAST(? AS DATETIME(6))), updated_at = ? WHERE tenant_key = ? AND"
+                        + " harness_key = ? AND tenant_id = ? AND session_id = ?",
+                    leaseUntil.getNanos() / 1_000,
+                    wholeSeconds(leaseUntil),
+                    now,
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId,
+                    sessionId);
             return grant(head, leaseUntil, true);
         }
         long generation = increment(head.writerGeneration(),
                 "writer generation");
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                        + " state = 'ACTIVE', writer_generation = ?,"
-                        + " writer_id = ?,"
-                        + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
-                        + " CAST(? AS DATETIME(6))),"
-                        + " lease_token_hash = ?, updated_at = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                generation, request.writerId(), leaseUntil.getNanos() / 1_000,
+        jdbc.update(
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?,"
+                    + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?, CAST(? AS DATETIME(6))),"
+                    + " lease_token_hash = ?, updated_at = ? WHERE tenant_key = ? AND harness_key ="
+                    + " ? AND tenant_id = ? AND session_id = ?",
+                generation,
+                request.writerId(),
+                leaseUntil.getNanos() / 1_000,
                 wholeSeconds(leaseUntil),
-                tokenHash, now, tenantId, sessionId);
+                tokenHash,
+                now,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId,
+                sessionId);
         return new WriterGrant(generation, databaseEpochMillis(leaseUntil),
                 head.journalRevision(), head.committedSequence(),
                 head.lastCommitDigest(), head.activationEpoch(), false);
@@ -408,7 +526,7 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
-        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
+        HeadRow head = requireHeartbeatHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();
         boolean cleanup = authority != null && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
@@ -418,13 +536,17 @@ public class ManagedSessionStore {
                 writerToken, now, !cleanup);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                        + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
-                        + " CAST(? AS DATETIME(6))),"
-                        + " updated_at = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                leaseUntil.getNanos() / 1_000, wholeSeconds(leaseUntil),
-                now, tenantId, sessionId);
+        jdbc.update(
+                "UPDATE ma_session_head SET writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
+                    + " CAST(? AS DATETIME(6))), updated_at = ? WHERE tenant_key = ? AND"
+                    + " harness_key = ? AND tenant_id = ? AND session_id = ?",
+                leaseUntil.getNanos() / 1_000,
+                wholeSeconds(leaseUntil),
+                now,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId,
+                sessionId);
         return grant(head, leaseUntil, false);
     }
 
@@ -455,10 +577,14 @@ public class ManagedSessionStore {
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, false);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                        + " state = 'SEALED', updated_at = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                now, tenantId, sessionId);
+        jdbc.update(
+                "UPDATE ma_session_head SET state = 'SEALED', updated_at = ? WHERE tenant_key = ?"
+                    + " AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                now,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId,
+                sessionId);
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
     }
 
@@ -494,12 +620,17 @@ public class ManagedSessionStore {
                     "The Managed Session already has a different recovery"
                             + " block.");
         }
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
-                        + " recovery_status = ?, recovery_detail_code = ?,"
-                        + " updated_at = ? WHERE tenant_id = ? AND"
-                        + " session_id = ?",
-                request.recoveryStatus(), request.recoveryDetailCode(), now,
-                tenantId, sessionId);
+        jdbc.update(
+                "UPDATE ma_session_head SET recovery_status = ?, recovery_detail_code = ?,"
+                    + " updated_at = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
+                    + " AND session_id = ?",
+                request.recoveryStatus(),
+                request.recoveryDetailCode(),
+                now,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId,
+                sessionId);
         return new RecoveryStateReceipt(head.writerGeneration(),
                 request.recoveryStatus(), request.recoveryDetailCode(),
                 false);
@@ -520,8 +651,6 @@ public class ManagedSessionStore {
         checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
-        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
-        requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
                 || validated.resources().stream().anyMatch(resource -> {
                     if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
@@ -541,6 +670,9 @@ public class ManagedSessionStore {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
+        requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
+        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
+        requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, true);
@@ -570,16 +702,23 @@ public class ManagedSessionStore {
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
-        for (String line : new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
+        for (String line :
+                new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
-                ManagedHostedRecoveryRecords.validateEvent(event.path("kind").asText(), event.path("payload"), tenantId,
-                        request.workspaceId(), sessionId, closureReader, hostedReferences);
+                ManagedHostedRecoveryRecords.validateEvent(
+                        event.path("kind").asText(),
+                        event.path("payload"),
+                        tenantId,
+                        request.workspaceId(),
+                        sessionId,
+                        closureReader,
+                        hostedReferences);
             }
         }
-        boolean v2 = authority != null && jdbc.queryForObject("SELECT lifecycle_protocol_version FROM managed_agent_operation"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class,
+        boolean v2 = authority != null && jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation"
+                + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class,
                 tenantId, sessionId, authority.operationId()) == 2;
         boolean resourcePhase = v2 && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
@@ -591,7 +730,8 @@ public class ManagedSessionStore {
                 lifecycleExecution.authorizeLifecycle(lifecycleSessions.requireSession(tenantId, sessionId), authority);
             } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException refusal) {
                 if (refusal.getStatusCode() == 409 && "workspace_unavailable".equals(refusal.getCode())) {
-                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_authorization_revoked");
+                    throw WorkspaceLifecycleStore.blocked(
+                            "workspace_lifecycle_authorization_revoked");
                 }
                 if (refusal.getStatusCode() == 409) {
                     throw new ApiException(HttpStatus.CONFLICT, refusal.getCode(), refusal.getMessage());
@@ -605,7 +745,7 @@ public class ManagedSessionStore {
         }
         var applied = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
-                validated.recordBytes(), reader);
+                validated.recordBytes(), reader, now.getTime());
         var receiptEvents = applied.receipts();
         if (actions != null) {
             actions.apply(
@@ -615,7 +755,7 @@ public class ManagedSessionStore {
                     validated.recordBytes(),
                     reader, hostedReferences);
         }
-        jdbc.update("INSERT INTO qwen_managed_session_journal_tx"
+        jdbc.update("INSERT INTO ma_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"
                         + " journal_revision, command_key_hash,"
                         + " transaction_id, operation, command_id,"
@@ -665,7 +805,7 @@ public class ManagedSessionStore {
                 && activationHeadRevision == head.journalRevision())) {
             activationHeadRevision = revision;
         }
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
@@ -674,7 +814,7 @@ public class ManagedSessionStore {
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
                         + " activation_head_revision = ?, storage_version = ?, updated_at = ?"
-                        + " WHERE tenant_id = ?"
+                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
                 revision, request.lastSequence(), request.commitDigest(),
                 request.activationEpoch(),
@@ -687,7 +827,7 @@ public class ManagedSessionStore {
                         : fits ? activation.epoch() : null,
                 activation == null ? head.activationExpiresAt()
                         : fits ? activation.expiresAt() : null,
-                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now, tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now, JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -752,7 +892,7 @@ public class ManagedSessionStore {
         requireReadGrant(head, writerToken);
         List<TransactionSize> candidates = jdbc.query(
                 "SELECT journal_revision, byte_length"
-                        + " FROM qwen_managed_session_journal_tx"
+                        + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND journal_revision > ?"
                         + " ORDER BY journal_revision LIMIT ?",
@@ -793,7 +933,7 @@ public class ManagedSessionStore {
         List<TransactionRow> rows = selectedCount == 0 ? List.of()
                 : jdbc.query(
                         "SELECT *"
-                                + " FROM qwen_managed_session_journal_tx"
+                                + " FROM ma_session_journal_tx"
                                 + " WHERE tenant_id = ? AND session_id = ?"
                                 + " AND journal_revision > ?"
                                 + " ORDER BY journal_revision LIMIT ?",
@@ -839,7 +979,7 @@ public class ManagedSessionStore {
             requireResourceScope(resource, tenantId, workspaceId, sessionId,
                     resourceId);
             verifyStoredResource(resource);
-            jdbc.update("UPDATE qwen_managed_session_resource SET"
+            jdbc.update("UPDATE ma_resource SET"
                             + " last_verified_at = ? WHERE session_scope_key = ?"
                             + " AND resource_id = ?",
                     databaseNow(), scopeKey, resourceId);
@@ -867,14 +1007,25 @@ public class ManagedSessionStore {
         Timestamp now = databaseNow();
         ResourceRow existing = findResource(scopeKey, resourceId);
         if (existing == null) {
-            jdbc.update("INSERT INTO qwen_managed_session_resource"
-                            + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                            + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                            + " publish_command_id, state, created_at, last_verified_at)"
-                            + " VALUES (?, ?, ?, ?, ?, 'managed-agent-instructions', 1, ?, ?,"
-                            + " 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                    scopeKey, tenantId, workspaceId, sessionId, resourceId,
-                    bytes.length, digest, bytes, resourceId, now, now);
+            jdbc.update(
+                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                        + " workspace_id, session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
+                        + " state, created_at, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                        + " 'managed-agent-instructions', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
+                        + " 'PUBLISHED', ?, ?)",
+                    resourceKey(scopeKey, resourceId),
+                    scopeKey,
+                    tenantId,
+                    workspaceId,
+                    sessionId,
+                    resourceId,
+                    bytes.length,
+                    digest,
+                    bytes,
+                    resourceId,
+                    now,
+                    now);
         } else {
             requireResourceScope(existing, tenantId, workspaceId, sessionId, resourceId);
             verifyStoredResource(existing);
@@ -920,6 +1071,8 @@ public class ManagedSessionStore {
         if (bytes.length != request.byteLength() || !sha256(bytes).equals(request.digest())) {
             throw invalid("Tool result bytes do not match their length or digest.");
         }
+        checkLifecycleWriter(tenantId, sessionId, null);
+        requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();
@@ -927,20 +1080,34 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         ResourceRow existing = findResource(scopeKey, request.resourceId());
         if (existing == null) {
-            jdbc.update("INSERT INTO qwen_managed_session_resource"
-                            + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                            + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
-                            + " publish_command_id, state, created_at, last_verified_at)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                    scopeKey, tenantId, request.workspaceId(), sessionId, request.resourceId(),
-                    request.kind(), request.schemaVersion(), request.byteLength(), request.digest(),
-                    bytes, request.resourceId(), now, now);
+            jdbc.update(
+                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                        + " workspace_id, session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
+                        + " state, created_at, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                        + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                    resourceKey(scopeKey, request.resourceId()),
+                    scopeKey,
+                    tenantId,
+                    request.workspaceId(),
+                    sessionId,
+                    request.resourceId(),
+                    request.kind(),
+                    request.schemaVersion(),
+                    request.byteLength(),
+                    request.digest(),
+                    bytes,
+                    request.resourceId(),
+                    now,
+                    now);
         } else {
             requireResourceScope(existing, tenantId, request.workspaceId(), sessionId, request.resourceId());
             verifyStoredResource(existing);
             if (!request.kind().equals(existing.kind()) || request.schemaVersion() != existing.schemaVersion()
                     || request.byteLength() != existing.byteLength() || !request.digest().equals(existing.digest())) {
-                throw conflict("managed_session_resource_conflict", "A resourceId was reused with different content metadata.");
+                throw conflict(
+                        "managed_session_resource_conflict",
+                        "A resourceId was reused with different content metadata.");
             }
         }
         return new ToolResultResourceRef(request.resourceId(), request.kind(), request.schemaVersion(),
@@ -998,16 +1165,16 @@ public class ManagedSessionStore {
                             "A referenced Managed Session resource is"
                                     + " missing.");
                 }
-                jdbc.update("INSERT INTO qwen_managed_session_resource"
-                                + " (session_scope_key, tenant_id,"
+                jdbc.update("INSERT INTO ma_resource"
+                                + " (resource_key, session_scope_key, tenant_id,"
                                 + " workspace_id, session_id, resource_id,"
                                 + " kind, schema_version, byte_length, sha256,"
                                 + " storage_kind, inline_bytes,"
                                 + " publish_command_id, state, created_at,"
-                                + " last_verified_at) VALUES (?, ?, ?, ?, ?,"
+                                + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
                                 + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
                                 + " 'REFERENCED', ?, ?)",
-                        scopeKey, tenantId, request.workspaceId(), sessionId,
+                        resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
                         resource.resourceId(), resource.kind(),
                         resource.schemaVersion(), resource.byteLength(),
                         resource.digest(), input.bytes(), request.commandId(),
@@ -1027,12 +1194,21 @@ public class ManagedSessionStore {
                                     + " content metadata.");
                 }
             }
-            jdbc.update("INSERT INTO qwen_managed_session_resource_ref"
-                            + " (session_scope_key, tenant_id, workspace_id,"
-                            + " session_id, journal_revision, resource_id,"
-                            + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    scopeKey, tenantId, request.workspaceId(), sessionId,
-                    revision, resource.resourceId(), now);
+            jdbc.update(
+                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                        + " journal_revision, resource_id, created_at) VALUES (?, 'JOURNAL', ?, ?,"
+                        + " ?, ?, ?, ?, ?, ?, ?)",
+                    scopeKey,
+                    scopeKey,
+                    revision,
+                    resourceKey(scopeKey, resource.resourceId()),
+                    tenantId,
+                    request.workspaceId(),
+                    sessionId,
+                    revision,
+                    resource.resourceId(),
+                    now);
         }
     }
 
@@ -1280,12 +1456,35 @@ public class ManagedSessionStore {
     private HeadRow findHeadForUpdate(String tenantId, String sessionId) {
         ToolPublicationRetentionStore.lockSession(jdbc, tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
-        List<HeadRow> rows = jdbc.query(
-                "SELECT * FROM qwen_managed_session_journal_head"
-                        + " WHERE tenant_id = ? AND session_id = ?"
-                        + " FOR UPDATE",
-                headMapper, tenantId, sessionId);
+        List<HeadRow> rows =
+                jdbc.query(
+                        "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                        headMapper,
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId);
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private HeadRow requireHeartbeatHead(String tenantId, String sessionId) {
+        // checkLifecycleWriter already holds the retirement/publication tenant fence.
+        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
+        var heads =
+                jdbc.query(
+                        "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                            + " FOR UPDATE",
+                        headMapper,
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId);
+        if (heads.isEmpty()) {
+            throw sessionNotFound();
+        }
+        return heads.getFirst();
     }
 
     private HeadRow requireHeadForUpdate(String tenantId, String sessionId) {
@@ -1297,10 +1496,15 @@ public class ManagedSessionStore {
     }
 
     private HeadRow requireHead(String tenantId, String sessionId) {
-        List<HeadRow> rows = jdbc.query(
-                "SELECT * FROM qwen_managed_session_journal_head"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                headMapper, tenantId, sessionId);
+        List<HeadRow> rows =
+                jdbc.query(
+                        "SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        headMapper,
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId);
         if (rows.isEmpty()) {
             throw sessionNotFound();
         }
@@ -1310,7 +1514,7 @@ public class ManagedSessionStore {
     private TransactionRow findTransactionByCommand(String tenantId,
             String sessionId, String commandKeyHash) {
         List<TransactionRow> rows = jdbc.query(
-                "SELECT * FROM qwen_managed_session_journal_tx"
+                "SELECT * FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND command_key_hash = ?",
                 transactionMapper, tenantId, sessionId, commandKeyHash);
@@ -1318,10 +1522,14 @@ public class ManagedSessionStore {
     }
 
     private ResourceRow findResource(String scopeKey, String resourceId) {
-        List<ResourceRow> rows = jdbc.query(
-                "SELECT * FROM qwen_managed_session_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?",
-                resourceMapper, scopeKey, resourceId);
+        List<ResourceRow> rows =
+                jdbc.query(
+                        "SELECT * FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
+                            + " AND resource_id = ? FOR UPDATE",
+                        resourceMapper,
+                        resourceKey(scopeKey, resourceId),
+                        scopeKey,
+                        resourceId);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -1376,12 +1584,16 @@ public class ManagedSessionStore {
      */
     @Transactional
     public boolean hasLiveWriter(String tenantId, String sessionId) {
-        List<Timestamp> leases = jdbc.query("SELECT writer_lease_until FROM"
-                        + " qwen_managed_session_journal_head WHERE"
-                        + " tenant_id = ? AND session_id = ? AND state ="
-                        + " 'ACTIVE' FOR UPDATE",
-                (result, row) -> result.getTimestamp("writer_lease_until"),
-                tenantId, sessionId);
+        List<Timestamp> leases =
+                jdbc.query(
+                        "SELECT writer_lease_until FROM ma_session_head WHERE tenant_key = ? AND"
+                            + " harness_key = ? AND tenant_id = ? AND session_id = ? AND state ="
+                            + " 'ACTIVE' FOR UPDATE",
+                        (result, row) -> result.getTimestamp("writer_lease_until"),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        tenantId,
+                        sessionId);
         return !leases.isEmpty() && leases.getFirst() != null
                 && leases.getFirst().after(databaseNow());
     }
@@ -1458,10 +1670,14 @@ public class ManagedSessionStore {
     }
 
     private static boolean isValidText(String value, int maxBytes) {
-        return value != null && !value.isEmpty()
-                && value.getBytes(StandardCharsets.UTF_8).length <= maxBytes
-                && value.chars().noneMatch(character -> character < 32
-                        || character == 127);
+        if (value == null || value.isEmpty() || value.chars().anyMatch(character -> character < 32 || character == 127)) {
+            return false;
+        }
+        try {
+            return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(value).length <= maxBytes;
+        } catch (IllegalArgumentException invalidUnicode) {
+            return false;
+        }
     }
 
     private static void validateDigest(String value, String label,
@@ -1492,6 +1708,12 @@ public class ManagedSessionStore {
     }
 
     private void verifyStoredResource(ResourceRow resource) {
+        if (resource.deletionOperation() != null
+                || resource.captureState() != null && !"VERIFIED".equals(resource.captureState())
+                || resource.resourceId().startsWith("capture-segment-")
+                || resource.resourceId().startsWith("capture-seal-")) {
+            throw resourceCorrupt();
+        }
         if ("TOOL_PUBLICATION".equals(resource.storageKind())) {
             if (!"REFERENCED".equals(resource.state()) || resource.bytes() != null
                     || resource.objectKey() == null || resource.objectVersionId() != null
@@ -1500,18 +1722,26 @@ public class ManagedSessionStore {
                     || resource.byteLength() > 2L * 1024 * 1024) {
                 throw resourceCorrupt();
             }
-            Long matching = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication p"
-                            + " JOIN qwen_tool_publication_object o ON o.scope_key = p.scope_key"
-                            + " AND o.publication_id = p.publication_id"
-                            + " WHERE p.tenant_id = ? AND p.workspace_id = ? AND p.session_id = ?"
-                            + " AND p.admission_resource_id = ? AND p.producer_phase IN ('FINISHED', 'REFERENCED')"
-                            + " AND p.quarantined = FALSE"
-                            + " AND o.slot_key = 'admission' AND o.state = 'VERIFIED'"
-                            + " AND o.resource_id = ? AND o.object_key = ? AND o.sha256 = ?"
-                            + " AND o.byte_length = ?",
-                    Long.class, resource.tenantId(), resource.workspaceId(), resource.sessionId(),
-                    resource.resourceId(), resource.resourceId(), resource.objectKey(),
-                    resource.digest(), resource.byteLength());
+            Long matching =
+                    jdbc.queryForObject(
+                            "SELECT COUNT(*) FROM ma_output_capture p JOIN ma_resource o ON"
+                                + " o.scope_key = p.scope_key AND o.publication_id ="
+                                + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
+                                + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
+                                + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
+                                + " p.quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
+                                + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
+                                + " ?",
+                            Long.class,
+                            resource.tenantId(),
+                            resource.workspaceId(),
+                            resource.sessionId(),
+                            resource.resourceId(),
+                            resource.resourceId(),
+                            resource.objectKey(),
+                            resource.digest(),
+                            resource.byteLength());
             if (matching == null || matching != 1) {
                 throw resourceCorrupt();
             }
@@ -1533,7 +1763,7 @@ public class ManagedSessionStore {
             throw resourceCorrupt();
         }
         if ("managed-tool-outcome".equals(resource.kind())) {
-            Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication"
+            Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
                             + " AND admission_resource_id = ? AND quarantined = TRUE",
                     Long.class, resource.tenantId(), resource.workspaceId(),
@@ -1546,7 +1776,7 @@ public class ManagedSessionStore {
 
     private InputStream guardedPublicationResource(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
         lease.requireScope(resource.tenantId(), resource.sessionId());
-        var rows = jdbc.queryForList("SELECT scope_key, publication_id FROM qwen_tool_publication_object"
+        var rows = jdbc.queryForList("SELECT scope_key, publication_id FROM ma_resource"
                 + " WHERE scope_key = ? AND resource_id = ? AND object_key = ?",
                 ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
                 resource.resourceId(), resource.objectKey());
@@ -1711,9 +1941,38 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
+    private void ensureSessionRoot(String tenantId, String sessionId) {
+        long now = databaseEpochMillis(databaseNow());
+        String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
+        String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
+        jdbc.update(
+                "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
+                    + " session_key, session_scope_key, created_at, updated_at) VALUES (?, ?,"
+                    + " 'CONTROL', ?, ?, ?, ?, ?)",
+                tenantId,
+                sessionId,
+                tenantKey,
+                sessionKey,
+                sessionScopeKey(tenantId, sessionId),
+                now,
+                now);
+        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND session_scope_key IS NULL",
+                tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
+        jdbc.update(
+                "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
+                        + " updated_at) VALUES (?, ?, 'SESSION', X'', ?)",
+                tenantId,
+                sessionId,
+                now);
+    }
+
     public static String sessionScopeKey(String tenantId, String sessionId) {
-        return sha256((tenantId + "\u0000" + sessionId)
-                .getBytes(StandardCharsets.UTF_8));
+        return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId, sessionId);
+    }
+
+    public static String resourceKey(String scopeKey, String resourceId) {
+        return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scopeKey, resourceId);
     }
 
     private static String commandKeyHash(String operation,
@@ -1811,7 +2070,7 @@ public class ManagedSessionStore {
             String sessionId, String resourceId, String kind,
             int schemaVersion, long byteLength, String digest,
             String storageKind, byte[] bytes, String objectKey,
-            String objectVersionId, String encryptionKeyId, String state) {
+            String objectVersionId, String encryptionKeyId, String state, String captureState, String deletionOperation) {
     }
 
     private record ValidatedResource(CommitResource resource, byte[] bytes) {

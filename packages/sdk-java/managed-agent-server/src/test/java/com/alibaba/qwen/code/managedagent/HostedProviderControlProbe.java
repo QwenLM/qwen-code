@@ -160,7 +160,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(Map<String, Object> session) {
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
@@ -168,11 +168,11 @@ final class HostedProviderControlProbe implements AutoCloseable {
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8)));
-        return jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", key);
+        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", key);
     }
 
     private String sessionState(Map<String, Object> session, String runtimeId) {
-        return jdbc.queryForObject("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?"
+        return jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, session.get("sessionId"), runtimeId);
     }
 
