@@ -113,6 +113,63 @@ advances the group offset, so the new owner can miss that notification and
 must recover the pending item by SQL reconciliation — never by assuming the
 MQ delivered it.
 
+**As built.** The contract extension is recorded in
+[2026-10-06-managed-event-envelope](2026-10-06-managed-event-envelope.md)
+(additive inside v1; a `public_event` kind is the public event type, checked
+by shape; the digest binds a nine-field row; `workspaceId` is the Session's
+binding, or for an unbound Session its journal's workspace). The wiring:
+
+- **Producers.** `LiteTopicPublicEventTransport` is the MQ1 seam's
+  `EventTransport`: it copies the borrowed batch onto a bounded single-thread
+  queue (a full queue drops the batch with its identity logged), resolves the
+  Session's workspace once it exists (both sources are written once and never
+  updated, so a found value is cached), and sends to the Session's own
+  LiteTopic, which the journal envelopes share;
+  `stream` tells them apart. The journal producer also sends every
+  `wake.requested` envelope to the wake bootstrap LiteTopic. Both producers
+  share one RocketMQ producer and isolate a synchronously refused send.
+- **Lanes.** Two LITE groups bound to the topic: the wake bootstrap group,
+  in which every node subscribes the one bootstrap LiteTopic (it is consumed
+  in order by one member at a time), and the owner group, which each node
+  subscribes to the Sessions its Harness writes — the connector's
+  attachments narrowed by SQL to ACTIVE journals whose writer is this
+  node's Harness under an unexpired lease, since an attachment outlives a
+  lapsed lease or a takeover (`OwnerSubscriptions` reconciles that set every
+  `owner-reconcile-interval`, default 1 s, and subscribes at once after a
+  wake activation). Both lanes share one listener, which acknowledges every
+  message: a LiteTopic is consumed in order, so a FAILURE would hold every
+  later notice behind a retry, and no outcome is recovery-relevant.
+- **Wake consumer.** A journal `wake.requested` is attempted only when SQL
+  shows it: the Session and its journal exist, the envelope's workspace is
+  the journal's, the sequence is committed, the Session is `ACTIVE` and its
+  journal `ACTIVE` or `SEALED`, and no writer holds it — an `ACTIVE` journal
+  under an unexpired lease (database time), as `hasLiveWriter` decides, so a
+  sealed journal's leftover lease does not count. The wake is then claimed
+  on a consumer-progress watermark (`journal_wake`) — a redelivered,
+  duplicated or older wake is refused even when two nodes race. Those checks
+  and the claim run on the listener; the load runs on a small bounded pool,
+  so one slow load never holds the ordered bootstrap lane. The load takes the
+  relay verbs' new-work admission (Workspace checks, then the takeover load
+  for a Session another control-plane process attached), and the Harness's
+  writer acquisition is the activation fence; a failed load counts as fenced
+  only when SQL then shows another live writer. A Session this node already
+  holds is not reloaded.
+- **Materialization consumer.** A `public_event` at or below the message
+  projection's covered sequence is a no-op. Above it, the Session gets one
+  queued batch on a single materialization thread — notices that arrive
+  while it is queued fold into it — and
+  `MessageMaterializer.materializeNotified` runs that batch through the same
+  store call as the scheduled pass, never bypassing that pass's backoff.
+- **Configuration.** `qwen.managed-agent.event-transport.*` gains
+  `wake-bootstrap-lite-topic`, `wake-bootstrap-group`, `owner-group` and
+  `owner-reconcile-interval`; the whole configuration class is conditional
+  on `enabled`, so a flag-off deployment still creates no transport bean.
+
+Not in MQ2c: the real-broker fault rows (MQ2d), receiver-side digest
+verification of journal facts (the consumers act on SQL, not on the body),
+and a new generic SQL wake scan (the existing relay scans and the loaded
+Session's own wake pump stay the backstop).
+
 ### MQ2d — real-broker E2E in CI
 
 A new failsafe profile plus a CI job with a RocketMQ 5.5.1 service

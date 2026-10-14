@@ -327,6 +327,24 @@ class HostedPublicWorkspaceIT {
     @EnabledOnOs(OS.LINUX)
     @Timeout(150)
     void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles(boolean crash) throws Exception {
+        runDurableClose(crash);
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(150)
+    void shellProfileClosesAfterNativeFileToolsOnBothSurfaces() throws Exception {
+        shell = true;
+        approvals = true;
+        shellLifecycleV2 = true;
+        runDurableClose(false);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?"
+                + " AND tool_profile = 'hosted-workspace-shell/1' AND status = 'CLOSED'", Integer.class, tenant)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+    }
+
+    private void runDurableClose(boolean crash) throws Exception {
         durableClose = true;
         runFiles();
         List<String> sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
@@ -1248,10 +1266,11 @@ class HostedPublicWorkspaceIT {
                 return;
             }
             int step = results.size();
-            if (!shell && step == 3) assertThat(results.get(2).toString()).contains("after");
-            if (shell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            if (shell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
-            if (shell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
+            boolean runShell = shell && prompt.get().contains("G0_SHELL");
+            if (!runShell && step == 3) assertThat(results.get(2).toString()).contains("after");
+            if (runShell && shellFault == null && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
+            if (runShell && shellFault == null && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            if (runShell && shellFault == null && step >= 3 && "allow".equals(shellDecision)) {
                 assertThat(results.get(2).toString()).contains("G0_SHELL_STDOUT");
             }
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")
@@ -1260,9 +1279,9 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean toolCall = step < (shellFault == null ? 3 : 1);
             if (toolCall) {
-                String name = shell ? (shellFault == null && step == 0 ? "monitor" : "run_shell_command")
+                String name = runShell ? (shellFault == null && step == 0 ? "monitor" : "run_shell_command")
                         : List.of("write_file", "edit", "read_file").get(step);
-                Map<String, Object> args = shell ? switch (step) {
+                Map<String, Object> args = runShell ? switch (step) {
                     case 0 -> Map.of("command", "printf 'monitor\\n' >> monitor-proof.txt");
                     case 1 -> Map.of("command", "printf 'background\\n' >> background-proof.txt", "is_background", true);
                     default -> Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof");

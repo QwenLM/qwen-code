@@ -259,6 +259,23 @@
             </build>
         </profile>
         <profile>
+            <id>hosted-harness-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/Hosted*Gate.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Probe witnesses stay off the Hosted*IT roster; this
+                         profile collects them and turns the probe flag on. -->
+                    <systemPropertyVariables><qwen.wedge.probe>true</qwen.wedge.probe></systemPropertyVariables>
+                    <forkedProcessTimeoutInSeconds>2400</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>hosted-process-crashes</id>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
