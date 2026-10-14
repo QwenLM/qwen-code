@@ -270,6 +270,84 @@ class ManagedAgentCsiMutationMySqlIT {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ})
+    void writerAfterAWarmedSnapshotStillRefusesAnOriginalCommittedLater(int isolation) throws Exception {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String schema = "csi_warmed_writer_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4");
+        try {
+            var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
+            Flyway.configure().dataSource(data).locations("classpath:db/managed-schema").load().migrate();
+            var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(data);
+            var manager = new DataSourceTransactionManager(data);
+            var json = new ObjectMapper();
+            var properties = new ManagedAgentProperties();
+            properties.setAgentRevision("reviewed-agent/1");
+            var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
+                    "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
+            new WorkspaceCsiReservationStore(jdbc, manager, json).register(registration);
+            jdbc.update(
+                    "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                            + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
+                    + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
+                    CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
+            jdbc.update(
+                    "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+            var journal = new ManagedSessionStore(jdbc);
+            var transaction = new TransactionTemplate(manager);
+            transaction.setIsolationLevel(isolation);
+            transaction.setTimeout(15);
+            var warmed = new CountDownLatch(1);
+            var created = new CountDownLatch(1);
+            var session = new java.util.concurrent.atomic.AtomicReference<String>();
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                // The writer's snapshot predates the original Session, so only
+                // a locking read of its root can see the pin.
+                var writer = pool.submit(() -> transaction.execute(status -> {
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
+                    warmed.countDown();
+                    try {
+                        assertThat(created.await(10, TimeUnit.SECONDS)).isTrue();
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(error);
+                    }
+                    return journal.acquireWriter("tenant", session.get(), "csi-original-writer-token-for-test",
+                            new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L));
+                }));
+                try {
+                    assertThat(warmed.await(5, TimeUnit.SECONDS)).isTrue();
+                    session.set(WorkspaceCsiSessionMain.create(jdbc, manager, json, properties,
+                            new WorkspaceCsiSessionMain.Request(registration, "actor", "original", null, null,
+                                    new WorkspaceSelection("workspace", "."))).sessionId());
+                    var before = allTables(jdbc, json);
+                    created.countDown();
+                    assertThatThrownBy(() -> writer.get(10, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+                            .satisfies(error -> {
+                                assertThat(error.getCause()).isInstanceOf(
+                                        com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+                                assertThat(((com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException)
+                                                error.getCause()).getCode())
+                                        .isEqualTo("csi_original_binding_unavailable");
+                            });
+                    assertThat(allTables(jdbc, json)).isEqualTo(before);
+                } finally {
+                    created.countDown();
+                }
+            }
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
+    }
+
     private static String lockWaitQuery(JdbcTemplate jdbc) {
         if (jdbc.queryForObject("SELECT VERSION()", String.class).contains("MariaDB")) {
             return "SELECT COUNT(*) FROM information_schema.INNODB_LOCK_WAITS w"
