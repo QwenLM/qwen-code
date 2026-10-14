@@ -4423,7 +4423,11 @@ export class AcpDispatcher {
           if (typeof filePath !== 'string' || filePath.length === 0) {
             if (id !== undefined)
               conn.sendConn(
-                error(id, RPC.INVALID_PARAMS, '`path` required, must be string'),
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`path` required, must be string',
+                ),
               );
             return;
           }
@@ -4436,8 +4440,7 @@ export class AcpDispatcher {
             this.replyConn(conn, id, result as unknown);
           } catch (err) {
             if (id === undefined) return;
-            const message =
-              err instanceof Error ? err.message : String(err);
+            const message = err instanceof Error ? err.message : String(err);
             conn.sendConn(
               error(
                 id,
