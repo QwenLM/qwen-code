@@ -58,8 +58,9 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public ToolExecutionRepository toolExecutionRepository(
-            DataSource dataSource) {
-        return new JdbcToolExecutionRepository(dataSource);
+            DataSource dataSource, RuntimeBindingRepository bindings) {
+        return new JdbcToolExecutionRepository(dataSource,
+                bindings instanceof JdbcRuntimeBindingRepository original ? original : null);
     }
 
     @Bean(destroyMethod = "close")

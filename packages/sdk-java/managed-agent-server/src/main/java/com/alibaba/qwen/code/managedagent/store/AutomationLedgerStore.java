@@ -5,6 +5,15 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -16,24 +25,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
-import org.springframework.stereotype.Repository;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * H6b: the JDBC side of the automation runtime — the V57 ledgers (the
- * definition mirror with its lease and watermark, the occurrence decisions,
- * the public command replay) and the small reads the scanner and service
- * need from the Session store. No row here is a journal fact: the Session
- * journal's schedule and automation_run chains stay the authority. Schedule
- * definitions are projected in the same transaction as their journal commit.
+ * H6b: the JDBC side of the automation runtime — the V57 ledgers (the definition mirror with its
+ * lease and watermark, the occurrence decisions, the public command replay) and the small reads the
+ * scanner and service need from the Session store. No row here is a journal fact: the Session
+ * journal's schedule and automation_run chains stay the authority. Schedule definitions are
+ * projected in the same transaction as their journal commit.
  *
- * <p>Every occurrence write names the lease its writer holds: the insert
- * selects its row from the definition row the holder leases, and each
- * settle is conditioned on that same holder and fence, so a scanner whose
- * lease expired under it cannot record or settle a decision.
+ * <p>Every occurrence write names the lease its writer holds: the insert selects its row from the
+ * definition row the holder leases, and each settle is conditioned on that same holder and fence,
+ * so a scanner whose lease expired under it cannot record or settle a decision.
  */
 @Repository
 public class AutomationLedgerStore {
@@ -161,15 +163,21 @@ public class AutomationLedgerStore {
             + " AND o.outcome IN (?, ?)";
 
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate commands;
 
     public AutomationLedgerStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        this.commands =
+                new TransactionTemplate(
+                        new DataSourceTransactionManager(
+                                Objects.requireNonNull(jdbc.getDataSource())));
+        this.commands.setTimeout(10);
     }
 
     /**
-     * The run identity of one occurrence of one definition — the derivation
-     * {@code managed-automation-operations.ts} makes, so both sides name the
-     * same record (design decision 2).
+     * The run identity of one occurrence of one definition — the derivation {@code
+     * managed-automation-operations.ts} makes, so both sides name the same record (design decision
+     * 2).
      */
     public static String automationRunId(String scheduleId,
             String occurrenceKey) {
@@ -180,8 +188,10 @@ public class AutomationLedgerStore {
         return runId + ":input";
     }
 
-    /** Each run's mirror task_state by its exact projection PK, in one
-     * batch keyed to the pair every index on the mirror table leads with. */
+    /**
+     * Each run's mirror task_state by its exact projection PK, in one batch keyed to the pair every
+     * index on the mirror table leads with.
+     */
     private Map<String, String> readTaskStates(String tenantId,
             List<RunIdentity> identities) {
         if (identities.isEmpty()) {
@@ -242,7 +252,8 @@ public class AutomationLedgerStore {
     public void projectSchedule(String tenantId, String workspaceId,
             String sessionId, long recordRevision, JsonNode record, long now) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
-            throw new IllegalStateException("Schedule projection requires the journal transaction.");
+            throw new IllegalStateException(
+                    "Schedule projection requires the journal transaction.");
         }
         String actorId = jdbc.query("SELECT creator_actor_key FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
@@ -251,17 +262,36 @@ public class AutomationLedgerStore {
                     return actor == null ? "" : new String(actor, StandardCharsets.UTF_8);
                 }, tenantId, sessionId).stream().findFirst().orElse("");
         JsonNode limit = record.required("catchUpLimit");
-        ScheduleRow next = new ScheduleRow(tenantId,
-                record.required("scheduleId").asText(), sessionId, workspaceId,
-                actorId, recordRevision, record.required("definitionRevision").asLong(),
-                record.required("definitionDigest").asText(), record.required("goal").asText(),
-                record.required("cron").asText(), record.required("timezone").asText(),
-                record.required("sessionMode").asText(), record.required("overlap").asText(),
-                record.required("catchUp").asText(), limit.isNull() ? null : limit.asLong(),
-                record.required("enabled").asBoolean(),
-                ManagedExtensionRecords.isTerminalRunState(record.required("run").required("state").asText())
-                        ? STATE_RETIRED : STATE_LIVE,
-                null, now, null, null, null, 0, now, now);
+        ScheduleRow next =
+                new ScheduleRow(
+                        tenantId,
+                        record.required("scheduleId").asText(),
+                        sessionId,
+                        workspaceId,
+                        actorId,
+                        recordRevision,
+                        record.required("definitionRevision").asLong(),
+                        record.required("definitionDigest").asText(),
+                        record.required("goal").asText(),
+                        record.required("cron").asText(),
+                        record.required("timezone").asText(),
+                        record.required("sessionMode").asText(),
+                        record.required("overlap").asText(),
+                        record.required("catchUp").asText(),
+                        limit.isNull() ? null : limit.asLong(),
+                        record.required("enabled").asBoolean(),
+                        ManagedExtensionRecords.isTerminalRunState(
+                                        record.required("run").required("state").asText())
+                                ? STATE_RETIRED
+                                : STATE_LIVE,
+                        null,
+                        now,
+                        null,
+                        null,
+                        null,
+                        0,
+                        now,
+                        now);
         Optional<ScheduleRow> existing = jdbc.query("SELECT * FROM ma_schedule"
                         + " WHERE tenant_id = ? AND schedule_id = ? FOR UPDATE", SCHEDULE,
                 next.tenantId(), next.scheduleId()).stream().findFirst();
@@ -314,9 +344,8 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * The tenant's definitions in Workspaces the actor may read, newest
-     * first: the page is cut after the grant, so no cursor names a
-     * definition the caller cannot see.
+     * The tenant's definitions in Workspaces the actor may read, newest first: the page is cut
+     * after the grant, so no cursor names a definition the caller cannot see.
      */
     public SchedulePage listReadableSchedules(String tenantId, String actorId,
             ScheduleCursor cursor, int limit) {
@@ -329,16 +358,20 @@ public class AutomationLedgerStore {
         } catch (IllegalArgumentException error) {
             return new SchedulePage(List.of(), false);
         }
-        String select = "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ("
-                + " SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!') FROM ma_workspace w JOIN ma_workspace_access a"
-                + " ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id"
-                + " WHERE w.tenant_id = ? AND w.workspace_kind = 'ROOT' AND a.actor_id = ?"
-                + " AND a.role IN ('READER', 'OPERATOR', 'OWNER') UNION ALL"
-                + " SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!') FROM ma_workspace c JOIN readable_workspace p"
-                + " ON CONCAT(c.tenant_id, '!') = p.tenant_identity AND CONCAT(c.parent_workspace_id, '!') = p.workspace_identity"
-                + " WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT') SELECT s.* FROM ma_schedule s"
-                + " WHERE s.tenant_id = ? AND EXISTS (SELECT 1 FROM readable_workspace r"
-                + " WHERE r.tenant_identity = CONCAT(s.tenant_id, '!') AND r.workspace_identity = CONCAT(s.workspace_id, '!'))";
+        String select =
+                "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ("
+                    + " SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!') FROM"
+                    + " ma_workspace w JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND"
+                    + " a.workspace_id = w.workspace_id WHERE w.tenant_id = ? AND w.workspace_kind"
+                    + " = 'ROOT' AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
+                    + " UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!') FROM"
+                    + " ma_workspace c JOIN readable_workspace p ON CONCAT(c.tenant_id, '!') ="
+                    + " p.tenant_identity AND CONCAT(c.parent_workspace_id, '!') ="
+                    + " p.workspace_identity WHERE c.tenant_id = ? AND c.workspace_kind ="
+                    + " 'CHILD_GIT') SELECT s.* FROM ma_schedule s WHERE s.tenant_id = ? AND EXISTS"
+                    + " (SELECT 1 FROM readable_workspace r WHERE r.tenant_identity ="
+                    + " CONCAT(s.tenant_id, '!') AND r.workspace_identity = CONCAT(s.workspace_id,"
+                    + " '!'))";
         List<ScheduleRow> rows = cursor == null
                 ? jdbc.query(select + " ORDER BY s.created_at DESC,"
                         + " s.schedule_id DESC LIMIT ?", SCHEDULE, tenantId,
@@ -375,9 +408,8 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * Definitions in any state that hold a claim due for re-drive and whose
-     * lease is free or expired: a disabled or retired definition's lost
-     * answer is still obtained.
+     * Definitions in any state that hold a claim due for re-drive and whose lease is free or
+     * expired: a disabled or retired definition's lost answer is still obtained.
      */
     public List<ScheduleRow> findFiringSchedules(long now, int limit) {
         return jdbc.query("SELECT s.* FROM ma_schedule s"
@@ -392,9 +424,9 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * Claims one definition for a scanner: the lease must be free or
-     * expired, and the fence moves so a scanner that lost it can prove
-     * nothing about the row any more. Answers the fence held, or -1.
+     * Claims one definition for a scanner: the lease must be free or expired, and the fence moves
+     * so a scanner that lost it can prove nothing about the row any more. Answers the fence held,
+     * or -1.
      */
     public long claim(String tenantId, String scheduleId, String owner,
             long leaseUntil, long now) {
@@ -454,12 +486,11 @@ public class AutomationLedgerStore {
     // --- occurrences ---
 
     /**
-     * Records one occurrence decision under the writer's lease unless one
-     * exists: the row is selected from the definition row the owner holds,
-     * so a writer whose lease was lost inserts nothing, and the primary key
-     * keeps the first decision of a slot. Answers the row now held — the
-     * one written, or the earlier decision — or empty when the lease was
-     * lost and no decision exists.
+     * Records one occurrence decision under the writer's lease unless one exists: the row is
+     * selected from the definition row the owner holds, so a writer whose lease was lost inserts
+     * nothing, and the primary key keeps the first decision of a slot. Answers the row now held —
+     * the one written, or the earlier decision — or empty when the lease was lost and no decision
+     * exists.
      */
     public Optional<OccurrenceRow> recordOccurrence(OccurrenceRow row,
             String owner) {
@@ -490,8 +521,8 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * A firing row settles into its outcome once the Harness answered;
-     * only the lease holder settles. True when the write landed.
+     * A firing row settles into its outcome once the Harness answered; only the lease holder
+     * settles. True when the write landed.
      */
     public boolean settleOccurrence(String tenantId, String scheduleId,
             String occurrenceKey, String outcome, String reason, String owner,
@@ -543,13 +574,11 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * The definition's occurrences whose run is not terminal: firing rows,
-     * and fired rows whose run record is still pending or running (a fired
-     * row with no visible record counts, so a lag never admits an overlap).
-     * The mirror fact arrives through exact point lookups of each run's
-     * (session_scope_key, record_key): the extension-record table's own
-     * indexes all lead with that pair, and a raw-column join rescans the
-     * whole journal mirror per call (Q3-45).
+     * The definition's occurrences whose run is not terminal: firing rows, and fired rows whose run
+     * record is still pending or running (a fired row with no visible record counts, so a lag never
+     * admits an overlap). The mirror fact arrives through exact point lookups of each run's
+     * (session_scope_key, record_key): the extension-record table's own indexes all lead with that
+     * pair, and a raw-column join rescans the whole journal mirror per call (Q3-45).
      */
     public int countActive(String tenantId, String scheduleId) {
         List<OccurrenceOutcome> outcomes = jdbc.query(
@@ -581,13 +610,12 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * The fired occurrences whose run keeps the overlap admission closed:
-     * the same set {@link #countActive} counts behind {@code firing}
-     * claims, named with their run ids so the scanner can ask the Harness
-     * to reconcile the ones its wake turn died on (oldest first, bounded,
-     * so one decision's reconcile fan-out stays small). The fired history
-     * walks oldest-first in pages, each page's mirror states a batch of
-     * exact PK point lookups instead of one full-table rescan (Q3-45).
+     * The fired occurrences whose run keeps the overlap admission closed: the same set {@link
+     * #countActive} counts behind {@code firing} claims, named with their run ids so the scanner
+     * can ask the Harness to reconcile the ones its wake turn died on (oldest first, bounded, so
+     * one decision's reconcile fan-out stays small). The fired history walks oldest-first in pages,
+     * each page's mirror states a batch of exact PK point lookups instead of one full-table rescan
+     * (Q3-45).
      */
     public List<OccurrenceView> findBlockingRuns(String tenantId,
             String scheduleId, int limit) {
@@ -674,15 +702,23 @@ public class AutomationLedgerStore {
 
     public Optional<CommandRow> findCommand(String tenantId,
             String idempotencyKey) {
-        return jdbc.query("SELECT * FROM ma_request_receipt"
-                        + " WHERE receipt_key = ? AND namespace = 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ?",
-                (result, row) -> new CommandRow(result.getString("tenant_id"),
-                        result.getString("idempotency_key"),
-                        result.getString("actor_id"),
-                        result.getString("request_digest"),
-                        result.getString("schedule_id"),
-                        result.getString("result_json")), receiptKey(tenantId, idempotencyKey), tenantId,
-                idempotencyKey).stream().findFirst();
+        return jdbc
+                .query(
+                        "SELECT * FROM ma_request_receipt WHERE receipt_key = ? AND namespace ="
+                                + " 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ?",
+                        (result, row) ->
+                                new CommandRow(
+                                        result.getString("tenant_id"),
+                                        result.getString("idempotency_key"),
+                                        result.getString("actor_id"),
+                                        result.getString("request_digest"),
+                                        result.getString("schedule_id"),
+                                        result.getString("result_json")),
+                        receiptKey(tenantId, idempotencyKey),
+                        tenantId,
+                        idempotencyKey)
+                .stream()
+                .findFirst();
     }
 
     public void recordCommand(CommandRow command, long now) {
@@ -690,46 +726,59 @@ public class AutomationLedgerStore {
     }
 
     /**
-     * Claims (tenant, key) for one request before any side effect: the
-     * primary key arbitrates, so only one concurrent or retried caller
-     * owns the identity; the row's empty result marks it unanswered. A
-     * claim whose requester dies mid-flight stays durable, which is what
-     * lets a different request under the same key conflict instead of
-     * repeating the side effect.
+     * Claims (tenant, key) for one request before any side effect: the primary key arbitrates, so
+     * only one concurrent or retried caller owns the identity; the row's empty result marks it
+     * unanswered. A claim whose requester dies mid-flight stays durable, which is what lets a
+     * different request under the same key conflict instead of repeating the side effect.
      */
-    public boolean claimCommand(CommandRow command, long now) {
-        return insertCommand(command, now, "") == 1;
+    public boolean claimCommand(String sessionId, CommandRow command, long now) {
+        return Boolean.TRUE.equals(
+                commands.execute(
+                        status -> {
+                            ManagedLegacySessionGuard.requireLegacyMutation(
+                                    jdbc, command.tenantId(), sessionId);
+                            return insertCommand(command, now, "") == 1;
+                        }));
     }
 
     /**
-     * Fills in the answer of a claim, guarded both ways: only the row's
-     * own request writes its answer, and only while it stays unanswered —
-     * a late re-driven mutation can neither steal another request's row
-     * nor overwrite a completed result.
+     * Fills in the answer of a claim, guarded both ways: only the row's own request writes its
+     * answer, and only while it stays unanswered — a late re-driven mutation can neither steal
+     * another request's row nor overwrite a completed result.
      */
     public boolean settleCommand(String tenantId, String idempotencyKey,
             String requestDigest, String actorId, String resultJson) {
-        return jdbc.update("UPDATE ma_request_receipt"
-                + " SET result_json = ?, state = 'COMPLETED'"
-                + " WHERE receipt_key = ? AND namespace = 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ?"
-                + " AND request_digest = ? AND actor_id = ?"
-                + " AND result_json = ''", resultJson, receiptKey(tenantId, idempotencyKey), tenantId,
-                idempotencyKey, requestDigest, actorId) > 0;
+        return jdbc.update(
+                        "UPDATE ma_request_receipt SET result_json = ?, state = 'COMPLETED' WHERE"
+                            + " receipt_key = ? AND namespace = 'AUTOMATION' AND tenant_id = ? AND"
+                            + " idempotency_key = ? AND request_digest = ? AND actor_id = ? AND"
+                            + " result_json = ''",
+                        resultJson,
+                        receiptKey(tenantId, idempotencyKey),
+                        tenantId,
+                        idempotencyKey,
+                        requestDigest,
+                        actorId)
+                > 0;
     }
 
     /**
-     * Releases a claim whose operation the Harness definitively refused:
-     * a 4xx answer commits nothing, so the key goes back to its owner
-     * rather than burning it — guarded the same way, so only the claim's
-     * own unanswered row is ever removed.
+     * Releases a claim whose operation the Harness definitively refused: a 4xx answer commits
+     * nothing, so the key goes back to its owner rather than burning it — guarded the same way, so
+     * only the claim's own unanswered row is ever removed.
      */
     public boolean releaseCommand(String tenantId, String idempotencyKey,
             String requestDigest, String actorId) {
-        return jdbc.update("DELETE FROM ma_request_receipt"
-                + " WHERE receipt_key = ? AND namespace = 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ?"
-                + " AND request_digest = ? AND actor_id = ?"
-                + " AND result_json = ''", receiptKey(tenantId, idempotencyKey), tenantId, idempotencyKey,
-                requestDigest, actorId) > 0;
+        return jdbc.update(
+                        "DELETE FROM ma_request_receipt WHERE receipt_key = ? AND namespace ="
+                                + " 'AUTOMATION' AND tenant_id = ? AND idempotency_key = ? AND"
+                                + " request_digest = ? AND actor_id = ? AND result_json = ''",
+                        receiptKey(tenantId, idempotencyKey),
+                        tenantId,
+                        idempotencyKey,
+                        requestDigest,
+                        actorId)
+                > 0;
     }
 
     private static String receiptKey(String tenantId, String idempotencyKey) {
@@ -738,14 +787,26 @@ public class AutomationLedgerStore {
     }
 
     private int insertCommand(CommandRow command, long now, String result) {
-        return jdbc.update("INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
-                        + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, actor_id,"
-                        + " request_digest, schedule_id, state, result_json, created_at, updated_at)"
-                        + " VALUES (?, 'AUTOMATION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                receiptKey(command.tenantId(), command.idempotencyKey()), ManagedSchemaKeys.key(command.tenantId()),
-                command.tenantId(), ManagedSchemaKeys.key("TENANT", command.tenantId()), command.tenantId(),
-                command.idempotencyKey(), ManagedSchemaKeys.key(command.idempotencyKey()), command.actorId(),
-                command.requestDigest(), command.scheduleId(), result.isEmpty() ? "PENDING" : "COMPLETED", result, now, now);
+        return jdbc.update(
+                "INSERT IGNORE INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
+                        + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
+                        + " idempotency_digest, actor_id, request_digest, schedule_id, state,"
+                        + " result_json, created_at, updated_at) VALUES (?, 'AUTOMATION', ?, ?,"
+                        + " 'TENANT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                receiptKey(command.tenantId(), command.idempotencyKey()),
+                ManagedSchemaKeys.key(command.tenantId()),
+                command.tenantId(),
+                ManagedSchemaKeys.key("TENANT", command.tenantId()),
+                command.tenantId(),
+                command.idempotencyKey(),
+                ManagedSchemaKeys.key(command.idempotencyKey()),
+                command.actorId(),
+                command.requestDigest(),
+                command.scheduleId(),
+                result.isEmpty() ? "PENDING" : "COMPLETED",
+                result,
+                now,
+                now);
     }
 
     // --- Session store reads ---

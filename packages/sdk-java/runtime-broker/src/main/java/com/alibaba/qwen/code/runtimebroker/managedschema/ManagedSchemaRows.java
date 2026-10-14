@@ -145,6 +145,11 @@ public final class ManagedSchemaRows {
         return row;
     }
 
+    public static String identity(ResultSet result, String label) throws SQLException {
+        byte[] bytes = result.getBytes(label);
+        return bytes == null ? null : utf8(bytes, label);
+    }
+
     private static String utf8(byte[] bytes, String label) throws SQLException {
         try {
             return StandardCharsets.UTF_8

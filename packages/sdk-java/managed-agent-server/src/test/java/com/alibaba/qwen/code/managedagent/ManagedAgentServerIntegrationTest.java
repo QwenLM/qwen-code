@@ -37,6 +37,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1035,9 +1036,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
                 .extracting(event -> event.sequence())
                 .containsExactly(before + 1, before + 2, before + 3);
-        store.materializeNextBatch(tenant, session.sessionId(), 200);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> {
+        assertThat(awaitSnapshotCovering(tenant, session.sessionId(),
+                before + 3))
+                .satisfies(snapshot -> {
                     assertThat(snapshot.coveredSequence())
                             .isEqualTo(before + 3);
                     assertThat(snapshot.items()).filteredOn(item ->
@@ -1261,9 +1262,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(before).extracting(EventRecord::contentPartId)
                 .containsOnly(before.get(0).contentPartId());
 
+        store.materializeNextBatch(tenant, sessionId, 100);
         store.retractContinuationOutput(tenant, sessionId, turn.turnId(),
                 owner, "boot_old", "epoch_old");
-        store.materializeNextBatch(tenant, sessionId, 100);
 
         assertThat(assertEventsNameTheSnapshot(tenant, sessionId))
                 .filteredOn(event -> event.type().endsWith(".delta"))
@@ -1274,13 +1275,31 @@ class ManagedAgentServerIntegrationTest {
                                 + before.get(1).sequence()));
     }
 
+    // The Snapshot is published after the drain that produced it commits, and
+    // a rewrite the refresh gate deferred stays behind until that floor ages
+    // out, so a drain never leaves the published Snapshot current on its own.
+    // Draining inside the wait keeps this independent of whether the 10ms
+    // materializer or the caller's own drain consumed the batch.
+    private SnapshotRecord awaitSnapshotCovering(String tenant, String sessionId,
+            long sequence) {
+        await().atMost(Duration.ofSeconds(30)).until(() -> {
+            store.materializeNextBatch(tenant, sessionId, 200);
+            return store.findSnapshot(tenant, sessionId)
+                    .filter(snapshot -> snapshot.coveredSequence() >= sequence)
+                    .isPresent();
+        });
+        return store.findSnapshot(tenant, sessionId).orElseThrow();
+    }
+
     // Every event that names an Item or a Part names one of the Snapshot.
     private List<EventRecord> assertEventsNameTheSnapshot(String tenant,
             String sessionId) {
-        List<ItemRecord> items = store.findSnapshot(tenant, sessionId)
-                .orElseThrow().items();
         List<EventRecord> events = store.findEvents(tenant, sessionId, 0,
                 100);
+        List<ItemRecord> items = awaitSnapshotCovering(tenant, sessionId,
+                events.isEmpty() ? 0
+                        : events.get(events.size() - 1).sequence())
+                .items();
         for (EventRecord event : events) {
             assertThat(event.schemaVersion()).isEqualTo(1);
             assertThat(event.projectionVersion()).isEqualTo(1);
