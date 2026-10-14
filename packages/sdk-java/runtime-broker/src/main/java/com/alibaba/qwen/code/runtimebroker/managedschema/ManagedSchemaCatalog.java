@@ -483,11 +483,7 @@ final class ManagedSchemaCatalog {
     private static List<String> checkShape(String expression) {
         List<String> flat = expressionTokens(expression);
         if (flat.contains("case")) {
-            return flat.stream().map(token -> switch (token) {
-                case "false" -> "0";
-                case "true" -> "1";
-                default -> token;
-            }).toList();
+            return flat;
         }
         String portable = portableExpression(expression);
         var matcher =
@@ -580,7 +576,13 @@ final class ManagedSchemaCatalog {
         List<String> result = new ArrayList<>();
         while (tokens.find()) {
             String token = tokens.group();
-            result.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            result.add(
+                    switch (normalized) {
+                        case "false" -> "0";
+                        case "true" -> "1";
+                        default -> normalized;
+                    });
         }
         return result;
     }
