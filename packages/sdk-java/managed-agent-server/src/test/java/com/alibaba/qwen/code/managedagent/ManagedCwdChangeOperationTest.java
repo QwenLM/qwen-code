@@ -43,7 +43,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -71,7 +74,7 @@ class ManagedCwdChangeOperationTest {
     void shellProfileRetainsNonExecutingCwdAdmissionAndReplay() {
         Fixture fixture = fixture(true);
         String session = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1' WHERE session_id = ?", session);
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = 'hosted-workspace-shell/1' WHERE session_id = ?", session);
         var admitted = begin(fixture, session, "shell-cwd", "digest", "services/b", 1);
         assertThat(admitted.operation().kind()).isEqualTo(OperationKind.CWD_CHANGE);
         assertThat(admitted.operation().targetCwdRelative()).isEqualTo("services/b");
@@ -151,7 +154,7 @@ class ManagedCwdChangeOperationTest {
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_operation WHERE tenant_id = ? AND"
+                + " ma_operation WHERE tenant_id = ? AND"
                 + " session_id = ?", Integer.class, TENANT, sessionId)).isZero();
         assertThat(fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getContextRevision()).isEqualTo(1);
@@ -211,9 +214,9 @@ class ManagedCwdChangeOperationTest {
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
         String other = fixture.createBoundSession(TENANT, "ws-other");
-        fixture.jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'other-storage'"
-                + " WHERE workspace_id = 'ws-other'");
-        fixture.jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'other-storage'"
+        fixture.jdbc.update("UPDATE ma_workspace SET storage_id = 'other-storage'"
+                + " WHERE workspace_id = ?", "ws-other");
+        fixture.jdbc.update("UPDATE ma_session SET workspace_storage_id = 'other-storage'"
                 + " WHERE session_id = ?", other);
         OperationAdmission first = begin(fixture, sessionId, "old", "digest", "services/b", 1);
         OperationRecord claimed = claim(fixture, sessionId, first.operation().operationId(), "owner");
@@ -230,7 +233,7 @@ class ManagedCwdChangeOperationTest {
                     assertThat(error.isRetryable()).isFalse();
                 });
         assertThat(fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace()).isEqualTo(binding);
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?",
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE session_id = ?",
                 Integer.class, sessionId)).isEqualTo(1);
         OperationRecord otherClaim = claim(fixture, other,
                 begin(fixture, other, "fresh", "digest", "services/b", 1).operation().operationId(), "other-owner");
@@ -256,8 +259,8 @@ class ManagedCwdChangeOperationTest {
     }
 
     private void installMigrationFence(Fixture fixture) {
-        fixture.jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, ?, ?)",
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT), JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
+        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
+                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE), JdbcRuntimeBindingRepository.storageFenceKey(TENANT), JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
                 TENANT, STORAGE, UUID.randomUUID().toString());
     }
 
@@ -279,7 +282,7 @@ class ManagedCwdChangeOperationTest {
                                 HttpStatus.BAD_REQUEST,
                                 "unsupported_feature"));
         String deletedId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+        fixture.jdbc.update("UPDATE ma_session SET status ="
                         + " 'DELETED', deleted_at = ? WHERE tenant_id = ?"
                         + " AND session_id = ?", now.get(), TENANT,
                 deletedId);
@@ -289,7 +292,7 @@ class ManagedCwdChangeOperationTest {
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
         String archivedId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+        fixture.jdbc.update("UPDATE ma_session SET status ="
                         + " 'ARCHIVED' WHERE tenant_id = ? AND"
                         + " session_id = ?", TENANT, archivedId);
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
@@ -343,7 +346,7 @@ class ManagedCwdChangeOperationTest {
         // Only the creator's row drops: the admitted operator still holds
         // OPERATOR, so the refusal comes from the creator-keyed facts
         // gate — the same conjunct the execution authority re-verifies.
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -353,11 +356,11 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'OPERATOR' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
+        fixture.jdbc.update("UPDATE ma_workspace_access SET"
                         + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
@@ -377,7 +380,7 @@ class ManagedCwdChangeOperationTest {
         OperationAdmission admitted = begin(fixture, sessionId, "key",
                 "digest", "services/b", 1);
         assertThat(admitted.replayed()).isFalse();
-        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+        fixture.jdbc.update("DELETE FROM ma_workspace_access"
                 + " WHERE tenant_id = ? AND"
                 + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -400,7 +403,7 @@ class ManagedCwdChangeOperationTest {
                 "digest", "services/b", 1, "operator-colleague",
                 "digest-operator");
         assertThat(admitted.replayed()).isFalse();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 "operator-colleague".getBytes(
@@ -454,7 +457,7 @@ class ManagedCwdChangeOperationTest {
     void admissionChecksRegistryFactsAndTheExpectedRevision() {
         Fixture fixture = fixture(true);
         String drainedId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("UPDATE managed_workspace_registry SET"
+        fixture.jdbc.update("UPDATE ma_workspace SET"
                         + " workspace_generation = 2 WHERE tenant_id = ?"
                         + " AND workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, drainedId, "key", "digest",
@@ -462,7 +465,7 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
-        fixture.jdbc.update("UPDATE managed_workspace_registry SET"
+        fixture.jdbc.update("UPDATE ma_workspace SET"
                         + " workspace_generation = 1, state = 'DRAINING'"
                         + " WHERE tenant_id = ? AND workspace_id = ?",
                 TENANT, WS);
@@ -471,7 +474,7 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
-        fixture.jdbc.update("UPDATE managed_workspace_registry SET"
+        fixture.jdbc.update("UPDATE ma_workspace SET"
                         + " state = 'ACTIVE' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, drainedId, "key", "digest",
@@ -491,7 +494,7 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
-        fixture.jdbc.update("UPDATE managed_agent_turn SET status ="
+        fixture.jdbc.update("UPDATE ma_turn SET status ="
                         + " 'COMPLETED' WHERE tenant_id = ? AND"
                         + " session_id = ?", TENANT, sessionId);
         OperationAdmission first = begin(fixture, sessionId, "key-a",
@@ -505,12 +508,11 @@ class ManagedCwdChangeOperationTest {
 
         // A pending mutation command is the same barrier.
         String secondId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("INSERT INTO managed_agent_command (tenant_id,"
-                        + " operation, idempotency_key, request_digest,"
-                        + " session_id, command_status, created_at,"
-                        + " updated_at) VALUES (?, 'RENAME', 'rename',"
-                        + " 'digest', ?, 'PENDING', 0, 0)", TENANT,
-                secondId);
+        fixture.jdbc.update("INSERT INTO ma_request_receipt (receipt_key, tenant_key, scope_kind, scope_id, scope_key, namespace, operation, idempotency_key, idempotency_digest,"
+                        + " tenant_id, request_digest, session_id, state, created_at, updated_at) VALUES (?, ?, 'TENANT', 'RENAME', ?, 'SESSION_COMMAND',"
+                        + " 'RENAME', 'rename', ?, ?, 'digest', ?, 'PENDING', 0, 0)",
+                ManagedSchemaKeys.key("test-pending-receipt", TENANT, secondId), ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(TENANT, "RENAME"),
+                ManagedSchemaKeys.key("rename"), TENANT, secondId);
         assertThatThrownBy(() -> begin(fixture, secondId, "key", "digest",
                 "a", 1))
                 .isInstanceOfSatisfying(ApiException.class,
@@ -617,7 +619,7 @@ class ManagedCwdChangeOperationTest {
                 "digest", "a", 1).operation().operationId();
         OperationRecord movedClaim = claim(fixture, movedId, movedOp,
                 "owner");
-        fixture.jdbc.update("UPDATE managed_agent_session SET"
+        fixture.jdbc.update("UPDATE ma_session SET"
                         + " context_revision = 9 WHERE tenant_id = ? AND"
                         + " session_id = ?", TENANT, movedId);
         CwdChangeOutcome moved = settle(fixture, movedId, movedOp, "owner",
@@ -647,7 +649,7 @@ class ManagedCwdChangeOperationTest {
                 "digest", "a", 1).operation().operationId();
         OperationRecord revokedClaim = claim(fixture, revokedId, revokedOp,
                 "owner");
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
+        fixture.jdbc.update("UPDATE ma_workspace_access SET"
                         + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThat(settle(fixture,
@@ -674,7 +676,7 @@ class ManagedCwdChangeOperationTest {
                 admitted.operation().operationId(), "owner");
         String kept = fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getCwdRelative();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 "operator-colleague".getBytes(
@@ -682,7 +684,7 @@ class ManagedCwdChangeOperationTest {
         // The arrange step must land, or the settle assertion below is
         // satisfied without ever exercising the initiator rung.
         assertThat(fixture.jdbc.queryForObject("SELECT role FROM"
-                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " ma_workspace_access WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", String.class,
                 TENANT, WS, "operator-colleague".getBytes(
                         java.nio.charset.StandardCharsets.UTF_8)))
@@ -708,13 +710,13 @@ class ManagedCwdChangeOperationTest {
                 admitted.operation().operationId(), "owner");
         String kept = fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getCwdRelative();
-        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+        fixture.jdbc.update("DELETE FROM ma_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ? AND"
                         + " actor_id = ?", TENANT, WS,
                 "operator-colleague".getBytes(
                         java.nio.charset.StandardCharsets.UTF_8));
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " ma_workspace_access WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", Integer.class,
                 TENANT, WS, "operator-colleague".getBytes(
                         java.nio.charset.StandardCharsets.UTF_8)))
@@ -743,15 +745,15 @@ class ManagedCwdChangeOperationTest {
                 admitted.operation().operationId(), "owner");
         String kept = fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getCwdRelative();
-        fixture.jdbc.update("ALTER TABLE managed_workspace_access"
-                + " DROP CONSTRAINT managed_workspace_access_role");
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+        fixture.jdbc.update("ALTER TABLE ma_workspace_access"
+                + " DROP CONSTRAINT ck_ma_access_role");
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'BROKEN' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 "operator-colleague".getBytes(
                         java.nio.charset.StandardCharsets.UTF_8));
         assertThat(fixture.jdbc.queryForObject("SELECT role FROM"
-                        + " managed_workspace_access WHERE tenant_id = ? AND"
+                        + " ma_workspace_access WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", String.class,
                 TENANT, WS, "operator-colleague".getBytes(
                         java.nio.charset.StandardCharsets.UTF_8)))
@@ -848,7 +850,7 @@ class ManagedCwdChangeOperationTest {
     void actorRefusalPrecedesTheStateAndRevisionChecks() {
         Fixture fixture = fixture(true);
         String archivedId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+        fixture.jdbc.update("UPDATE ma_session SET status ="
                         + " 'ARCHIVED' WHERE tenant_id = ? AND"
                         + " session_id = ?", TENANT, archivedId);
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
@@ -905,8 +907,8 @@ class ManagedCwdChangeOperationTest {
                 Duration.ofMillis(100)).orElseThrow();
         // The lease gates run on database time; expire the dead claim
         // directly instead of advancing the fixture clock.
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
-                + " lease_until = 0 WHERE tenant_id = ? AND session_id = ?"
+        fixture.jdbc.update("UPDATE ma_operation SET"
+                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         OperationRecord alive = fixture.store.claimOperation(TENANT,
                 sessionId, operationId, "owner", Duration.ofMillis(60_000))
@@ -953,8 +955,8 @@ class ManagedCwdChangeOperationTest {
         OperationRecord expiring = fixture.store.claimOperation(TENANT,
                 thirdId, thirdOp, "owner", Duration.ofMillis(60_000))
                 .orElseThrow();
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
-                + " lease_until = 0 WHERE tenant_id = ? AND session_id = ?"
+        fixture.jdbc.update("UPDATE ma_operation SET"
+                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, thirdId, thirdOp);
         assertThat(fixture.store.failCwdChangeOperation(TENANT, thirdId,
                 thirdOp, "owner", expiring.claimGeneration(),
@@ -968,14 +970,14 @@ class ManagedCwdChangeOperationTest {
         OperationRecord parked = fixture.store.claimOperation(TENANT,
                 fourthId, fourthOp, "owner", Duration.ofMillis(60_000))
                 .orElseThrow();
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
+        fixture.jdbc.update("UPDATE ma_operation SET"
                 + " delivery_state = 'BLOCKED' WHERE tenant_id = ? AND"
                 + " session_id = ? AND operation_id = ?", TENANT, fourthId,
                 fourthOp);
         assertThat(fixture.store.failCwdChangeOperation(TENANT, fourthId,
                 fourthOp, "owner", parked.claimGeneration(),
                 "workspace_unavailable")).isFalse();
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
+        fixture.jdbc.update("UPDATE ma_operation SET"
                 + " delivery_state = 'LEASED' WHERE tenant_id = ? AND"
                 + " session_id = ? AND operation_id = ?", TENANT, fourthId,
                 fourthOp);
@@ -1032,14 +1034,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(afterMutation.turnId()).isNotBlank();
 
         String secondId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state,"
-                + " admission_stage, delivery_state, session_status_before,"
-                + " available_at, created_at, updated_at) VALUES (?, ?, ?,"
-                + " 'ACTION_RESPONSE', 'actor', 'action-key', 'digest',"
-                + " 'RUNNING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0,"
-                + " 0)", TENANT, secondId, "action-op");
+        fixture.insertOperation(secondId, "action-op", "ACTION_RESPONSE", "RUNNING", "PENDING", null);
         var afterAction = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn-action", "digest", secondId, List.of(), "payload");
         assertThat(afterAction.turnId()).isNotBlank();
@@ -1047,15 +1042,7 @@ class ManagedCwdChangeOperationTest {
         // H4f: a task cancel stops one task and changes no Session context,
         // so an open one never holds a later Turn either.
         String thirdId = fixture.createBoundSession(TENANT, WS);
-        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state,"
-                + " admission_stage, delivery_state, session_status_before,"
-                + " task_id, available_at, created_at, updated_at) VALUES"
-                + " (?, ?, ?, 'TASK_CANCEL', 'actor', 'cancel-key', 'digest',"
-                + " 'RUNNING', 'JAVA_DURABLE', 'LEASED', 'ACTIVE', ?, 0, 0,"
-                + " 0)", TENANT, thirdId, "task-cancel-op",
-                "task_" + "a".repeat(64));
+        fixture.insertOperation(thirdId, "task-cancel-op", "TASK_CANCEL", "RUNNING", "LEASED", "task_" + "a".repeat(64));
         var afterTaskCancel = fixture.store.insertTurnCommand(TENANT,
                 "SUBMIT", "turn-task-cancel", "digest", thirdId, List.of(),
                 "payload");
@@ -1071,14 +1058,7 @@ class ManagedCwdChangeOperationTest {
         String legacyId = fixture.store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null,
                 null, List.of(), null).sessionId();
-        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state,"
-                + " admission_stage, delivery_state, session_status_before,"
-                + " available_at, created_at, updated_at) VALUES (?, ?, ?,"
-                + " 'ACTION_RESPONSE', 'actor', 'action-key', 'digest',"
-                + " 'RUNNING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0,"
-                + " 0)", TENANT, legacyId, "action-op");
+        fixture.insertOperation(legacyId, "action-op", "ACTION_RESPONSE", "RUNNING", "PENDING", null);
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn", "digest", legacyId, List.of(), "payload");
         assertThat(admitted.turnId()).isNotBlank();
@@ -1088,14 +1068,7 @@ class ManagedCwdChangeOperationTest {
         String olderId = fixture.store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create-2", "digest-2", "qwen-code",
                 null, null, List.of(), null).sessionId();
-        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state,"
-                + " admission_stage, delivery_state, session_status_before,"
-                + " available_at, created_at, updated_at) VALUES (?, ?, ?,"
-                + " 'CLOSE', 'actor', 'close-key', 'digest',"
-                + " 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0,"
-                + " 0)", TENANT, olderId, "close-op");
+        fixture.insertOperation(olderId, "close-op", "CLOSE", "PENDING", "PENDING", null);
         var second = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn-2", "digest-2", olderId, List.of(), "payload-2");
         assertThat(second.turnId()).isNotBlank();
@@ -1112,7 +1085,7 @@ class ManagedCwdChangeOperationTest {
                 "services/b", 1).operation().operationId();
         OperationRecord failingClaim = claim(fixture, lifecycleId,
                 failingOp, "owner");
-        fixture.jdbc.update("UPDATE managed_agent_session SET"
+        fixture.jdbc.update("UPDATE ma_session SET"
                 + " context_revision = 9 WHERE tenant_id = ? AND"
                 + " session_id = ?", TENANT, lifecycleId);
         assertThat(settle(fixture, lifecycleId, failingOp, "owner",
@@ -1130,7 +1103,7 @@ class ManagedCwdChangeOperationTest {
                 "services/b", 1).operation().operationId();
         OperationRecord otherClaim = claim(fixture, turnId, otherOp,
                 "owner");
-        fixture.jdbc.update("UPDATE managed_agent_session SET"
+        fixture.jdbc.update("UPDATE ma_session SET"
                 + " context_revision = 9 WHERE tenant_id = ? AND"
                 + " session_id = ?", TENANT, turnId);
         assertThat(settle(fixture, turnId, otherOp, "owner",
@@ -1158,8 +1131,8 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
-        fixture.jdbc.update("DELETE FROM managed_agent_action WHERE"
-                + " action_id = 'approval-iso'");
+        fixture.jdbc.update("DELETE FROM ma_session_record WHERE"
+                + " action_id = ?", "approval-iso");
         String sessionId = fixture.createBoundSession(TENANT, WS);
         begin(fixture, sessionId, "key", "digest", "services/b", 1);
         fixture.insertAction(sessionId, "approval-1", future);
@@ -1181,8 +1154,8 @@ class ManagedCwdChangeOperationTest {
         assertThat(fixture.store.requireSession(TENANT, secondId)
                 .workspace().getContextRevision()).isEqualTo(1);
 
-        fixture.jdbc.update("DELETE FROM managed_agent_action WHERE"
-                + " action_id = 'approval-2'");
+        fixture.jdbc.update("DELETE FROM ma_session_record WHERE"
+                + " action_id = ?", "approval-2");
         // The typed failure is terminal for that row; a re-issue over the
         // same Session settles now that the Action is gone.
         String reissued = begin(fixture, secondId, "key-r", "digest-r",
@@ -1205,7 +1178,7 @@ class ManagedCwdChangeOperationTest {
                 "services/b", 1).operation().operationId();
         OperationRecord claimed = claim(fixture, sessionId, operationId,
                 "owner");
-        fixture.jdbc.update("UPDATE managed_agent_session SET"
+        fixture.jdbc.update("UPDATE ma_session SET"
                 + " workspace_id = NULL, workspace_generation = NULL,"
                 + " workspace_storage_id = NULL, cwd_relative = NULL,"
                 + " context_config_ref = NULL, context_revision = NULL,"
@@ -1228,14 +1201,7 @@ class ManagedCwdChangeOperationTest {
         String sessionId = fixture.createBoundSession(TENANT, WS);
         String operationId = begin(fixture, sessionId, "key", "digest",
                 "services/b", 1).operation().operationId();
-        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state,"
-                + " admission_stage, delivery_state, session_status_before,"
-                + " available_at, created_at, updated_at) VALUES (?, ?, ?,"
-                + " 'ACTION_RESPONSE', 'actor', 'action-key', 'digest',"
-                + " 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0, 0)",
-                TENANT, sessionId, "action-op");
+        fixture.insertOperation(sessionId, "action-op", "ACTION_RESPONSE", "PENDING", "PENDING", null);
         OperationRecord claimed = claim(fixture, sessionId, operationId,
                 "owner");
         assertThat(settle(fixture, sessionId, operationId, "owner",
@@ -1258,7 +1224,7 @@ class ManagedCwdChangeOperationTest {
                 "services/b", 1).operation().operationId();
         OperationRecord claimed = claim(fixture, sessionId, operationId,
                 "owner");
-        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+        fixture.jdbc.update("UPDATE ma_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
                 TENANT, sessionId);
         assertThat(settle(fixture, sessionId, operationId, "owner",
@@ -1283,7 +1249,7 @@ class ManagedCwdChangeOperationTest {
         String sessionId = fixture.createBoundSession(TENANT, WS);
         String operationId = begin(fixture, sessionId, "key", "digest",
                 "services/b", 1).operation().operationId();
-        fixture.jdbc.update("UPDATE managed_agent_session SET"
+        fixture.jdbc.update("UPDATE ma_session SET"
                 + " workspace_id = NULL, workspace_generation = NULL,"
                 + " workspace_storage_id = NULL, cwd_relative = NULL,"
                 + " context_config_ref = NULL, context_revision = NULL,"
@@ -1346,7 +1312,7 @@ class ManagedCwdChangeOperationTest {
                 "a", 1).operation().operationId();
         OperationRecord claimed = claim(fixture, sessionId, operationId,
                 "owner");
-        fixture.jdbc.update("UPDATE managed_agent_session SET"
+        fixture.jdbc.update("UPDATE ma_session SET"
                         + " context_revision = 9 WHERE tenant_id = ? AND"
                         + " session_id = ?", TENANT, sessionId);
         assertThat(settle(fixture,
@@ -1409,7 +1375,7 @@ class ManagedCwdChangeOperationTest {
         // The claim gate reads database time; make the backoff elapsed
         // instead of advancing the fixture clock, and let the recovery scan
         // — not a manual dispatch — rediscover the retried operation.
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
+        fixture.jdbc.update("UPDATE ma_operation SET"
                 + " available_at = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, thirdId, third);
         coordinator.recoverOperations();
@@ -1442,7 +1408,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(waiting.deliveryState()).isEqualTo("PENDING");
         assertThat(waiting.attemptCount()).isEqualTo(1);
         assertThat(waiting.failureCode()).isNull();
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
+        fixture.jdbc.update("UPDATE ma_operation SET"
                 + " available_at = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         coordinator.recoverOperations();
@@ -1476,7 +1442,7 @@ class ManagedCwdChangeOperationTest {
             OperationRecord waiting = fixture.store.findOperation(TENANT,
                     sessionId, operationId).orElseThrow();
             assertThat(waiting.state()).isEqualTo("RUNNING");
-            fixture.jdbc.update("UPDATE managed_agent_operation SET"
+            fixture.jdbc.update("UPDATE ma_operation SET"
                     + " available_at = 0 WHERE tenant_id = ? AND"
                     + " session_id = ? AND operation_id = ?", TENANT,
                     sessionId, operationId);
@@ -1522,8 +1488,8 @@ class ManagedCwdChangeOperationTest {
                 sessionId, operationId, "dead-owner",
                 Duration.ofMillis(100)).orElseThrow();
         assertThat(dead.deliveryState()).isEqualTo("LEASED");
-        fixture.jdbc.update("UPDATE managed_agent_operation SET"
-                + " lease_until = 0 WHERE tenant_id = ? AND session_id = ?"
+        fixture.jdbc.update("UPDATE ma_operation SET"
+                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         // The recovery scan itself must see an expired cwd claim: a row it
         // cannot see would strand the Session behind session_context_busy
@@ -1597,9 +1563,8 @@ class ManagedCwdChangeOperationTest {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:cwd-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness()
                 .setWorkspaceFilesEnabled(workspaceFilesEnabled);
@@ -1656,7 +1621,7 @@ class ManagedCwdChangeOperationTest {
                     new DataSourceTransactionManager(jdbc.getDataSource()))
                     .execute(status -> {
                         jdbc.update("INSERT INTO"
-                                + " managed_workspace_registry (tenant_id,"
+                                + " ma_workspace (tenant_id,"
                                 + " workspace_id, workspace_generation,"
                                 + " storage_id, display_name, config_ref,"
                                 + " policy_ref, state) VALUES (?, ?, 1, ?,"
@@ -1676,7 +1641,7 @@ class ManagedCwdChangeOperationTest {
 
         void grant(String tenant, String workspaceId, String actor,
                 String role) {
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                             + " workspace_id, actor_id, role)"
                             + " VALUES (?, ?, ?, ?)"
                             + " ON DUPLICATE KEY UPDATE actor_id = actor_id",
@@ -1684,18 +1649,30 @@ class ManagedCwdChangeOperationTest {
                             .StandardCharsets.UTF_8), role);
         }
 
+        void insertOperation(String sessionId, String operationId, String kind, String state, String delivery, String taskId) {
+            String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+            String target = ManagedSchemaKeys.key(sessionId);
+            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json,"
+                            + " tenant_id, session_id, operation_id, operation_kind, request_digest, state, phase, admission_stage,"
+                            + " delivery_state, session_status_before, task_id, created_at, updated_at)"
+                            + " VALUES (?, ?, 'SESSION', ?, ?, '{}', ?, ?, ?, ?, 'digest', ?, ?, 'JAVA_DURABLE', ?, 'ACTIVE', ?, 0, 0)",
+                    ManagedSchemaKeys.operationKey(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.valueOf(kind),
+                            scope, target, operationId), scope, target, sessionId, TENANT, sessionId, operationId, kind, state, state, delivery, taskId);
+        }
+
         void insertAction(String sessionId, String actionId,
                 long expiresAtMillis) {
-            jdbc.update("INSERT INTO managed_agent_action (tenant_id,"
-                            + " session_id, action_id, state, options_json,"
-                            + " created_at) VALUES (?, ?, ?, 'requested', ?,"
-                            + " 0)", TENANT, sessionId, actionId,
+            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, record_kind, domain, record_id, tenant_id,"
+                            + " workspace_id, session_id, action_id, action_version, revision, state, options_json, created_at)"
+                            + " VALUES (?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
+                    ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
+                    actionId, TENANT, WS, sessionId, actionId,
                     mapper.valueToTree(java.util.Map.of("expiresAt",
                             expiresAtMillis)).toString());
         }
 
         void insertTurn(String sessionId, String turnId, String status) {
-            jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+            jdbc.update("INSERT INTO ma_turn (tenant_id,"
                             + " session_id, turn_id, prompt_id, input_json,"
                             + " payload_digest, status, created_at,"
                             + " updated_at) VALUES (?, ?, ?, ?, '[]',"
@@ -1721,7 +1698,7 @@ class ManagedCwdChangeOperationTest {
 
         List<Map<String, Object>> events(String sessionId) {
             return jdbc.queryForList("SELECT data_json, event_type,"
-                            + " source_key FROM managed_agent_event WHERE"
+                            + " source_key FROM ma_public_event WHERE"
                             + " tenant_id = ? AND session_id = ? ORDER BY"
                             + " sequence_id", TENANT, sessionId);
         }

@@ -45,30 +45,22 @@ class BindingExecutionInventoryTest {
     }
 
     @Test
-    void jdbcRejectsBindingAliasesFromCaseInsensitiveDatabaseComparison() throws Exception {
+    void binaryBindingIdentityRejectsCaseAndTrailingSpaceAliases() throws Exception {
         DataSource source = dataSource();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE qwen_tool_execution "
-                    + "ALTER COLUMN binding_id VARCHAR_IGNORECASE(512) NOT NULL");
-        }
         var writer = new JdbcToolExecutionRepository(source);
         writer.findOrCreate(prepared("foreign-case", "BINDING", GENERATION, "session"));
         var reader = new JdbcToolExecutionRepository(source);
-        assertThrows(IllegalStateException.class,
-                () -> reader.findByBinding(BINDING, GENERATION, null, 100));
+        assertTrue(reader.findByBinding(BINDING, GENERATION, null, 100).isEmpty());
+        assertTrue(reader.findByBinding("BINDING ", GENERATION, null, 100).isEmpty());
+        assertEquals(1, reader.findByBinding("BINDING", GENERATION, null, 100).size());
     }
 
     @Test
-    void jdbcHoldRowsByHarnessSessionKeepsExactHarnessIdentityOnCaseInsensitiveColumns()
-            throws Exception {
-        // #13986 review: a case-insensitive collation lets the SQL's `=`
-        // alias another Harness's hold rows in; the exact identity fence is
-        // Java-side, so the alias must not reach the restart inventory.
+    void binaryHarnessIdentityRejectsCaseAliasesInTheHoldInventory() {
+        // #13986 review: a Harness id that differs only in case is a
+        // different owner; the canonical schema's VARBINARY identity is
+        // byte-exact, so the alias must not reach the restart inventory.
         DataSource source = dataSource();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE qwen_tool_execution "
-                    + "ALTER COLUMN harness_session_id VARCHAR_IGNORECASE(512) NOT NULL");
-        }
         var harnessWriter = new JdbcToolExecutionRepository(source);
         harnessWriter.findOrCreate(holdRow("hold-foreign", "Harness-Case"));
         harnessWriter.findOrCreate(holdRow("hold-exact", "harness-case"));
@@ -85,7 +77,7 @@ class BindingExecutionInventoryTest {
         ToolExecutionRecord record = writer.findOrCreate(prepared("settled", BINDING, GENERATION, "session"));
         writer.requestCancel(record.getExecutionCallId(), record.getVersion());
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            assertEquals(1, statement.executeUpdate("UPDATE qwen_tool_execution "
+            assertEquals(1, statement.executeUpdate("UPDATE ma_tool_execution "
                     + "SET result_json = '{\"executionStatus\":\"success\"}'"));
         }
         var reader = new JdbcToolExecutionRepository(source);
@@ -98,7 +90,7 @@ class BindingExecutionInventoryTest {
         DataSource source = dataSource();
         new JdbcToolExecutionRepository(source).findOrCreate(prepared("record", BINDING, GENERATION, "session"));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            assertEquals(1, statement.executeUpdate("UPDATE qwen_tool_execution "
+            assertEquals(1, statement.executeUpdate("UPDATE ma_tool_execution "
                     + "SET execution_call_id_hash = '" + "0".repeat(64) + "'"));
         }
         var reader = new JdbcToolExecutionRepository(source);
@@ -269,7 +261,7 @@ class BindingExecutionInventoryTest {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:binding-inventory-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return source;
     }
 }
