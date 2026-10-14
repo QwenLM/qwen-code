@@ -311,6 +311,34 @@ describe('parseAndFormatApiError', () => {
       );
     });
 
+    it('does not append the suffix when the message already embeds the id (ResponsesHttpError opaque body)', () => {
+      // ResponsesHttpError appends " (request_id: …)" to its own message on
+      // the opaque-body path and also exposes `.requestId`; the formatter
+      // must not print the same id twice.
+      const message = `Responses API error 404: <body excerpt> (request_id: ${REQUEST_ID})`;
+      const error = Object.assign(new Error(message), {
+        status: 404,
+        requestId: REQUEST_ID,
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(`[API Error: ${message}]`);
+    });
+
+    it('does not append the suffix when the JSON diagnostic excerpt already contains the id', () => {
+      // When the Responses body parses, the excerpt is a JSON diagnostic that
+      // already carries "request_id":"X"; appending the suffix repeats it.
+      const message = `Responses API error 400: {"error":{"message":"bad request"},"request_id":"${REQUEST_ID}"}`;
+      const error = Object.assign(new Error(message), {
+        status: 400,
+        requestId: REQUEST_ID,
+      });
+
+      // The id is embedded in a JSON body inside the message, not as the
+      // "(request_id: X)" suffix, so the suffix would duplicate it.
+      const result = parseAndFormatApiError(error);
+      expect(result).toBe(`[API Error: ${message}]`);
+    });
+
     it('bounds an over-long provider-supplied request id', () => {
       const error: StructuredError = {
         message: BODYLESS,

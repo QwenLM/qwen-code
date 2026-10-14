@@ -145,9 +145,16 @@ export function parseAndFormatApiError(
     // a suffix after the bracket would make a second pass re-wrap the line into
     // "[API Error: [API Error: ...]]".
     const requestId = resolveApiErrorRequestId(error);
-    let text = requestId
-      ? `[API Error: ${message} (request_id: ${requestId})]`
-      : `[API Error: ${message}]`;
+    // Skip the suffix when the message already embeds this id: ResponsesHttpError
+    // puts it in its own message (as the " (request_id: …)" suffix on the
+    // opaque-body path, or inside the JSON diagnostic when the body parses), so
+    // appending it again would print the same id twice.
+    const embedsRequestId =
+      requestId !== undefined && message.includes(requestId);
+    let text =
+      requestId && !embedsRequestId
+        ? `[API Error: ${message} (request_id: ${requestId})]`
+        : `[API Error: ${message}]`;
     if (error.status === 429) {
       text += getRateLimitMessage(authType);
     }
