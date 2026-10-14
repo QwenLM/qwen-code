@@ -4,11 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LlmRequestPreparationError,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
+} from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import type { HostedModelRequest } from './hosted-model-recovery.js';
+
 import type { Content, Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
-import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
@@ -65,6 +72,46 @@ export interface HostedHarnessTextDeltas {
   retract(): Promise<void>;
 }
 
+/**
+ * Applies a Session's AgentDefinition model pin to a fresh per-turn config:
+ * exactly one configured, non-runtime model must match, and it is switched
+ * to with cached credentials. A pin that does not resolve fails the Turn
+ * (the config is shut down first) instead of falling back to the default.
+ * Every Turn lane a pinned Session runs — text and workflow alike — goes
+ * through here.
+ */
+export async function applyHostedModelPin(
+  config: Awaited<ReturnType<typeof loadCliConfig>>,
+  model: HostedAgentDefinition['model'] | undefined,
+): Promise<void> {
+  if (!model) return;
+  try {
+    const matches = config
+      .getAllConfiguredModels()
+      .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
+    if (matches.length !== 1) throw new HostedModelUnavailableError();
+    const selected = matches[0]!;
+    await config.switchModel(selected.authType, selected.id, {
+      requireCachedCredentials: true,
+      ...(selected.registryBaseUrl
+        ? { baseUrl: selected.registryBaseUrl }
+        : {}),
+    });
+  } catch (cause) {
+    try {
+      await config.shutdown({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+    } catch (cleanupCause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+      );
+    }
+    throw new HostedModelUnavailableError(cause);
+  }
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
@@ -73,6 +120,18 @@ export async function runHostedHarnessTextTurn(input: {
   promptId: string;
   signal: AbortSignal;
   resumeFromToolResults?: readonly Part[];
+  initialRound?: number;
+  resumeModel?: HostedModelRequest;
+  prepareModel?: (
+    prepared: LlmPreparedRequest,
+    round: number,
+    pendingToolResults: boolean,
+    context: string | undefined,
+    captureUnsupported?: boolean,
+  ) => Promise<
+    | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
+    | undefined
+  >;
   hooks?: HostedHookSession;
   modelScope?: ManagedHookModelScope;
   toolTurn?: Pick<
@@ -80,7 +139,10 @@ export async function runHostedHarnessTextTurn(input: {
     'execute' | 'consumeResults' | 'declarations' | 'setPromptHookRunner'
   > &
     Partial<
-      Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
+      Pick<
+        HostedWorkspaceToolTurn,
+        'resumeHookResults' | 'hookStopReason' | 'setModelRound'
+      >
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
@@ -120,33 +182,7 @@ export async function runHostedHarnessTextTurn(input: {
       .filter(Boolean)
       .join('\n\n');
   const model = input.agentDefinition?.model;
-  if (model) {
-    try {
-      const matches = config
-        .getAllConfiguredModels()
-        .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
-      if (matches.length !== 1) throw new HostedModelUnavailableError();
-      const selected = matches[0]!;
-      await config.switchModel(selected.authType, selected.id, {
-        requireCachedCredentials: true,
-        ...(selected.registryBaseUrl
-          ? { baseUrl: selected.registryBaseUrl }
-          : {}),
-      });
-    } catch (cause) {
-      try {
-        await config.shutdown({
-          shutdownTelemetry: false,
-          strictResourceCleanup: true,
-        });
-      } catch (cleanupCause) {
-        writeStderrLineSafe(
-          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
-        );
-      }
-      throw new HostedModelUnavailableError(cause);
-    }
-  }
+  await applyHostedModelPin(config, model);
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -163,7 +199,7 @@ export async function runHostedHarnessTextTurn(input: {
         ]
       : [],
   );
-  if (!input.resumeFromToolResults)
+  if (!input.resumeFromToolResults && !input.resumeModel)
     initialMessages.push({ role: 'user', parts: [{ text: input.prompt }] });
   const initializationHooks: Array<{
     fields: HookInput;
@@ -288,7 +324,7 @@ export async function runHostedHarnessTextTurn(input: {
     if (runPromptHook) input.toolTurn?.setPromptHookRunner?.(runPromptHook);
     modelReady = true;
     let effectivePrompt = input.prompt;
-    if (input.hooks && !input.resumeFromToolResults) {
+    if (input.hooks && !input.resumeFromToolResults && !input.resumeModel) {
       const startupId = `session-start:${input.sessionId}`;
       const start = input.hooks.hasCompletedOccurrence(
         HookEventName.SessionStart,
@@ -403,13 +439,25 @@ export async function runHostedHarnessTextTurn(input: {
           input.signal,
         )) ?? [...input.resumeFromToolResults])
       : [{ text: effectivePrompt }];
-    let pendingToolResults = input.resumeFromToolResults !== undefined;
+    let pendingToolResults =
+      input.resumeFromToolResults !== undefined ||
+      (input.resumeModel?.pendingToolResults ?? false);
+    let preparedRecovery = input.resumeModel?.prepared;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
-    for (let round = 0; round < 16; round++) {
+    for (
+      let round = input.resumeModel?.round ?? input.initialRound ?? 0;
+      round < 16;
+      round++
+    ) {
+      input.toolTurn?.setModelRound?.(round);
       input.signal.throwIfAborted();
       const contextAvailable = input.workspaceContext?.read();
-      if (contextAvailable && contextAvailable !== injectedContext) {
+      if (
+        !preparedRecovery &&
+        contextAvailable &&
+        contextAvailable !== injectedContext
+      ) {
         // setUserMemory alone never reaches the wire: the system instruction
         // was assembled during initialize() and is cached on the chat.
         config.setUserMemory(contextWithInstructions(contextAvailable));
@@ -434,28 +482,67 @@ export async function runHostedHarnessTextTurn(input: {
       let text = '';
       let finished = false;
       let modelFailure = true;
-      const completeAttempt = await input.modelScope?.beginMainAttempt(
-        config.getModel(),
-      );
-      const modelOccurrence =
+      let completeAttempt:
+        | Awaited<ReturnType<ManagedHookModelScope['beginMainAttempt']>>
+        | undefined = input.prepareModel
+        ? undefined
+        : await input.modelScope?.beginMainAttempt(config.getModel());
+      let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
+      const prepare: LlmPreparedRequestCallback = async (
+        prepared,
+        captureUnsupported,
+      ) => {
+        if (completeAttempt) {
+          const previous = completeAttempt;
+          completeAttempt = undefined;
+          await previous(finished, usage);
+        }
+        const recoveryRef = await input.prepareModel?.(
+          prepared,
+          round,
+          pendingToolResults,
+          input.workspaceContext?.read(),
+          captureUnsupported,
+        );
+        completeAttempt = await input.modelScope?.beginMainAttempt(
+          prepared.request.model,
+          recoveryRef,
+        );
+        modelOccurrence = completeAttempt?.attemptId ?? modelOccurrence;
+        finished = false;
+        usage.length = 0;
+      };
+      prepare.maxSnapshotBytes = 64 * 1024;
       const usage: unknown[] = [];
       try {
-        for await (const event of client.sendMessageStream(
-          request,
-          input.signal,
-          input.promptId,
-          {
-            type:
-              round === 0 && !input.resumeFromToolResults
-                ? SendMessageType.UserQuery
-                : SendMessageType.ToolResult,
-            // Published deltas cannot be un-glued after the fact: a cut that
-            // already delivered content replays the request, and the RETRY
-            // handling below retracts the orphaned prefix (#13319).
-            retractDeliveredOutputOnRetry: true,
-          },
-        )) {
+        const stream = preparedRecovery
+          ? new Turn(
+              client.getChat(),
+              input.promptId,
+              undefined,
+              undefined,
+              true,
+              prepare,
+            ).run(
+              preparedRecovery.request.model,
+              [],
+              input.signal,
+              preparedRecovery,
+            )
+          : client.sendMessageStream(request, input.signal, input.promptId, {
+              type:
+                round === 0 && !input.resumeFromToolResults
+                  ? SendMessageType.UserQuery
+                  : SendMessageType.ToolResult,
+              // Published deltas cannot be un-glued after the fact: a cut that
+              // already delivered content replays the request, and the RETRY
+              // handling below retracts the orphaned prefix (#13319).
+              retractDeliveredOutputOnRetry: true,
+              ...(input.prepareModel ? { onPreparedRequest: prepare } : {}),
+            });
+        preparedRecovery = undefined;
+        for await (const event of stream) {
           if (event.type === LlmEventType.Content) {
             text += event.value;
             await textDeltas?.delta(event.value);
@@ -509,7 +596,8 @@ export async function runHostedHarnessTextTurn(input: {
         if (
           modelFailure &&
           !input.signal.aborted &&
-          !(cause instanceof HostedHookRecoveryRequiredError)
+          !(cause instanceof HostedHookRecoveryRequiredError) &&
+          !(cause instanceof LlmRequestPreparationError)
         ) {
           await fire(
             HookEventName.StopFailure,

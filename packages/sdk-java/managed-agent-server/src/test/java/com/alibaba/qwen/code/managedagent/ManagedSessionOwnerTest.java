@@ -25,15 +25,15 @@ class ManagedSessionOwnerTest {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:session-owner-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(source).load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(source);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?,"
                 + " 'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES ('tenant',"
                 + " 'workspace', ?, 'OPERATOR')",
                 "actor".getBytes(StandardCharsets.UTF_8));
@@ -51,21 +51,21 @@ class ManagedSessionOwnerTest {
                         null, new WorkspaceSelection("workspace", "."))
                 .sessionId());
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
-                + " managed_agent_session WHERE session_id = ?",
+                + " ma_session WHERE session_id = ?",
                 byte[].class, bound))
                 .isEqualTo("actor".getBytes(StandardCharsets.UTF_8));
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
-                + " managed_agent_session WHERE session_id = ?",
+                + " ma_session WHERE session_id = ?",
                 byte[].class, bound))
                 .isEqualTo(jdbc.queryForObject("SELECT creator_actor_key FROM"
-                        + " managed_agent_session WHERE session_id = ?",
+                        + " ma_session WHERE session_id = ?",
                         byte[].class, bound));
 
         store.insertSessionCommand("tenant", "actor", "CREATE_SESSION",
                 "legacy", "digest-legacy", "qwen-code", null, null, List.of(),
                 null);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_session WHERE owner_actor_key"
+                + " ma_session WHERE owner_actor_key"
                 + " = creator_actor_key AND creator_actor_key IS NOT NULL",
                 Integer.class)).isEqualTo(2);
 
@@ -73,7 +73,7 @@ class ManagedSessionOwnerTest {
                 "digest-anonymous", "qwen-code", null, null, List.of(),
                 null);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_session WHERE owner_actor_key IS NULL"
+                + " ma_session WHERE owner_actor_key IS NULL"
                 + " AND creator_actor_key IS NULL", Integer.class))
                 .isEqualTo(1);
     }

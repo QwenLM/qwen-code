@@ -7,7 +7,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -32,11 +31,10 @@ public class MessageMaterializer {
         this.store = store;
     }
 
-    // Blocking JDBC rotation writes must never occupy the one-thread
-    // default pool that carries the dispatch scan and lease recovery.
-    @Scheduled(scheduler = "managedMaterializationScheduler",
-            fixedDelayString =
-                    "${qwen.managed-agent.events.materialize-interval:100ms}")
+    // Driven by ManagedArtifactConfiguration.messageMaterializerTask on the
+    // dedicated single-thread scheduler at
+    // ManagedAgentProperties.Events.materializeInterval (bound from
+    // application.yml's materialize-interval, 100 ms by default).
     public void materialize() {
         // Saturation means a row sits behind the selection window, so
         // probe one row past the limit rather than inferring it from an
@@ -77,6 +75,32 @@ public class MessageMaterializer {
                             target.sessionId(), error.toString());
                 }
             }
+        }
+    }
+
+    /**
+     * One batch for a Session an EventTransport notice named (design
+     * 2026-10-04-managed-agent-event-transport, phase MQ2c): the same store
+     * call as the scheduled pass, so ordering, the gap guard and the Snapshot
+     * discipline are unchanged, and the store's row locks serialize it with
+     * the pass. A Session the pass is backing off is left to the pass — a
+     * notice never bypasses the backoff, so a poisoned Session cannot warn at
+     * the event rate. Returns whether a batch ran.
+     */
+    public boolean materializeNotified(String tenantId, String sessionId) {
+        String key = tenantId + ":" + sessionId;
+        if (failures.containsKey(key)) {
+            return false;
+        }
+        try {
+            store.materializeNextBatch(tenantId, sessionId, EVENT_LIMIT);
+            return true;
+        } catch (RuntimeException error) {
+            // Hand the Session to the pass's backoff from its first step.
+            failures.putIfAbsent(key, 1);
+            LOG.warn("Failed to materialize Managed Agent session {}",
+                    sessionId, error);
+            return false;
         }
     }
 

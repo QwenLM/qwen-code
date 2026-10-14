@@ -95,8 +95,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         Duration v3ResultWindow = broker.getV3ResultWindow();
         if (v3ResultWindow == null || v3ResultWindow.compareTo(
                 RuntimeBrokerService.MIN_V3_RESULT_WINDOW) < 0) {
-            // A suffix-less number binds as milliseconds; fail before the
-            // provisioner exists rather than degrade every v3 execution.
+            // A suffix-less number binds as seconds, so this floor refuses
+            // only sub-second values; a stale milliseconds-style override
+            // passes. Fail before the provisioner exists rather than
+            // degrade every v3 execution.
             throw new IllegalStateException(
                     "Runtime Broker v3 result window must be at least "
                             + RuntimeBrokerService.MIN_V3_RESULT_WINDOW);
@@ -242,7 +244,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.recovery = broker.isTrustedLocalRebootRecovery()
                 ? new RuntimeRecoveryCoordinator(service, bindingRepository) : null;
         // Log the resolved window: a suffix-less config value binds as
-        // milliseconds, so "30" meant as 30 minutes shows up here as PT0.03S.
+        // seconds, so a stale milliseconds-style "1800000" meant as 30
+        // minutes shows up here as PT500H.
         LOG.info("Embedded Runtime Broker listening at {} (v3 result window {})",
                 server.getBaseUri(), v3ResultWindow);
     }
@@ -293,6 +296,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     @Override
     public CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
         return service.drainHarnessSession(tenantId, sessionId);
+    }
+
+    @Override
+    public CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return service.drainHarnessResources(tenantId, sessionId, authority, false);
+    }
+
+    @Override
+    public CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return service.drainHarnessResources(tenantId, sessionId, authority, true);
     }
 
     @Override
@@ -391,7 +406,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     "Runtime Broker state directory");
             require(broker.getNodeExecutable(), "Node.js executable");
             require(broker.getWorkerEntry(), "Runtime worker entry");
-            require(broker.getCliEntry(), "Qwen CLI entry");
             if (!broker.getEnvironment().isEmpty()) {
                 throw new IllegalStateException("Merged local Runtime"
                         + " provisioner does not accept extra environment");

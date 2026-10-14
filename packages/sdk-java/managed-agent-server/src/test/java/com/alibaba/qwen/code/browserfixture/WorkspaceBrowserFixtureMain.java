@@ -31,13 +31,13 @@ public final class WorkspaceBrowserFixtureMain {
                         "--spring.datasource.password=",
                         "--qwen.managed-agent.harness.enabled=false");
         JdbcTemplate jdbc = context.getBean(JdbcTemplate.class);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES ('w0d-browser', 'ws-default', 1,"
                         + " 'test-storage', 'Browser Workspace',"
                         + " 'test-config', 'test-policy', 'ACTIVE')");
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES ('w0d-browser', 'ws-disabled', 1,"
@@ -46,20 +46,19 @@ public final class WorkspaceBrowserFixtureMain {
                         + " ('w0d-browser', 'ws-hidden', 1,"
                         + " 'test-hidden', 'Hidden Workspace',"
                         + " 'test-config', 'test-policy', 'ACTIVE')");
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES ('w0d-browser', 'ws-default', ?, 'OPERATOR')",
                 "browser-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES ('w0d-browser', 'ws-disabled', ?,"
                         + " 'OPERATOR'), ('w0d-browser', 'ws-hidden', ?,"
                         + " 'OPERATOR')",
                 "browser-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 "other-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_workspace_default"
-                        + " (tenant_id, workspace_id)"
-                        + " VALUES ('w0d-browser', 'ws-default')");
+        jdbc.update("UPDATE ma_workspace SET is_default=TRUE"
+                        + " WHERE tenant_id=? AND workspace_id=?", "w0d-browser", "ws-default");
     }
 
     @Configuration(proxyBeanMethods = false)

@@ -156,7 +156,7 @@ class AgentDefinitionCompilerTest {
     void metadataNeverAffectsExecution() {
         String json = "{\"model\":{},\"instructions\":\"\",\"tools\":[],"
                 + "\"permission_policy\":{},"
-                + "\"metadata\":{\"team\":\"review\",\"mode\":\"yolo\"}}";
+                + "\"metadata\":{\"team\":\"review\",\"mode\":\"auto-edit\"}}";
         assertThat(AgentDefinitionCompiler.compile(json, false, "yolo",
                 FILES_ONLY).approvalMode()).isEqualTo("yolo");
     }

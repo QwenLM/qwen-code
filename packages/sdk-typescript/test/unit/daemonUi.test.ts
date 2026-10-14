@@ -11170,3 +11170,148 @@ describe('transcript timing frames', () => {
     ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
   });
 });
+
+describe('daemonBlockToPlainText sanitizes tool preview content', () => {
+  it('strips terminal escapes and control chars from a command preview', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'in_progress',
+      // Command text is model- and repository-controlled content; every other
+      // render path strips terminal escapes, so the copy-paste path must too.
+      preview: createDaemonToolPreview(
+        { command: 'echo hi\x1b[31mRED\x1b[0m\r\x1b[2J' },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b[');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('echo hiRED');
+  });
+
+  it('strips terminal escapes from a web_fetch method', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'WebFetch',
+      status: 'completed',
+      // detectWebFetch() copies `method` verbatim out of raw tool-call input
+      // and the field is typed free-form, so it is exactly as model-controlled
+      // as the command text above.
+      preview: createDaemonToolPreview({
+        url: 'https://api.example.com/data',
+        method: 'POST\x1b[31mPWN\x1b[0m\r',
+      }),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    // Assert the visible method survives too: a "fix" that dropped the field
+    // entirely would satisfy the two assertions above.
+    expect(plain).toContain('POSTPWN https://api.example.com/data');
+  });
+
+  it('strips terminal escapes from the tool status line', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      // `status` is an open string on the wire, so a non-conforming peer can
+      // put escapes here too.
+      status: 'completed\x1b]0;TITLE\x1b[31m\r',
+      preview: createDaemonToolPreview({ command: 'echo hi' }),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('status: completed');
+  });
+
+  const plainForThumbnail = async (thumbnailUrl: string) => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    return daemonBlockToPlainText({
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'gen',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { prompt: 'p', thumbnailUrl },
+        { toolName: 'image_generator', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+  };
+
+  it('strips terminal escapes from an image_generation thumbnail URL', async () => {
+    const plain = await plainForThumbnail(
+      'https://cdn.example.com/a.png\r\x1b[31mFAKE',
+    );
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('https://cdn.example.com/a.png');
+  });
+
+  it('keeps a long data:image thumbnail URL intact while sanitizing it', async () => {
+    const payload = 'A'.repeat(20_000);
+    const plain = await plainForThumbnail(`data:image/png;base64,${payload}`);
+    // The wrap must not be the length cap: ensureSafeImageUrl() deliberately
+    // admits arbitrary-length data:image/* payloads, and capping one turns a
+    // valid image into a broken URL.
+    expect(plain).not.toContain('[truncated]');
+    expect(plain).toContain(payload);
+  });
+
+  it('measures the preview cap against visible characters, not escape bytes', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { command: `${'A'.repeat(40)}\x1b[31m${'B'.repeat(40)}` },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    // Sanitising before capping is the tradeoff the description names; if the
+    // two calls are swapped the escapes spend the budget and plaintext starts
+    // cutting visible text that markdown still renders.
+    const plain = daemonBlockToPlainText(block, { maxFieldLength: 80 });
+    expect(plain).not.toContain('[truncated]');
+    expect(plain).toContain('B'.repeat(40));
+  });
+});

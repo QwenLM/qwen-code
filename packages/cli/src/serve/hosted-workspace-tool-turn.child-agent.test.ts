@@ -64,6 +64,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    acquired = false;
     runtime = {
       bindingId: 'binding',
       generation: '1',
@@ -71,14 +72,20 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     };
     fileHistory = broker.fileHistory;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = async (...args: Parameters<typeof broker.acquire>) => {
+      await broker.acquire(...args);
+      this.acquired = true;
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
     executeV3 = broker.executeV3;
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
-    release = broker.release;
+    release = async (...args: Parameters<typeof broker.release>) => {
+      await broker.release(...args);
+      this.acquired = false;
+    };
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     hookControl = broker.hookControl;
@@ -1429,17 +1436,20 @@ const resultEvents = [
 
 it.each(
   resultEvents.flatMap((eventName) =>
-    [false, true].map((background) => ({ eventName, background })),
+    ['command', 'http', 'function'].flatMap((type) =>
+      [false, true].map((background) => ({ eventName, type, background })),
+    ),
   ),
 )(
-  'refuses restored $eventName command Hooks before child admission (background=$background)',
-  async ({ eventName, background }) => {
+  'refuses restored $eventName $type Hooks before child admission (background=$background)',
+  async ({ eventName, type, background }) => {
     const hooks = await restoredHooks({
       eventName,
-      config: { type: 'command' },
+      config: { type: type as 'command' | 'http' | 'function' },
     });
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
+      expect(hooks.hasMountableToolResultHooks).toBe(true);
       const result = await executeAgent(
         turn,
         call({
@@ -1493,22 +1503,14 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
   }
 });
 
-// The type/eligibility filter and the event filter are orthogonal, so the
-// controls exercise the five ineligible shapes on one event and the event
+// The eligibility filter and the event filter are orthogonal, so the
+// controls exercise the three ineligible shapes on one event and the event
 // filter on the single off-event row. The refusal side above already sweeps
-// all three result events.
+// every non-prompt type across all three result events.
 const admissionControls: Array<
   Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
     Partial<ManagedHookDescriptor>
 > = [
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'http' as const },
-  },
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'function' as const },
-  },
   {
     eventName: HookEventName.PostToolUse,
     config: { type: HookType.Prompt, prompt: 'check' },

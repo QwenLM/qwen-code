@@ -92,7 +92,7 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -215,6 +215,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -272,8 +277,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
@@ -444,6 +449,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -482,13 +492,15 @@ jobs:
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # 15 covered the hosted lane. On the pool this job takes the per-host
-    # sdk-java lock once per Maven step — three acquisitions today — and each
-    # acquisition can wait out one full flock --wait 1200 behind the sibling
-    # test job's holds (measured run 37743332082: 1193 s of waits against
-    # 818 s of holds, the cross-job term a one-wait budget misses). The
-    # ceiling is three 20-minute lock waits plus the ~14 minutes of measured
-    # Maven work, plus margin: 85.
-    timeout-minutes: 85
+    # sdk-java lock once per Maven step — three acquisitions today. The
+    # 20-minute per-acquisition budget was sized on one quiet window
+    # (measured run 37743332082: 1193 s of waits against 818 s of holds),
+    # and main run 38258395829 exhausted it — the verify step below starved
+    # a full 1200 s behind cross-run pool traffic and failed before Maven
+    # started (#13989). Each acquisition now waits out two full sibling
+    # holds (flock --wait 2400); the ceiling is three 40-minute lock waits
+    # plus the ~14 minutes of measured Maven work, plus margin: 140.
+    timeout-minutes: 140
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -621,6 +633,11 @@ jobs:
       # gate certifies what merging would produce, cancel-in-progress
       # re-runs a displaced head, and the pool queue is seconds short.
       # Pinned in scripts/tests/sdk-java-workflow.test.js.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -645,6 +662,14 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
+      - name: 'Configure MariaDB packet budget for large-object tests'
+        env:
+          MARIADB_CONTAINER: '${{ job.services.mariadb.id }}'
+        run: |-
+          # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
+          # Set this job's disposable service before its first JDBC connection.
+          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
+
       - name: 'Run Runtime Broker MySQL integration tests'
         working-directory: 'packages/sdk-java/runtime-broker'
         env:
@@ -653,8 +678,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
@@ -672,8 +697,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           # Seed from the cache-restored shared repo so cache: 'maven' and
@@ -693,8 +718,8 @@ jobs:
           set -o pipefail
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
@@ -721,13 +746,17 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (35 + 9×10 + 20 = 145 — the Verify and O4 steps
-    # sit above their failsafe fork timeouts; the FG7 channel classes
-    # raised the hosted fork 900→1200 s) plus ~13 minutes for the
-    # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~158; 160 keeps a thin margin, and each arm buys its
-    # own 10 instead of sharing an envelope.
-    timeout-minutes: 160
+    # The step ceilings (45 + 9×10 + 20 + 50 = 205 — the Verify, admission
+    # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
+    # classes raised the hosted fork 900→1200 s and the L4 recovery class
+    # 1200→1800 s; the admission gates share a 2400 s fork for both witness
+    # classes)) plus ~13 minutes for the uncapped setup steps
+    # (Checkout..Install MySQL binaries, the report checks) need ~218; 220
+    # keeps a thin margin, and each arm buys its own 10 instead of sharing
+    # an envelope.
+    timeout-minutes: 220
+    env:
+      QWEN_E2E_REGISTER_STORAGE: '1'
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -778,13 +807,14 @@ jobs:
           cd integration-tests
           npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        # Must outlive the hosted-harness-mysql failsafe fork timeout (1200 s,
-        # raised 900→1200 for the FG7 channel classes) plus the wrapped
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (1800 s,
+        # raised 900→1200 for the FG7 channel classes and 1200→1800 for the
+        # L4 recovery class after its #14125 per-commit kill) plus the wrapped
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering.
-        timeout-minutes: 35
+        timeout-minutes: 45
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -856,7 +886,29 @@ jobs:
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
+            packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
+
+      - name: 'Verify Hosted admission gates'
+        # Its clean would otherwise discard the hosted lane's failsafe
+        # reports and the fg7-cases evidence the hosts upload above, so it
+        # runs after the fixture. The hosted-harness-gates profile carries a
+        # 2400 s failsafe fork budget for both admission witness classes
+        # (@Timeout(1800) each); the same killed-after-timeout pattern as the
+        # hosted-harness-mysql verify applies.
+        timeout-minutes: 50
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
+          -Phosted-harness-gates
+          -Dnode.executable="$(command -v node)"
+          -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
+          -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
+          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+      - name: 'Check that every Hosted admission gate class ran'
+        run: 'node scripts/check-failsafe-reports.js hosted-gates packages/sdk-java/managed-agent-server'
 
       - name: 'Verify O4 filesystem process and capacity gates'
         id: 'o4_mysql'
@@ -1007,6 +1059,11 @@ jobs:
                   fi
                 done || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
