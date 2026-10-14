@@ -147,10 +147,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 31 is the current field
+        // exceptions would go unchecked. 32 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(31);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(32);
     }
 
     @Test
