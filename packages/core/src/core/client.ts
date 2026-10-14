@@ -195,8 +195,10 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
-import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
-import { hasUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
@@ -3987,7 +3989,7 @@ export class LlmClient {
           const requestArray = Array.isArray(request) ? request : [request];
           request = [
             ...requestArray,
-            { text: wrapUserPromptSubmitContext(additionalContext) },
+            createUserPromptSubmitContextPart(additionalContext),
           ];
           if (messageType === SendMessageType.UserQuery) {
             userPromptRecordPayload = {

@@ -73,15 +73,18 @@ newline on both sides of the body, so offset-based inner slicing is easy to get
 wrong; and the injected string is the HTML-escaped form, so comparing against
 the raw hook output would never match a payload containing angle brackets.
 
-Matching bytes is not enough to prove provenance, so the predicate also requires
-the shape injection produces: a user entry whose trailing part is the block,
-preceded by at least one part of the user's own. History carries no hook-origin
-field, so the injector's invariant shape is the only evidence available, and it
-is the same invariant `stripTrailingUserPromptSubmitContextPart` already relies
-on when it treats a sole tagged part as user-authored. Tagged text that merely
-appears — in a model entry, or as a whole user message — is therefore not proof
-that the hook delivered it, so it does not suppress a fresh delivery. An
-unprovable origin injects the block as before.
+Matching bytes is not enough to prove provenance, and neither is shape: a
+caller-authored message can end in the wrapped block byte-for-byte (an ACP
+client can submit two text blocks that persist as exactly the injection
+shape). The injector therefore stamps the part it appends with a
+module-private symbol receipt (`createUserPromptSubmitContextPart`), and the
+predicate requires that receipt in addition to the exact trailing text in a
+user entry with at least one part of the user's own ahead of it. The symbol
+cannot cross a JSON transcript, an ACP prompt block, or model output, so only
+a part the injector built — or one re-stamped by resume from the recorded
+per-turn `hookContext` provenance — counts as delivered. Tagged text that
+merely appears, in any entry shape, does not suppress a fresh delivery; when
+provenance cannot be established, injection proceeds as before.
 
 The predicate answers a question about a single history entry — does this entry
 carry exactly this wrapped block where injection would have put it — and the
@@ -92,6 +95,14 @@ serves both injection sites, and each site keeps its own access to history.
 The interactive site and the ACP/IDE site both consult session history before
 appending, so a block delivered by either path suppresses a repeat from either
 path.
+
+The receipt survives in-memory history churn (spread-based container copies
+preserve symbol keys), but not serialization. On resume, transcript records
+are rebuilt into API history without the symbol; the rebuild re-stamps it from
+the recorded per-turn `hookContext` provenance, which only the injector
+writes. The ACP/IDE site does not record that provenance for its turns, so a
+session resumed after an ACP-delivered block conservatively re-injects rather
+than suppressing on unprovable origin.
 
 When a match is found the turn proceeds without the appended part and without
 recording hook-context provenance for that turn, which keeps the displayed

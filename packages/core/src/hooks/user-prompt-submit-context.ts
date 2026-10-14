@@ -21,6 +21,51 @@ export {
   wrapUserPromptSubmitContext,
 } from '../utils/transcript-records.js';
 
+type UserPromptSubmitContextPart = { text: string } & Record<symbol, unknown>;
+
+/**
+ * Receipt stamped by the injector on the tagged part it appends. History
+ * carries no hook-origin field, and a caller-authored message can reproduce
+ * the injection shape byte-for-byte (multi-part user text ending in the
+ * wrapped block), so shape alone cannot prove the hook delivered a block.
+ * The symbol is module-private: JSON transcript records, ACP prompt blocks,
+ * and model output cannot carry it, so only a part built by
+ * `createUserPromptSubmitContextPart` — or one re-stamped by resume from the
+ * recorded per-turn `hookContext` provenance — counts as injector-owned.
+ */
+const userPromptSubmitContextReceipt = Symbol('userPromptSubmitContextReceipt');
+
+/** Builds the tagged part the injector appends, stamped with its receipt. */
+export function createUserPromptSubmitContextPart(
+  context: string,
+): UserPromptSubmitContextPart {
+  return {
+    text: wrapUserPromptSubmitContext(context),
+    [userPromptSubmitContextReceipt]: true,
+  };
+}
+
+/**
+ * Re-stamps a receipt onto a trailing tagged part whose text matches
+ * `context` — the resume half of the receipt contract, used when transcript
+ * records are rebuilt into API history and only the recorded `hookContext`
+ * provenance can attest which parts the injector delivered.
+ */
+export function restoreUserPromptSubmitContextReceipt(
+  entry: unknown,
+  context: string,
+): void {
+  const candidate = entry as { parts?: unknown } | null;
+  const parts = candidate?.parts;
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return;
+  }
+  const last = parts[parts.length - 1] as UserPromptSubmitContextPart | null;
+  if (last?.text === wrapUserPromptSubmitContext(context)) {
+    last[userPromptSubmitContextReceipt] = true;
+  }
+}
+
 /**
  * Drops a trailing part that is entirely a tagged UserPromptSubmit context
  * block. Injection always appends after the user's own part(s), so a sole
@@ -50,12 +95,12 @@ export function stripTrailingUserPromptSubmitContextPart<T>(
  * `isUserPromptSubmitContextPartText`, which recognizes any tagged block, this
  * recognizes one exact payload and does not trim.
  *
- * A match also requires the shape injection produces: a user entry whose
- * trailing part is the block, preceded by at least one part of the user's own.
- * Tagged text that merely appears — in a model entry, or as a whole user
- * message, which `stripTrailingUserPromptSubmitContextPart` treats as
- * user-authored — is not proof the hook delivered it, so it does not suppress a
- * fresh delivery.
+ * A match requires injector-owned evidence, not shape: the trailing part must
+ * carry the module-private receipt in a user entry with at least one part of
+ * the user's own ahead of it. Tagged text that merely appears — authored by
+ * the user or the model, in any entry shape — never carries the receipt, so it
+ * does not suppress a fresh delivery; when provenance cannot be established,
+ * injection proceeds as before.
  */
 export function hasUserPromptSubmitContext(
   entry: unknown,
@@ -69,6 +114,11 @@ export function hasUserPromptSubmitContext(
   if (parts.length < 2) {
     return false;
   }
-  const last = parts[parts.length - 1] as { text?: unknown } | null;
-  return last?.text === wrapUserPromptSubmitContext(context);
+  const last = parts[parts.length - 1] as
+    | (UserPromptSubmitContextPart & { text?: unknown })
+    | null;
+  return (
+    last?.text === wrapUserPromptSubmitContext(context) &&
+    last[userPromptSubmitContextReceipt] === true
+  );
 }

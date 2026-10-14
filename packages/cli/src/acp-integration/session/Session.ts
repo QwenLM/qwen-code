@@ -14,7 +14,10 @@ import {
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
-import { hasUserPromptSubmitContext } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -130,7 +133,6 @@ import {
   NotificationType,
   persistPermissionOutcome,
   createHookOutput,
-  wrapUserPromptSubmitContext,
   generateToolUseId,
   isValidCronTaskRoutingId,
   MessageBusType,
@@ -6643,7 +6645,7 @@ export class Session implements SessionContext {
               ) {
                 parts = [
                   ...parts,
-                  { text: wrapUserPromptSubmitContext(additionalContext) },
+                  createUserPromptSubmitContextPart(additionalContext),
                 ];
               }
             }

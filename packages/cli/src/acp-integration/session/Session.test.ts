@@ -39744,7 +39744,46 @@ describe('Session', () => {
           ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
         });
 
-        it('does not re-append an unchanged UserPromptSubmit context block already in history', async () => {
+        it('does not re-append an unchanged UserPromptSubmit context block already delivered in history', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+          mockChat.getHistory = vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: 'an earlier prompt' },
+                core.createUserPromptSubmitContextPart('extra hook context'),
+              ],
+            },
+          ]);
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(textParts(firstSentMessage())).toEqual(['hello']);
+        });
+
+        it('still appends when an ACP prompt block reproduces the injection shape', async () => {
+          // A client can submit two text blocks whose persisted entry looks
+          // exactly like a hook delivery. Without injector-owned provenance
+          // that shape is not a receipt, so the fresh hook context is sent.
           const messageBus = {
             request: vi.fn().mockResolvedValue({
               success: true,
@@ -39779,7 +39818,10 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'hello' }],
           });
 
-          expect(textParts(firstSentMessage())).toEqual(['hello']);
+          expect(textParts(firstSentMessage())).toEqual([
+            'hello',
+            core.wrapUserPromptSubmitContext('extra hook context'),
+          ]);
         });
       });
 
