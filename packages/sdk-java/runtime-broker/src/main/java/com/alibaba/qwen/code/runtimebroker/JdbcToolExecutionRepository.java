@@ -12,6 +12,8 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import javax.sql.DataSource;
 
 /** JDBC ledger for idempotent Tool executions. */
@@ -500,7 +502,7 @@ public final class JdbcToolExecutionRepository
                     return List.copyOf(matches);
                 }
                 for (ToolExecutionRecord record : batch) {
-                    if (ManagedHoldFamily.of(record) != null) {
+                    if (ManagedHoldFamily.isLiveHold(record)) {
                         matches.add(record);
                         if (matches.size() == limit) {
                             return List.copyOf(matches);
@@ -564,6 +566,34 @@ public final class JdbcToolExecutionRepository
         }
         return JdbcRepositorySupport.read(dataSource, connection ->
                 hasActiveByBinding(connection, id, runtimeGeneration));
+    }
+
+    @Override
+    public List<String> findHeldRuntimeSessions(String harnessSessionId) {
+        String id = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            Set<String> held = new TreeSet<>();
+            // The hold family lives in the reference payload, so SQL narrows
+            // the Harness Session's non-terminal window and the family filter
+            // runs row by row, as in the background-process scan.
+            String sql = "SELECT " + EXECUTION_COLUMNS
+                    + " FROM qwen_tool_execution WHERE harness_session_id = ? "
+                    + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')";
+            try (PreparedStatement statement = connection.prepareStatement(
+                    sql)) {
+                statement.setString(1, id);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        ToolExecutionRecord record = mapExecution(result);
+                        if (ManagedHoldFamily.isLiveHold(record)) {
+                            held.add(record.getRuntimeSessionId());
+                        }
+                    }
+                }
+            }
+            return List.copyOf(held);
+        });
     }
 
     @Override

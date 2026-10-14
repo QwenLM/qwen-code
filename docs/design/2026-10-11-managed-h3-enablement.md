@@ -213,6 +213,12 @@ publisher close so the drain's finalize RPCs still land:
 3. Only then do the publisher close, the pending-input settlements and
    `session.managed.close(...)` run, in today's order.
 
+The owed set travels with the Session, not the process (#13930 R1-2): a
+replacement Harness that loads the Session restores it from the Broker's
+read-only listing of the Session's live hold rows — restored at load,
+never discharged there — and a listing the Broker cannot answer fails the
+load rather than silently leaving the close with nothing owed.
+
 `releaseLeaseNow` (the recovery-adopted lease handback at close) releases
 with drain semantics for the same reason; the cancellation path's
 fire-and-forget handback keeps routine semantics (a cancel route must not

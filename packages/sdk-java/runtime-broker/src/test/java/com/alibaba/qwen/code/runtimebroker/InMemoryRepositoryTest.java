@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.holdRow;
 import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -761,6 +762,40 @@ class InMemoryRepositoryTest {
         assertFalse(repository.hasActiveByRuntimeSession("session"));
         assertNull(repository.requestCancel(created.getExecutionCallId(),
                 created.getVersion()));
+    }
+
+    @Test
+    void heldRuntimeSessionListingTracksLiveHoldRowsOnly() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryToolExecutionRepository repository =
+                new InMemoryToolExecutionRepository(clock);
+        repository.findOrCreate(holdRow("hold-shell-0", "harness",
+                "session-0"));
+        ToolExecutionRecord shell = repository.findOrCreate(
+                holdRow("hold-shell", "harness", "session-a"));
+        ToolExecutionRecord watch = repository.findOrCreate(
+                holdRow("hold-watch", "harness", "session-a",
+                        "background_v3_monitor"));
+        repository.findOrCreate(execution("foreground-row"));
+        repository.findOrCreate(holdRow("other-harness-row", "someone",
+                "session-b"));
+
+        assertEquals(List.of("session-0", "session-a"),
+                repository.findHeldRuntimeSessions("harness"));
+        assertEquals(List.of("session-b"),
+                repository.findHeldRuntimeSessions("someone"));
+        assertEquals(List.of(),
+                repository.findHeldRuntimeSessions("nobody"));
+
+        repository.settlePrepared(shell, result("success"),
+                clock.instant());
+        // Only the watch and shell-0 rows still live: the obligation stands.
+        assertEquals(List.of("session-0", "session-a"),
+                repository.findHeldRuntimeSessions("harness"));
+        repository.settlePrepared(watch, result("success"),
+                clock.instant());
+        assertEquals(List.of("session-0"),
+                repository.findHeldRuntimeSessions("harness"));
     }
 
     @Test

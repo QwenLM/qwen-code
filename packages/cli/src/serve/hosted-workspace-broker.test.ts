@@ -79,6 +79,44 @@ it.each([false, true])(
   },
 );
 
+it('lists the Harness Session held Runtime Sessions (#13930 R1-2)', async () => {
+  const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const broker = await fixture((path, body) => {
+    requests.push({ path, body });
+    return {
+      body: { ...identity, runtimeSessionIds: ['wake-a1b2', 'turn'] },
+    };
+  });
+  await expect(broker.heldRuntimeSessions()).resolves.toEqual([
+    'wake-a1b2',
+    'turn',
+  ]);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.path).toBe(
+    '/internal/runtime-broker/v1/tool-sessions:holds',
+  );
+  expect(requests[0]!.body).toMatchObject({
+    harnessSessionId: 'session',
+    runtimeSessionId: 'turn',
+  });
+});
+
+it.each([
+  ['a non-string element', [42]],
+  ['a non-array payload', 'turn'],
+  ['an empty-string element', ['turn', '']],
+] as const)(
+  'rejects a malformed held-Runtime listing with %s',
+  async (_label, runtimeSessionIds) => {
+    const broker = await fixture(() => ({
+      body: { ...identity, runtimeSessionIds },
+    }));
+    await expect(broker.heldRuntimeSessions()).rejects.toThrow(
+      'held-Runtime listing is invalid',
+    );
+  },
+);
+
 it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   'rejects a mismatched %s at acquisition',
   async (field) => {

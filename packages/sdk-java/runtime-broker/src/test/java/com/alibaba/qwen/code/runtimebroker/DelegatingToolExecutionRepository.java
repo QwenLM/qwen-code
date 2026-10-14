@@ -120,4 +120,9 @@ abstract class DelegatingToolExecutionRepository
             long runtimeGeneration) {
         return delegate.hasActiveByBinding(bindingId, runtimeGeneration);
     }
+
+    @Override
+    public List<String> findHeldRuntimeSessions(String harnessSessionId) {
+        return delegate.findHeldRuntimeSessions(harnessSessionId);
+    }
 }

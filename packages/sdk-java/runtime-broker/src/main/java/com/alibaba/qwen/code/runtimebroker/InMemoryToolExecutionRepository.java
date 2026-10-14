@@ -7,6 +7,8 @@ import java.util.HashMap;
 import java.util.Comparator;
 import java.util.Map;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.TreeMap;
 
 /** Process-local execution ledger for tests and single-node use. */
@@ -316,8 +318,8 @@ public final class InMemoryToolExecutionRepository
                 : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
         TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
         for (ToolExecutionRecord record : recordsById.values()) {
-            if (record.belongsTo(session) && !record.isTerminal()
-                    && ManagedHoldFamily.of(record) != null) {
+            if (record.belongsTo(session)
+                    && ManagedHoldFamily.isLiveHold(record)) {
                 String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
                 if (key.compareTo(after) > 0) {
                     batch.put(key, record);
@@ -391,6 +393,21 @@ public final class InMemoryToolExecutionRepository
                 && record.getRuntimeGeneration() == runtimeGeneration
                 && record.getRuntimeSessionId().equals(runtimeSessionId)
                 && !excludingExecutionCallIds.contains(record.getExecutionCallId()));
+    }
+
+    @Override
+    public synchronized List<String> findHeldRuntimeSessions(
+            String harnessSessionId) {
+        String id = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        Set<String> held = new TreeSet<>();
+        for (ToolExecutionRecord record : recordsById.values()) {
+            if (id.equals(record.getHarnessSessionId())
+                    && ManagedHoldFamily.isLiveHold(record)) {
+                held.add(record.getRuntimeSessionId());
+            }
+        }
+        return List.copyOf(held);
     }
 
     @Override

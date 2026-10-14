@@ -185,6 +185,11 @@ close 处理器获得 H3 close 序列点名的那一步，位于 publisher close
 3. 之后publisher close、待定输入结算与 `session.managed.close(...)`
    按今天的顺序运行。
 
+亏欠的 list 随 Session 走而不随进程走（#13930 R1-2）：加载该
+Session 的替补 Harness 从 Broker 对该 Session 存活持有行的只读清单
+恢复它 —— 加载时恢复，绝不在加载时清偿 —— Broker 无法回答清单时
+加载失败，而不是让 close 在亏欠全部失忆的情况下照常 204。
+
 `releaseLeaseNow`（close 处对恢复收养 lease 的交还）出于同一原因以
 drain 语义释放；取消路径的 fire-and-forget 交还保持 routine 语义（取消
 路由绝不能停止存活 run；持有保持亏欠直至 close）。

@@ -110,6 +110,34 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void holdsListingIsReadOnlyAndScopedToTheHarnessSession() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.executions.findOrCreate(holdRow("held-call",
+                    "harness", "runtime-held"));
+            fixture.executions.findOrCreate(holdRow("stranger-call",
+                    "someone", "runtime-stranger"));
+            fixture.executions.findOrCreate(ToolExecutionRecord.prepared(
+                    "plain-call", "key-plain", "binding", 1, "harness",
+                    "runtime-foreground", "turn", "call", "digest",
+                    Map.of("sessionId", "runtime-foreground", "promptId",
+                            "turn", "callId", "call", "argsDigest",
+                            "digest")));
+            HttpResponse<String> holds = fixture.post("/tool-sessions:holds",
+                    Map.of("protocolVersion", 1, "requestId", "holds",
+                            "harnessSessionId", "harness",
+                            "runtimeSessionId", "runtime-held"));
+            assertEquals(200, holds.statusCode(), holds.body());
+            var body = JSON.parseObject(holds.body());
+            assertEquals("harness", body.getString("harnessSessionId"));
+            assertEquals(List.of("runtime-held"), body.getJSONArray(
+                    "runtimeSessionIds").toList(String.class));
+            assertEquals(400, fixture.post("/tool-sessions:holds", Map.of(
+                    "protocolVersion", 1, "requestId", "bad",
+                    "harnessSessionId", "harness")).statusCode());
+        }
+    }
+
+    @Test
     void v2UnknownExecutionReconcilesOnlyWhenExplicitlyRequested() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap")
@@ -834,6 +862,12 @@ class RuntimeBrokerHttpServerTest {
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");
+    }
+
+    private static ToolExecutionRecord holdRow(String executionCallId,
+            String harnessSessionId, String runtimeSessionId) {
+        return ToolExecutionRecordFixtures.holdRow(executionCallId,
+                harnessSessionId, runtimeSessionId);
     }
 
     // The HTTP face's automatic observation reuses the freshest answer for

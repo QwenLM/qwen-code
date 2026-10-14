@@ -41,6 +41,15 @@ enum ManagedHoldFamily {
         return ofDispatchMode(row.getReference().get("dispatchMode"));
     }
 
+    /** A provably live hold row: non-terminal and of a hold family — the
+     * rows a routine release answers {@code runtime_session_held} with.
+     * Every scan that means "live hold" keys on this one predicate, so the
+     * scans cannot drift apart (the takeover restore and the release sweep
+     * must name the same rows). */
+    static boolean isLiveHold(ToolExecutionRecord row) {
+        return !row.isTerminal() && of(row) != null;
+    }
+
     static ManagedHoldFamily ofDispatchMode(Object dispatchMode) {
         for (ManagedHoldFamily family : values()) {
             if (family.dispatchMode.equals(dispatchMode)) {

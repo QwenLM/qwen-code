@@ -418,9 +418,11 @@ interface HostedSession {
   runtimeLeaseHeld?: { promptId: string; runtimeSessionId: string };
   /** #13856: promptIds of turns whose Runtime Session ended held by a
    * live background run (the designed hold — the broker refused the
-   * routine release with `runtime_session_held` and stopped nothing).
-   * The Session's close drain-releases each; a later turn never re-uses
-   * the id, so a held Runtime is owed exactly until the close. */
+   * routine release with `runtime_session_held` and stopped nothing);
+   * the Session's close drain-releases each. At a takeover's load the
+   * Broker-side runtimeSessionIds restored by #13930 R1-2 land here too,
+   * one id space either way — `hostedRuntimeSessionId` is idempotent, so
+   * the close re-maps every entry uniformly. */
   readonly heldRuntimeTurns: Set<string>;
 }
 
@@ -5303,6 +5305,32 @@ export function registerHostedHarnessSessionRoutes(
           writeStderrLineSafe(
             'qwen serve: Cleanup remains owed: ' + String(cause),
           );
+        }
+      }
+      // #13930 R1-2: the close owes every Runtime a turn left held, but the
+      // obligation only lived in the dead process's memory. The Broker's
+      // hold ledger is its durable record: restore the owed list here, at
+      // load — never discharge it: an eager drain-release on load would
+      // stop a run the live Session still wants. A listing that cannot be
+      // proven fails the load rather than silently re-leaking at close.
+      if (!create && brokerOptions && session.toolProfile !== undefined) {
+        try {
+          for (const runtimeSessionId of await new HostedWorkspaceBroker(
+            brokerOptions,
+            session.managed.authority.sessionHeader.sessionKey,
+            hostedRuntimeSessionId(sessionId),
+          ).heldRuntimeSessions())
+            session.heldRuntimeTurns.add(runtimeSessionId);
+        } catch (cause) {
+          // Same owed-lease discipline as every sibling refusal above: by
+          // here a parked-turn recovery may already have adopted it.
+          noteOwedAdoption(session, sessionId);
+          await managed.close();
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness load of session ${sessionId} could not restore the held Runtime drains: ${String(cause)}`,
+          );
+          error(res, 409, 'hosted_runtime_broker_unavailable');
+          return;
         }
       }
       sessions.set(sessionId, session);

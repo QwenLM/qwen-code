@@ -6685,6 +6685,11 @@ class RuntimeBrokerServiceTest {
             return delegate.hasActiveByBinding(bindingId,
                     runtimeGeneration);
         }
+
+        @Override
+        public List<String> findHeldRuntimeSessions(String harnessSessionId) {
+            return delegate.findHeldRuntimeSessions(harnessSessionId);
+        }
     }
 
     private static final class HookedExecutionRepository
@@ -6839,6 +6844,11 @@ class RuntimeBrokerServiceTest {
                 long runtimeGeneration) {
             return delegate.hasActiveByBinding(bindingId,
                     runtimeGeneration);
+        }
+
+        @Override
+        public List<String> findHeldRuntimeSessions(String harnessSessionId) {
+            return delegate.findHeldRuntimeSessions(harnessSessionId);
         }
     }
 

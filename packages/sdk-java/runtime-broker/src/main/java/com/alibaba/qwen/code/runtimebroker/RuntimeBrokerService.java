@@ -177,6 +177,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
+    /**
+     * The owed held-Runtime drains of a Harness Session: its Runtime
+     * Sessions carrying provably live hold rows. A replacement Harness
+     * asks at load time to restore the obligation its dead predecessor
+     * recorded only in process memory (#13930); the listing is read-only
+     * and never discharges anything.
+     */
+    public List<String> findHeldRuntimeSessions(String harnessSessionId) {
+        return executionRepository.findHeldRuntimeSessions(harnessSessionId);
+    }
+
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport,
             RuntimeBindingRepository bindingRepository,

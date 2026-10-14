@@ -128,6 +128,24 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                         ignored -> envelope(sessionId, runtimeSessionId, "authorized", true));
                 return;
             }
+            // #13930 R1-2: the owed held-Runtime drain listing a takeover
+            // Harness restores at load. Read-only — it never discharges.
+            if ("POST".equals(exchange.getRequestMethod())
+                    && "/tool-sessions:holds".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange,
+                        "holds request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "holds request");
+                String sessionId = JsonCodec.requiredString(body,
+                        "harnessSessionId", "holds request");
+                String runtimeSessionId = JsonCodec.requiredString(body,
+                        "runtimeSessionId", "holds request");
+                complete(exchange, CompletableFuture.completedFuture(
+                        service.findHeldRuntimeSessions(sessionId)),
+                        holds -> envelope(sessionId, runtimeSessionId,
+                                "runtimeSessionIds", holds));
+                return;
+            }
             if ("POST".equals(exchange.getRequestMethod())
                     && "/tool-sessions:acquire".equals(relative)) {
                 acquire(exchange);

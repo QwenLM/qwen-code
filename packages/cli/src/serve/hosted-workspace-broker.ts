@@ -157,6 +157,22 @@ export class HostedWorkspaceBroker {
       await this.request('/runtimes:authorize-lifecycle', {});
   }
 
+  /**
+   * #13930 R1-2: the Harness Session's Runtime Sessions with provably
+   * live hold rows — the owed held-Runtime drains a takeover Harness
+   * restores at load. The listing is read-only: restore, never discharge.
+   */
+  async heldRuntimeSessions(): Promise<string[]> {
+    const response = await this.request('/tool-sessions:holds', {});
+    const ids = response['runtimeSessionIds'];
+    if (
+      !Array.isArray(ids) ||
+      ids.some((id) => typeof id !== 'string' || id.length === 0)
+    )
+      throw new Error('Runtime Broker held-Runtime listing is invalid.');
+    return ids as string[];
+  }
+
   async acquire(expected?: {
     runtimeBindingId: string;
     generation: string;

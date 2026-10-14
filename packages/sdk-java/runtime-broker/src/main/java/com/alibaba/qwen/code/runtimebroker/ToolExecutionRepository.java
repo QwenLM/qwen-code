@@ -109,4 +109,12 @@ public interface ToolExecutionRepository {
     /** Any nonterminal execution still points at this binding generation.
      * UNKNOWN counts as active; terminal uncertainty is not physical stop proof. */
     boolean hasActiveByBinding(String bindingId, long runtimeGeneration);
+
+    /** The Harness Session's Runtime Sessions carrying at least one live
+     * hold row — non-terminal rows of the H3 hold families, the ones a
+     * routine release answers {@code runtime_session_held} with. This is
+     * the owed-drain obligation a replacement Harness restores at load
+     * (#13930): the list is read back, never drained by the query itself.
+     * Ids are deduplicated and returned in sorted (stable) order. */
+    List<String> findHeldRuntimeSessions(String harnessSessionId);
 }

@@ -55,6 +55,7 @@ public final class JdbcRepositoryContract {
         verifySeedCiphertextIsImmutable(dataSource, prefix);
         verifySession(dataSource, prefix);
         verifyExecution(dataSource, prefix);
+        verifyHeldRuntimeSessionListing(dataSource, prefix + "-holds");
         verifyExecutionFences(dataSource, prefix);
         verifyExecutionForgeries(dataSource, prefix);
         ExecutionTakeoverContract.verify(new JdbcToolExecutionRepository(dataSource), prefix + "-takeover-scan");
@@ -1295,6 +1296,71 @@ public final class JdbcRepositoryContract {
                 assertThrows(IllegalStateException.class,
                         () -> repository.findByExecutionCallId(id))
                         .getMessage());
+    }
+
+    /**
+     * The held-Runtime listing a replacement Harness restores at load
+     * (#13930) must answer from the durable ledger alone: only live hold
+     * rows of the asked Harness Session count, deduplicated and sorted —
+     * the same answer the InMemory suite pins, on the durable store.
+     */
+    private static void verifyHeldRuntimeSessionListing(
+            DataSource dataSource, String prefix) throws Exception {
+        JdbcToolExecutionRepository repository =
+                new JdbcToolExecutionRepository(dataSource);
+        String harness = prefix + "-harness";
+        String runtime = prefix + "-runtime";
+        repository.findOrCreate(holdRow(prefix + "-shell-0", harness,
+                prefix + "-runtime-0"));
+        repository.findOrCreate(holdRow(prefix + "-shell", harness,
+                runtime));
+        repository.findOrCreate(holdRow(prefix + "-watch", harness,
+                runtime, "background_v3_monitor"));
+        repository.findOrCreate(plainRow(prefix + "-plain", harness,
+                prefix + "-foreground"));
+        repository.findOrCreate(holdRow(prefix + "-stranger",
+                prefix + "-someone", prefix + "-stranger-runtime"));
+
+        assertEquals(List.of(runtime, prefix + "-runtime-0"),
+                repository.findHeldRuntimeSessions(harness));
+        assertEquals(List.of(prefix + "-stranger-runtime"),
+                repository.findHeldRuntimeSessions(prefix + "-someone"));
+        assertEquals(List.of(),
+                repository.findHeldRuntimeSessions(prefix + "-nobody"));
+
+        ToolExecutionRecord settled = repository.settlePrepared(
+                repository.findByExecutionCallId(prefix + "-shell"),
+                result("cancelled"), HEALTH);
+        assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+        // Only the watch row still lives: the obligation stands.
+        assertEquals(List.of(runtime, prefix + "-runtime-0"),
+                repository.findHeldRuntimeSessions(harness));
+        repository.settlePrepared(repository.findByExecutionCallId(
+                prefix + "-watch"), result("cancelled"), HEALTH);
+        assertEquals(List.of(prefix + "-runtime-0"),
+                repository.findHeldRuntimeSessions(harness));
+    }
+
+    private static ToolExecutionRecord plainRow(String executionCallId,
+            String harnessSessionId, String runtimeSessionId) {
+        return ToolExecutionRecord.prepared(executionCallId,
+                executionCallId + "-key", "binding-1", 1, harnessSessionId,
+                runtimeSessionId, "turn", "tool", "digest",
+                Map.of("sessionId", runtimeSessionId, "promptId", "turn",
+                        "callId", "tool", "argsDigest", "digest"));
+    }
+
+    private static ToolExecutionRecord holdRow(String executionCallId,
+            String harnessSessionId, String runtimeSessionId) {
+        return ToolExecutionRecordFixtures.holdRow(executionCallId,
+                harnessSessionId, runtimeSessionId);
+    }
+
+    private static ToolExecutionRecord holdRow(String executionCallId,
+            String harnessSessionId, String runtimeSessionId,
+            String dispatchMode) {
+        return ToolExecutionRecordFixtures.holdRow(executionCallId,
+                harnessSessionId, runtimeSessionId, dispatchMode);
     }
 
     private static ToolExecutionRecord execution(String executionCallId,
