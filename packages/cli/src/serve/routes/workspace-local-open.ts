@@ -6,7 +6,10 @@
 
 import { promises as fs } from 'node:fs';
 import type { Application, Request, RequestHandler, Response } from 'express';
-import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '@qwen-code/qwen-code-core';
+import {
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   LocalPathOpenUnavailableError,
@@ -94,14 +97,12 @@ export function registerWorkspaceLocalOpenRoutes(
         } else {
           await openLocally(targetPath);
         }
-        res
-          .status(200)
-          .json({
-            kind: 'workspace-local-open',
-            opened: true,
-            target,
-            ...(target === 'auto-memory' ? { scope: autoMemoryScope } : {}),
-          });
+        res.status(200).json({
+          kind: 'workspace-local-open',
+          opened: true,
+          target,
+          ...(target === 'auto-memory' ? { scope: autoMemoryScope } : {}),
+        });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         if (error instanceof LocalPathOpenUnavailableError) {

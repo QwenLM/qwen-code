@@ -13,7 +13,7 @@ import {
   getUserAutoMemoryRoot,
   isAutoMemPath,
   isUserAutoMemPath,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/memory/paths.js';
 import { detectBOM } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
 import { openNoFollow } from '@qwen-code/qwen-code-core/noFollowOpen';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -347,13 +347,21 @@ export async function readWorkspaceAutoMemoryFile(
 
   let resolved: string;
   try {
-    resolved = await resolveWithinWorkspace(filePath, [projectDir, userDir], 'read');
+    resolved = await resolveWithinWorkspace(
+      filePath,
+      [projectDir, userDir],
+      'read',
+    );
   } catch (err) {
     if (err instanceof FsError) {
       // The literal path was already admitted by the root pre-check above,
       // so a canonicalization failure means a symlink escape (or the file
       // vanished mid-flight); either way the read is refused, not served.
-      throw new AutoMemoryPathError('outside', err.message);
+      // A missing file inside a root is a 404, not an escape.
+      throw new AutoMemoryPathError(
+        err.kind === 'path_not_found' ? 'not_found' : 'outside',
+        err.message,
+      );
     }
     throw err;
   }
@@ -473,7 +481,7 @@ function requireTrustedWorkspace(
   deps: WorkspaceAutoMemoryRouteDeps,
   res: Response,
 ): boolean {
-  if (deps.isWorkspaceTrusted?.() !== false) return true;
+  if (deps.isWorkspaceTrusted?.() === true) return true;
   res.status(403).json({
     error: 'Workspace is not trusted.',
     code: 'untrusted_workspace',
@@ -506,7 +514,8 @@ export function mountWorkspaceAutoMemoryRoutes(
     if (!assertGenerationOpen) return;
     if (!requireTrustedWorkspace(deps, res)) return;
     try {
-      const collectStatus = deps.collectStatus ?? collectWorkspaceAutoMemoryStatus;
+      const collectStatus =
+        deps.collectStatus ?? collectWorkspaceAutoMemoryStatus;
       const status = await collectStatus(deps.boundWorkspace);
       assertGenerationOpen();
       res.status(200).json(status);
@@ -514,7 +523,7 @@ export function mountWorkspaceAutoMemoryRoutes(
       if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspace/auto-memory failed: ${
-          err instanceof Error ? err.stack ?? err.message : String(err)
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
       );
       res.status(500).json({
@@ -555,7 +564,7 @@ export function mountWorkspaceAutoMemoryRoutes(
         }
         writeStderrLine(
           `qwen serve: GET /workspace/auto-memory/file failed: ${
-            err instanceof Error ? err.stack ?? err.message : String(err)
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`,
         );
         res.status(500).json({
