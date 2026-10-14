@@ -22,6 +22,12 @@ import {
   sendAboutUntilRendered,
 } from './interactive-session.js';
 
+// A model reply to a workflow completion is a full roundtrip that starts only
+// after the run settles and the notification drains; the loaded
+// sandbox:docker shard stalled that window past the old 30s budget (#14191) —
+// the same loaded-runner lesson as the cron suite's #10904.
+const MODEL_REPLY_SCREEN_TIMEOUT = 120_000;
+
 // OpenTUI's schedule_tool handler is a separate, unwired entry point.
 describe.skipIf(pickE2eRenderer() === 'opentui')(
   'saved workflow slash-command completion',
@@ -191,7 +197,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.waitForScreen(
         (screen) => screen.includes(reply),
         'model reply based on the workflow completion, without a follow-up prompt',
-        30_000,
+        MODEL_REPLY_SCREEN_TIMEOUT,
       );
       await session.idle(1_000);
 
@@ -289,7 +295,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.waitForScreen(
         (text) => text.includes(`${reply}_FOLLOWUP`),
         'follow-up result',
-        30_000,
+        MODEL_REPLY_SCREEN_TIMEOUT,
       );
       await session.idle(1_000);
       const followUpRequests = server.requests.filter(
