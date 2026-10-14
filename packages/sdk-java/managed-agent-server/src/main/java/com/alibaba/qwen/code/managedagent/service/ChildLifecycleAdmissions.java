@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import java.util.Map;
 import org.springframework.stereotype.Component;
 
@@ -12,8 +11,8 @@ import org.springframework.stereotype.Component;
  * run, so a contested admission replays its receipt instead of minting a
  * second operation, and a finished child (relay `done`) closes through the
  * exact same admission its parent's close would have taken. The child
- * actor clones the parent's creation actor shape, matching how
- * createChildSession registered it.
+ * close authority comes from the persisted child lineage and the original
+ * creation identity; it survives a later revocation of execution grants.
  */
 @Component
 public class ChildLifecycleAdmissions {
@@ -45,8 +44,7 @@ public class ChildLifecycleAdmissions {
             String parentSessionId, String childSessionId,
             String childRunId) {
         String actor = "child:" + parentSessionId;
-        return store.beginWorkspaceLifecycle(tenantId, childSessionId,
-                OperationKind.CLOSE, actor,
+        return store.beginChildClose(tenantId, parentSessionId, childSessionId, childRunId,
                 digests.digest(Map.of("actorId", actor)),
                 "child-close-" + childRunId,
                 digests.digest(Map.of("sessionId", childSessionId,

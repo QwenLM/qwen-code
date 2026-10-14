@@ -285,7 +285,7 @@ class ManagedSessionMessageStoreTest {
         assertRefused("a root Session writing to a parent", child, LINEAGE,
                 toParent, () -> commit(journal, "message-2:1",
                         toParent(child, parent, "planned"), null));
-        jdbc.update("UPDATE managed_agent_session SET parent_session_id = ?,"
+        jdbc.update("UPDATE ma_session SET parent_session_id = ?,"
                         + " root_session_id = ?, parent_child_run_id = ?,"
                         + " child_depth = 1 WHERE tenant_id = ?"
                         + " AND session_id = ?",
@@ -608,7 +608,7 @@ class ManagedSessionMessageStoreTest {
 
     private long revisions(String sessionId) {
         Long total = jdbc.queryForObject("SELECT COALESCE(SUM(revision), 0)"
-                        + " FROM qwen_managed_session_extension_record"
+                        + " FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 Long.class, TENANT, sessionId);
         return total == null ? 0 : total;

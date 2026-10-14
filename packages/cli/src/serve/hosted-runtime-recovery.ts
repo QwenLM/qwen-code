@@ -438,11 +438,15 @@ async function answerAbandonedTurnCalls(input: {
   teams?: HostedTeamSession;
   messages?: HostedSessionMessageSession;
   commands?: HostedSessionCommandSession;
+  /** A journal projection the caller already holds: one snapshot serves
+   * the caller's classification and this answering pass instead of two
+   * full walks of the committed events (the settle's projection walk). */
+  projected?: Awaited<ReturnType<ManagedSession['sink']['project']>>;
 }): Promise<number> {
   const uncommitted = input.uncommitted ?? 'all';
-  const records = (await input.session.sink.project()).filter(
-    (entry) => entry.daemonPromptId === input.promptId,
-  );
+  const records = (
+    input.projected ?? (await input.session.sink.project())
+  ).filter((entry) => entry.daemonPromptId === input.promptId);
   // One authority for the exactly-once predicate: the same helper every
   // replayed fold rides, fed the projection already in hand.
   const answered = await journaledToolResultIds(
@@ -1218,6 +1222,162 @@ export async function fillParkedRoundCommandGaps(input: {
 }
 
 /**
+ * The tool names a takeover may answer from the journal alone (#13847):
+ * the child orchestration and team vocabulary commits its own durable
+ * records before its answers, so a crash between the two leaves the
+ * evidence the answer family above reads. Any other name keeps its
+ * decline — an owed Runtime call cannot be proven stopped or never run.
+ */
+const JOURNAL_ONLY_ANSWERABLE_TOOLS: ReadonlySet<string> = new Set([
+  'agent',
+  'workflow',
+  'send_message',
+  ...HOSTED_TEAM_TOOL_NAMES,
+]);
+
+/**
+ * The journal-only interrupted-Turn settlement (#13847): a Turn whose
+ * batch committed nothing but journal writes — a background launch, a
+ * team call — parks at a model-start phase (or a checkpoint that never
+ * bound it), and the typed decline for that park used to wedge the
+ * Session forever: the coordinator stamps the Turn terminally failed
+ * while the journal keeps the input unsettled, so every later load is
+ * refused and the child result relay can never record its attach and
+ * result. When the durable journal proves the Turn's still-owed calls
+ * are all of the answerable family, the takeover settles instead:
+ * every owed call meets its functionResponse (committed ones by their
+ * own per-call evidence, the rest as never run — a dangling call would
+ * make the resumed thread a malformed request), the dead Turn's pending
+ * file-history obligation drops exactly as the interrupted-Turn funnel
+ * drops it, and the terminal record settles the Turn so the lead loads
+ * again. The answer is the pre-G3 `inapplicable`: a settled Turn owes a
+ * takeover nothing, and every redrive of this state converges on the
+ * plain attach. A Turn the evidence does not cover — no accepted input,
+ * an owed call outside the family, or one whose evidence funnel this
+ * load does not hold — returns undefined and keeps its typed decline,
+ * never a minted answer. Idempotent: a retry after a partial settle
+ * re-derives the owed set from the journal, and a retry after the
+ * terminal lands answers `inapplicable` on the settled input.
+ */
+async function settleJournalOnlyInterruptedTurn(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  children?: HostedChildAgentSession;
+  teams?: HostedTeamSession;
+  messages?: HostedSessionMessageSession;
+  commands?: HostedSessionCommandSession;
+}): Promise<HostedRuntimeRecoveryOutcome | undefined> {
+  const authority = input.session.authority;
+  let accepted = false;
+  let settled = false;
+  for (const event of authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  )) {
+    if (
+      event.kind === 'input.accepted' &&
+      event.payload['turnId'] === input.promptId
+    )
+      accepted = true;
+    else if (
+      event.kind === 'turn.settled' &&
+      event.payload['turnId'] === input.promptId
+    )
+      settled = true;
+  }
+  if (settled) return inapplicable();
+  if (!accepted) return undefined;
+  const projected = await input.session.sink.project();
+  const records = projected.filter(
+    (entry) => entry.daemonPromptId === input.promptId,
+  );
+  const answered = await journaledToolResultIds(
+    input.session,
+    input.promptId,
+    records,
+  );
+  for (const record of records) {
+    if (record.type !== 'assistant') continue;
+    for (const part of record.message?.parts ?? []) {
+      const call = part.functionCall;
+      if (!call?.id || !call.name || answered.has(call.id)) continue;
+      if (!JOURNAL_ONLY_ANSWERABLE_TOOLS.has(call.name)) return undefined;
+      // The evidence each answer rides is per-call durable state inside
+      // its own funnel; without that funnel the honest answer does not
+      // exist, and a minted never-ran would be a false terminal for work
+      // the journal may actually carry.
+      if (
+        (call.name === 'agent' || call.name === 'workflow') &&
+        input.children === undefined
+      )
+        return undefined;
+      if (
+        call.name === 'send_message' &&
+        (input.messages === undefined || input.children === undefined)
+      )
+        return undefined;
+      // A team call's committed evidence rides two disjoint funnels —
+      // `teams.committedBy` for a lead's own team writes, and the H4e-b3
+      // command journal once a member board call's outbound commits —
+      // so BOTH must be held, exactly like the send_message guard above.
+      if (
+        HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+        (input.teams === undefined || input.commands === undefined)
+      )
+        return undefined;
+    }
+  }
+  await answerAbandonedTurnCalls({
+    session: input.session,
+    sessionId: input.sessionId,
+    cwd: input.cwd,
+    promptId: input.promptId,
+    message: INTERRUPTED_HARNESS,
+    uncommitted: 'all',
+    children: input.children,
+    teams: input.teams,
+    messages: input.messages,
+    commands: input.commands,
+    projected,
+  });
+  // The dead Turn's pending file-history obligation dies with it, the
+  // same shape the interrupted-Turn funnel commits: kept snapshots,
+  // dropped marker, or every later load stays refused on the marker.
+  const savedHistory = await readHostedFileHistory(input.session);
+  if (savedHistory?.pendingTurn === input.promptId) {
+    await commitHostedFileHistory(input.session, {
+      schemaVersion: 1,
+      state: savedHistory.state,
+      pendingTurn: null,
+      pendingUndo: null,
+    });
+  }
+  // The interrupted Turn's terminal: the same cancelled result the
+  // channel wake settle stamps (F5), so the input settles and — with
+  // the park at a model-start phase — the checkpoint hands the Session
+  // over to its next Turn in the same commit.
+  await input.session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: input.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    cwd: input.cwd,
+    version: 'hosted-harness/1',
+    subtype: 'turn_result',
+    systemPayload: {
+      promptId: input.promptId,
+      state: 'cancelled',
+      stopReason: 'harness_interruption',
+      endedAt: Date.now(),
+    },
+  } as unknown as ChatRecord);
+  return inapplicable();
+}
+
+/**
  * H5/F5 follow-up: the Runtime-facing settlement of an interrupted Turn
  * ahead of its terminal record. A Turn that died inside a tool call parked
  * its checkpoint in `await_runtime`, and a terminal record advances the
@@ -1513,6 +1673,15 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  /** The evidence funnels of the interrupted-Turn settlement (#13847): a
+   * model-start park whose open round holds only journal-only calls
+   * answers them by what committed through these — the same shapes the
+   * interrupted-Turn funnel settles. A call whose funnel this load does
+   * not hold keeps its typed decline instead of minting a false answer. */
+  children?: HostedChildAgentSession;
+  teams?: HostedTeamSession;
+  messages?: HostedSessionMessageSession;
+  commands?: HostedSessionCommandSession;
   onPassiveRuntimeAcquired?: (runtimeSessionId: string) => void;
   /** Set when the calling Session already holds the Runtime lease from an
    * earlier recovery of the same parked Turn (a re-answered load whose
@@ -1523,6 +1692,21 @@ export async function recoverHostedRuntimeTurn(input: {
   leaseAlreadyHeld?: boolean;
 }): Promise<HostedRuntimeRecoveryOutcome> {
   const { session, promptId, passive } = input;
+  // One entry to the journal-only settle (#13847): every decline arm
+  // below whose park the durable journal can disprove hands the same
+  // funnel-honest call — named once so a later argument or precondition
+  // can never drift the arms apart.
+  const tryJournalOnlySettle = () =>
+    settleJournalOnlyInterruptedTurn({
+      session,
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      promptId,
+      children: input.children,
+      teams: input.teams,
+      messages: input.messages,
+      commands: input.commands,
+    });
   const authorization = await session.authority.harnessRunAuthorization();
   // A submitted prompt with no checkpoint yet is parked in its first model
   // round; one whose checkpoint no longer parses cannot be driven either.
@@ -1532,6 +1716,8 @@ export async function recoverHostedRuntimeTurn(input: {
   // can pay — no live waiter, no projection, only a durable-looking 200.
   if (authorization.status === 'initial') {
     if (passive) throw new Error('Parked in the first model round');
+    const journalSettled = await tryJournalOnlySettle();
+    if (journalSettled !== undefined) return journalSettled;
     return declined('model_start');
   }
   if (authorization.status === 'blocked') {
@@ -1564,6 +1750,13 @@ export async function recoverHostedRuntimeTurn(input: {
       throw new Error(
         `Checkpoint names a different Turn (${checkpoint.identity.turnId})`,
       );
+    // A checkpoint that never bound the Turn is the yolo journal-only
+    // shape (#13847): no wait checkpointed the interrupted Turn, so its
+    // crash left a runnable checkpoint that names nothing.
+    if (checkpoint.identity.turnId === null) {
+      const journalSettled = await tryJournalOnlySettle();
+      if (journalSettled !== undefined) return journalSettled;
+    }
     return declined('unresolved_after_settle');
   }
   if (
@@ -1687,6 +1880,12 @@ export async function recoverHostedRuntimeTurn(input: {
         throw new Error(
           `Parked at model start (${checkpoint.continuation.phase})`,
         );
+      // The bound Turn's own journal-only park (#13847): a batch of
+      // background launches or team calls committed no wait a takeover
+      // can drive, so the crash left the Turn here — answerable from
+      // the journal, never a terminal decline.
+      const journalSettled = await tryJournalOnlySettle();
+      if (journalSettled !== undefined) return journalSettled;
       return declined('model_start');
     }
     // A phase outside the model-start vocabulary is not one a takeover

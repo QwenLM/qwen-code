@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -25,23 +26,41 @@ public final class HostedProcessCrashFixtureMain {
         String cli = args[2];
         String tenant = args[3];
         String fault = args[4];
+        boolean coordinatorRestart = "coordinator-only".equals(fault);
         Path workspace = root.resolve("workspace");
-        Path worker = root.resolve("fixture-worker.mjs");
-        Path cliPath = Path.of(cli).toAbsolutePath().normalize();
         ObjectMapper mapper = new ObjectMapper();
-        Files.writeString(worker, "await import("
-                + mapper.writeValueAsString(cliPath.getParent().getParent()
-                        .resolve("integration-tests/helpers/hosted-file-read-gate.mjs").toUri().toString())
-                + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
-                + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
-        var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
-                ManagedAgentServerApplication.class).run(
-                "--server.address=127.0.0.1", "--server.port=0",
+        List<String> arguments = new ArrayList<>(List.of(
+                "--server.address=127.0.0.1",
                 "--spring.datasource.url=" + System.getenv("FG6C_MYSQL_URL"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.username=" + System.getenv("FG6C_MYSQL_USER"),
                 "--spring.datasource.password=" + System.getenv().getOrDefault("FG6C_MYSQL_PASSWORD", ""),
-                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.enabled=true"));
+        if (coordinatorRestart) {
+            String port = args[5];
+            arguments.addAll(List.of(
+                    "--server.port=" + port,
+                    "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + port,
+                    "--qwen.managed-agent.session-store.workspace-id=coordinator-restart",
+                    "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
+                    "--qwen.managed-agent.harness.enabled=true",
+                    "--qwen.managed-agent.harness.base-url=" + args[6],
+                    "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
+                    "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
+                    "--qwen.managed-agent.runtime-broker.enabled=false",
+                    "--qwen.managed-agent.dispatch.scan-delay=100ms",
+                    "--qwen.managed-agent.dispatch.lease-duration=3s",
+                    "--qwen.managed-agent.dispatch.lease-renew-interval=1s"));
+        } else {
+            Path worker = root.resolve("fixture-worker.mjs");
+            Path cliPath = Path.of(cli).toAbsolutePath().normalize();
+            Files.writeString(worker, "await import("
+                    + mapper.writeValueAsString(cliPath.getParent().getParent()
+                            .resolve("integration-tests/helpers/hosted-file-read-gate.mjs").toUri().toString())
+                    + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
+                    + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
+            arguments.addAll(List.of(
+                "--server.port=0",
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=true",
@@ -49,6 +68,8 @@ public final class HostedProcessCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                        + "Linux".equals(System.getProperty("os.name")),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + root,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + root.resolve("runtime"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",
@@ -57,18 +78,29 @@ public final class HostedProcessCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
-                "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace);
+                "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
+        }
+        var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
+                ManagedAgentServerApplication.class).run(arguments.toArray(String[]::new));
+        if (coordinatorRestart) {
+            Path ready = root.resolve("ready.tmp");
+            mapper.writeValue(ready.toFile(), Map.of(
+                    "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort()));
+            Files.move(ready, root.resolve("ready.json"), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+            return;
+        }
         Path saved = root.resolve("session-id");
         String sessionId;
         if (Files.exists(saved)) {
             sessionId = Files.readString(saved);
         } else {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
                     + " 'Workspace', ?, ?, 'ACTIVE')", tenant,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             sessionId = spring.getBean(ManagedAgentStore.class).insertWorkspaceSessionCommand(tenant, "actor", "create",
                     "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
