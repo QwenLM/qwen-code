@@ -5,10 +5,12 @@ import {
   type DaemonWorkspaceMemoryFile,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { AutoMemoryPanel } from './AutoMemoryPanel';
 import styles from './MemoryMessage.module.css';
 
 type MemoryMode = 'view' | 'edit';
 type MemoryScope = 'global' | 'workspace';
+type MemoryTab = MemoryScope | 'auto';
 
 interface MemoryMessageProps {
   refreshSignal?: number;
@@ -52,7 +54,7 @@ export function MemoryMessage({
     });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
-  const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
+  const [selectedTab, setSelectedTab] = useState<MemoryTab>('workspace');
   const [mode, setMode] = useState<MemoryMode>('view');
   const [content, setContent] = useState('');
   const [draft, setDraft] = useState('');
@@ -87,7 +89,9 @@ export function MemoryMessage({
   }, [files, t]);
 
   const selectedEntry =
-    entries.find((entry) => entry.scope === selectedScope) ?? entries[0];
+    selectedTab === 'auto'
+      ? undefined
+      : entries.find((entry) => entry.scope === selectedTab) ?? entries[0];
 
   // Replace needs both the file's full text and the list that says whether
   // the file exists. While the status load is outstanding (`status` is
@@ -146,7 +150,7 @@ export function MemoryMessage({
   );
 
   useEffect(() => {
-    if (!selectedEntry) return;
+    if (selectedTab === 'auto' || !selectedEntry) return;
     loadContent(selectedEntry, mode);
     // Only reload when the selected file changes. Mode changes are explicit
     // button actions that call loadContent directly.
@@ -176,13 +180,13 @@ export function MemoryMessage({
     if (handledAddSignalRef.current === addSignal) return;
     handledAddSignalRef.current = addSignal;
     const nextScope = addScope === 'global' ? 'global' : 'workspace';
-    setSelectedScope(nextScope);
+    setSelectedTab(nextScope);
     const entry = entries.find((item) => item.scope === nextScope);
     loadContent(entry, 'edit');
   }, [addScope, addSignal, entries, loadContent]);
 
   const handleSelect = (entry: MemoryEntry) => {
-    setSelectedScope(entry.scope);
+    setSelectedTab(entry.scope);
     loadContent(entry, 'view');
   };
 
@@ -240,7 +244,7 @@ export function MemoryMessage({
     <div className={styles.page}>
       <nav className={styles.tabs} aria-label={t('memory.menu')}>
         {entries.map((entry) => {
-          const active = entry.scope === selectedScope;
+          const active = entry.scope === selectedTab;
           return (
             <button
               key={entry.scope}
@@ -254,67 +258,87 @@ export function MemoryMessage({
             </button>
           );
         })}
+        <button
+          key="auto"
+          type="button"
+          className={`${styles.memoryCard} ${
+            selectedTab === 'auto' ? styles.memoryCardActive : ''
+          }`}
+          onClick={() => setSelectedTab('auto')}
+        >
+          <span className={styles.memoryTitle}>
+            {t('memory.autoMemoryTab')}
+          </span>
+        </button>
       </nav>
 
       <section className={styles.detail}>
-        <header className={styles.detailHeader}>
-          <div className={styles.detailTitleWrap}>
-            <div className={styles.detailPath}>{path}</div>
-          </div>
-          <div className={styles.actions}>
-            <button
-              type="button"
-              className={styles.actionButton}
-              disabled={!canReplace}
-              onClick={handleEdit}
-            >
-              {t('settings.action.edit')}
-            </button>
-          </div>
-        </header>
-
-        {statusText && <div className={styles.status}>{statusText}</div>}
-
-        {mode === 'edit' ? (
-          <>
-            <textarea
-              ref={editorRef}
-              className={styles.editor}
-              value={draft}
-              disabled={saving || contentLoading}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder={t('memory.placeholder', {
-                scope: selectedEntry ? scopeLabel(selectedEntry.scope, t) : '',
-              })}
-            />
-            <div className={styles.editorFooter}>
-              <button
-                type="button"
-                className={styles.secondaryButton}
-                disabled={saving}
-                onClick={() => {
-                  setDraft(content);
-                  setMode('view');
-                }}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                type="button"
-                className={styles.primaryButton}
-                disabled={saving || contentLoading || !canReplace}
-                onClick={handleSave}
-              >
-                {saving ? t('memory.saving') : t('memory.save')}
-              </button>
-            </div>
-          </>
+        {selectedTab === 'auto' ? (
+          <AutoMemoryPanel onMessage={onMessage} />
         ) : (
-          <pre className={styles.content}>
-            {contentLoading
-              ? t('memory.loadingFile')
-              : content || t('memory.noFiles')}
-          </pre>
+          <>
+            <header className={styles.detailHeader}>
+              <div className={styles.detailTitleWrap}>
+                <div className={styles.detailPath}>{path}</div>
+              </div>
+              <div className={styles.actions}>
+                <button
+                  type="button"
+                  className={styles.actionButton}
+                  disabled={!canReplace}
+                  onClick={handleEdit}
+                >
+                  {t('settings.action.edit')}
+                </button>
+              </div>
+            </header>
+
+            {statusText && <div className={styles.status}>{statusText}</div>}
+
+            {mode === 'edit' ? (
+              <>
+                <textarea
+                  ref={editorRef}
+                  className={styles.editor}
+                  value={draft}
+                  disabled={saving || contentLoading}
+                  onChange={(event) => setDraft(event.target.value)}
+                  placeholder={t('memory.placeholder', {
+                    scope: selectedEntry
+                      ? scopeLabel(selectedEntry.scope, t)
+                      : '',
+                  })}
+                />
+                <div className={styles.editorFooter}>
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    disabled={saving}
+                    onClick={() => {
+                      setDraft(content);
+                      setMode('view');
+                    }}
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.primaryButton}
+                    disabled={saving || contentLoading || !canReplace}
+                    onClick={handleSave}
+                  >
+                    {saving ? t('memory.saving') : t('memory.save')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <pre className={styles.content}>
+                {contentLoading
+                  ? t('memory.loadingFile')
+                  : content || t('memory.noFiles')}
+              </pre>
+            )}
+          </>
         )}
       </section>
     </div>
