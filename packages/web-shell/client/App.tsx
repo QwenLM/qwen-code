@@ -1793,6 +1793,21 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'sideTask',
 ];
 /**
+ * Right-panel entries that work without a session; the empty new-task page
+ * offers only these.
+ */
+const EMPTY_STATE_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
+  'files',
+  'terminal',
+  'webPreview',
+];
+/**
+ * Key prefix backing the empty new-task page's panel state: one draft entry
+ * per workspace, migrated to the session's key when the first prompt
+ * materializes one.
+ */
+const DRAFT_PANEL_KEY_PREFIX = 'draft\0';
+/**
  * One trajectory tab per session, so re-opening an already-open one reveals it
  * rather than stacking a second. Shared with the entry, which hides itself
  * once this session's tab is open.
@@ -3460,6 +3475,11 @@ export function App({
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
+  // Workspace-scoped entries are the only ones usable before a session
+  // exists; the empty new-task page offers just those.
+  const emptyStateRightPanelItems = rightPanelItems.filter((item) =>
+    EMPTY_STATE_RIGHT_PANEL_ITEMS.includes(item),
+  );
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
@@ -4432,6 +4452,14 @@ export function App({
   const headerWorkspaceName = activeWorkspaceCwd
     ? workspaceLabelForCwd(activeWorkspaceCwd, ordinaryWorkspaces)
     : undefined;
+  // The artifact panel keys its state per session; the empty new-task page
+  // gets a per-workspace draft key so its files/terminal/web-preview tabs
+  // persist and restore like a session's.
+  const panelStateKey =
+    logicalSessionKey ??
+    (workspaceContextActive && activeWorkspaceCwd
+      ? `${DRAFT_PANEL_KEY_PREFIX}${activeWorkspaceCwd}`
+      : undefined);
   const workspaceWorkflowsEnabled =
     workspaces.find(
       (entry) =>
@@ -4838,8 +4866,7 @@ export function App({
     initialArtifactPanelPersistedStates,
   );
   const initialArtifactPanelOpen = Boolean(
-    logicalSessionKey &&
-      initialArtifactPanelPersistedStates[logicalSessionKey]?.open,
+    panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(
     initialArtifactPanelOpen,
@@ -5113,18 +5140,17 @@ export function App({
   }, [artifactPanelTabs, blocks, logicalSessionKey]);
   useLayoutEffect(() => {
     if (
-      !logicalSessionKey ||
-      artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey
+      !panelStateKey ||
+      artifactPanelRestoredSessionKeyRef.current !== panelStateKey
     )
       return;
     const previousPersistedState =
-      artifactPanelPersistedStatesRef.current[logicalSessionKey];
-    delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
+      artifactPanelPersistedStatesRef.current[panelStateKey];
+    delete artifactPanelPersistedStatesRef.current[panelStateKey];
     const serializedTabs = serializeArtifactPanelTabs(artifactPanelTabs);
     const deferredTabs =
-      artifactPanelDeferredPersistedTabsRef.current.get(logicalSessionKey) ??
-      [];
-    artifactPanelPersistedStatesRef.current[logicalSessionKey] = {
+      artifactPanelDeferredPersistedTabsRef.current.get(panelStateKey) ?? [];
+    artifactPanelPersistedStatesRef.current[panelStateKey] = {
       open: artifactPanelOpen,
       activeTabId:
         activeArtifactPanelTabId ??
@@ -5147,7 +5173,7 @@ export function App({
     activeArtifactPanelTabId,
     artifactPanelOpen,
     artifactPanelTabs,
-    logicalSessionKey,
+    panelStateKey,
   ]);
   const [reviewChanges, setReviewChanges] = useState<
     readonly TurnOutputFileChange[]
@@ -5194,7 +5220,14 @@ export function App({
   const artifactPanelStateBySessionRef = useRef(
     new Map<string, ArtifactPanelSessionState>(),
   );
-  const artifactPanelSessionIdRef = useRef(logicalSessionKey);
+  const artifactPanelSessionIdRef = useRef(panelStateKey);
+  // Set when a session materialized out of the empty new-task state and
+  // adopted the panel as-is; cleared on the next real session switch.
+  const artifactPanelAdoptedSessionRef = useRef<string | undefined>(undefined);
+  // Set when the lazy first-prompt creation allocates a session id: the panel
+  // effect then treats the draft→session transition as a migration (panel
+  // carries over, draft entry dropped) instead of a session switch.
+  const draftMaterializedSessionIdRef = useRef<string | undefined>(undefined);
   artifactPanelSessionStateRef.current = {
     open: artifactPanelOpen,
     tabs: artifactPanelTabs,
@@ -6524,7 +6557,7 @@ export function App({
     true;
   useLayoutEffect(() => {
     const previousSessionId = artifactPanelSessionIdRef.current;
-    const nextSessionId = logicalSessionKey;
+    const nextSessionId = panelStateKey;
     setArtifactPanelRestoring(false);
     if (
       previousSessionId &&
@@ -6577,15 +6610,69 @@ export function App({
         nextSavedState?.width ?? getDefaultReviewPanelWidth(),
       );
       setArtifactPanelFullscreen(false);
+      artifactPanelAdoptedSessionRef.current = undefined;
     }
 
     artifactPanelSessionIdRef.current = nextSessionId;
     if (!nextSessionId) {
       artifactPanelRestoredSessionKeyRef.current = undefined;
       setArtifactPanelRestoring(false);
-      setArtifactPanelOpen(false);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      // Steady no-key states keep an already-open panel usable; only a real
+      // key change (leaving a session, or a draft losing its workspace
+      // context) drops the live panel content — persisted entries survive.
+      if (previousSessionId !== nextSessionId) {
+        setArtifactPanelOpen(false);
+        setArtifactPanelTabs([]);
+        setActiveArtifactPanelTabId(null);
+      }
+      return;
+    }
+    if (
+      previousSessionId !== undefined &&
+      previousSessionId.startsWith(DRAFT_PANEL_KEY_PREFIX) &&
+      draftMaterializedSessionIdRef.current !== undefined &&
+      draftMaterializedSessionIdRef.current === connection.sessionId
+    ) {
+      // The first prompt consumed the draft: the panel carries into the new
+      // session, and the workspace's draft resets to empty for the next
+      // new-task visit.
+      draftMaterializedSessionIdRef.current = undefined;
+      artifactPanelStateBySessionRef.current.delete(previousSessionId);
+      delete artifactPanelPersistedStatesRef.current[previousSessionId];
+      // Deferred tabs belong to the draft too: move them under the session
+      // key so a capability flip can still restore them later.
+      const deferredDraftTabs =
+        artifactPanelDeferredPersistedTabsRef.current.get(previousSessionId) ??
+        [];
+      artifactPanelDeferredPersistedTabsRef.current.delete(previousSessionId);
+      if (deferredDraftTabs.length > 0) {
+        artifactPanelDeferredPersistedTabsRef.current.set(
+          nextSessionId,
+          deferredDraftTabs,
+        );
+      }
+      // Persist the carried-over state under the session key immediately: the
+      // persist writer already ran earlier in this commit (before this
+      // effect) and would otherwise leave the session unrecorded until the
+      // next panel change.
+      const carriedState = artifactPanelSessionStateRef.current;
+      if (carriedState) {
+        artifactPanelPersistedStatesRef.current[nextSessionId] = {
+          open: carriedState.open,
+          activeTabId: carriedState.activeTabId,
+          tabs: mergePersistedArtifactPanelTabs(
+            serializeArtifactPanelTabs(carriedState.tabs),
+            deferredDraftTabs,
+            undefined,
+          ),
+        };
+      }
+      writeStoredArtifactPanelStates(
+        RIGHT_PANEL_STATE_STORAGE_KEY,
+        artifactPanelPersistedStatesRef.current,
+      );
+      artifactPanelAdoptedSessionRef.current = nextSessionId;
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       return;
     }
     const newlyAvailableDeferredTab = (
@@ -6604,6 +6691,11 @@ export function App({
       !connection.loadingTranscript &&
       !newlyAvailableDeferredTab
     ) {
+      return;
+    }
+    if (artifactPanelAdoptedSessionRef.current === nextSessionId) {
+      // An adopted new-task panel stays untouched through the session's
+      // first load (transcript/artifact flips included).
       return;
     }
     const saveCurrentState = () => {
@@ -7033,7 +7125,7 @@ export function App({
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
-    logicalSessionKey,
+    panelStateKey,
     resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
@@ -10951,6 +11043,7 @@ export function App({
               await onSessionCreatedRef.current?.(sessionId);
             },
             onSessionAllocated: (sessionId) => {
+              draftMaterializedSessionIdRef.current = sessionId;
               notify?.(sessionId);
               preparingSessionIdRef.current = sessionId;
               allocatedSessionId = sessionId;
@@ -19377,6 +19470,20 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  // The empty new-task page shows a reduced built-in header: daemon and
+  // workspace scoped entries only, and only when at least one of them is
+  // actually available (the composer already names the workspace, so the
+  // header's workspace icon is hidden there). Custom renderChatHeader hosts
+  // keep the headerless empty state — their renderer expects a live session.
+  const emptyStateChatHeader =
+    isChatEmptyState &&
+    Boolean(header) &&
+    !renderChatHeader &&
+    workspaceContextActive &&
+    mainView === 'chat' &&
+    (emptyStateRightPanelItems.length > 0 ||
+      showMobileAccess ||
+      workspaceHostsEnabled);
   const handleAgentCollaborationError = useCallback(
     (message: string) => pushToast('error', message),
     [pushToast],
@@ -20149,7 +20256,7 @@ export function App({
     trajectoryTabId: connection.sessionId
       ? trajectoryTabId(connection.sessionId)
       : undefined,
-    items: rightPanelItems,
+    items: isChatEmptyState ? emptyStateRightPanelItems : rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
     sideTasksLoading,
@@ -21009,7 +21116,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                !isChatEmptyState &&
+                (!isChatEmptyState || emptyStateChatHeader) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -21089,21 +21196,26 @@ export function App({
                         ) : undefined
                       }
                       content={
-                        titleHeaderItemVisible
+                        titleHeaderItemVisible && !isChatEmptyState
                           ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
                       workspacePath={activeWorkspaceCwd}
+                      hideWorkspaceIcon={isChatEmptyState}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={
-                        mainView === 'chat' && environmentHeaderItemVisible
+                        !isChatEmptyState &&
+                        mainView === 'chat' &&
+                        environmentHeaderItemVisible
                       }
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
                         mainView === 'chat' &&
                         rightPanelHeaderItemVisible &&
-                        !artifactPanelOpen
+                        !artifactPanelOpen &&
+                        (!isChatEmptyState ||
+                          emptyStateRightPanelItems.length > 0)
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -21181,19 +21293,13 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || isChatEmptyState) &&
+                (!chatHeaderEnabled ||
+                  (isChatEmptyState && !emptyStateChatHeader)) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
-                    className={[
-                      styles.hamburgerButton,
-                      !chatHeaderEnabled || isChatEmptyState
-                        ? styles.hamburgerButtonFloating
-                        : undefined,
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                    className={`${styles.hamburgerButton} ${styles.hamburgerButtonFloating}`}
                     onClick={() => {
                       setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
