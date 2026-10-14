@@ -17,38 +17,6 @@ class ManagedSchemaCatalogTest {
     private static final String BODY = "\n    CONSTRAINT ck_probe CHECK (state = 'OK')\n";
 
     @Test
-    void acceptsNumericCsiGuardFallbackWithoutAcceptingExpressionDrift() throws Exception {
-        String expression = "COALESCE(tool_profile = 'csi-files-retirement/1'"
-                + " OR runtime_request_key IS NOT NULL, FALSE)";
-        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (" + expression + ")\n";
-        String numeric = expression.replace("FALSE", "0");
-        try (var data = fixture(false); var update = data.prepareStatement(
-                "UPDATE catalog_fixture.columns SET generation_expression=?")) {
-            Connection connection = mariaDb(data, "MySQL", 1, 1);
-            for (String equivalent : new String[] {expression, numeric}) {
-                update.setString(1, equivalent);
-                update.executeUpdate();
-                ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body);
-            }
-            for (String changed : new String[] {
-                    numeric.replace(", 0", ", 1"),
-                    numeric.replace(", 0", ", TRUE"),
-                    numeric.replace(", 0", ", 'FALSE'"),
-                    numeric.replace(" OR ", " AND "),
-                    numeric.replace(" = ", " <> "),
-                    numeric.replace("retirement/1", "retirement/2"),
-                    "COALESCE(0, tool_profile = 'csi-files-retirement/1'"
-                            + " OR runtime_request_key IS NOT NULL)"}) {
-                update.setString(1, changed);
-                update.executeUpdate();
-                assertThrows(SQLException.class,
-                        () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body),
-                        changed);
-            }
-        }
-    }
-
-    @Test
     void acceptsMariaDbMetadataWithEitherDriverProductName() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false)) {
@@ -82,6 +50,45 @@ class ManagedSchemaCatalogTest {
                 update.executeUpdate();
                 assertThrows(SQLException.class,
                         () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body),
+                        changed);
+            }
+        }
+    }
+
+    @Test
+    void acceptsNumericBooleanGeneratedColumnsWithoutAcceptingExpressionDrift() throws Exception {
+        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE(tool_profile ="
+                + " 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
+        String mariaDb = "coalesce(`tool_profile` = 'csi-files-retirement/1' or"
+                + " `runtime_request_key` is not null,0)";
+        String mySql = "coalesce(((`tool_profile` = _utf8mb4\\'csi-files-retirement/1\\') or"
+                + " (`runtime_request_key` is not null)),false)";
+        try (var data = fixture(false)) {
+            try (var statement = data.createStatement()) {
+                statement.execute("CREATE TABLE catalog_fixture.columns (table_schema VARCHAR,"
+                        + " table_name VARCHAR, column_name VARCHAR, generation_expression VARCHAR)");
+                statement.execute("INSERT INTO catalog_fixture.columns"
+                        + " VALUES ('PUBLIC','MA_SESSION','CSI_GUARD',NULL)");
+            }
+            var update = data.prepareStatement(
+                    "UPDATE catalog_fixture.columns SET generation_expression=?");
+            Connection connection = mariaDb(data, "MariaDB", 1, 1);
+            for (String stored : new String[] {mariaDb, mySql}) {
+                update.setString(1, stored);
+                update.executeUpdate();
+                ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body);
+            }
+            for (String changed : new String[] {
+                    mariaDb.replace(",0)", ",1)"),
+                    mySql.replace(",false)", ",true)"),
+                    mariaDb.replace("/1'", "/2'"),
+                    mariaDb.replace("is not null", "is null"),
+                    mariaDb.replace(" or ", " and ")}) {
+                update.setString(1, changed);
+                update.executeUpdate();
+                assertThrows(SQLException.class,
+                        () -> ManagedSchemaCatalog.validateGeneratedColumns(
+                                connection, "ma_session", body),
                         changed);
             }
         }
@@ -135,10 +142,6 @@ class ManagedSchemaCatalogTest {
         Connection data = DriverManager.getConnection("jdbc:h2:mem:catalog-" + UUID.randomUUID());
         try (var statement = data.createStatement()) {
             statement.execute("CREATE SCHEMA catalog_fixture");
-            statement.execute("CREATE TABLE catalog_fixture.columns (column_name VARCHAR,"
-                    + " generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
-            statement.execute("INSERT INTO catalog_fixture.columns"
-                    + " VALUES ('CSI_GUARD', '', 'PUBLIC', 'MA_SESSION')");
             statement.execute("CREATE TABLE catalog_fixture.table_constraints"
                     + " (constraint_name VARCHAR, constraint_schema VARCHAR, table_schema VARCHAR,"
                     + " table_name VARCHAR, constraint_type VARCHAR"
@@ -181,8 +184,8 @@ class ManagedSchemaCatalogTest {
                                                 + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
                                                 + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
                                         : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
-                                        .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns")
-                                        .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints");
+                                        .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints")
+                                        .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns");
                     }
                     return invoke(method, data, args);
                 });
