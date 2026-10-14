@@ -685,11 +685,6 @@ export interface LlmPreparedRequest {
   providerPin: string;
   promptTokensForClamp: number;
   allowPersistentRetry?: boolean;
-  /**
-   * The caller set `maxOutputTokens` itself. Otherwise the saved value is the
-   * automatic window clamp, and a replay must still allow MAX_TOKENS recovery.
-   */
-  userMaxOutputTokens?: boolean;
 }
 export type LlmPreparedRequestCallback = ((
   prepared: LlmPreparedRequest,
@@ -3674,35 +3669,37 @@ export class LlmChat {
       parsedEnvMaxTokensForClamp;
     const outputCeiling: number =
       explicitOutputCeiling ?? defaultOutputCeiling(model);
-    // A replayed request carries the first send's automatic clamp in
-    // params.config.maxOutputTokens; only a caller-set value is a user cap.
-    const savedRequest = options?.preparedRequest;
-    const userMaxOutputTokens =
-      !options?.maxOutputTokensFromRecovery &&
-      (savedRequest
-        ? savedRequest.userMaxOutputTokens === true
-        : params.config?.maxOutputTokens !== undefined);
-    const userOutputCeiling: number | undefined =
-      (userMaxOutputTokens ? params.config?.maxOutputTokens : undefined) ??
-      cgConfigForThresholds?.samplingParams?.max_tokens ??
-      parsedEnvMaxTokensForClamp;
-    const onPreparedRequest =
-      userMaxOutputTokens && options?.onPreparedRequest
-        ? Object.assign(
-            (prepared: LlmPreparedRequest, captureUnsupported?: boolean) =>
-              options.onPreparedRequest!(
-                { ...prepared, userMaxOutputTokens: true },
-                captureUnsupported,
-              ),
-            { maxSnapshotBytes: options.onPreparedRequest.maxSnapshotBytes },
-          )
-        : options?.onPreparedRequest;
     // Declared at function level so the MAX_TOKENS escalation path inside
     // the generator closure can re-clamp against the same window and prompt
     // estimate.
     const contextWindowForClamp =
       cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
     let promptTokensForClamp = 0;
+    // A replayed request carries the first send's automatic clamp (or the
+    // automatic escalation limit) in params.config.maxOutputTokens. Recompute
+    // both from the saved prompt estimate: a matching value is automatic and
+    // must not disable MAX_TOKENS recovery; any other value is a caller cap.
+    const savedRequest = options?.preparedRequest;
+    const savedMaxOutputTokens = savedRequest
+      ? params.config?.maxOutputTokens
+      : undefined;
+    const replaysAutomaticOutputLimit =
+      savedRequest !== undefined &&
+      savedMaxOutputTokens !== undefined &&
+      [defaultOutputCeiling(model), OUTPUT_TOKEN_CEILING].some(
+        (ceiling) =>
+          clampOutputTokensToWindow(
+            ceiling,
+            contextWindowForClamp,
+            savedRequest.promptTokensForClamp,
+          ) === savedMaxOutputTokens,
+      );
+    const userOutputCeiling: number | undefined =
+      (replaysAutomaticOutputLimit
+        ? undefined
+        : params.config?.maxOutputTokens) ??
+      cgConfigForThresholds?.samplingParams?.max_tokens ??
+      parsedEnvMaxTokensForClamp;
 
     const previousGenerationConfig = options?.preparedRequest
       ? this.generationConfig
@@ -4390,7 +4387,7 @@ export class LlmChat {
               () => {
                 terminalMutationAborted = true;
               },
-              onPreparedRequest,
+              options?.onPreparedRequest,
               promptTokensForClamp,
             );
             streamEstablished = true;
@@ -5519,7 +5516,7 @@ export class LlmChat {
                 attemptState.onModelTurnCommitted,
                 false,
                 undefined,
-                onPreparedRequest,
+                options?.onPreparedRequest,
                 promptTokensForClamp,
                 retryEvent.isContinuation === true,
               );
@@ -6503,7 +6500,7 @@ export class LlmChat {
                     fallbackRetryErrorCodes,
                     requestRouteKey,
                     turnGoalContext,
-                    onPreparedRequest,
+                    options?.onPreparedRequest,
                     promptTokensForClamp,
                     fallbackConfig,
                   )) {

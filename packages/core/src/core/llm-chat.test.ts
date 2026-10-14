@@ -36,6 +36,11 @@ import {
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
 import {
+  clampOutputTokensToWindow,
+  DEFAULT_TOKEN_LIMIT,
+  OUTPUT_TOKEN_CEILING,
+} from './tokenLimits.js';
+import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
@@ -11637,6 +11642,16 @@ describe('LlmChat', async () => {
     });
 
     describe('prepared request replay', () => {
+      const PREPARED_KEYS = [
+        'allowPersistentRetry',
+        'completedToolCallIds',
+        'history',
+        'promptTokensForClamp',
+        'providerPin',
+        'request',
+        'routeSelector',
+      ];
+
       function routeReplayToTestModel() {
         const routeConfig = {
           model: 'test-model',
@@ -11650,6 +11665,28 @@ describe('LlmChat', async () => {
             contentGeneratorConfig: routeConfig,
           }),
         } as unknown as ReturnType<Config['getBaseLlmClient']>);
+        return routeConfig;
+      }
+
+      async function replayAgainstMaxTokens(saved: LlmPreparedRequest) {
+        const streams = [
+          makeStream([makeChunk([{ text: 'first' }], 'MAX_TOKENS')]),
+          makeStream([makeChunk([{ text: ' second' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(mockContentGenerator.generateContentStream).mockReset();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+        const replayChat = newChat();
+        const events: StreamEvent[] = [];
+        for await (const event of await replayChat.sendPreparedMessageStream(
+          saved,
+          'replay-capture',
+          new AbortController().signal,
+        ))
+          events.push(event);
+        return { events, replayChat };
       }
 
       async function captureAndReplay(config?: GenerateContentConfig) {
@@ -11673,31 +11710,33 @@ describe('LlmChat', async () => {
             },
           ),
         );
-        const streams = [
-          makeStream([makeChunk([{ text: 'first' }], 'MAX_TOKENS')]),
-          makeStream([makeChunk([{ text: ' second' }], 'STOP')]),
-        ];
-        let callIndex = 0;
-        vi.mocked(mockContentGenerator.generateContentStream).mockReset();
-        vi.mocked(
-          mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => streams[callIndex++]!);
-        const replayChat = newChat();
-        const events: StreamEvent[] = [];
-        for await (const event of await replayChat.sendPreparedMessageStream(
-          saved!,
-          'replay-capture',
-          new AbortController().signal,
-        ))
-          events.push(event);
-        return { saved: saved!, events, replayChat };
+        return { saved: saved!, ...(await replayAgainstMaxTokens(saved!)) };
+      }
+
+      function existingSchemaSnapshot(
+        maxOutputTokens: number,
+      ): LlmPreparedRequest {
+        const routeConfig = routeReplayToTestModel();
+        return {
+          request: {
+            model: 'test-model',
+            contents: [userText('essay')],
+            config: { maxOutputTokens },
+          },
+          history: [userText('essay')],
+          completedToolCallIds: [],
+          routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+          providerPin: llmPreparedProviderPin(routeConfig),
+          promptTokensForClamp: 15,
+          allowPersistentRetry: true,
+        };
       }
 
       it('recovers from MAX_TOKENS when the saved cap is the automatic clamp', async () => {
         const { saved, events, replayChat } = await captureAndReplay();
 
+        expect(Object.keys(saved).sort()).toEqual(PREPARED_KEYS);
         expect(saved.request.config.maxOutputTokens).toBeGreaterThan(0);
-        expect(saved.userMaxOutputTokens).toBeUndefined();
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(2);
@@ -11712,7 +11751,7 @@ describe('LlmChat', async () => {
           maxOutputTokens: 1024,
         });
 
-        expect(saved.userMaxOutputTokens).toBe(true);
+        expect(Object.keys(saved).sort()).toEqual(PREPARED_KEYS);
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledOnce();
@@ -11720,6 +11759,40 @@ describe('LlmChat', async () => {
           events.some((event) => event.type === StreamEventType.RETRY),
         ).toBe(false);
         expect(replayChat.getLastModelMessageText()).toBe('first');
+      });
+
+      it('honors a caller cap in an existing-schema snapshot', async () => {
+        const { events, replayChat } = await replayAgainstMaxTokens(
+          existingSchemaSnapshot(1024),
+        );
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledOnce();
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(false);
+        expect(replayChat.getLastModelMessageText()).toBe('first');
+      });
+
+      it('recovers an existing-schema snapshot saved at the automatic escalation limit', async () => {
+        const { events, replayChat } = await replayAgainstMaxTokens(
+          existingSchemaSnapshot(
+            clampOutputTokensToWindow(
+              OUTPUT_TOKEN_CEILING,
+              DEFAULT_TOKEN_LIMIT,
+              15,
+            ),
+          ),
+        );
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(replayChat.getLastModelMessageText()).toContain('second');
       });
     });
 
