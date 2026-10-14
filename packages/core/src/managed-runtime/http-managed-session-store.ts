@@ -1806,6 +1806,29 @@ export function collectNestedResourceRefs(
   if (ref.kind === MANAGED_MESSAGE_CHUNKS_KIND) {
     return managedMessageChunkParts(ref.kind, bytes);
   }
+  if (ref.kind === 'managed-tool-outcome-chunks') {
+    const manifest = asRecord(
+      JSON.parse(bytes.toString('utf8')),
+      'outcome chunks',
+    );
+    if (Object.keys(manifest).length !== 1 || !('parts' in manifest)) {
+      throw corrupt('outcome chunk manifest fields conflict.');
+    }
+    const parts = asArray(manifest['parts'], 'outcome parts');
+    if (parts.length < 2 || parts.length > 69) {
+      throw corrupt('outcome chunk count exceeds its bounds.');
+    }
+    return parts.map((part) => {
+      const checked = assertManagedSessionDurableRef(
+        part as ManagedSessionJsonValue,
+        'outcome chunk part',
+      );
+      if (checked.kind !== 'managed-tool-outcome-part') {
+        throw corrupt('outcome chunks must reference outcome parts.');
+      }
+      return checked;
+    });
+  }
   if (ref.kind === 'managed-checkpoint') {
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
@@ -1872,6 +1895,7 @@ function isReferenceContainer(kind: string): boolean {
       'managed-hook-plan',
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
+      'managed-tool-outcome-chunks',
     ].includes(kind)
   );
 }

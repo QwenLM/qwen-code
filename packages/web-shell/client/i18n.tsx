@@ -22,6 +22,10 @@ import {
 import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_ZH,
+} from './mcp-app/messages.js';
+import {
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
@@ -4349,6 +4353,7 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...BROWSER_NOTIFICATION_MESSAGES_EN,
+  ...MCP_APP_MESSAGES_EN,
   ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
@@ -8398,6 +8403,7 @@ const ZH: Messages = {
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...BROWSER_NOTIFICATION_MESSAGES_ZH,
+  ...MCP_APP_MESSAGES_ZH,
   ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,

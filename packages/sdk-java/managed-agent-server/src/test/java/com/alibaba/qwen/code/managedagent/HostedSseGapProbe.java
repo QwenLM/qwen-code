@@ -162,12 +162,12 @@ final class HostedSseGapProbe implements AutoCloseable {
         var execution = rows.getFirst();
         if (!finished) executionId = execution.get("execution_call_id").toString();
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
-        String storageId = "storage-0";
-        var owner = jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o"
-                + " JOIN ma_storage s ON s.physical_key = o.storage_key"
-                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
-                tenant, storageId);
+        String storage = "storage-0";
+        var owner = jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
+                + " AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
         if (finished) assertThat(owner.get("holder_key")).isNull();
         else {
             assertThat(owner.get("holder_key")).isNotNull();

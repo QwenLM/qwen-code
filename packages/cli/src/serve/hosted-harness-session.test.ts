@@ -1272,6 +1272,84 @@ describe('Hosted Harness no-tool session', () => {
     await rm(state.root, { recursive: true, force: true });
   });
 
+  it('re-answers a drive takeover while the resident model turn is active', async () => {
+    let releaseModel!: () => void;
+    let markFirstChunk!: () => void;
+    const modelHeld = new Promise<void>((resolve) => {
+      releaseModel = resolve;
+    });
+    const firstChunk = new Promise<void>((resolve) => {
+      markFirstChunk = resolve;
+    });
+    const text = 'COORDINATOR_RECOVERED';
+    state.model.mockImplementationOnce(async ({ textDeltas }) => {
+      await textDeltas!.delta('COORDINATOR_');
+      markFirstChunk();
+      await modelHeld;
+      await textDeltas!.delta('RECOVERED');
+      return { text, model: 'test-model' };
+    });
+
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'COORDINATOR_ONLY' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await firstChunk;
+
+    const load = () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        driveRuntimeRecovery: true,
+      });
+    const takeover = await load();
+    expect(takeover.status).toBe(200);
+    expect(takeover.body.clientId).toBe(created.body.clientId);
+    const redriven = await load();
+    expect(redriven.status).toBe(200);
+    expect(redriven.body).toMatchObject({
+      clientId: takeover.body.clientId,
+      eventEpoch: takeover.body.eventEpoch,
+      lastEventId: takeover.body.lastEventId,
+    });
+    expect(state.model).toHaveBeenCalledTimes(1);
+
+    releaseModel();
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
+    ).set('X-Qwen-Client-Id', created.body.clientId as string);
+    expectFullStreamedAnswer(transcript.body, text);
+    expect(
+      transcript.body.events.filter((event: { type: string }) =>
+        ['turn_complete', 'turn_error'].includes(event.type),
+      ),
+    ).toHaveLength(1);
+    expect(state.model).toHaveBeenCalledTimes(1);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+  });
+
   it.each(['close', 'delete'] as const)(
     'settles %s lifecycle Hooks once and retains the attachment until detach',
     async (kind) => {
@@ -18817,6 +18895,17 @@ describe('Hosted Harness refusal reasons', () => {
     await headers(
       supertest(result).delete(`/session/${DECLINE_SESSION}`),
     ).expect(204);
+    // R3-1's stamp needs a shape that still declines: a durably blocked
+    // checkpoint verdict keeps its typed terminal (`checkpoint_blocked`)
+    // where the journal-only park above now settles (#13847).
+    const blockedVerdict = {
+      status: 'blocked',
+      reason: 'opaque_state',
+    };
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue(blockedVerdict as never);
     const declined = await headers(
       supertest(result).post(`/session/${DECLINE_SESSION}/load`),
     ).send({
@@ -18826,13 +18915,13 @@ describe('Hosted Harness refusal reasons', () => {
     });
     expect(declined.status).toBe(409);
     expect(declined.body.code).toBe('hosted_turn_recovery_declined');
-    expect(declined.body.reason).toBe('unresolved_after_settle');
+    expect(declined.body.reason).toBe('checkpoint_blocked');
     expect(logger.warn).toHaveBeenCalledWith(
       'request completed',
       expect.objectContaining({
         status: 409,
         code: 'hosted_turn_recovery_declined',
-        reason: 'unresolved_after_settle',
+        reason: 'checkpoint_blocked',
       }),
     );
   });
@@ -24316,21 +24405,31 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
-  it('refuses a takeover whose parked turn is not a Runtime wait', async () => {
+  it('settles a takeover whose parked turn holds nothing unanswerable (#13847)', async () => {
     await parkBlockedTextTurn(true);
     const server = await replacementApp();
-    const loaded = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({
+    const loadBody = {
       managedSessionStore: storeFor(BOOT_ID_2),
       toolProfile: FILE_PROFILE,
       driveRuntimeRecovery: true,
-    });
-    // G3: a park that never reached the Runtime is a typed terminal
-    // decline, not a retriable refusal — retrying can never change it.
+    };
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(loadBody);
+    // G3 declined this park terminally and bricked the Session. #13847
+    // settles it instead: the interrupted Turn owes no Runtime work and
+    // nothing the takeover cannot answer, so it is cancelled durably and
+    // this drive keeps only the plain retriable refusal…
     expect(loaded.status).toBe(409);
-    expect(loaded.body.code).toBe('hosted_turn_recovery_declined');
-    expect(loaded.body.reason).toBe('unresolved_after_settle');
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('takeover_unrecovered');
+    // …and the next drive attaches, because the Turn's settle landed the
+    // input: the Session is never bricked.
+    const reloaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(loadBody);
+    expect(reloaded.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
   async function loadParkedRecovery() {
