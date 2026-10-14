@@ -1190,3 +1190,13 @@ CREATE TABLE ma_csi_physical (
 
 CREATE UNIQUE INDEX uq_ma_csi_physical_binding ON ma_csi_physical (binding_id);
 CREATE INDEX ix_ma_csi_physical_key ON ma_csi_physical (physical_key);
+
+
+-- Runtime history cleanup uses these predicates without scanning active families.
+CREATE INDEX ix_ma_runtime_retention ON ma_runtime_binding (binding_state, last_active_at, binding_id);
+
+CREATE INDEX ix_ma_runtime_tenant_state ON ma_runtime_binding (tenant_id, binding_state);
+
+CREATE INDEX ix_ma_capture_execution ON ma_output_capture (execution_key);
+
+CREATE INDEX ix_ma_work_execution ON ma_operation_work (work_kind, target_key, operation_key);

@@ -143,6 +143,107 @@ class ToolPublicationStoreTest {
         return source;
     }
 
+    @Test
+    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var publisher = new TransactionTemplate(manager).execute(status -> {
+                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
+                String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
+                jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
+                        + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
+                jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
+                        tenantKey);
+                var entered = new CountDownLatch(1);
+                var pending = pool.submit(() -> {
+                    entered.countDown();
+                    return reserve();
+                });
+                try {
+                    assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                    assertThatThrownBy(() -> pending.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
+                            .isInstanceOf(java.util.concurrent.TimeoutException.class);
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+                RuntimeBindingRecord original = jdbc.execute(
+                        (org.springframework.jdbc.core.ConnectionCallback<RuntimeBindingRecord>) connection ->
+                                bindings.findByIdForUpdate(connection, "binding-1"));
+                assertThat(original.getBindingId()).isEqualTo("binding-1");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();
+                return pending;
+            });
+            assertThat(publisher.get(3, java.util.concurrent.TimeUnit.SECONDS).path("publicationId").asText())
+                    .isEqualTo("pub-1");
+        }
+    }
+
+    @Test
+    void localReservationHoldsBothBrokerRowsUntilThePublicationCommits() throws Exception {
+        var reserved = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(3)) {
+            var publisher = pool.submit(() -> new TransactionTemplate(manager).execute(status -> {
+                JsonNode grant = reserve();
+                reserved.countDown();
+                try {
+                    assertThat(release.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+                return grant;
+            }));
+            try {
+                assertThat(reserved.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                var bindingLock = pool.submit(() -> jdbc.queryForList(
+                        "SELECT binding_id FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE", "binding-1"));
+                var executionLock = pool.submit(() -> jdbc.queryForList(
+                        "SELECT execution_call_id FROM ma_tool_execution WHERE execution_call_id = ? FOR UPDATE", "execution-1"));
+                for (var contender : List.of(bindingLock, executionLock)) {
+                    assertThatThrownBy(() -> contender.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
+                            .isInstanceOf(java.util.concurrent.TimeoutException.class);
+                }
+                release.countDown();
+                assertThat(publisher.get(3, java.util.concurrent.TimeUnit.SECONDS).path("publicationId").asText())
+                        .isEqualTo("pub-1");
+                assertThat(bindingLock.get(3, java.util.concurrent.TimeUnit.SECONDS)).hasSize(1);
+                assertThat(executionLock.get(3, java.util.concurrent.TimeUnit.SECONDS)).hasSize(1);
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void localReservationRechecksBindingAfterWaitingForRetirement() throws Exception {
+        try (var connection = jdbc.getDataSource().getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            connection.setAutoCommit(false);
+            bindings.findByIdForUpdate(connection, "binding-1");
+            var entered = new CountDownLatch(1);
+            var publisher = pool.submit(() -> {
+                entered.countDown();
+                return reserve();
+            });
+            try {
+                assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                assertThatThrownBy(() -> publisher.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
+                        .isInstanceOf(java.util.concurrent.TimeoutException.class);
+                try (var statement = connection.prepareStatement("UPDATE ma_runtime_binding"
+                        + " SET binding_state = 'RELEASED' WHERE binding_id = ?")) {
+                    statement.setBytes(1, "binding-1".getBytes(StandardCharsets.UTF_8));
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                assertThatThrownBy(() -> publisher.get(3, java.util.concurrent.TimeUnit.SECONDS))
+                        .hasRootCauseMessage("Runtime cannot authorize publication");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();
+            } finally {
+                connection.rollback();
+            }
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"0.5,false", "1.0,false", "0.0,false", "-0.0,false",
             "0.5,true", "1.0,true", "0.0,true", "-0.0,true"})
@@ -341,10 +442,11 @@ class ToolPublicationStoreTest {
     void privateHistoricalPublicationRefusesLegacyProduction(String profile, String operation) {
         reserve();
         // Unsupported saved legacy history is not native writer authority.
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
-                        + " runtime_request_key, created_at, updated_at) VALUES ('tenant-1', 'session-1',"
-                        + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
-        jdbc.update("DELETE FROM qwen_tool_publication_tenant");
+        jdbc.update("UPDATE ma_session SET tool_profile = ?, runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?",
+                profile, "full".equals(profile) ? "a".repeat(64) : null,
+                "tenant-1".getBytes(StandardCharsets.UTF_8), "session-1".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("DELETE FROM ma_tenant_guard WHERE tenant_key = ? AND guard_domain = 'output_publication'",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant-1"));
         var before = producerTables();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
@@ -386,11 +488,12 @@ class ToolPublicationStoreTest {
     @ValueSource(strings = {"csi-files-retirement/1", "full"})
     void producerExclusionUsesStoredTargetBeforeBindingScope(String profile) {
         reserve();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, tool_profile,"
                         + " runtime_request_key, created_at, updated_at) VALUES ('tenant-1', 'private-target',"
                         + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
-        jdbc.update("UPDATE qwen_tool_publication SET session_id = 'private-target' WHERE publication_id = 'pub-1'");
-        jdbc.update("DELETE FROM qwen_tool_publication_tenant");
+        jdbc.update("UPDATE ma_output_capture SET session_id = 'private-target' WHERE publication_id = X'7075622d31'");
+        jdbc.update("DELETE FROM ma_tenant_guard WHERE tenant_key = ? AND guard_domain = 'output_publication'",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant-1"));
         var before = producerTables();
         assertThatThrownBy(() -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN)).isInstanceOfSatisfying(ApiException.class,
@@ -400,7 +503,7 @@ class ToolPublicationStoreTest {
 
     private Map<String, List<Map<String, Object>>> producerTables() {
         var result = new java.util.TreeMap<String, List<Map<String, Object>>>();
-        for (String table : List.of("ma_tenant_guard", "ma_session_head",
+        for (String table : List.of("ma_tenant_guard", "ma_session", "ma_session_head",
                 "ma_output_capture", "ma_resource", "ma_operation",
                 "ma_resource_ref")) {
             result.put(table, jdbc.queryForList("SELECT * FROM " + table));
@@ -602,8 +705,19 @@ class ToolPublicationStoreTest {
                     : first.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null));
             try {
                 assertThat(written.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                jdbc.update("UPDATE ma_operation SET deadline ="
-                        + " TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = X'6f726967696e616c'");
+                String outputKind = terminal ? "OUTPUT_FINISH" : "OUTPUT_UPLOAD";
+                var originalOutput = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = ? AND operation_id = ?",
+                        outputKind, "original".getBytes(StandardCharsets.UTF_8));
+                String outputKey = (String) originalOutput.get("operation_key");
+                var originalPut = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'");
+                assertThat(originalPut.get("state")).isEqualTo("IN_FLIGHT");
+                assertThat(originalPut.get("operation_key")).isEqualTo(
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.OBJECT_PUT,
+                                (String) originalPut.get("scope_key"), (String) originalPut.get("target_key"),
+                                (String) originalPut.get("operation_id")));
+                jdbc.update("UPDATE ma_operation SET deadline = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6))"
+                        + " WHERE operation_key = ? AND operation_kind = ?", outputKey, outputKind);
                 var originalDeadline = jdbc.queryForObject("SELECT deadline FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
                         + " AND operation_id = X'6f726967696e616c'", java.sql.Timestamp.class);
                 var before = jdbc.queryForMap("SELECT capture_object_key AS object_key, resource_id, byte_length, sha256, operation_id"
@@ -619,8 +733,14 @@ class ToolPublicationStoreTest {
                 }).isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
                 var recoveryStarted = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class);
+                var capacityBeforeRecovery = jdbc.queryForMap("SELECT capture_held_bytes,producer_held_bytes,admission_held_bytes,"
+                        + "capture_used_bytes,producer_used_bytes,admission_used_bytes FROM ma_output_capture WHERE publication_id = ?",
+                        "pub-1".getBytes(StandardCharsets.UTF_8));
                 assertThat(replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("RETRYABLE");
+                assertThat(jdbc.queryForMap("SELECT capture_held_bytes,producer_held_bytes,admission_held_bytes,"
+                        + "capture_used_bytes,producer_used_bytes,admission_used_bytes FROM ma_output_capture WHERE publication_id = ?",
+                        "pub-1".getBytes(StandardCharsets.UTF_8))).isEqualTo(capacityBeforeRecovery);
                 var recoveryFinished = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class);
                 var recoveryDeadline = jdbc.queryForObject("SELECT recovery_deadline FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
                         + " AND operation_id = X'6f726967696e616c'", java.sql.Timestamp.class);
@@ -656,9 +776,30 @@ class ToolPublicationStoreTest {
                 assertThat(writes).hasValue(1);
                 assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'",
                         String.class)).isEqualTo("RETURNED");
+                var recoveredPut = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind = 'OBJECT_PUT'",
+                        originalPut.get("operation_key"));
+                for (String field : List.of("operation_key", "operation_id", "operation_kind", "scope_key", "session_scope_key",
+                        "tenant_id", "workspace_id", "session_id", "publication_id", "target_key", "request_json", "request_digest",
+                        "phase", "claim_generation", "created_at")) {
+                    assertThat(recoveredPut.get(field)).as(field).isEqualTo(originalPut.get(field));
+                }
+                JsonNode proof = JSON.readTree((String) recoveredPut.get("result_json"));
+                assertThat(proof).isEqualTo(JSON.createObjectNode().put("version", 1).put("proof", "original_object")
+                        .put("objectKey", before.get("object_key").toString()).put("byteLength", bytes.length)
+                        .put("sha256", ToolPublicationContract.sha256(bytes)));
+                var outputBeforeLateReply = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ?", outputKey);
+                var captureBeforeLateReply = jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = ?",
+                        "pub-1".getBytes(StandardCharsets.UTF_8));
                 release.countDown();
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
-                        .hasCauseInstanceOf(ApiException.class);
+                        .hasCauseInstanceOf(IllegalArgumentException.class).hasRootCauseMessage("PUT attempt conflicts");
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ?", originalPut.get("operation_key")))
+                        .usingRecursiveComparison().isEqualTo(recoveredPut);
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ?", outputKey))
+                        .usingRecursiveComparison().isEqualTo(outputBeforeLateReply);
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = ?", "pub-1".getBytes(StandardCharsets.UTF_8)))
+                        .usingRecursiveComparison().isEqualTo(captureBeforeLateReply);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'", Long.class)).isEqualTo(1);
                 JsonNode receipt = terminal
                         ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
                         : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
@@ -2254,17 +2395,17 @@ class ToolPublicationStoreTest {
         ObjectNode second = addSecondExecution();
         reserve();
         seedPrivateExpiredPublication(profile);
-        jdbc.update("UPDATE qwen_tool_publication SET expires_at = 1 WHERE publication_id = 'pub-1'");
-        var privateBefore = jdbc.queryForMap("SELECT * FROM qwen_tool_publication WHERE publication_id = 'private-publication'");
+        jdbc.update("UPDATE ma_output_capture SET expires_at = 1 WHERE publication_id = X'7075622d31'");
+        var privateBefore = jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = X'707269766174652d7075626c69636174696f6e'");
         store = newStore(2 * ALLOCATION, 2);
         ObjectNode next = request("reserve");
         next.set("binding", second);
         assertThat(store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText()).isEqualTo("OPEN");
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication WHERE publication_id = 'pub-1'", String.class))
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_output_capture WHERE publication_id = X'7075622d31'", String.class))
                 .isEqualTo("FENCED");
         assertThat(jdbc.queryForObject("SELECT capture_held_bytes + producer_held_bytes + admission_held_bytes"
-                + " FROM qwen_tool_publication WHERE publication_id = 'pub-1'", Long.class)).isZero();
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication WHERE publication_id = 'private-publication'"))
+                + " FROM ma_output_capture WHERE publication_id = X'7075622d31'", Long.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = X'707269766174652d7075626c69636174696f6e'"))
                 .usingRecursiveComparison().isEqualTo(privateBefore);
     }
 
@@ -2274,29 +2415,29 @@ class ToolPublicationStoreTest {
         ObjectNode second = addSecondExecution();
         reserve();
         seedPrivateExpiredPublication("full");
-        jdbc.update("UPDATE qwen_tool_publication SET expires_at = 1 WHERE publication_id = 'pub-1'");
-        var before = jdbc.queryForList("SELECT * FROM qwen_tool_publication ORDER BY publication_id");
+        jdbc.update("UPDATE ma_output_capture SET expires_at = 1 WHERE publication_id = X'7075622d31'");
+        var before = jdbc.queryForList("SELECT * FROM ma_output_capture ORDER BY publication_id");
         store = newStore("bytes".equals(capacity) ? ALLOCATION : 3 * ALLOCATION,
                 "captures".equals(capacity) ? 1 : 4);
         ObjectNode next = request("reserve");
         next.set("binding", second);
         assertThatThrownBy(() -> store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN)).hasMessageContaining("capacity exhausted");
-        assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication ORDER BY publication_id"))
+        assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture ORDER BY publication_id"))
                 .usingRecursiveComparison().isEqualTo(before);
     }
 
     private void seedPrivateExpiredPublication(String profile) {
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, tool_profile,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, tool_profile,"
                         + " runtime_request_key, created_at, updated_at) VALUES ('tenant-1', 'private-session',"
                         + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                         + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                         + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
                         + " producer_held_bytes, admission_held_bytes, write_evidence)"
                         + " SELECT ?, tenant_key, tenant_id, workspace_id, 'private-session', 'private-publication',"
                         + " ?, 'private-capture', binding_json, binding_digest, token_hash, 'OPEN', 1, capture_bytes,"
                         + " producer_bytes, admission_bytes, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
-                        + " write_evidence FROM qwen_tool_publication WHERE publication_id = 'pub-1'",
+                        + " write_evidence FROM ma_output_capture WHERE publication_id = X'7075622d31'",
                 digest("private-scope"), digest("private-execution"));
     }
 

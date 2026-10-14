@@ -92,5 +92,5 @@ qualification. Restricted acceptance remains recorded as incomplete.
 This port does not install a collector or create paid nodes. Source installation
 and confinement qualification, atomic physical release, retained old
 credential validation, monotonic safe reuse, and public selection remain
-separate K2 work. Public selection stays closed until those prerequisites
+separate K2 work. Passive ownership support for remaining canonical artifact and secondary domains is still incomplete; unknown rows remain blocked. Public selection stays closed until those prerequisites
 have passed their required checks.
