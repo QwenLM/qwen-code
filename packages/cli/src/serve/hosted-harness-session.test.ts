@@ -19404,6 +19404,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
    */
   async function parkAgentWaitResumeShape(
     shape: 'orphan' | 'carried',
+    hooks = false,
   ): Promise<void> {
     const key = {
       tenantId: 'tenant',
@@ -19438,6 +19439,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
               engine: 'managed',
               sessionId: SESSION_ID,
               toolProfile: 'hosted-workspace-shell/1',
+              ...(hooks ? { hookCatalog: hookPin } : {}),
             }),
           ),
         ),
@@ -19715,6 +19717,58 @@ describe('Hosted Harness Runtime turn takeover', () => {
           hostedChildRunIdFor(PROMPT_ID, 'call-task'),
         );
       }
+    } finally {
+      await managed.close();
+    }
+  }
+
+  async function parkHooksIdleSession(): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      await createManagedHarnessHandle(managed).ensureRunnable();
     } finally {
       await managed.close();
     }
@@ -25630,6 +25684,103 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await replacementHeaders(
       supertest(second).delete(`/session/${SESSION_ID}`),
     );
+  }, 30_000);
+
+  // Outside its journal wait a Hooks Session drives no takeover on load: the
+  // parked Turn stays latched and the recovery routes keep refusing it.
+  it('drives no takeover for a Hooks Session parked outside its journal wait', async () => {
+    await parkAgentWaitResumeShape('carried', true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => ({
+        operationId: operation.operationId,
+        state: 'settled',
+        catalog: { ...hookPin, hooks: [] },
+      }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const second = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(second).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      hookCatalog: hookPin,
+      driveRuntimeRecovery: true,
+    });
+    expect(loaded.status).toBe(200);
+    expect(
+      loaded.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
+    ).toBeUndefined();
+    const clientId = loaded.body.clientId as string;
+    const continued = await replacementHeaders(
+      supertest(second).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: 'ckpt-foreign',
+        activationId: 'act-foreign',
+      });
+    expect(continued.status).toBe(409);
+    expect(continued.body.code).toBe('hosted_turn_recovery_required');
+    await replacementHeaders(
+      supertest(second).delete(`/session/${SESSION_ID}`),
+    ).set('X-Qwen-Client-Id', clientId);
+  }, 30_000);
+
+  // The hook refusal precedes the identity fence on purpose (a foreign-epoch
+  // request must read as the hook contract), so the foreign checkpoint and
+  // activation ids below never reach a lookup.
+  it('refuses the recovery routes for a Hooks Session outside its journal wait', async () => {
+    await parkHooksIdleSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => ({
+        operationId: operation.operationId,
+        state: 'settled',
+        catalog: { ...hookPin, hooks: [] },
+      }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const second = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(second).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      hookCatalog: hookPin,
+      driveRuntimeRecovery: true,
+    });
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    for (const route of ['continue', 'cancel'] as const) {
+      const refused = await replacementHeaders(
+        supertest(second).post(
+          `/session/${SESSION_ID}/managed-runtime/${route}`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: 'ckpt-foreign',
+          activationId: 'act-foreign',
+        });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_hook_recovery_required');
+    }
+    await replacementHeaders(
+      supertest(second).delete(`/session/${SESSION_ID}`),
+    ).set('X-Qwen-Client-Id', clientId);
   }, 30_000);
 
   // A Hooks Session with Runtime work still recovers on its bare load. With

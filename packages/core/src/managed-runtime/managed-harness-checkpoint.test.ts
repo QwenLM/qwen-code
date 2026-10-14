@@ -729,6 +729,67 @@ describe('harness checkpoint v1', () => {
     expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
   });
 
+  it('rejects a journal wait that would replace unfinished Harness work', () => {
+    const calls = [{ functionCallId: 'call-1', toolName: 'agent' }];
+    const waitOver = (previous: HarnessCheckpointV1): HarnessCheckpointV1 =>
+      createAwaitJournalHarnessCheckpoint({
+        previous,
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: committedAttempt(),
+        journalWait: { calls },
+      });
+    expect(() =>
+      waitOver(
+        createAwaitActionHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          approval: requestedUserApproval(),
+        }),
+      ),
+    ).toThrow(/cannot replace unfinished Harness work/);
+    expect(() =>
+      waitOver(
+        createAwaitAgentHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          agentWait: agentWaitOf(['run-1']),
+        }),
+      ),
+    ).toThrow(/cannot replace unfinished Harness work/);
+    expect(() =>
+      waitOver(
+        createAwaitCommandHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          commandWait: commandWaitOf(['cmd_1']),
+        }),
+      ),
+    ).toThrow(/cannot replace unfinished Harness work/);
+    expect(() =>
+      waitOver(
+        createAwaitRuntimeHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          ...inProgressRuntime(),
+        }),
+      ),
+    ).toThrow(/cannot replace unfinished Harness work/);
+  });
+
   it('omits an empty journal wait for older checkpoint readers', () => {
     const encoded = JSON.parse(bytesOf(seed()).toString()) as Record<
       string,
