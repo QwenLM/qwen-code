@@ -28,6 +28,7 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
+import { collectResidentRuleDisplayPaths } from '../config/rulesDiscovery.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import {
   collectResidentMemoryBodies,
@@ -882,7 +883,9 @@ export class LlmClient {
 
   getHistoryShallow(curated: boolean = false): Content[] {
     const chat = this.getChat();
-    return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
+    return (
+      chat.getHistoryShallow?.(curated) ?? chat.getHistory?.(curated) ?? []
+    );
   }
 
   getHistoryForForkWindow(): Content[] {
@@ -1094,7 +1097,10 @@ export class LlmClient {
     // the retry itself fails, the send-failure finally block handles the
     // rollback. The blanket reset here is safe because a successful retry
     // re-reads the same files and re-triggers the rules.
-    this.resetConditionalRuleInjectionMarkers();
+    this.reconcileConditionalRuleInjectionMarkers(
+      'strip-orphaned',
+      this.getHistoryShallow(),
+    );
     this.config
       .getMemoryManager()
       .restoreMemoryBodiesPresentInHistory(
@@ -1181,7 +1187,7 @@ export class LlmClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
-    this.resetConditionalRuleInjectionMarkers();
+    this.reconcileConditionalRuleInjectionMarkers('set-history', history);
     this.config
       .getMemoryManager()
       .restoreMemoryBodiesPresentInHistory(
@@ -1217,7 +1223,10 @@ export class LlmClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
-      this.resetConditionalRuleInjectionMarkers();
+      this.reconcileConditionalRuleInjectionMarkers(
+        'truncate-history',
+        this.getHistoryShallow(),
+      );
       this.config
         .getMemoryManager()
         .restoreMemoryBodiesPresentInHistory(
@@ -1236,20 +1245,29 @@ export class LlmClient {
   }
 
   /**
-   * Drop the "this rule was already injected" markers once their reminder text
-   * has left the conversation.
+   * Reconcile conditional rule injection markers against history residency.
    *
-   * A conditional rule reminder is appended to the tool result that matched
-   * its `paths:` glob. Anything that evicts that result — pre-send
-   * microcompaction, `/compress`, `/compress-fast`, auto-compaction,
-   * memory-pressure `compact_history`, `/rewind`, or a wholesale history
-   * replacement — removes the text but leaves the marker behind, which
-   * would suppress every later re-injection for the rest of the session.
-   * Call this wherever history loses tool results, alongside the other
-   * derived-state invalidations.
+   * A reminder rides the tool result that triggered the match. Anything that
+   * evicts that result — pre-send microcompaction, `/compress`, `/compress-fast`,
+   * auto-compaction, memory-pressure `compact_history`, `/rewind`, or wholesale
+   * history replacement — drops the reminder text. Reconciling derives the
+   * consumed markers from the envelopes still visible in history (plus in-flight
+   * pending content where provided), ensuring resident rules don't duplicate
+   * while evicted rules are safely re-armed.
    */
-  private resetConditionalRuleInjectionMarkers(): void {
-    this.config.getConditionalRulesRegistry()?.resetInjected();
+  private reconcileConditionalRuleInjectionMarkers(
+    site: string,
+    history: readonly Content[],
+    extraResident?: readonly Content[],
+  ): void {
+    const registry = this.config.getConditionalRulesRegistry();
+    if (!registry) {
+      return;
+    }
+    const resident = collectResidentRuleDisplayPaths(
+      extraResident ? [...history, ...extraResident] : history,
+    );
+    registry.reconcileInjected(resident, site);
   }
 
   async setTools(options: { skipHistoryReveal?: boolean } = {}): Promise<void> {
@@ -1895,10 +1913,11 @@ export class LlmClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
-    // startChat() drops every tool result, so no conditional-rule reminder
-    // survives /clear. Without this the new session could never inject the
-    // rule again for the life of the process.
-    this.resetConditionalRuleInjectionMarkers();
+    // Defensive reset: startNewSession() (via /clear) already cleared
+    // markers, and startChat() below reconciles from the empty history.
+    // Explicitly resetting here ensures resetChat() does not depend on
+    // caller ordering or startChat() internals.
+    this.config.getConditionalRulesRegistry()?.resetInjected();
     // Clean up old tool result overflow files on /clear
     void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
@@ -2783,6 +2802,7 @@ export class LlmClient {
       );
       chat.enableManualPlanExitNotices();
       this.chat = chat;
+      this.reconcileConditionalRuleInjectionMarkers('start-chat', history);
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
       // never made it back into the transcript before we wrote the JSONL.
@@ -3337,7 +3357,16 @@ export class LlmClient {
             m.evictedMemoryBodies ?? [],
           );
         }
-        this.resetConditionalRuleInjectionMarkers();
+        const pendingExtra = opts?.pendingContent
+          ? Array.isArray(opts.pendingContent)
+            ? opts.pendingContent
+            : [opts.pendingContent]
+          : undefined;
+        this.reconcileConditionalRuleInjectionMarkers(
+          'microcompaction',
+          mcResult.history,
+          pendingExtra,
+        );
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -4971,7 +5000,10 @@ export class LlmClient {
             this.forceFullIdeContext = true;
             this.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
-            this.resetConditionalRuleInjectionMarkers();
+            this.reconcileConditionalRuleInjectionMarkers(
+              'auto-compaction',
+              this.getHistoryShallow(),
+            );
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
@@ -5557,10 +5589,13 @@ export class LlmClient {
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
         // The tool result never reached the model, so neither did the
-        // conditional-rule reminder appended to it. Roll the marker back for
-        // the same reason the memory bodies are restored above: a transient
-        // send failure must not burn the rule for the rest of the session.
-        this.resetConditionalRuleInjectionMarkers();
+        // conditional-rule reminder appended to it. Reconciling against
+        // history (which lacks the failed pending send) drops the marker
+        // so a transient send failure does not burn the rule for the session.
+        this.reconcileConditionalRuleInjectionMarkers(
+          'send-failure-rollback',
+          this.getHistoryShallow(),
+        );
       }
       if (
         this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&
@@ -5769,7 +5804,10 @@ export class LlmClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
-      this.resetConditionalRuleInjectionMarkers();
+      this.reconcileConditionalRuleInjectionMarkers(
+        'compress',
+        this.getHistoryShallow(),
+      );
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
@@ -5875,7 +5913,10 @@ export class LlmClient {
           microcompactMeta.evictedMemoryBodies ?? [],
         );
       }
-      this.resetConditionalRuleInjectionMarkers();
+      this.reconcileConditionalRuleInjectionMarkers(
+        'compress-fast',
+        this.getHistoryShallow(),
+      );
     }
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
     // The fast path rewrites history too, so the delivery state derived from

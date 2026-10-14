@@ -133,6 +133,10 @@ beforeAll(async () => {
 function createMockConfig(
   overrides: {
     fileReadCache?: Partial<FileReadCache>;
+    conditionalRulesRegistry?: {
+      reconcileInjected?: ReturnType<typeof vi.fn>;
+      resetInjected?: ReturnType<typeof vi.fn>;
+    } | null;
     llmClient?: {
       isInitialized?: () => boolean;
       getChat?: () => {
@@ -174,7 +178,10 @@ function createMockConfig(
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
-    getConditionalRulesRegistry: () => undefined,
+    getConditionalRulesRegistry: () =>
+      overrides.conditionalRulesRegistry === undefined
+        ? undefined
+        : (overrides.conditionalRulesRegistry as never),
     getLlmClient: () => client as never,
     getMemoryManager: () => ({
       markMemoryBodiesEvictedFromHistory: vi.fn(),
@@ -1028,6 +1035,7 @@ describe('MemoryPressureMonitor', () => {
     it('compacts history and clears fileReadCache when meta is non-null', async () => {
       const setHistory = vi.fn();
       const clearCache = vi.fn();
+      const reconcileInjected = vi.fn();
       // Build history with 7 read_file tool results (keep=5, so 2 get cleared)
       const toolHistory: Content[] = [];
       for (let i = 0; i < 7; i++) {
@@ -1059,12 +1067,17 @@ describe('MemoryPressureMonitor', () => {
           completed: ['call_1', 'goal-end'],
         }),
         fileReadCache: { clear: clearCache },
+        conditionalRulesRegistry: { reconcileInjected },
       });
 
       await checkAt(monitor, 11 * GB); // 11/16 = 0.6875 >= 0.65: hard pressure
 
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
+      expect(reconcileInjected).toHaveBeenCalledWith(
+        expect.any(Set),
+        'compact_history',
+      );
       const compacted = setHistory.mock.calls[0][0] as Content[];
       expect(setHistory.mock.calls[0][1]).toEqual(['call_1', 'goal-end']);
       expect(compacted.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(

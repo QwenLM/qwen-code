@@ -8,10 +8,12 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content } from '@google/genai';
 import {
   parseRuleFile,
   loadRules,
   ConditionalRulesRegistry,
+  collectResidentRuleDisplayPaths,
 } from './rulesDiscovery.js';
 import { QWEN_DIR, unescapePath } from '../utils/paths.js';
 
@@ -440,6 +442,90 @@ Also visible.
 
       expect(reg.injectedCount).toBe(0);
       expect(reg.totalCount).toBe(2);
+    });
+
+    it('reconcileInjected derives markers from resident envelopes (keeps, drops, re-seeds)', async () => {
+      const reg = projectReg(
+        rule('/project/.qwen/rules/fe.md', ['src/**/*.tsx'], 'Use hooks.'),
+        rule('/project/.qwen/rules/be.md', ['src/**/*.ts'], 'Strict.'),
+      );
+      await reg.matchAndConsume('/project/src/App.tsx');
+      await reg.matchAndConsume('/project/src/a.ts');
+      expect(reg.injectedCount).toBe(2);
+
+      // 1. Partial eviction: only fe reminder is resident -> be is re-armed
+      reg.reconcileInjected(new Set(['.qwen/rules/fe.md']), 'test-partial');
+      expect(reg.injectedCount).toBe(1);
+      // be should be eligible for injection again
+      expect(await reg.matchAndConsume('/project/src/a.ts')).toBeDefined();
+      // fe should still be suppressed
+      expect(await reg.matchAndConsume('/project/src/App.tsx')).toBeUndefined();
+
+      // 2. Full eviction: neither is resident -> both re-armed
+      reg.reconcileInjected(new Set(), 'test-empty');
+      expect(reg.injectedCount).toBe(0);
+      expect(await reg.matchAndConsume('/project/src/App.tsx')).toBeDefined();
+
+      // 3. /resume re-seeding: registry starts empty, transcript has resident envelopes -> markers restored
+      reg.resetInjected();
+      expect(reg.injectedCount).toBe(0);
+      reg.reconcileInjected(
+        new Set(['.qwen/rules/fe.md', '.qwen/rules/be.md']),
+        'test-resume',
+      );
+      expect(reg.injectedCount).toBe(2);
+      expect(await reg.matchAndConsume('/project/src/App.tsx')).toBeUndefined();
+      expect(await reg.matchAndConsume('/project/src/a.ts')).toBeUndefined();
+    });
+
+    it('collectResidentRuleDisplayPaths extracts envelopes from text parts, tool output, and extraText', () => {
+      const history = [
+        {
+          role: 'user',
+          parts: [{ text: 'Please inspect the code.' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              text: 'Here is the rule:\n--- Rule from: .qwen/rules/style.md ---\nAvoid any\n--- End of Rule from: .qwen/rules/style.md ---',
+            },
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: {
+                  output:
+                    'File content\n--- Rule from: .qwen/rules/fe.md ---\nUse hooks\n--- End of Rule from: .qwen/rules/fe.md ---',
+                },
+              },
+            },
+            {
+              functionResponse: {
+                name: 'other_tool',
+                response:
+                  'raw string with --- Rule from: .qwen/rules/be.md --- embedded',
+              },
+            },
+          ],
+        },
+      ];
+
+      const pendingText =
+        'In-flight tool output:\n--- Rule from: .qwen/rules/pending.md ---\nPending rule\n--- End of Rule from: .qwen/rules/pending.md ---';
+
+      const resident = collectResidentRuleDisplayPaths(
+        history as unknown as Content[],
+        pendingText,
+      );
+
+      expect(resident).toEqual(
+        new Set([
+          '.qwen/rules/style.md',
+          '.qwen/rules/fe.md',
+          '.qwen/rules/be.md',
+          '.qwen/rules/pending.md',
+        ]),
+      );
     });
 
     it('matches multiple rules for one file', async () => {

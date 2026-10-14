@@ -13,6 +13,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { microcompactHistory } from './microcompaction/microcompact.js';
+import { collectResidentRuleDisplayPaths } from '../config/rulesDiscovery.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import {
   recordMemoryUsage,
@@ -750,9 +751,15 @@ export class MemoryPressureMonitor extends EventEmitter {
             this.coreConfig.getFileReadCache().clear();
             // compact_history evicts tool results via chat.setHistory()
             // directly, bypassing LlmClient.setHistory() which normally
-            // resets conditional-rule markers. Reset them here so rules
-            // whose reminder was on an evicted tool result can fire again.
-            this.coreConfig.getConditionalRulesRegistry()?.resetInjected();
+            // reconciles conditional-rule markers. Reconcile them here
+            // against the compacted history so evicted rules re-arm
+            // while resident rules stay deduplicated.
+            this.coreConfig
+              .getConditionalRulesRegistry()
+              ?.reconcileInjected(
+                collectResidentRuleDisplayPaths(result.history),
+                'compact_history',
+              );
             const m = result.meta;
             debugLogger.debug(
               `[COMPACT_HISTORY] cleared ${m.toolsCleared} tool result(s) ` +
