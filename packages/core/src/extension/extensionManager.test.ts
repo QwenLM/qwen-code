@@ -1506,6 +1506,31 @@ describe('extension tests', () => {
       }
     });
 
+    it('replaces the Claude plugin root without a hooks directory', async () => {
+      const archivePath = archive('claude-ext-no-hooks.zip', (destination) => {
+        writeTree(destination, {
+          ...claudePlugin('claude-ext-no-hooks'),
+          'README.md': '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
+          // The .claude path rewrite stays behind the hooks gate.
+          'guide.md': 'Check `.claude/loop.local.md`.',
+        });
+      });
+      const manager = createExtensionManager();
+      const prepared = await prepare(manager, archivePath);
+
+      try {
+        await manager.commitPreparedExtension(prepared);
+        expect(
+          path.normalize(readText(prepared.destinationDirectory, 'README.md')),
+        ).toBe(path.join(prepared.destinationDirectory, 'scripts', 'setup.sh'));
+        expect(readText(prepared.destinationDirectory, 'guide.md')).toBe(
+          'Check `.claude/loop.local.md`.',
+        );
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
     /** `ready()` then a prepared local-archive install of extension `name`. */
     async function readyPrepared(name: string) {
       const archivePath = archive(`${name}.zip`, name);

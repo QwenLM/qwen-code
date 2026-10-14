@@ -119,12 +119,17 @@ export function substituteHookVariables(
 }
 
 /**
- * Perform variable replacement in all markdown and shell script files of the extension.
- * This is done during the conversion phase to avoid modifying files during every extension load.
+ * Replace ${CLAUDE_PLUGIN_ROOT} with the installed extension path in all
+ * markdown files of the extension.
+ *
+ * Claude Code resolves this variable in skill, command and agent content
+ * regardless of whether the plugin declares hooks, so this runs for every
+ * Claude/Qoder plugin install — unlike the syntax and path rewrites in
+ * performVariableReplacement, which stay behind the hooks gate.
  * @param extensionPath - The path to the extension directory to edit
  * @param pluginRoot - The installed path to substitute for ${CLAUDE_PLUGIN_ROOT}
  */
-export function performVariableReplacement(
+export function replacePluginRootVariable(
   extensionPath: string,
   pluginRoot = extensionPath,
 ): void {
@@ -150,9 +155,62 @@ export function performVariableReplacement(
           () => pluginRoot,
         );
 
+        // Only write if content was actually changed
+        if (updatedContent !== content) {
+          fs.writeFileSync(filePath, updatedContent, 'utf8');
+          debugLogger.debug(
+            `Replaced plugin root variable in file: ${filePath}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to scan markdown files in extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Perform variable replacement in all markdown and shell script files of the extension.
+ * This is done during the conversion phase to avoid modifying files during every extension load.
+ *
+ * The ${CLAUDE_PLUGIN_ROOT} substitution is delegated to
+ * replacePluginRootVariable, which must run for every Claude/Qoder plugin;
+ * the remaining rewrites below historically ran only when the plugin
+ * declared hooks and keep that gate at the call site.
+ * @param extensionPath - The path to the extension directory to edit
+ * @param pluginRoot - The installed path to substitute for ${CLAUDE_PLUGIN_ROOT}
+ */
+export function performVariableReplacement(
+  extensionPath: string,
+  pluginRoot = extensionPath,
+): void {
+  replacePluginRootVariable(extensionPath, pluginRoot);
+
+  // Process markdown files
+  const mdGlobPattern = '**/*.md';
+  const mdGlobOptions = {
+    cwd: extensionPath,
+    nodir: true,
+  };
+
+  try {
+    const mdFiles = glob.sync(mdGlobPattern, mdGlobOptions);
+
+    for (const file of mdFiles) {
+      const filePath = path.join(extensionPath, file);
+
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+
         // Replace Markdown shell syntax ```! ... ``` with system-recognized !{...} syntax
         // This regex finds code blocks with ! language identifier and captures their content
-        const syntaxUpdatedContent = updatedContent.replace(
+        const syntaxUpdatedContent = content.replace(
           /```!(?:\s*\n)?([\s\S]*?)\n*```/g,
           '!{$1}',
         );
@@ -169,7 +227,7 @@ export function performVariableReplacement(
         if (updatedMdContent !== content) {
           fs.writeFileSync(filePath, updatedMdContent, 'utf8');
           debugLogger.debug(
-            `Updated variables, syntax, and .claude paths in file: ${filePath}`,
+            `Updated syntax and .claude paths in file: ${filePath}`,
           );
         }
       } catch (error) {

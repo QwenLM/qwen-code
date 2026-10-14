@@ -33,6 +33,7 @@ import {
   recursivelyHydrateStrings,
   substituteHookVariables,
   performVariableReplacement,
+  replacePluginRootVariable,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -2722,7 +2723,21 @@ export class ExtensionManager {
           );
         }
 
-        // Perform variable replacement in extension files (e.g., ${CLAUDE_PLUGIN_ROOT}) for Claude extensions
+        // Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} in skill, command and
+        // agent content with or without hooks, so the plugin root replacement
+        // runs for every Claude/Qoder extension. The remaining rewrites
+        // (```! syntax, .claude paths, transcript fixes) stay behind the
+        // hooks gate below, preserving their historical behavior.
+        const usesPluginVariables =
+          originSource === 'Claude' || originSource === 'Qoder';
+        if (usesPluginVariables) {
+          try {
+            replacePluginRootVariable(stagingPath, destinationPath);
+          } catch (error) {
+            debugLogger.error('Plugin root variable replacement failed', error);
+          }
+        }
+
         const hooksDir = path.join(stagingPath, 'hooks');
         const configHooksPath =
           typeof newExtensionConfig.hooks === 'string'
@@ -2731,8 +2746,6 @@ export class ExtensionManager {
               : path.join(stagingPath, newExtensionConfig.hooks)
             : null;
 
-        const usesPluginVariables =
-          originSource === 'Claude' || originSource === 'Qoder';
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||

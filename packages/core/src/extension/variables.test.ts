@@ -9,6 +9,7 @@ import {
   hydrateString,
   substituteHookVariables,
   performVariableReplacement,
+  replacePluginRootVariable,
 } from './variables.js';
 import { HookType, type HookDefinition } from '../hooks/types.js';
 import * as fs from 'node:fs';
@@ -411,5 +412,105 @@ describe('performVariableReplacement', () => {
       expect(result).toContain(extDir);
       expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
     });
+  });
+});
+
+describe('replacePluginRootVariable', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-root-test-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  /** Writes `files` (relative path to content) into `testDir/<dir>`. */
+  function writeExt(files: Record<string, string>, dir = 'ext'): string {
+    const extDir = path.join(testDir, dir);
+    fs.mkdirSync(extDir, { recursive: true });
+    for (const [rel, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(extDir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(extDir, rel), content, 'utf-8');
+    }
+    return extDir;
+  }
+
+  /** Writes `files`, runs the replacement, and returns a reader for them. */
+  function replaceIn(
+    files: Record<string, string>,
+    { dir = 'ext', installedDir }: { dir?: string; installedDir?: string } = {},
+  ) {
+    const extDir = writeExt(files, dir);
+    replacePluginRootVariable(extDir, installedDir);
+    const read = (rel: string) =>
+      fs.readFileSync(path.join(extDir, rel), 'utf-8');
+    return { extDir, read };
+  }
+
+  it('should replace ${CLAUDE_PLUGIN_ROOT} in markdown files', () => {
+    const { extDir, read } = replaceIn({
+      'skills/siege/SKILL.md': 'Run `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh`.',
+    });
+
+    expect(read('skills/siege/SKILL.md')).toBe(
+      `Run \`${extDir}/scripts/hello.sh\`.`,
+    );
+  });
+
+  it('should edit a staging directory using a separate installed path', () => {
+    const installedDir = path.join(testDir, 'installed');
+    const { read } = replaceIn(
+      { 'README.md': '${CLAUDE_PLUGIN_ROOT}/config.json' },
+      { dir: 'staging', installedDir },
+    );
+
+    expect(read('README.md')).toBe(`${installedDir}/config.json`);
+  });
+
+  it('should preserve replacement metacharacters in the installed path', () => {
+    const installedDir = path.join(testDir, "installed-$&-$`-$'");
+    const { read } = replaceIn(
+      { 'README.md': '${CLAUDE_PLUGIN_ROOT}/config.json' },
+      { dir: 'staging', installedDir },
+    );
+
+    expect(read('README.md')).toBe(`${installedDir}/config.json`);
+  });
+
+  it('should leave the gated markdown rewrites to performVariableReplacement', () => {
+    const mdContent = [
+      'Path: `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh`',
+      '',
+      '```!',
+      'echo hi',
+      '```',
+      '',
+      'Check `.claude/loop.local.md`.',
+    ].join('\n');
+    const { read } = replaceIn({ 'guide.md': mdContent });
+
+    const result = read('guide.md');
+    expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+    // ```! blocks and .claude paths stay behind the hooks gate.
+    expect(result).toContain('```!');
+    expect(result).toContain('.claude/loop.local.md');
+  });
+
+  it('should not modify shell scripts', () => {
+    const { read } = replaceIn({
+      'setup.sh': 'echo "${CLAUDE_PLUGIN_ROOT}/setup"',
+    });
+
+    expect(read('setup.sh')).toBe('echo "${CLAUDE_PLUGIN_ROOT}/setup"');
+  });
+
+  it('should handle empty directories gracefully', () => {
+    const extDir = writeExt({}, 'empty-ext');
+
+    expect(() => replacePluginRootVariable(extDir)).not.toThrow();
   });
 });
