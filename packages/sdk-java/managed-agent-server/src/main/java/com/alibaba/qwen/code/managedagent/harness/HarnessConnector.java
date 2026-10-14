@@ -162,8 +162,43 @@ public interface HarnessConnector extends AutoCloseable {
      */
     String closeSession(String tenantId, String sessionId);
 
+    /**
+     * The Sessions this control-plane node holds an attachment for. An
+     * attachment is a cache entry, not ownership: it outlives a lapsed lease
+     * or a takeover by another node, so the EventTransport owner-side
+     * subscription (design 2026-10-04-managed-agent-event-transport, §11)
+     * narrows it by SQL to the Sessions whose journal this node's Harness
+     * writes. A connector without attachments holds nothing.
+     */
+    default List<AttachedSession> attachedSessions() {
+        return List.of();
+    }
+
+    /**
+     * The writer id this node's Harness acquires Session journals under, or
+     * null while there is none (no client yet, or the connector is closed).
+     */
+    default String writerIdentity() {
+        return null;
+    }
+
+    /**
+     * Loads a Session whose committed wake nobody holds, so its wake pump runs
+     * the waiting input (EventTransport wake consumer, phase MQ2c). A wake
+     * drives new work, so this takes the new-work admission the relay verbs
+     * take. Returns false, loading nothing, when this node already holds an
+     * attachment for the Session.
+     */
+    default boolean activateForWake(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException(
+                "Hosted wake activation is unavailable");
+    }
+
     @Override
     default void close() {
+    }
+
+    record AttachedSession(String tenantId, String sessionId) {
     }
 
     record Attachment(String bootId, HarnessRuntimeRecovery runtimeRecovery,

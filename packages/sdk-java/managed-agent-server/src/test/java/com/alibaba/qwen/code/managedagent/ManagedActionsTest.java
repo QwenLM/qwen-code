@@ -229,17 +229,17 @@ class ManagedActionsTest {
                 default -> {}
             }
             if ("corrupt".equals(fault)) {
-                jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
+                jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                         new byte[] {1}, tenant, session, resourceId);
             } else if ("null-bytes".equals(fault)) {
                 // The damage shape the other two arms miss: the row is still
                 // committed and REFERENCED, but its bytes are gone.
-                jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                         tenant, session, resourceId);
             } else if ("unreferenced".equals(fault)) {
-                jdbc.update("UPDATE qwen_managed_session_resource SET state = 'UNREFERENCED'"
+                jdbc.update("UPDATE ma_resource SET state = 'UNREFERENCED'"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                         tenant, session, resourceId);
             } else {
@@ -409,13 +409,13 @@ class ManagedActionsTest {
         String session = session(tenant);
         ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
         String storage = "storage-" + UUID.randomUUID();
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, ?, 'workspace', ?, ?, 'ACTIVE')",
                 tenant, storage, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = ?, workspace_id = 'workspace',"
+        jdbc.update("UPDATE ma_session SET workspace_storage_id = ?, workspace_id = 'workspace',"
                 + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
                 + " workspace_config_ref = ?, workspace_policy_ref = ? WHERE tenant_id = ? AND session_id = ?",
                 storage, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
@@ -430,9 +430,9 @@ class ManagedActionsTest {
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
                 .andExpect(jsonPath("$.error.retryable").value(false));
         assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("requested");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
                 Long.class, tenant, session)).isZero();
-        jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
+        jdbc.update("DELETE FROM ma_storage WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
         mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                 .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
                 .content(response("allow"))).andExpect(status().isAccepted());
@@ -605,14 +605,14 @@ class ManagedActionsTest {
         if (shell) {
             assertThat(store.workspaceFilesEnabled()).isTrue();
             assertThat(store.workspaceShellEnabled()).isFalse();
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-actions', 1, 'storage', 'workspace', ?, ?, 'ACTIVE')",
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             for (String actor : List.of("owner", "other")) {
-                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, 'workspace-actions', ?, 'OPERATOR')", tenant, actor.getBytes(StandardCharsets.UTF_8));
             }
-            jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'storage', workspace_id = 'workspace-actions',"
+            jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage', workspace_id = 'workspace-actions',"
                     + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
                     + " workspace_config_ref = ?, workspace_policy_ref = ?, tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default'"
                     + " WHERE tenant_id = ? AND session_id = ?", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
@@ -893,7 +893,7 @@ class ManagedActionsTest {
                             .header("Idempotency-Key", "disabled-ended")
                             .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
                     .path("id").asText();
-            var before = jdbc.queryForMap("SELECT * FROM managed_agent_operation WHERE operation_id = ?", pendingOp);
+            var before = jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
             var claim = sessions.claimOperation(tenant, session, endedOp, "stopped-worker", Duration.ofMinutes(10))
                     .orElseThrow();
             ended.change("expired", null);
@@ -905,7 +905,7 @@ class ManagedActionsTest {
             assertThat(result.state()).isEqualTo("FAILED");
             assertThat(result.claimGeneration()).isEqualTo(claim.claimGeneration());
             assertThat(actions.response(tenant, session, endedOp).errorCode()).isEqualTo("action_expired");
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation WHERE operation_id = ?", pendingOp))
+            assertThat(jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
                     .isEqualTo(before);
         } finally {
             doReturn(true).when(harness).isAvailable();
@@ -1039,40 +1039,16 @@ class ManagedActionsTest {
                                 .header("Idempotency-Key", "allow-answer")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(response("allow")));
-        JsonNode deny =
-                readAccepted(
-                        auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
-                                .header("Idempotency-Key", "deny-answer")
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content(response("deny")));
-        journal.change(
-                "decided",
-                json.createObjectNode()
-                        .put("optionId", "deny")
-                        .put("inputRevision", 1)
-                        .put("policyRevision", "hosted-tool-approval/1"));
-        await().atMost(Duration.ofSeconds(5))
-                .untilAsserted(
-                        () -> {
-                            assertThat(
-                                            sessions.findOperation(
-                                                            tenant,
-                                                            session,
-                                                            allow.path("id").asText())
-                                                    .orElseThrow()
-                                                    .state())
-                                    .isEqualTo("FAILED");
-                            assertThat(
-                                            sessions.findOperation(
-                                                            tenant,
-                                                            session,
-                                                            deny.path("id").asText())
-                                                    .orElseThrow()
-                                                    .state())
-                                    .isEqualTo("COMPLETED");
-                        });
-        assertThat(actions.response(tenant, session, allow.path("id").asText()).errorCode())
-                .isEqualTo("action_already_resolved");
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "deny-answer").contentType(MediaType.APPLICATION_JSON).content(response("deny")))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("action_already_resolved"));
+        journal.change("decided", json.createObjectNode().put("optionId", "allow").put("inputRevision", 1)
+                .put("policyRevision", "hosted-tool-approval/1"));
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(
+                sessions.findOperation(tenant, session, allow.path("id").asText()).orElseThrow().state()).isEqualTo("COMPLETED"));
+        assertThat(actions.response(tenant, session, allow.path("id").asText()).errorCode()).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id=? AND session_id=? AND operation_kind='ACTION_RESPONSE'",
+                Long.class, tenant, session)).isEqualTo(1);
     }
 
     @Test
@@ -1099,7 +1075,7 @@ class ManagedActionsTest {
                 .andExpect(status().isNotFound());
         assertThat(
                         jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ?"
+                                "SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                                 Integer.class,
                                 tenant,
@@ -1124,7 +1100,7 @@ class ManagedActionsTest {
     }
 
     private void corruptOptions(String tenant, String session, ActionJournal journal) throws Exception {
-        assertThat(jdbc.update("UPDATE managed_agent_action SET options_json = ?"
+        assertThat(jdbc.update("UPDATE ma_session_record SET options_json = ?"
                         + " WHERE tenant_id = ? AND session_id = ? AND action_id = ?",
                 json.writeValueAsString(journal.options), tenant, session, journal.id)).isEqualTo(1);
     }
@@ -1206,7 +1182,7 @@ class ManagedActionsTest {
                 .andExpect(status().isAccepted()).andReturn().getResponse()
                 .getContentAsString()).path("sessionId").asText();
         assertThat(jdbc.queryForObject(
-                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+                "SELECT creator_actor_key FROM ma_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 byte[].class, tenant, session))
                 .as("creator recorded for a WebShell hosted create")
@@ -1244,16 +1220,17 @@ class ManagedActionsTest {
                                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                         .path("id")
                         .asText();
-        jdbc.update(
-                "INSERT INTO managed_workspace_create_command (tenant_id, actor_id,"
-                    + " idempotency_key, request_digest, session_id, created_at) VALUES (?, ?, ?,"
-                    + " ?, ?, ?)",
-                tenant,
-                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                UUID.randomUUID().toString(),
-                "sha256:test",
-                session,
-                System.currentTimeMillis());
+        String key = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
+                        + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,created_at,updated_at)"
+                        + " VALUES (?,'SESSION_CREATE_ACTOR',?,?,'ACTOR',?,?,?,?,?, ?,?,'COMPLETED',?,?)",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("fixture",tenant,key),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant), tenant,
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("owner"), "owner", key,
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(key), "sha256:test",
+                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), session, System.currentTimeMillis(), System.currentTimeMillis());
+        jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
+                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), tenant, session);
         return session;
     }
 
