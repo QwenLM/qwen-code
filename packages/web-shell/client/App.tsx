@@ -3404,6 +3404,10 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = e.target as HTMLElement | null;
+      // Dialogs portal outside the drawer subtree but stack above it, so they
+      // need their own exemption — otherwise every dialog opened from the
+      // drawer loses touch scrolling entirely on a phone.
+      if (el?.closest('[data-web-shell-dialog]')) return;
       if (
         el?.closest('[data-sidebar-shell]') &&
         !el.closest(`.${styles.mobileBackdrop}`)
