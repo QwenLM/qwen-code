@@ -22,6 +22,7 @@ public final class ChildWorkspaceException extends RuntimeException {
     public static final String MISSING = "child_workspace_missing";
     /** A Git command failed or timed out. */
     public static final String GIT = "child_workspace_git";
+    public static final String STOP_UNVERIFIED = "child_workspace_stop_unverified";
 
     private final String code;
     private final boolean retryable;

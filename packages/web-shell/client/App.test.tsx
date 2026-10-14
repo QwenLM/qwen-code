@@ -5891,6 +5891,172 @@ describe('task activity key', () => {
     );
   });
 
+  it.each([
+    'same-session',
+    'session',
+    'workspace',
+    'client',
+    'context',
+  ] as const)('isolates trajectory recovery for %s changes', async (change) => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+    mockWorkspace.client.getSessionTranscriptPage.mockImplementation(
+      async (_sessionId, options) => {
+        const page = Number(options?.cursor ?? 0);
+        return {
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: '' },
+                _meta: {
+                  timing: {
+                    kind: 'request',
+                    durationMs: 100,
+                    startedAt: 10000 - page * 1000,
+                    promptId: `prompt-${page}`,
+                    model: 'qwen-test',
+                    status: 'ok',
+                  },
+                  qwenTranscript: { sourceRecordIds: [`record-${page}`] },
+                },
+              },
+            },
+          ],
+          hasMore: page < 7,
+          nextCursor: String(page + 1),
+        };
+      },
+    );
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+            {
+              id: 'file:README.md',
+              kind: 'file',
+              title: 'README.md',
+              workspacePath: 'README.md',
+            },
+          ],
+        },
+      }),
+    );
+    const props = { rightPanel: { items: ['trajectory' as const] } };
+    const { container, rerender } = renderApp(props);
+    await flush();
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(container.textContent).toContain('Historical window');
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'qwen-test');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    const selected = container.querySelector(
+      '[data-testid="trajectory-selected"]',
+    )!.textContent;
+    const rows = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    await act(async () => {
+      rows.scrollTop = 118;
+      rows.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
+      8,
+    );
+    mockConnection.loadingTranscript = true;
+    if (change === 'session') mockConnection.sessionId = 'session-2';
+    if (change === 'workspace') mockConnection.workspaceCwd = '/tmp/other';
+    if (change === 'client') mockWorkspace.client = { ...mockWorkspace.client };
+    if (change === 'context')
+      mockConnection.sessionContext = { kind: 'standalone' };
+    rerender(props);
+    await flush();
+    if (change !== 'same-session') {
+      expect(
+        container.querySelector('[data-testid="trajectory-rows"]'),
+      ).not.toBe(rows);
+      return;
+    }
+    mockConnection.status = 'disconnected';
+    rerender(props);
+    await flush();
+    mockConnection.loadingTranscript = false;
+    rerender(props);
+    await flush();
+    mockConnection.status = 'connected';
+    rerender(props);
+    await flush();
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
+      8,
+    );
+    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+    ).toBe('qwen-test');
+    expect(
+      container.querySelector('[data-testid="trajectory-selected"]')!
+        .textContent,
+    ).toBe(selected);
+    expect(container.querySelector('[data-testid="trajectory-rows"]')).toBe(
+      rows,
+    );
+    expect(rows.scrollTop).toBe(118);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain('History may have changed while disconnected');
+    expect(
+      Array.from(
+        container.querySelectorAll('[role="tablist"] [role="tab"]'),
+      ).map((tab) => tab.getAttribute('title')),
+    ).toEqual(['Trajectory', 'README.md']);
+    expect(container.querySelector('button[title="README.md"]')).not.toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-latest"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).not.toContain('History may have changed while disconnected');
+  });
+
   it('drops a restored trajectory tab when the host stopped listing it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -5931,7 +6097,9 @@ describe('task activity key', () => {
         '/tmp/project\0session-1': { open: true, activeTabId: null, tabs: [] },
       }),
     );
-    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['trajectory'] },
+    });
     await flush();
     await flush();
 
@@ -5945,6 +6113,16 @@ describe('task activity key', () => {
     expect(
       container.querySelector('button[title="Trajectory"]'),
     ).not.toBeNull();
+    const panel = container.querySelector('[data-testid="trajectory-panel"]');
+    mockConnection.loadingTranscript = true;
+    rerender({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    expect(container.querySelector('[data-testid="trajectory-panel"]')).toBe(
+      panel,
+    );
+    mockConnection.loadingTranscript = false;
+    rerender({ rightPanel: { items: ['trajectory'] } });
+    await flush();
     const persisted = JSON.parse(
       window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
         '{}',
@@ -5961,6 +6139,12 @@ describe('task activity key', () => {
         sessionId: 'session-1',
       },
     ]);
+    mockConnection.loadingTranscript = true;
+    rerender({ rightPanel: { items: ['review'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="trajectory-panel"]'),
+    ).toBeNull();
   });
 
   it('reclaims pane-bound token usage tabs restored outside a split view', async () => {
@@ -16523,7 +16707,7 @@ describe('App session callbacks', () => {
     expect(container.textContent).not.toContain('qwen-plus::hybrid');
   });
 
-  it('wires the composer context ring from the connection and opens /context on click', async () => {
+  it('wires the composer context ring from the connection and opens the details panel on click', async () => {
     const usageConnection = mockConnection as typeof mockConnection & {
       tokenCount?: number;
       contextWindow?: number;
@@ -16531,6 +16715,10 @@ describe('App session callbacks', () => {
     usageConnection.tokenCount = 338;
     usageConnection.contextWindow = 1000;
 
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
     renderApp();
     await flush();
 
@@ -16539,15 +16727,45 @@ describe('App session callbacks', () => {
     );
     expect(testState.latestChatEditorProps?.tokenCount).toBe(338);
     expect(testState.latestChatEditorProps?.contextWindow).toBe(1000);
+    // The main composer always has a details panel, so its ring never falls
+    // back to posting a snapshot card into the transcript.
+    expect(testState.latestChatEditorProps?.onShowContextUsage).toBeUndefined();
 
     await act(async () => {
-      testState.latestChatEditorProps?.onShowContextUsage?.();
+      testState.latestChatEditorProps?.onOpenContextUsage?.();
     });
     await flush();
 
     expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: false,
+      detail: true,
+      silent: true,
     });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('opens the details panel from a transcript context card', async () => {
+    mockSessionActions.getContextUsage.mockResolvedValue({
+      ...paneContextFixture,
+      sessionId: 'session-1',
+    });
+    renderApp();
+    await flush();
+
+    const onShowContextDetail = (
+      testState.latestMessageListProps as unknown as {
+        onShowContextDetail?: () => void;
+      } | null
+    )?.onShowContextDetail;
+    expect(onShowContextDetail).toBeTypeOf('function');
+
+    await act(async () => onShowContextDetail!());
+    await flush();
+
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
   it.each(['main', 'split'] as const)(
@@ -16582,7 +16800,7 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('updates and removes the host context usage callback without changing snapshots', async () => {
+  it('updates and removes the host context usage callback', async () => {
     const onContextUsageOpen = vi.fn();
     const replacement = vi.fn();
     const { rerender } = renderApp({ onContextUsageOpen });
@@ -16594,12 +16812,7 @@ describe('App session callbacks', () => {
     );
     expect(replacement).toHaveBeenCalledExactlyOnceWith('session-1');
     expect(onContextUsageOpen).not.toHaveBeenCalled();
-    await act(async () =>
-      testState.latestChatEditorProps!.onShowContextUsage!(),
-    );
-    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: false,
-    });
+    expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
     expect(replacement).toHaveBeenCalledTimes(1);
     mockSessionActions.getContextUsage.mockClear();
     rerender({});
@@ -16711,7 +16924,7 @@ describe('App session callbacks', () => {
       await flush();
       expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
-      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+      expect(testState.latestChatEditorProps?.onOpenContextUsage).toBeTypeOf(
         'function',
       );
 
@@ -16722,7 +16935,7 @@ describe('App session callbacks', () => {
       expect(testState.latestChatEditorProps?.tokenCount).toBe(0);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
       expect(
-        testState.latestChatEditorProps?.onShowContextUsage,
+        testState.latestChatEditorProps?.onOpenContextUsage,
       ).toBeUndefined();
 
       mockConnection.status = 'connected';
@@ -16730,7 +16943,7 @@ describe('App session callbacks', () => {
       await flush();
       expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
-      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+      expect(testState.latestChatEditorProps?.onOpenContextUsage).toBeTypeOf(
         'function',
       );
     } finally {

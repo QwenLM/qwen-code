@@ -20,7 +20,10 @@ import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
-import { isSessionWriterBlockedCode } from './daemon/session/session-context';
+import {
+  isSessionWriterBlockedCode,
+  sessionContextKey,
+} from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
@@ -191,6 +194,7 @@ import {
 import { TodoPanel } from './components/panels/TodoPanel';
 import {
   EnvironmentPanel,
+  isTaskInProgress,
   type EnvironmentAgentTask,
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
@@ -5973,7 +5977,11 @@ export function App({
         kind: 'trajectory',
         title: t('trajectory.title'),
         sessionId: sourceSessionId,
-        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+        loadPage: createTrajectoryPageLoader(
+          workspace.client,
+          sourceSessionId,
+          sessionContextKey(connection.sessionContext),
+        ),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -5986,7 +5994,12 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t, workspace.client],
+    [
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.client,
+      connection.sessionContext,
+    ],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6613,6 +6626,34 @@ export function App({
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
     };
+    const retainCurrentTrajectory = () => {
+      const retainedTabs = artifactPanelTabsRef.current.filter(
+        (tab) =>
+          previousSessionId === nextSessionId &&
+          trajectoryAvailable &&
+          tab.kind === 'trajectory' &&
+          tab.loadPage ===
+            createTrajectoryPageLoader(
+              workspace.client,
+              tab.sessionId,
+              sessionContextKey(connection.sessionContext),
+            ),
+      );
+      setArtifactPanelTabs(
+        retainedTabs.map((tab) =>
+          tab.kind === 'trajectory'
+            ? { ...tab, historyGapRevision: (tab.historyGapRevision ?? 0) + 1 }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(
+        retainedTabs.some(
+          (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+        )
+          ? activeArtifactPanelTabIdRef.current
+          : null,
+      );
+    };
     if (connection.loadingTranscript) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
@@ -6623,8 +6664,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (connection.status !== 'connected') {
@@ -6637,8 +6677,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (artifactsLoading) {
@@ -6651,8 +6690,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
 
@@ -6903,6 +6941,7 @@ export function App({
                     loadPage: createTrajectoryPageLoader(
                       workspace.client,
                       tab.sessionId,
+                      sessionContextKey(connection.sessionContext),
                     ),
                   };
                 }
@@ -6954,12 +6993,13 @@ export function App({
       const desiredActiveTabId =
         savedState?.activeTabId ?? persisted?.activeTabId ?? null;
       const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
-      const newlyOpenedIds = new Set(
-        tabsOpenedDuringRestore.map((tab) => tab.id),
+      const openedById = new Map(
+        tabsOpenedDuringRestore.map((tab) => [tab.id, tab]),
       );
+      const restoredIds = new Set(mergedRestoredTabs.map((tab) => tab.id));
       const candidateTabs = [
-        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
-        ...tabsOpenedDuringRestore,
+        ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
+        ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
       const mergedTabs = candidateTabs.filter(
         (tab) =>
@@ -7027,6 +7067,7 @@ export function App({
     };
   }, [
     artifactsLoading,
+    connection.sessionContext,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
@@ -8068,6 +8109,13 @@ export function App({
     () => sessionTasks.filter(isComposerTask),
     [sessionTasks],
   );
+  // The header dot promises only what the panel can show, so it follows the
+  // same section gating and the same in-progress rule as the panel's rows.
+  const environmentRunning =
+    (environmentPanelItems.includes('subagents') &&
+      environmentAgentTasks.some((task) => isTaskInProgress(task.status))) ||
+    (environmentPanelItems.includes('backgroundTasks') &&
+      backgroundTasks.some((task) => isTaskInProgress(task.status)));
   const monitorDetailsSessionIdRef = useRef(connection.sessionId);
   monitorDetailsSessionIdRef.current = connection.sessionId;
   const openMonitorPanelFromTool = useCallback(
@@ -13881,9 +13929,9 @@ export function App({
   // so the panel is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      // Read-only: every entry point (keyboard, status-bar button, in-chat
-      // "context detail" click) runs immediately, even mid-turn — only the
-      // echo is skipped while streaming so the active turn is not split.
+      // Read-only: every entry point (keyboard, status-bar button) runs
+      // immediately, even mid-turn — only the echo is skipped while streaming
+      // so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
       const owner = sessionOwnerGuard.capture();
       echoLocalCommandIfIdle(commandText);
@@ -13911,22 +13959,10 @@ export function App({
       t,
     ],
   );
-  // Stable identity: ChatEditor is memoized and an inline closure would
-  // re-render it on every app render.
-  const handleShowContextUsage = useCallback(
-    () => showContextUsage('/context', false),
-    [showContextUsage],
-  );
   const contextUsageAvailable = !shouldBlockComposerSubmit({
     connectionStatus: connection.status,
     hasSession: Boolean(connection.sessionId),
   });
-
-  // Stable reference: this travels through the memoized MessageList →
-  // MessageItem chain, so an inline closure would defeat their memo.
-  const handleShowContextDetail = useCallback(() => {
-    showContextUsage('/context detail', true);
-  }, [showContextUsage]);
 
   const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
@@ -21099,6 +21135,7 @@ export function App({
                       environmentAvailable={
                         mainView === 'chat' && environmentHeaderItemVisible
                       }
+                      environmentRunning={environmentRunning}
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
                         mainView === 'chat' &&
@@ -22050,7 +22087,11 @@ export function App({
                                   terminalBackgroundShellTaskIds
                                 }
                                 pendingApproval={pendingToolApproval}
-                                onShowContextDetail={handleShowContextDetail}
+                                onShowContextDetail={
+                                  contextUsageAvailable
+                                    ? openCurrentContextUsagePanel
+                                    : undefined
+                                }
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
                                 hasOlderHistory={transcriptHistory.hasMore}
@@ -22826,9 +22867,6 @@ export function App({
                           }
                           contextUsageAlwaysVisible={
                             contextUsageAlwaysVisible
-                          }
-                          onShowContextUsage={
-                            contextUsageAvailable ? handleShowContextUsage : undefined
                           }
                           contextUsageControls={
                             connection.sessionId

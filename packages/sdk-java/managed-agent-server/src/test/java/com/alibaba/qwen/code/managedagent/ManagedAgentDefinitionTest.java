@@ -153,7 +153,7 @@ class ManagedAgentDefinitionTest {
         assertThat(absent.has("metadata")).isFalse();
         assertThat(explicit.has("metadata")).isFalse();
         assertThat(objectMapper.readTree(jdbc.queryForObject(
-                "SELECT definition_json FROM managed_agent_definition"
+                "SELECT definition_json FROM ma_agent_definition"
                         + " WHERE tenant_id = ? AND agent_id = ?",
                 String.class, tenant, explicit.path("id").asText())))
                 .isEqualTo(minimum);
@@ -170,7 +170,7 @@ class ManagedAgentDefinitionTest {
                 .andExpect(status().isAccepted()));
         String agentId = first.path("id").asText();
         assertThat(objectMapper.readTree(jdbc.queryForObject(
-                "SELECT definition_json FROM managed_agent_definition"
+                "SELECT definition_json FROM ma_agent_definition"
                         + " WHERE tenant_id = ? AND agent_id = ? AND revision = 1",
                 String.class, tenant, agentId))).isEqualTo(content);
 
@@ -180,7 +180,7 @@ class ManagedAgentDefinitionTest {
         assertThat(second.path("revision").asText()).isEqualTo("2");
         assertThat(second.get("digest")).isNotEqualTo(first.get("digest"));
         assertThat(objectMapper.readTree(jdbc.queryForObject(
-                "SELECT definition_json FROM managed_agent_definition"
+                "SELECT definition_json FROM ma_agent_definition"
                         + " WHERE tenant_id = ? AND agent_id = ? AND revision = 2",
                 String.class, tenant, agentId))).isEqualTo(content);
     }
@@ -239,15 +239,15 @@ class ManagedAgentDefinitionTest {
         String path = "/v1/agents;jsessionid=abc";
         String key = "matrix-" + UUID.randomUUID();
         Integer before = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_agent_definition", Integer.class);
+                "SELECT COUNT(*) FROM ma_agent_definition", Integer.class);
         mvc.perform(post(path).header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON).content(DEFINITION))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_tenant"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " managed_agent_definition_command WHERE idempotency_key = ?",
+                + " ma_request_receipt WHERE namespace = 'AGENT_DEFINITION' AND idempotency_key = ?",
                 Integer.class, key)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition",
                 Integer.class)).isEqualTo(before);
         mvc.perform(post(path).header(TENANT, tenant)
                         .header("Idempotency-Key", key)
@@ -374,7 +374,7 @@ class ManagedAgentDefinitionTest {
     }
 
     private int rows(String tenant) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition"
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition"
                 + " WHERE tenant_id = ?", Integer.class, tenant);
     }
 

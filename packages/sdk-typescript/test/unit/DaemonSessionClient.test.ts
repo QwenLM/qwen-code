@@ -877,6 +877,19 @@ describe('DaemonSessionClient', () => {
           lastEventId: 7,
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 7, v: 1, type: 'session_update', data: {} }],
+          lifecycleReplay: [
+            {
+              id: 6,
+              v: 1,
+              type: 'session_update',
+              data: {
+                _meta: {
+                  executionLifecycle: { executionId: 'only-lifecycle' },
+                },
+              },
+            },
+          ],
+          lifecycleReplayIncomplete: true,
         });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -887,7 +900,12 @@ describe('DaemonSessionClient', () => {
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
 
+    expect(session.replaySnapshot.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplayIncomplete).toBe(true);
+    expect(JSON.stringify(session.session)).not.toContain('only-lifecycle');
     const consumed = session.consumeReplaySnapshot();
+    expect(consumed.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplay).toBeUndefined();
     expect(consumed.compactedReplay).toHaveLength(1);
     expect(consumed.liveJournal).toHaveLength(1);
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
