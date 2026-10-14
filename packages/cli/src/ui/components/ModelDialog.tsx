@@ -610,8 +610,7 @@ export function ModelDialog({
       : undefined;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const visionModelSetting = settings?.merged?.visionModel as
-    | string
-    | undefined;
+    string | undefined;
   const imageModelSetting = settings?.merged?.imageModel as string | undefined;
   const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
   const parsedImageModelValue = parseVisionModelSetting(imageModelSetting);
@@ -1238,8 +1237,7 @@ export function ModelDialog({
         }
 
         after = config.getContentGeneratorConfig?.() as
-          | ContentGeneratorConfig
-          | undefined;
+          ContentGeneratorConfig | undefined;
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
