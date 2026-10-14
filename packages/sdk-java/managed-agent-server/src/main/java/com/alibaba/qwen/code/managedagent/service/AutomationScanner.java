@@ -7,10 +7,6 @@ import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceView;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.ScheduleRow;
-import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.StaleMirror;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -29,8 +25,8 @@ import org.springframework.stereotype.Service;
 
 /**
  * H6b: the automation scanner. It discovers candidates and claims them; it
- * never drives a model. Each tick refreshes the definition mirror from the
- * committed records, claims every armed definition under its lease and
+ * never drives a model. Each tick reads atomically committed definitions
+ * and claims every armed definition under its lease and
  * fence, derives the slots of the window since the covered watermark on
  * the host tz database, records one decision per slot — fired, skipped or
  * missed, by the overlap and catch-up policies — and fires an occurrence as
@@ -45,7 +41,6 @@ public class AutomationScanner {
     private static final Logger LOG = LoggerFactory
             .getLogger(AutomationScanner.class);
     private static final int SCAN_LIMIT = 100;
-    private static final int MIRROR_LIMIT = 200;
     /** Re-drives of one claim before its answer is recorded unknown. */
     static final int MAX_FIRE_ATTEMPTS = 64;
     public static final String TRIGGER_SCHEDULED = "scheduled";
@@ -64,25 +59,23 @@ public class AutomationScanner {
 
     private final AutomationLedgerStore store;
     private final HarnessConnector harness;
-    private final ObjectMapper mapper;
     private final ManagedAgentProperties.Automation settings;
     private final Supplier<Long> clock;
     private final String owner;
 
     @Autowired
     public AutomationScanner(AutomationLedgerStore store,
-            HarnessConnector harness, ObjectMapper mapper,
+            HarnessConnector harness,
             ManagedAgentProperties properties) {
-        this(store, harness, mapper, properties.getAutomation(),
+        this(store, harness, properties.getAutomation(),
                 System::currentTimeMillis, "automation-" + UUID.randomUUID());
     }
 
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
-            ObjectMapper mapper, ManagedAgentProperties.Automation settings,
+            ManagedAgentProperties.Automation settings,
             Supplier<Long> clock, String owner) {
         this.store = store;
         this.harness = harness;
-        this.mapper = mapper;
         this.settings = settings;
         this.clock = clock;
         this.owner = owner;
@@ -104,7 +97,6 @@ public class AutomationScanner {
 
     /** One tick at {@code now}; answers how many occurrences fired. */
     public int tick(long now) {
-        refreshMirrors(now);
         int fired = 0;
         for (ScheduleRow row : store.findArmed(now, SCAN_LIMIT)) {
             fired += claimed(row, now, true);
@@ -145,65 +137,6 @@ public class AutomationScanner {
             store.release(row.tenantId(), row.scheduleId(), owner, fence,
                     clock.get());
         }
-    }
-
-    /**
-     * The mirror follows the committed records: a definition the service
-     * committed but did not mirror (a crash between the two), or a revision
-     * another instance committed, is read from its record resource.
-     */
-    void refreshMirrors(long now) {
-        for (StaleMirror stale : store.findStaleMirrors(MIRROR_LIMIT)) {
-            refreshMirror(stale, now);
-        }
-    }
-
-    private Optional<ScheduleRow> refreshMirror(StaleMirror stale, long now) {
-        try {
-            String content = store.readResource(stale.tenantId(),
-                    stale.recordResourceId());
-            if (content == null) {
-                return Optional.empty();
-            }
-            JsonNode record = mapper.readTree(content);
-            return Optional.of(store.upsertSchedule(mirror(stale, record),
-                    now));
-        } catch (Exception error) {
-            LOG.warn("automation mirror refresh failed tenant={}"
-                    + " schedule={} failure={}", stale.tenantId(),
-                    stale.scheduleId(), error.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    /** The mirror row of one committed schedule record. */
-    public static ScheduleRow mirror(StaleMirror stale, JsonNode record) {
-        return scheduleRow(stale.tenantId(), stale.workspaceId(),
-                stale.sessionId(), "", stale.revision(), record);
-    }
-
-    public static ScheduleRow scheduleRow(String tenantId, String workspaceId,
-            String sessionId, String actorId, long recordRevision,
-            JsonNode record) {
-        String runState = record.required("run").required("state").asText();
-        boolean terminal = ManagedExtensionRecords
-                .isTerminalRunState(runState);
-        JsonNode limit = record.required("catchUpLimit");
-        return new ScheduleRow(tenantId, record.required("scheduleId").asText(),
-                sessionId, workspaceId, actorId, recordRevision,
-                record.required("definitionRevision").asLong(),
-                record.required("definitionDigest").asText(),
-                record.required("goal").asText(),
-                record.required("cron").asText(),
-                record.required("timezone").asText(),
-                record.required("sessionMode").asText(),
-                record.required("overlap").asText(),
-                record.required("catchUp").asText(),
-                limit.isNull() ? null : limit.asLong(),
-                record.required("enabled").asBoolean(),
-                terminal ? AutomationLedgerStore.STATE_RETIRED
-                        : AutomationLedgerStore.STATE_LIVE,
-                null, 0, null, null, null, 0, 0, 0);
     }
 
     /** Claims whose answer was lost: the same operation, re-driven, each
@@ -513,12 +446,10 @@ public class AutomationScanner {
         } catch (DaemonHttpException error) {
             String code = errorCode(error);
             if ("automation_revision_stale".equals(code)) {
-                // The mirror lagged the committed definition: learn the
-                // revision now live and re-pin the claim to it, once.
+                // A definition changed after this scanner read it: reload
+                // the committed projection and re-pin the claim once.
                 Optional<ScheduleRow> moved = Optional.empty();
                 if (mayRepin) {
-                    store.findStaleMirror(row.tenantId(), row.scheduleId())
-                            .ifPresent(stale -> refreshMirror(stale, now));
                     moved = store.findSchedule(row.tenantId(),
                             row.scheduleId());
                 }

@@ -98,16 +98,17 @@ class AutomationScannerTest {
         // The scanner's work queries span every tenant by design, and this
         // class shares one H2: earlier methods' armed rows must never be
         // the current method's fake's fires.
-        for (String table : List.of("qwen_managed_automation_occurrence",
-                "qwen_managed_automation_schedule",
-                "qwen_managed_automation_command",
-                "qwen_managed_session_extension_record",
-                "qwen_managed_session_resource")) {
-            jdbc.update("DELETE FROM " + table
-                    + " WHERE tenant_id LIKE 'tenant-automation-%'");
+        for (String previousTenant : jdbc.queryForList("SELECT DISTINCT tenant_id FROM ma_session", String.class)) {
+            if (previousTenant.startsWith("tenant-automation-")) {
+                jdbc.update("DELETE FROM ma_schedule_occurrence WHERE tenant_id=?", previousTenant);
+                jdbc.update("DELETE FROM ma_schedule WHERE tenant_id=?", previousTenant);
+                jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND tenant_id=?", previousTenant);
+                jdbc.update("DELETE FROM ma_session_record WHERE record_kind='DOMAIN' AND tenant_id=?", previousTenant);
+                jdbc.update("DELETE FROM ma_request_receipt WHERE namespace='AUTOMATION' AND tenant_id=?", previousTenant);
+            }
         }
         tenant = "tenant-automation-" + UUID.randomUUID();
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, 'storage', 'Workspace', ?, ?,"
@@ -115,11 +116,11 @@ class AutomationScannerTest {
                 tenant, WORKSPACE,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, WORKSPACE, ACTOR.getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'READER')",
                 tenant, WORKSPACE, READER.getBytes(StandardCharsets.UTF_8));
@@ -127,11 +128,12 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Automation",
                 Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-        fake = new AutomationHarnessFake();
-        connector = new FakeConnector(fake);
         clock = new AtomicLong(T0);
+        fake = new AutomationHarnessFake((session, schedule) ->
+                AutomationHarnessFake.projectSchedule(jdbc, tenant, session, schedule, clock.get()));
+        connector = new FakeConnector(fake);
         settings = new ManagedAgentProperties.Automation();
         settings.setEnabled(true);
         settings.setLateTolerance(Duration.ofMinutes(5));
@@ -145,7 +147,7 @@ class AutomationScannerTest {
     }
 
     private AutomationScanner scanner(String owner) {
-        return new AutomationScanner(ledger, connector, mapper, settings,
+        return new AutomationScanner(ledger, connector, settings,
                 clock::get, owner);
     }
 
@@ -273,10 +275,10 @@ class AutomationScannerTest {
     }
 
     @Test
-    void skipsAnOccurrenceTheDefinitionMovedUnder() {
+    void doesNotDeriveSlotsFromADefinitionReplacedBeforeTick() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
-        // The definition moved on the Harness without the mirror learning.
+        // The journal publishes the new cron before the scanner derives its slots.
         fake.run(sessionId, Map.of("operationId", UUID.randomUUID().toString(),
                 "kind", "define_schedule", "scheduleId", automation.id(),
                 "definition", Map.of("cron", "*/2 * * * *")));
@@ -284,17 +286,16 @@ class AutomationScannerTest {
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         List<OccurrenceView> rows = ledger.listOccurrences(tenant,
                 automation.id(), null, 10).rows();
-        assertThat(rows).hasSize(1);
-        assertThat(rows.getFirst().occurrence().outcome()).isEqualTo("skipped");
-        assertThat(rows.getFirst().occurrence().reason())
-                .isEqualTo("revision_stale");
+        assertThat(rows).isEmpty();
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow().definitionRevision())
+                .isEqualTo(2);
     }
 
     @Test
     void skipsWhenTheTargetSessionIsNotActive() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
@@ -309,12 +310,14 @@ class AutomationScannerTest {
     void aClosedSessionStillRetiresItsDefinitionLocally() {
         PublicAutomation automation = define("* * * * *", "allow", "none",
                 null, true);
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
         var retired = service.retire(tenant, ACTOR, automation.id(), "retire-local");
         assertThat(retired.body().state()).isEqualTo("retired");
+        assertThat(retired.body().enabled()).isFalse();
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
                 .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow().enabled()).isTrue();
         // No slot of it is decided again: the retire is visible, not an
         // endless skipped(session_not_active) column.
         clock.set(T0 + MINUTE + 1_000);
@@ -347,7 +350,7 @@ class AutomationScannerTest {
     void blocksADefinitionWhoseZoneStopsResolving() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
-        jdbc.update("UPDATE qwen_managed_automation_schedule SET timezone = ?"
+        jdbc.update("UPDATE ma_schedule SET timezone = ?"
                 + " WHERE tenant_id = ? AND schedule_id = ?", "Mars/Olympus_Mons",
                 tenant, automation.id());
         clock.set(T0 + MINUTE + 1_000);
@@ -379,7 +382,7 @@ class AutomationScannerTest {
                 });
         // The first run settles in the Session store: its projection row
         // reads completed, so the next manual run is admitted.
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
@@ -466,8 +469,8 @@ class AutomationScannerTest {
                 ManagedAutomationService.scheduleIdFor(tenant, "lost-row"));
         // The crash window: the Harness committed and the ledger mirrored,
         // but the command row was never written.
-        jdbc.update("DELETE FROM qwen_managed_automation_command"
-                + " WHERE tenant_id = ? AND idempotency_key = ?", tenant,
+        jdbc.update("DELETE FROM ma_request_receipt"
+                + " WHERE namespace='AUTOMATION' AND tenant_id = ? AND idempotency_key = ?", tenant,
                 "lost-row");
         var retried = service.create(tenant, ACTOR, "lost-row", request);
         assertThat(retried.body().id()).isEqualTo(created.id());
@@ -493,8 +496,8 @@ class AutomationScannerTest {
         // The crash window the finding names: the Harness committed the
         // definition and the ledger mirrored it, but the answer — and so
         // the command row's settle — was lost.
-        jdbc.update("UPDATE qwen_managed_automation_command SET"
-                + " result_json = '' WHERE tenant_id = ? AND"
+        jdbc.update("UPDATE ma_request_receipt SET"
+                + " result_json = '' WHERE namespace='AUTOMATION' AND tenant_id = ? AND"
                 + " idempotency_key = ?", tenant, "cap-key");
         var retried = service.create(tenant, ACTOR, "cap-key", request);
         assertThat(retried.replayed()).isTrue();
@@ -682,7 +685,7 @@ class AutomationScannerTest {
     }
 
     @Test
-    void repinsAClaimToTheRevisionTheMirrorLagged() throws Exception {
+    void repinsAClaimToTheRevisionCommittedAfterItWasRead() throws Exception {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
         String id = automation.id();
@@ -697,50 +700,11 @@ class AutomationScannerTest {
                         AutomationLedgerStore.OUTCOME_FIRING, null, fence, now),
                 "scanner-a").orElseThrow();
         // Between the claim and the fire another instance revised the
-        // definition: the Harness and the Session store hold revision 2,
-        // the mirror still reads revision 1.
-        Map<String, Object> moved = fake.run(sessionId, Map.of("operationId",
+        // definition and its projection now hold revision 2; the claim
+        // still pins the revision this scanner read before the change.
+        fake.run(sessionId, Map.of("operationId",
                 UUID.randomUUID().toString(), "kind", "define_schedule",
                 "scheduleId", id, "definition", Map.of("goal", "Moved")));
-        Map<?, ?> schedule = (Map<?, ?>) moved.get("schedule");
-        Map<String, Object> record = new LinkedHashMap<>();
-        record.put("scheduleId", id);
-        record.put("definitionRevision", 2L);
-        record.put("definitionDigest", schedule.get("definitionDigest"));
-        record.put("goal", "Moved");
-        record.put("cron", "* * * * *");
-        record.put("timezone", "UTC");
-        record.put("sessionMode", "persistent");
-        record.put("overlap", "skip");
-        record.put("catchUp", "none");
-        record.put("catchUpLimit", null);
-        record.put("enabled", true);
-        record.put("run", Map.of("state", "admitted"));
-        byte[] bytes = mapper.writeValueAsBytes(record);
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
-                        + " session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at)"
-                        + " VALUES (?, ?, ?, ?, 'schedule-rev-2',"
-                        + " 'managed-schedule', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                        + " 'publish', 'REFERENCED', ?)",
-                scope, tenant, WORKSPACE, sessionId, bytes.length,
-                AutomationLedgerStore.sha256(new String(bytes,
-                        StandardCharsets.UTF_8)), bytes,
-                new java.sql.Timestamp(now));
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
-                        + " (session_scope_key, record_key, tenant_id,"
-                        + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, definition_revision,"
-                        + " created_at)"
-                        + " VALUES (?, ?, ?, ?, ?, 'schedule', ?, ?, 2,"
-                        + " 'schedule-rev-2', 'schedule', 'running', 2, ?)",
-                scope, ManagedExtensionProjection.recordKey(sessionId,
-                        "schedule", id), tenant, WORKSPACE, sessionId, id,
-                "0".repeat(64), now);
         assertThat(scanner.fire(row, claim, "scanner-a", fence, now)).isTrue();
         ledger.release(tenant, id, "scanner-a", fence, now);
         AutomationLedgerStore.ScheduleRow refreshed = ledger.findSchedule(
@@ -769,7 +733,22 @@ class AutomationScannerTest {
         fake.run(sessionId, Map.of("operationId",
                 UUID.randomUUID().toString(), "kind", "define_schedule",
                 "scheduleId", id, "definition", Map.of("goal", "Moved twice")));
-        assertThat(scanner.fire(refreshed, second, "scanner-a", again, then))
+        FakeConnector moving = new FakeConnector(fake) {
+            @Override
+            public Map<String, Object> runAutomationOperation(String tenantId,
+                    String targetSession, Map<String, Object> body) {
+                if ("fire_run".equals(body.get("kind"))
+                        && Long.valueOf(3).equals(body.get("definitionRevision"))) {
+                    fake.run(targetSession, Map.of("operationId", UUID.randomUUID().toString(),
+                            "kind", "define_schedule", "scheduleId", id,
+                            "definition", Map.of("goal", "Moved during repin")));
+                }
+                return super.runAutomationOperation(tenantId, targetSession, body);
+            }
+        };
+        AutomationScanner racing = new AutomationScanner(ledger, moving, settings,
+                clock::get, "scanner-a");
+        assertThat(racing.fire(refreshed, second, "scanner-a", again, then))
                 .isFalse();
         ledger.release(tenant, id, "scanner-a", again, then);
         AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
@@ -821,51 +800,7 @@ class AutomationScannerTest {
         AutomationLedgerStore.CommandRow claim = ledger
                 .findCommand(tenant, keyA).orElseThrow();
         assertThat(claim.resultJson()).isEmpty();
-        assertThat(ledger.findSchedule(tenant, automationId)).isEmpty();
-        // The committed record reaches the record store out of band (the
-        // projection of the Session store), and the next scanner tick
-        // refreshes the mirror from it — the repair arm of the lost answer.
-        Map<?, ?> committed = fake.scheduleOf(sessionId, automationId);
-        assertThat(committed).isNotNull();
-        Map<String, Object> record = new LinkedHashMap<>();
-        record.put("scheduleId", automationId);
-        record.put("definitionRevision", 1L);
-        record.put("definitionDigest", committed.get("definitionDigest"));
-        record.put("goal", "Goal");
-        record.put("cron", "0 2 * * *");
-        record.put("timezone", "UTC");
-        record.put("sessionMode", "persistent");
-        record.put("overlap", "skip");
-        record.put("catchUp", "none");
-        record.put("catchUpLimit", null);
-        record.put("enabled", true);
-        record.put("run", Map.of("state", "admitted"));
-        byte[] bytes = mapper.writeValueAsBytes(record);
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
-                        + " session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at)"
-                        + " VALUES (?, ?, ?, ?, 'schedule-rev-1',"
-                        + " 'managed-schedule', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                        + " 'publish', 'REFERENCED', ?)",
-                scope, tenant, WORKSPACE, sessionId, bytes.length,
-                AutomationLedgerStore.sha256(new String(bytes,
-                        StandardCharsets.UTF_8)), bytes,
-                new java.sql.Timestamp(T0));
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
-                        + " (session_scope_key, record_key, tenant_id,"
-                        + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, definition_revision,"
-                        + " created_at)"
-                        + " VALUES (?, ?, ?, ?, ?, 'schedule', ?, ?, 1,"
-                        + " 'schedule-rev-1', 'schedule', 'running', 1, ?)",
-                scope, ManagedExtensionProjection.recordKey(sessionId,
-                        "schedule", automationId), tenant, WORKSPACE,
-                sessionId, automationId, "0".repeat(64), T0);
-        scanner.tick(clock.get());
+        // The journal commit published the definition before its answer was lost.
         assertThat(ledger.findSchedule(tenant, automationId).orElseThrow()
                 .definitionRevision()).isEqualTo(1);
         // Another request moves the same definition to revision 2.
@@ -915,15 +850,14 @@ class AutomationScannerTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("automation_operation_unknown"));
-        // The answer never arrived: the mirror still reads the chain live,
-        // and the pre-relay claim is the request's own unanswered binding.
+        // The journal published retirement before the answer was lost;
+        // the pre-relay claim is still the request's unanswered binding.
         assertThat(
                 ledger.findSchedule(tenant, created.id()).orElseThrow().state())
-                .isEqualTo(AutomationLedgerStore.STATE_LIVE);
+                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
         assertThat(ledger.findCommand(tenant, keyR).orElseThrow().resultJson())
                 .isEmpty();
-        // The retry re-sends the same derived operationId and answers the
-        // cancel revision the first attempt committed.
+        // The terminal committed projection answers the retry directly.
         var retried = service.retire(tenant, ACTOR, created.id(), keyR);
         assertThat(retried.replayed()).isTrue();
         assertThat(retried.body().state()).isEqualTo("retired");
@@ -933,14 +867,12 @@ class AutomationScannerTest {
         var replayed = service.retire(tenant, ACTOR, created.id(), keyR);
         assertThat(replayed.replayed()).isTrue();
         assertThat(replayed.body().state()).isEqualTo("retired");
-        // Two relays, one derived operationId, no further ones.
+        // The original relay committed once; retries perform no extra relay.
         List<Map<String, Object>> retires = fake.operations.stream()
                 .filter(operation -> "retire_schedule"
                         .equals(operation.get("kind")))
                 .toList();
-        assertThat(retires).hasSize(2);
-        assertThat(retires.get(0).get("operationId"))
-                .isEqualTo(retires.get(1).get("operationId"));
+        assertThat(retires).hasSize(1);
     }
 
     @Test
@@ -1032,7 +964,7 @@ class AutomationScannerTest {
         // A second Workspace the reader has no grant in, holding the three
         // newest definitions.
         String hidden = "ws-automation-private";
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, 'storage', 'Private', ?, ?,"
@@ -1040,7 +972,7 @@ class AutomationScannerTest {
                 tenant, hidden,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')",
                 tenant, hidden, ACTOR.getBytes(StandardCharsets.UTF_8));
@@ -1048,7 +980,7 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Private",
                 Map.of(), List.of(), new WorkspaceSelection(hidden, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 privateSession);
         clock.set(T0);
@@ -1187,7 +1119,7 @@ class AutomationScannerTest {
     void anOpenPublicTurnSuppressesFiresUntilItEnds() {
         PublicAutomation automation = define("* * * * *", "allow", "none",
                 null, true);
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, created_at, updated_at, completed_at)"
                         + " VALUES (?, ?, 'turn-open', 'prompt-open', '[]',"
@@ -1204,10 +1136,10 @@ class AutomationScannerTest {
         assertThat(skipped.reason())
                 .isEqualTo(AutomationScanner.REASON_OVERLAP);
         // The public Turn ends: the next slot fires again.
-        jdbc.update("UPDATE managed_agent_turn SET status = 'COMPLETED',"
+        jdbc.update("UPDATE ma_turn SET status = 'COMPLETED',"
                         + " completed_at = 2000 WHERE tenant_id = ?"
-                        + " AND turn_id = 'turn-open'",
-                tenant);
+                        + " AND turn_id = ?",
+                tenant, "turn-open");
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(fake.firedOccurrences())
@@ -1347,21 +1279,21 @@ class AutomationScannerTest {
                     String scope = ManagedSessionStore.sessionScopeKey(tenant,
                             sessionId);
                     byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
-                    jdbc.update("INSERT INTO qwen_managed_session_resource"
-                            + " (session_scope_key, tenant_id, workspace_id,"
+                    jdbc.update("INSERT INTO ma_resource"
+                            + " (resource_key, session_scope_key, tenant_id, workspace_id,"
                             + " session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind,"
                             + " inline_bytes, publish_command_id, state,"
                             + " created_at)"
-                            + " VALUES (?, ?, ?, ?, 'wedged-run-rev-3',"
+                            + " VALUES (?, ?, ?, ?, ?, 'wedged-run-rev-3',"
                             + " 'managed-automation-run', 1, ?, ?,"
                             + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', ?)",
-                            scope, tenant, WORKSPACE, sessionId, bytes.length,
+                            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, "wedged-run-rev-3"), scope, tenant, WORKSPACE, sessionId, bytes.length,
                             AutomationLedgerStore.sha256(
                                     new String(bytes, StandardCharsets.UTF_8)),
                             bytes, new java.sql.Timestamp(clock.get()));
                     jdbc.update(
-                            "INSERT INTO qwen_managed_session_extension_record"
+                            "INSERT INTO ma_session_record"
                             + " (session_scope_key, record_key, tenant_id,"
                             + " workspace_id, session_id, domain, record_id,"
                             + " operation_hash, revision, record_resource_id,"
@@ -1379,7 +1311,7 @@ class AutomationScannerTest {
             }
         };
         AutomationScanner applyingScanner = new AutomationScanner(ledger,
-                applying, mapper, settings, clock::get, "scanner-a");
+                applying, settings, clock::get, "scanner-a");
         fake.crashedRuns.add(wedgedRunId);
         clock.set(T0 + 3 * MINUTE + 1_000);
         assertThat(applyingScanner.tick(clock.get())).isEqualTo(0);
@@ -1463,7 +1395,7 @@ class AutomationScannerTest {
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         // The overlap a waiting Turn makes is its own lane with its own
         // takeover: no reconcile goes out for it.
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, created_at, updated_at, completed_at)"
                         + " VALUES (?, ?, 'turn-open-reconcile',"
@@ -1480,8 +1412,8 @@ class AutomationScannerTest {
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
         assertThat(fake.operations.stream()).noneMatch(
                 operation -> "reconcile_run".equals(operation.get("kind")));
-        jdbc.update("DELETE FROM managed_agent_turn WHERE tenant_id = ?"
-                + " AND turn_id = 'turn-open-reconcile'", tenant);
+        jdbc.update("DELETE FROM ma_turn WHERE tenant_id = ?"
+                + " AND turn_id = ?", tenant, "turn-open-reconcile");
     }
 
     @Test
@@ -1515,8 +1447,8 @@ class AutomationScannerTest {
                         null, true)).body();
         // The crash window the funnel's journal closes: the control plane
         // lost its command row after the Harness committed the create.
-        jdbc.update("DELETE FROM qwen_managed_automation_command"
-                + " WHERE tenant_id = ? AND idempotency_key = ?", tenant, key);
+        jdbc.update("DELETE FROM ma_request_receipt"
+                + " WHERE namespace='AUTOMATION' AND tenant_id = ? AND idempotency_key = ?", tenant, key);
         assertThatThrownBy(
                 () -> service.retire(tenant, ACTOR, automation.id(), key))
                 .isInstanceOfSatisfying(ApiException.class, error -> {
@@ -1541,13 +1473,13 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
                 Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 otherSession);
         // The crash window: the command row is gone while the durable
         // mirror still proves the identity landed — on the first Session.
-        jdbc.update("DELETE FROM qwen_managed_automation_command"
-                + " WHERE tenant_id = ? AND idempotency_key = ?", tenant, key);
+        jdbc.update("DELETE FROM ma_request_receipt"
+                + " WHERE namespace='AUTOMATION' AND tenant_id = ? AND idempotency_key = ?", tenant, key);
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
                 new AutomationDefinitionRequest(otherSession, "Goal 2",
                         "15 3 * * *", "UTC", "Run that.", null, "skip", "none",
@@ -1573,14 +1505,14 @@ class AutomationScannerTest {
         AutomationDefinitionRequest requestA = new AutomationDefinitionRequest(
                 sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
                 null, null, null);
-        // The post-commit answer is lost: the claim is durable, mirror and
-        // answer are not — the window a mirror check could never cover.
+        // The post-commit answer is lost; the request claim and definition
+        // projection are durable while the response receipt is unsettled.
         fake.failAfterNextDefineCommit = new DaemonException("connection lost");
         assertThatThrownBy(() -> service.create(tenant, ACTOR, keyA, requestA))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("automation_operation_unknown"));
-        assertThat(ledger.findSchedule(tenant, scheduleId)).isEmpty();
+        assertThat(ledger.findSchedule(tenant, scheduleId)).isPresent();
         assertThat(fake.scheduleOf(sessionId, scheduleId)).isNotNull();
         // A different request under the same key meets the claim, not a
         // second commit — whatever Session it names.
@@ -1588,7 +1520,7 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
                 Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 otherSession);
         assertThatThrownBy(() -> service.create(tenant, ACTOR, keyA,
@@ -1619,7 +1551,7 @@ class AutomationScannerTest {
                 key);
         // A foreign request's claim already holds the key mid-flight:
         // this one never reaches the Harness and mirrors nothing.
-        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "deadbeef", scheduleId, ""), clock.get());
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
                 new AutomationDefinitionRequest(sessionId, "Goal",
@@ -1640,7 +1572,7 @@ class AutomationScannerTest {
         String key = "claim-" + UUID.randomUUID();
         String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
                 key);
-        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "digest-c", scheduleId, ""), clock.get());
         assertThat(ledger.settleCommand(tenant, key, "digest-c", ACTOR,
                 "{\"id\":\"" + scheduleId + "\"}")).isTrue();
@@ -1709,7 +1641,7 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
                 Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 otherSession);
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
@@ -1757,7 +1689,7 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
                 Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 otherSession);
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
@@ -1801,7 +1733,7 @@ class AutomationScannerTest {
                 "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
                 Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
                 .sessionId();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant,
                 otherSession);
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,

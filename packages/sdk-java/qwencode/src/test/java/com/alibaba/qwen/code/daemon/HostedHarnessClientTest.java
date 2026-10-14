@@ -1166,6 +1166,38 @@ class HostedHarnessClientTest {
         assertEquals(1, closes.get());
     }
 
+    @ParameterizedTest
+    @MethodSource("captureByteBudgets")
+    void createCarriesOptionalCaptureByteBudget(Long budget) {
+        AtomicReference<Map<String, Object>> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> {
+            payload.set(JsonSupport.parseObject(readBody(exchange), "Capture create request"));
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        CreateHarnessSession.Builder request = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .toolProfile("hosted-workspace-shell/1");
+        if (budget != null) request.captureBytes(budget);
+        try (HostedHarnessClient client = newClient()) {
+            client.createSession(request.build());
+        }
+        if (budget == null) assertFalse(payload.get().containsKey("captureBytes"));
+        else assertEquals(budget.longValue(), ((Number) payload.get().get("captureBytes")).longValue());
+    }
+
+    private static Stream<Arguments> captureByteBudgets() {
+        return Stream.of(Arguments.of((Long) null), Arguments.of(1L),
+                Arguments.of(1048576L), Arguments.of(1L << 41));
+    }
+
+    @Test
+    void rejectsCaptureByteBudgetsOutsideTheHarnessContract() {
+        for (long value : new long[] {-1, 0, (1L << 41) + 1, Long.MAX_VALUE}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CreateHarnessSession.builder().captureBytes(value));
+        }
+    }
+
     @Test
     void actionResolutionCarriesOriginalRevisionsAndClientIdentity() {
         String action = "tool_approval_" + "a".repeat(32);

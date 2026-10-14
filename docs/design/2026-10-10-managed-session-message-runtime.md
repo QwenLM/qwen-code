@@ -73,15 +73,19 @@ when the raw message fits its content or member-envelope bound. If the assistant
 record itself fits its separate transcript bound, this is a
 `byte_limit` tool refusal with advice to shorten and retry, not a failure of the
 sender's Turn. No message or member command is committed for the refused call.
-The 64 KiB raw parent-message bound applies to team members as well as plain
-children; existing argument refusals retain their more specific explanations.
+The 64 KiB raw parent-message check gives team members validation parity with
+plain children, not a reachable tool refusal: any message exceeding that raw
+bound also exceeds the equal-sized assistant-record budget. Existing argument
+refusals retain their more specific explanations only when the record fits.
 An assistant record that exceeds its own inline limit still fails before any
 tool answer is committed. This change does not truncate or rewrite that record.
+Making oversized transcript records recoverable remains follow-up work requiring
+the issue owner's scope decision; neither shared limit is changed here.
 
 | Bound                         | Value                                                                 | Refusal                                   |
 | ----------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
 | Message to a child task       | fits the task's continuation envelope (≤ 32 KiB)                      | tool error, `byte_limit`                  |
-| Message to the parent         | ≤ 64 KiB of UTF-8                                                     | tool error                                |
+| Message to the parent         | ≤ 64 KiB of UTF-8                                                     | oversized assistant record fails the Turn |
 | Messages in flight per edge   | 8 per direction (not yet handed over)                                 | tool error, `count_limit`                 |
 | Messages per child run        | 64 per direction                                                      | tool error, `budget_exhausted`            |
 | Wait for a message turn       | 30 minutes without any event in the child journal but a lease renewal | the child fails, `child_failed`           |

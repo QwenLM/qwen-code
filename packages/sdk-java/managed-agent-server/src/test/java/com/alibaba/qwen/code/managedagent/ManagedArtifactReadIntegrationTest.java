@@ -49,7 +49,7 @@ class ManagedArtifactReadIntegrationTest {
                             if (method.getName().equals("createStatement")) { statements.incrementAndGet(); }
                             if (method.getName().equals("prepareStatement")) {
                                 statements.incrementAndGet();
-                                if (((String) arguments[0]).startsWith("INSERT INTO qwen_output_read_lease")) {
+                                if (((String) arguments[0]).startsWith("INSERT INTO ma_read_lease")) {
                                     admissions.incrementAndGet();
                                 }
                             }
@@ -74,7 +74,7 @@ class ManagedArtifactReadIntegrationTest {
         assertThat(statements.get()).isLessThanOrEqualTo(350 * 8);
         assertThat(admissions.get()).isEqualTo(1);
         assertThat(response.getContentAsByteArray()).isEqualTo("A".repeat(size).getBytes(StandardCharsets.UTF_8));
-        assertThat(source.fixture.jdbc().queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Long.class)).isZero();
+        assertThat(source.fixture.jdbc().queryForObject("SELECT COUNT(*) FROM ma_read_lease", Long.class)).isZero();
     }
 
     @Test
@@ -238,7 +238,7 @@ class ManagedArtifactReadIntegrationTest {
             if (deleteSession) {
                 fixture.jdbc()
                         .update(
-                                "UPDATE managed_agent_session SET status ="
+                                "UPDATE ma_session SET status ="
                                     + " 'DELETING'");
             } else {
                 permission.set(false);
@@ -270,8 +270,8 @@ class ManagedArtifactReadIntegrationTest {
         // The flipping stub really fired its state change.
         if (deleteSession) {
             assertThat(fixture.jdbc().queryForObject(
-                    "SELECT status FROM managed_agent_session"
-                            + " WHERE session_id = 'session-1'",
+                    "SELECT status FROM ma_session"
+                            + " WHERE session_id = X'73657373696f6e2d31'",
                     String.class)).isEqualTo("DELETING");
         } else {
             assertThat(permission).isFalse();
@@ -289,7 +289,7 @@ class ManagedArtifactReadIntegrationTest {
         var policy = readingPolicy(fixture, () -> true);
         var reader = oneBytePerReadReader(fixture, 0);
         var response = flippingResponse(() -> fixture.jdbc()
-                .update("UPDATE managed_agent_session SET status ="
+                .update("UPDATE ma_session SET status ="
                         + " 'DELETING'"));
         // A 60s window: the DELETING lifecycle gate is evaluated by the
         // throttled access check, so a stage-1 deletion lands only when the
@@ -317,8 +317,8 @@ class ManagedArtifactReadIntegrationTest {
         // The deferral is real: the stage-1 transition really happened
         // mid-stream, and the window is what let the stream complete.
         assertThat(fixture.jdbc().queryForObject(
-                "SELECT status FROM managed_agent_session"
-                        + " WHERE session_id = 'session-1'",
+                "SELECT status FROM ma_session"
+                        + " WHERE session_id = X'73657373696f6e2d31'",
                 String.class)).isEqualTo("DELETING");
     }
 

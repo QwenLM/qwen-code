@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.service.OwnerSubscriptions;
 import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
 import java.util.concurrent.ScheduledFuture;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientException;
@@ -38,14 +37,18 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
  *
  * <p>Deployment prerequisites, all on the broker (RocketMQ 5.5.0+ with
  * {@code enableLmq}): the topic is a LITE topic, and three groups are
- * pre-created as LITE groups bound to it — the capability-probe group
- * {@value #CAPABILITY_PROBE_GROUP}, and the configured wake-bootstrap and
- * owner groups — because subscribeLite rejects an auto-created (regular)
- * group with "regular group cannot use LITE mode":
+ * pre-created as LITE groups bound to it — the configured capability-probe,
+ * wake-bootstrap and owner groups — because subscribeLite rejects an
+ * auto-created (regular) group with "regular group cannot use LITE mode".
+ * mqadmin creates nothing, printing only its usage, unless a cluster (-c) or
+ * broker (-b) is named:
  * <pre>
- *   mqadmin updateSubGroup -g &lt;group&gt; -o true \
+ *   mqadmin updateTopic -c &lt;cluster&gt; -t &lt;topic&gt; -a +message.type=LITE
+ *   mqadmin updateSubGroup -c &lt;cluster&gt; -g &lt;group&gt; -o true \
  *     --attributes +lite.bind.topic=&lt;topic&gt;
  * </pre>
+ * scripts/rocketmq-lite-broker.sh provisions exactly this for the broker
+ * gates.
  * The wake-bootstrap group is shared by every node: the one bootstrap
  * LiteTopic is consumed in order by one member at a time, so its listener
  * only checks SQL and claims, and hands each load to a small pool. The owner
@@ -56,10 +59,8 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 @ConditionalOnProperty(prefix = "qwen.managed-agent.event-transport",
         name = "enabled", havingValue = "true")
 public class EventTransportConfiguration {
-    // A throwaway group + lite topic used only by the startup capability probe.
-    static final String CAPABILITY_PROBE_GROUP =
-            "qwen-managed-journal-capability-probe";
-    private static final String CAPABILITY_PROBE_LITE = "capability-probe";
+    // The lite topic only the startup capability probe uses.
+    static final String CAPABILITY_PROBE_LITE = "capability-probe";
 
     // Replaceable, so the wiring can be exercised without a broker.
     @Bean
@@ -74,11 +75,20 @@ public class EventTransportConfiguration {
             ManagedAgentProperties properties) throws ClientException {
         var config = properties.getEventTransport();
         ClientConfiguration clientConfig = clientConfiguration(config);
-        verifyLiteTopicCapability(provider, clientConfig, config.getTopic());
-        return provider.newProducerBuilder()
+        verifyLiteTopicCapability(provider, clientConfig, config.getTopic(),
+                config.getCapabilityProbeGroup());
+        Producer producer = provider.newProducerBuilder()
                 .setClientConfiguration(clientConfig)
                 .setTopics(config.getTopic())
                 .build();
+        try {
+            verifyTopicAcceptsLiteMessages(provider, producer,
+                    config.getTopic());
+        } catch (RuntimeException failure) {
+            closeQuietly(producer, failure);
+            throw failure;
+        }
+        return producer;
     }
 
     @Bean
@@ -90,9 +100,8 @@ public class EventTransportConfiguration {
     }
 
     @Bean
-    public TransportConsumerStore transportConsumerStore(JdbcTemplate jdbc,
-            Clock clock) {
-        return new TransportConsumerStore(jdbc, clock);
+    public TransportConsumerStore transportConsumerStore(JdbcTemplate jdbc) {
+        return new TransportConsumerStore(jdbc);
     }
 
     @Bean(destroyMethod = "close")
@@ -166,9 +175,10 @@ public class EventTransportConfiguration {
                     + " could not subscribe "
                     + config.getWakeBootstrapLiteTopic() + " on topic "
                     + config.getTopic() + ": pre-create it as a LITE group"
-                    + " bound to the topic (mqadmin updateSubGroup"
-                    + " --attributes +lite.bind.topic=" + config.getTopic()
-                    + ")", failure);
+                    + " bound to the topic (mqadmin updateSubGroup -c"
+                    + " <cluster> -g " + config.getWakeBootstrapGroup()
+                    + " -o true --attributes +lite.bind.topic="
+                    + config.getTopic() + ")", failure);
         }
         return consumer;
     }
@@ -204,10 +214,10 @@ public class EventTransportConfiguration {
                 .build();
     }
 
-    private static void closeQuietly(LitePushConsumer consumer,
+    private static void closeQuietly(java.io.Closeable closeable,
             Throwable failure) {
         try {
-            consumer.close();
+            closeable.close();
         } catch (Exception suppressed) {
             failure.addSuppressed(suppressed);
         }
@@ -215,14 +225,14 @@ public class EventTransportConfiguration {
 
     // #13200 hardening: fail fast at startup on a broker that cannot serve
     // LiteTopics (needs RocketMQ 5.5.0+ with enableLmq), instead of silently
-    // degrading to a classic topic. The probe subscribes and unsubscribes; no
-    // message is written. Building the consumer also catches an unreachable or
-    // non-gRPC (classic 4.x) broker.
+    // degrading to a classic topic. This probe subscribes and unsubscribes and
+    // writes nothing; the send probe below writes one message. Building the
+    // consumer also catches an unreachable or non-gRPC (classic 4.x) broker.
     private static void verifyLiteTopicCapability(ClientServiceProvider provider,
-            ClientConfiguration clientConfig, String topic) {
+            ClientConfiguration clientConfig, String topic, String group) {
         try (LitePushConsumer probe = provider.newLitePushConsumerBuilder()
                 .setClientConfiguration(clientConfig)
-                .setConsumerGroup(CAPABILITY_PROBE_GROUP)
+                .setConsumerGroup(group)
                 .bindTopic(topic)
                 .setMessageListener(messageView -> ConsumeResult.SUCCESS)
                 .build()) {
@@ -232,11 +242,36 @@ public class EventTransportConfiguration {
             throw new IllegalStateException("the event-transport LiteTopic"
                     + " capability probe failed on topic " + topic + ": the"
                     + " broker must serve LiteTopics (RocketMQ 5.5.0+ with"
-                    + " enableLmq) and the probe group " + CAPABILITY_PROBE_GROUP
+                    + " enableLmq) and the probe group " + group
                     + " must be pre-created as a LITE group bound to the topic"
-                    + " (mqadmin updateSubGroup --attributes +lite.bind.topic="
-                    + topic + "); check"
-                    + " qwen.managed-agent.event-transport.endpoints", failure);
+                    + " (mqadmin updateSubGroup -c <cluster> -g " + group
+                    + " -o true --attributes +lite.bind.topic=" + topic
+                    + "); check qwen.managed-agent.event-transport.endpoints",
+                    failure);
+        }
+    }
+
+    // The subscription probe passes on a NORMAL topic too — a group binds to
+    // a topic whatever its message type — and every envelope would then be
+    // refused at send time. One synchronous send to the probe's own lite
+    // topic is refused by a topic that is not LITE, so that misconfiguration
+    // fails startup instead. Nothing consumes the probe lite topic beyond
+    // the subscription probe's own brief subscribe, whose listener only
+    // acknowledges; the broker expires it.
+    private static void verifyTopicAcceptsLiteMessages(
+            ClientServiceProvider provider, Producer producer, String topic) {
+        try {
+            producer.send(provider.newMessageBuilder()
+                    .setTopic(topic)
+                    .setLiteTopic(CAPABILITY_PROBE_LITE)
+                    .setKeys(CAPABILITY_PROBE_LITE)
+                    .setBody("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    .build());
+        } catch (ClientException | RuntimeException failure) {
+            throw new IllegalStateException("the event-transport topic "
+                    + topic + " refused a LiteTopic message: create it as a"
+                    + " LITE topic (mqadmin updateTopic -c <cluster> -t "
+                    + topic + " -a +message.type=LITE)", failure);
         }
     }
 }

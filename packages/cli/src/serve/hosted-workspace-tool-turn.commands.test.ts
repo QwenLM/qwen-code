@@ -1641,7 +1641,7 @@ it.each([
       }),
     ]);
     expect(texts(refused)).toContain('byte_limit');
-    expect(texts(refused)).toMatch(/shorten.*retry/i);
+    expect(texts(refused)).toContain('shorten the message and retry');
     expect(
       session.authority.extensionRecordsInDomain('session_command'),
     ).toHaveLength(0);
@@ -1677,22 +1677,24 @@ it.each([
 );
 
 it.each(['member', 'plain child'])(
-  '#14062: validates the parent content bound for a %s independently of the transcript bound',
+  '#14062: rejects an oversized parent message from a %s at the transcript bound',
   async (sender) => {
+    useTranscriptBudget();
     await seedFirstInput(
       (sender === 'member'
         ? teamMemberPreamble({ name: 'alice', teamName: 'review' })
         : '') + 'work',
     );
-    const refused = await execute(createTurn(), [
-      call(
-        { to: 'parent', message: 'x'.repeat(100_000) },
-        'call-over-content-bound',
-        'send_message',
-      ),
-    ]);
-    expect(texts(refused)).toContain(
-      'Hosted send_message message exceeds 65536 bytes.',
+    await expect(
+      execute(createTurn(), [
+        call(
+          { to: 'parent', message: 'x'.repeat(100_000) },
+          'call-over-content-bound',
+          'send_message',
+        ),
+      ]),
+    ).rejects.toThrow(
+      'Hosted assistant record exceeds the inline Session Store limit.',
     );
     expect(
       session.authority.extensionRecordsInDomain('session_command'),
