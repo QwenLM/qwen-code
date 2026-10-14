@@ -19,7 +19,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,7 +55,7 @@ class WorkspaceCsiWorkerAckStoreTest {
 
     @Test
     void absentHistoricalAckReturnsNullWithoutRpcOrInsert() {
-        fixture.jdbc().update("DELETE FROM managed_workspace_csi_worker_ack");
+        fixture.jdbc().update("DELETE FROM ma_operation_work");
         assertThat(fixture.store().inspect(fixture.selector())).isNull();
         assertThat(fixture.rows()).isZero();
         verifyNoInteractions(fixture.transport(), fixture.objects());
@@ -182,12 +183,12 @@ class WorkspaceCsiWorkerAckStoreTest {
     @ValueSource(strings = {"digest", "hash-alias", "timestamp-zero", "timestamp-negative", "publication-digest", "publication-row-alias"})
     void persistedColumnPinsAreVerifiedIndependently(String damage) {
         switch (damage) {
-            case "digest" -> fixture.jdbc().update("UPDATE managed_workspace_csi_worker_ack SET evidence_digest = ?", "f".repeat(64));
-            case "hash-alias" -> fixture.jdbc().update("UPDATE managed_workspace_csi_worker_ack SET execution_call_id = 'foreign'");
-            case "timestamp-zero" -> fixture.jdbc().update("UPDATE managed_workspace_csi_worker_ack SET recorded_at_epoch_micros = 0");
-            case "timestamp-negative" -> fixture.jdbc().update("UPDATE managed_workspace_csi_worker_ack SET recorded_at_epoch_micros = -1");
-            case "publication-digest" -> fixture.jdbc().update("UPDATE qwen_tool_publication SET binding_digest = ?", "f".repeat(64));
-            default -> fixture.jdbc().update("UPDATE qwen_tool_publication SET tenant_id = 'foreign'");
+            case "digest" -> fixture.jdbc().update("UPDATE ma_operation_work SET evidence_sha256 = ?", "f".repeat(64));
+            case "hash-alias" -> fixture.jdbc().update("UPDATE ma_operation_work SET target_id = X'666f726569676e'");
+            case "timestamp-zero" -> fixture.observed(0);
+            case "timestamp-negative" -> fixture.observed(-1);
+            case "publication-digest" -> fixture.jdbc().update("UPDATE ma_output_capture SET binding_digest = ?", "f".repeat(64));
+            default -> fixture.jdbc().update("UPDATE ma_output_capture SET tenant_id = X'666f726569676e'");
         }
         refused();
     }
@@ -229,8 +230,8 @@ class WorkspaceCsiWorkerAckStoreTest {
         source.setURL(url);
         source.setUser("sa");
         source.setPassword("fixture-password");
-        Flyway.configure().dataSource(source).load().migrate();
-        var jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         var sessions = new JdbcRuntimeSessionRepository(source);
@@ -272,14 +273,24 @@ class WorkspaceCsiWorkerAckStoreTest {
         document.set("original", original);
         document.set("confirmation", response);
         // Only historical read fixtures: no binding, execution, retirement or successful acknowledge is manufactured.
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
                         + " execution_key, capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ADMITTED', 1, 1, 1)",
                 ToolPublicationDataStore.scope(key), hash(selector.tenantId()), selector.tenantId(), selector.workspaceId(), selector.sessionId(),
                 selector.publicationId(), hash(capture.path("executionCallId").asText()), publication.path("captureId").asText(),
                 publication.toString(), ToolPublicationContract.bindingDigest(publication), "a".repeat(64));
-        jdbc.update("INSERT INTO managed_workspace_csi_worker_ack VALUES (?, ?, ?, ?, ?, ?)", selector.retirementId(),
-                hash(capture.path("executionCallId").asText()), capture.path("executionCallId").asText(), document.toString(), hash(document.toString()), OBSERVED);
+        new TransactionTemplate(manager).executeWithoutResult(ignored -> {
+            var operations = new WorkspaceOperations(jdbc, selector.tenantId());
+            operations.create(WorkspaceOperations.Kind.CSI_RETIREMENT, selector.retirementId(),
+                    WorkspaceOperations.values("binding_id", original.path("bindingId").asText(), "state", "DRAINING"));
+            String owner = WorkspaceOperations.hash(operations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, selector.retirementId()), "historical-proof");
+            String resource = WorkspaceEvidenceResources.publish(jdbc, selector.tenantId(), selector.workspaceId(), selector.sessionId(),
+                    owner, document.toString().getBytes(StandardCharsets.UTF_8));
+            operations.insertWork(WorkspaceOperations.Kind.CSI_RETIREMENT, selector.retirementId(), "CSI_WORKER_ACK",
+                    hash(capture.path("executionCallId").asText()), capture.path("executionCallId").asText(), selector.sessionId(),
+                    WorkspaceOperations.values("evidence_resource_key", resource, "evidence_sha256", hash(document.toString()),
+                            "recorded_at_epoch_micros", OBSERVED), "COMPLETE");
+        });
         return new Fixture(jdbc, store, selector, document, transport, objects);
     }
 
@@ -303,21 +314,33 @@ class WorkspaceCsiWorkerAckStoreTest {
     record Fixture(JdbcTemplate jdbc, WorkspaceCsiWorkerAckStore store, WorkspaceCsiWorkerAckStore.Selector selector,
             ObjectNode document, RuntimeTransport transport, ToolPublicationObjectStore objects) {
         void save(String encoded) {
-            jdbc.update("UPDATE managed_workspace_csi_worker_ack SET evidence_json = ?, evidence_digest = ?", encoded, hash(encoded));
+            new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource())).executeWithoutResult(ignored -> {
+                String owner = WorkspaceOperations.hash(selector.retirementId(), "fixture-proof");
+                String resource = WorkspaceEvidenceResources.publish(jdbc, selector.tenantId(), selector.workspaceId(), selector.sessionId(),
+                        owner, encoded.getBytes(StandardCharsets.UTF_8));
+                jdbc.update("UPDATE ma_operation_work SET evidence_resource_key = ?, evidence_sha256 = ? WHERE work_kind = 'CSI_WORKER_ACK'", resource, hash(encoded));
+            });
+        }
+
+        void observed(long value) {
+            String target = hash(document.path("confirmation").path("captureIdentity").path("executionCallId").asText());
+            new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource())).executeWithoutResult(ignored ->
+                    new WorkspaceOperations(jdbc, selector.tenantId()).updateWork(WorkspaceOperations.Kind.CSI_RETIREMENT,
+                            selector.retirementId(), "CSI_WORKER_ACK", target, WorkspaceOperations.values("recorded_at_epoch_micros", value)));
         }
 
         ObjectNode publication() {
-            return (ObjectNode) ToolPublicationContract.parseBytes("binding", jdbc.queryForObject("SELECT binding_json FROM qwen_tool_publication", String.class)
+            return (ObjectNode) ToolPublicationContract.parseBytes("binding", jdbc.queryForObject("SELECT binding_json FROM ma_output_capture", String.class)
                     .getBytes(StandardCharsets.UTF_8));
         }
 
         void savePublication(ObjectNode publication) {
-            jdbc.update("UPDATE qwen_tool_publication SET binding_json = ?, binding_digest = ?",
+            jdbc.update("UPDATE ma_output_capture SET binding_json = ?, binding_digest = ?",
                     publication.toString(), ToolPublicationContract.bindingDigest(publication));
         }
 
         long rows() {
-            return jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_worker_ack", Long.class);
+            return jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work", Long.class);
         }
     }
 }

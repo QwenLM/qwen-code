@@ -19,6 +19,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { TrajectoryPanel } from './TrajectoryPanel';
+import { createTrajectoryPageLoader } from '../../trajectory/transcriptPageLoader';
+import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context';
+import {
+  createTrajectoryLiveStore,
+  type TrajectoryLiveStore,
+} from '../../trajectory/trajectory-live-store';
 import styles from './TrajectoryPanel.module.css';
 import type {
   TrajectoryPageLoader,
@@ -130,6 +136,8 @@ afterEach(() => {
 
 async function render(
   loadPage: TrajectoryPageLoader | undefined,
+  liveStore: TrajectoryLiveStore | null = null,
+  historyGapRevision = 0,
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -138,7 +146,12 @@ async function render(
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <TrajectoryPanel loadPage={loadPage} />
+        <TrajectoryLiveContext.Provider value={liveStore}>
+          <TrajectoryPanel
+            loadPage={loadPage}
+            historyGapRevision={historyGapRevision}
+          />
+        </TrajectoryLiveContext.Provider>
       </I18nProvider>,
     );
   });
@@ -218,6 +231,134 @@ const metricsOf = (container: HTMLElement) =>
   ).map((node) => node.textContent ?? '');
 
 describe('TrajectoryPanel', () => {
+  it('discloses incomplete lifecycle details separately from page truncation', async () => {
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      { sessionId: 's', scope: 'scope', events: [], incomplete: true },
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain(
+      'Lifecycle details may be incomplete or outside the retained limit.',
+    );
+  });
+
+  it('shows the matched live request lifecycle in recorded details', async () => {
+    const lifecycle = {
+      v: 1,
+      kind: 'request',
+      phase: 'ended',
+      executionId: 'exec-matched',
+      sessionId: 's',
+      promptId: 'p',
+      model: 'model',
+      startedAt: 10,
+      endedAt: 20,
+      durationMs: 10,
+      outcome: 'success',
+    };
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      {
+        sessionId: 's',
+        scope: 'scope',
+        incomplete: false,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: { executionLifecycle: lifecycle },
+            },
+          },
+        ],
+      },
+    );
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page([
+            timingFrame(
+              {
+                kind: 'request',
+                executionId: 'exec-matched',
+                promptId: 'p',
+                model: 'model',
+                startedAt: 10,
+                durationMs: 10,
+                status: 'ok',
+              },
+              'record',
+            ),
+          ]),
+      },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    const details = container.querySelector(
+      '[data-testid="trajectory-inspector"] pre',
+    );
+    expect(details?.textContent).toContain('"executionId": "exec-matched"');
+    expect(details?.textContent).toContain('"outcome": "success"');
+  });
+
+  it('keeps the gap warning after failed refresh until a successful refresh', async () => {
+    let failLatest = false;
+    const loader = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor && failLatest) throw new Error('offline');
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `record-${index}`)], {
+        hasMore: index < 7,
+        nextCursor: String(index + 1),
+      });
+    });
+    const container = await render(loader, null, 1);
+    failLatest = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain('History may have changed while disconnected');
+    failLatest = false;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(loader).toHaveBeenCalledTimes(9);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).not.toContain('History may have changed while disconnected');
+  });
+
   it('opens record details and invalidates them when a refreshed window reuses the key', async () => {
     let textValue = 'first payload';
     let failRefresh = false;

@@ -52,10 +52,10 @@ deltas lose their text and identity, later deltas may name other Parts, and a
 Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream
-only while the Snapshot backs the floor
-(`replay_floor_sequence <= snapshot_through_sequence`); a stream reconciliation
-discards the Snapshot without lowering the floor, and during that rebuild such
-a cursor is served from the retained events.
+whenever the cursor is below the durable floor. Rebuilding projections or pruning
+all retained events never resets that floor. Snapshot-backed pages keep their immutable
+version during concurrent message changes; their scoped opaque cursor expires after
+30 minutes and retains the required snapshot and subsequent replay interval.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
 an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
@@ -201,7 +201,7 @@ not maintain a separate public-to-Harness Session mapping.
 
 ## Public Session lifecycle
 
-Close, archive and delete are durable operations (Flyway V17). Each answers
+Close, archive and delete are durable `ma_operation` execution units. Each answers
 `202` with a command operation that
 `GET /v1/agents/sessions/{id}/operations/{operationId}` reads back, also after a
 delete; the WebShell adapter offers the same routes. The public control plane
@@ -301,26 +301,28 @@ slice, not shipped behavior.
 Delete writes a public tombstone: get and list stop returning the Session,
 while its operations stay readable. Completed deletion permanently marks an existing
 private journal `DELETED`, clears its writer and recovery references, and fences
-new writes and recovery. Close and archive keep output pinned. Deletion does
-not physically erase the journal, events or resources; output collection stays
-disabled by default and requires the retention deployment gates. With both
+new writes and recovery. Close and archive keep output pinned. The deletion
+request records the tombstone; output collection stays disabled by default
+and requires the retention deployment gates. With both
 `qwen.managed-agent.tool-publication.enabled` and
-`qwen.managed-agent.tool-publication.gc-enabled` true, collection also frees
-stream-capture bytes (background Shell and foreground leftovers): eligible
-`PUBLISHED` `MYSQL_INLINE` rows of the `managed-tool-result-{content,page,manifest}`
-kinds with no journal reference on a permanently retired Session are
-byte-dropped after the same deletion grace under a per-Session claim ledger
-(`qwen_managed_session_resource_collection`), keeping their identities with
-state `COLLECTED`. Reads of the retired Session stay fenced with
+`qwen.managed-agent.tool-publication.gc-enabled` true, a typed
+`SESSION_RESOURCE_GC` operation in `ma_operation` releases retired journal,
+message, record, snapshot and artifact owners and their `ma_resource_ref`
+references in bounded transactions after the deletion grace. Unreferenced
+`PUBLISHED` or `REFERENCED` immutable `MYSQL_INLINE` bodies in `ma_resource`
+are then byte-dropped, keeping their identities with state `COLLECTED`.
+Capture objects follow a separate `CAPTURE_GC` operation: it persists deletion
+intent before physical deletion and retains its claim generation and cursor
+until the outcome is settled. Live readers, recovery protection and unresolved
+object writes block collection. Session/head tombstones and event-stream tail
+and retention-floor counters remain. Unreferenced bodies of active Sessions
+remain retained until Session retirement. Reads of the retired Session stay fenced with
 `tool_output_session_retired` exactly as before; a workspace-recovery read
 that physically reaches a collected byte copy fails the named check
 `resource_collected` instead of the generic `resource_layout_unsupported` or
 `resource_corrupt` verdict a pre-V65 broker produces.
 
-The Phase 1 schema has not been released. A development database created by an
-older revision with `harness_session_id` must be recreated before running this
-revision; the service fails Flyway validation instead of silently rewriting
-existing public Session URLs.
+This revision starts with a new empty database. Existing development or application databases keep their historical data under the old binary; the new service refuses legacy catalogs before running its baseline. Session identities and public URLs remain stable within their own environment.
 
 The public listener intentionally ignores end-user `Authorization`. The
 optional Runtime Broker listener still requires a separate machine bearer and
@@ -328,7 +330,7 @@ must remain private.
 
 ## Private Managed Session store
 
-Flyway V4 creates the private Managed Session journal and resource tables. The
+The shared fresh baseline creates the private Managed Session head, journal and resource tables. The
 internal routes under `/internal/managed-session-store/v1/**` provide
 database-time writer leases and generations, head compare-and-set,
 idempotent transaction receipts, exact JSONL transaction bytes, paged restore
@@ -581,7 +583,7 @@ Harness and HTTP Session Store, `default` or `auto-edit` approval for Shell
 (`yolo` is also valid for files), and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
-tenant/storage identity must have a deployment mount. The trusted ingress must
+tenant/storage identity must have a deployment mount. Fresh LOCAL databases additionally require `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on Linux and a successful native storage registration before tool or child Git execution. Every logical alias maps to one physical owner; aliases of the same native mount share that owner while retaining independent logical admission fences. Registration preserves the first marker provenance, and an unmapped alias cannot acquire physical execution authority. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
 header alone does not authenticate an actor. For local runs and the
 packaged-stack E2E, which have no ingress,
@@ -782,12 +784,14 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
 
 The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
-suffix-less number binds as seconds unless the setting's `@DurationUnit`
-declares milliseconds. Millisecond-bound settings — `auth.allowed-drift` (so
+suffix-less number binds as seconds except for `runtime-broker.retention.max-age`,
+which binds as days, and the millisecond-bound settings below.
+Millisecond-bound settings — `auth.allowed-drift` (so
 a stale `300000` keeps meaning five minutes instead of widening the
 signature-replay window to ~83 hours), the sub-second `events.batch-interval`
 and `events.materialize-interval`,
-`runtime-broker.child-workspace-git-timeout`, `automation.scan-delay`,
+`runtime-broker.child-workspace-git-timeout`, `runtime-broker.retention.scan-delay`,
+`automation.scan-delay`,
 `automation.lease`, `automation.late-tolerance` and `automation.lookback`
 — bind a suffix-less number as milliseconds. Always write the suffix (`90s`,
 `500ms`). At startup the server reads each seconds-convention setting's
@@ -870,13 +874,75 @@ standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
-Flyway V12 aligns the Runtime tables with the Broker's own `schema.sql`, which
-its JDBC repositories are written against. `RuntimeBrokerFlywaySchemaTest`
-fails when the two definitions differ, so a change to either one needs a
-matching change to the other. V12 replaces two primary keys. MySQL rejects this
-when `sql_require_primary_key` is set: V12 fails before it changes anything, and
-Flyway records the failure. Unset the variable, run Flyway `repair`, and start
-the server again.
+Managed Server and Runtime Broker share the single versioned 32-table baseline in
+[`runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql`](../runtime-broker/src/main/resources/db/managed-schema/V1__managed_schema.sql).
+The Server loads it through Flyway; Broker initialization reads the same resource.
+Both refuse a legacy, partial, foreign, or history-only catalog before schema writes.
+An already initialized complete baseline is structurally validated; a Broker-created
+baseline may be registered by Flyway only after that validation. Schema initialization
+does not repair or backfill old data.
+
+Use a new MySQL 8.4/InnoDB database for the new environment. Quiesce old admissions
+and settle in-flight work before cutover; retain the old environment/database for
+historical reads. New Sessions belong to the new database, which must remain available
+if routing is rolled back. The retired SQL/Java migration chain and upgrade tests are
+[archived outside the runtime classpath](../../../docs/archive/managed-agent-schema/README.md).
+The former separate Broker `schema.sql` has been removed.
+
+### Terminal Runtime record retention
+
+Runtime JDBC retention is disabled by default. It removes old terminal
+executions, Sessions and bindings in bounded batches on a dedicated scheduler;
+it does not stop workers or delete Workspace files. Configure
+`qwen.managed-agent.runtime-broker.retention` with these environment variables:
+
+| Variable                                          | Default | Meaning                                                                                                                               |
+| ------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                                |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be at least 1ms; unit-less values use days; explicit units such as `12h` are preserved |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                                   |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                            |
+
+Recovery records, Workspace holders and CSI retirement keep their bindings.
+Child Session lineage also keeps a binding until its canonical parent child_run
+has a committed terminal projection; a missing projection remains protected.
+This lets cascade and relay repair a stopped child's original Runtime identity.
+Lineage and permanent relay classifications are never collected here.
+A `:process` execution also keeps its whole binding family while its owning
+Session has an unsettled background Shell child_run, including top-level
+Sessions and Workspace isolation. This preserves the process-status evidence
+used by Session-open never-started reconciliation until those Shell records
+settle; the association conservatively protects the whole owning Session.
+The lookup deduplicates owning Sessions by both raw value and binary identity
+before checking their records on the sweep connection.
+Publication and CSI ACK references keep the original execution and its parents,
+including already collected publications; unreferenced siblings may be removed.
+Nonterminal children, live operation/dispatch leases and managed bindings without
+stop evidence remain retained. Binding slots and generation counters, placement
+guards, harness drains and storage fences remain durable. Successful ticks log
+scanned, skipped and deleted counts and duration; failures retry on the next tick.
+
+Enabling retention allows eligible, unreferenced historical records to be deleted
+once they age past `max-age`; it does not guarantee deletion by that age.
+Publication and CSI ACK references retain executions and their parent sessions and
+bindings regardless of age, including COLLECTED publications.
+After cleanup, existing missing-record responses apply. Callers must not reuse
+expired Runtime Session IDs or idempotency keys. Initialize a fresh database with
+the single canonical 32-table V1 baseline and keep cleanup disabled. Legacy
+catalogs are rejected; no in-place upgrade or old-data migration is provided.
+Verify repeated initialization preserves terminal receipts, retain the old
+environment for historical reads and settle its in-flight work before cutover.
+Shared publication, CSI operation/work and Session record variants are checked
+by their typed discriminators; their metadata and physical owner headers are
+not collected. Every publication writer must use the locking protocol, and
+retention stays disabled until the exact-identity Hosted cleanup
+release-proof contract in [#13992](https://github.com/QwenLM/qwen-code/issues/13992)
+is delivered and verified. An owed cleanup descriptor can outlive its RELEASED binding;
+collection then makes the original release conflict and blocks the Hosted
+Session. This PR does not implement that release-proof contract.
+Disable retention before reverting to older writers;
+disabling prevents future cleanup but cannot restore deleted records. See the
+[retention design](../../../docs/design/runtime-broker-jdbc-retention.md).
 
 ### Private Workspace tool execution (W0c-3)
 
@@ -954,22 +1020,17 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
-V25 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
-`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
-upgrading every Broker and Harness instance. An unregistered mount is refused
-once the option is enabled; it is never registered from the directory found at
-startup.
+The current fresh 32-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. The current native identity reader requires Linux, so this baseline does not provide macOS LOCAL tool execution. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
 Marker v2 stores birth time as a canonical `Instant` string preserving nanoseconds. The guard reads creation time, mtime, device and inode in one `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID, keyed by the trimmed machine-id UTF-8 bytes with `Qwen-Code/verified-workspace/v2` as input, rather than the raw machine ID.
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-Prerelease W1 V21/V24 databases and marker v1 cannot be directly upgraded to V25/v2. Experimental W1 V24 conflicts with main’s Actions V24; renaming the migration does not upgrade an existing database. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
+The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it does not upgrade or migrate an existing database. Preserve old deployments and their data for historical access. Do not attach this binary to an old catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
 
 Stop all processes and external jobs that can write the storage, account for
-old Runtime holders and verify the original root before registration. Apply
-Flyway migrations, then run the private maintenance entry from this module on
+old Runtime holders and verify the original root before registration. Initialize
+the new database with the canonical V1 baseline, then run the private maintenance entry from this module on
 the same Linux host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
 crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 `W1_JDBC_PASSWORD` environment variables:
@@ -1001,7 +1062,7 @@ a live shared storage.
 
 After registration, enable
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on the
-whole upgraded deployment. On each new attachment, model submission, Runtime
+whole new deployment before admission. On each new attachment, model submission, Runtime
 claim and execute, the server compares the configured canonical root against
 the SQL registration, Linux host/device/inode/birth-time identity and the root marker.
 A missing or conflicting marker, replacement root, missing saved cwd or fenced
