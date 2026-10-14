@@ -27,6 +27,7 @@ import {
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { LinkifiedText } from './LinkifiedText';
+import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { useWebShellCustomization } from '../../customization';
 import type {
   ComposerTagClickHandler,
@@ -247,7 +248,8 @@ export const UserMessage = memo(function UserMessage({
   author,
 }: UserMessageProps) {
   const { t } = useI18n();
-  const documentMode = useTranscriptRenderMode() === 'document';
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -500,7 +502,17 @@ export const UserMessage = memo(function UserMessage({
               }`}
               hidden={editing}
             >
-              {renderedContent}
+              <SelectionCopyMenu
+                className=""
+                content={content}
+                enabled={
+                  transcriptRenderMode === 'interactive' &&
+                  !editing &&
+                  !submittingEdit
+                }
+              >
+                {renderedContent}
+              </SelectionCopyMenu>
             </div>
             {editing && (
               <div className={styles.editArea}>
