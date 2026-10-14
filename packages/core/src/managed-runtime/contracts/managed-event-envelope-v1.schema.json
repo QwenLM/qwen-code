@@ -13,6 +13,7 @@
     "forbiddenFields",
     "formatVersion",
     "fromEventCases",
+    "fromPublicEventCases",
     "kinds",
     "limits",
     "streams"
@@ -45,11 +46,14 @@
         "lifecycle.changed",
         "domain.committed",
         "message.delta",
-        "message.retracted"
+        "message.retracted",
+        "operation.replayed",
+        "hosted.batch.planned",
+        "hosted.cleanup"
       ]
     },
     "streams": {
-      "const": ["authoritative_journal"]
+      "const": ["authoritative_journal", "public_event"]
     },
     "forbiddenFields": {
       "const": [
@@ -66,6 +70,8 @@
     "limits": {
       "const": {
         "maxIdBytes": 512,
+        "maxJsonDepth": 64,
+        "maxPublicKindBytes": 128,
         "maxTimeMs": 8640000000000000
       }
     },
@@ -140,6 +146,29 @@
           }
         }
       }
+    },
+    "fromPublicEventCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["envelope", "id", "row", "workspaceId"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "row": {
+            "type": "object"
+          },
+          "workspaceId": {
+            "$ref": "#/$defs/stableId"
+          },
+          "envelope": {
+            "$ref": "#/$defs/envelope"
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -166,6 +195,35 @@
           "$ref": "#/$defs/digest"
         }
       }
+    },
+    "journalKind": {
+      "enum": [
+        "input.accepted",
+        "wake.requested",
+        "activation.changed",
+        "model.attempt",
+        "message.committed",
+        "tool.intent",
+        "action.changed",
+        "tool.receipt",
+        "checkpoint.committed",
+        "context.compacted",
+        "cancel.requested",
+        "turn.settled",
+        "config.bound",
+        "lifecycle.changed",
+        "domain.committed",
+        "message.delta",
+        "message.retracted",
+        "operation.replayed",
+        "hosted.batch.planned",
+        "hosted.cleanup"
+      ]
+    },
+    "publicKind": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
     },
     "envelope": {
       "type": "object",
@@ -196,7 +254,7 @@
           "$ref": "#/$defs/stableId"
         },
         "stream": {
-          "enum": ["authoritative_journal"]
+          "enum": ["authoritative_journal", "public_event"]
         },
         "sequence": {
           "type": "integer",
@@ -207,25 +265,7 @@
           "$ref": "#/$defs/stableId"
         },
         "kind": {
-          "enum": [
-            "input.accepted",
-            "wake.requested",
-            "activation.changed",
-            "model.attempt",
-            "message.committed",
-            "tool.intent",
-            "action.changed",
-            "tool.receipt",
-            "checkpoint.committed",
-            "context.compacted",
-            "cancel.requested",
-            "turn.settled",
-            "config.bound",
-            "lifecycle.changed",
-            "domain.committed",
-            "message.delta",
-            "message.retracted"
-          ]
+          "type": "string"
         },
         "occurredAt": {
           "type": "integer",
@@ -235,7 +275,43 @@
         "payloadRef": {
           "$ref": "#/$defs/payloadRef"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "const": "authoritative_journal"
+              }
+            },
+            "required": ["stream"]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/journalKind"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "const": "public_event"
+              }
+            },
+            "required": ["stream"]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/publicKind"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

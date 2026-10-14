@@ -61,14 +61,27 @@ export function omitSkillDetailsFromReplayArrays<
   T extends {
     compactedReplay?: BridgeEvent[];
     liveJournal?: BridgeEvent[];
+    lifecycleReplay?: BridgeEvent[];
   },
 >(session: T): T {
-  if (!session.compactedReplay && !session.liveJournal) return session;
+  if (
+    !session.compactedReplay &&
+    !session.liveJournal &&
+    !session.lifecycleReplay
+  )
+    return session;
   return {
     ...session,
     ...(session.compactedReplay
       ? {
           compactedReplay: session.compactedReplay.map(
+            omitSkillDetailsForSdkSurface,
+          ),
+        }
+      : {}),
+    ...(session.lifecycleReplay
+      ? {
+          lifecycleReplay: session.lifecycleReplay.map(
             omitSkillDetailsForSdkSurface,
           ),
         }

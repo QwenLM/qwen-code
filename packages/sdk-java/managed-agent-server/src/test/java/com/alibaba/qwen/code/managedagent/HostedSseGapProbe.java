@@ -22,10 +22,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Principal;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -154,19 +152,22 @@ final class HostedSseGapProbe implements AutoCloseable {
     }
 
     private List<Map<String, Object>> events() {
-        return jdbc.queryForList("SELECT * FROM managed_agent_event WHERE tenant_id = ? AND session_id = ?"
+        return jdbc.queryForList("SELECT * FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
                 + " ORDER BY sequence_id", tenant, session);
     }
 
     private void assertExecution(boolean finished) throws Exception {
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         if (!finished) executionId = execution.get("execution_call_id").toString();
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
-        String storageKey = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-0").getBytes(StandardCharsets.UTF_8)));
-        var owner = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
+        String storage = "storage-0";
+        var owner = jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
+                + " AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
         if (finished) assertThat(owner.get("holder_key")).isNull();
         else {
             assertThat(owner.get("holder_key")).isNotNull();
@@ -179,10 +180,10 @@ final class HostedSseGapProbe implements AutoCloseable {
         assertThat(execution.get("execution_state")).isEqualTo(finished ? "SETTLED" : "EXECUTING");
         assertThat(execution.get("execution_status")).isEqualTo(finished ? "success" : null);
         assertThat(((Number) execution.get("dispatch_generation")).intValue()).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?"
+        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, session, promptId)).isEqualTo(finished ? "RELEASED" : "READY");
         if (finished) assertThat(Files.readString(proof)).isEqualTo("xx");
-        var records = jdbc.queryForList("SELECT record_bytes FROM qwen_managed_session_journal_tx"
+        var records = jdbc.queryForList("SELECT record_bytes FROM ma_session_journal_tx"
                 + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", byte[].class, tenant, session);
         var events = new ArrayList<JsonNode>();
         for (byte[] record : records) {

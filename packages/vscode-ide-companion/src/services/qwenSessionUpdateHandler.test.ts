@@ -29,6 +29,64 @@ describe('QwenSessionUpdateHandler', () => {
     handler = new QwenSessionUpdateHandler(mockCallbacks);
   });
 
+  it.each(['started', 'ended', 'unknown'])(
+    'ignores lifecycle-only %s metadata without empty usage updates',
+    (phase) => {
+      handler.handleSessionUpdate({
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            executionLifecycle: { v: phase === 'unknown' ? 99 : 1, phase },
+          },
+        },
+      } as unknown as SessionNotification);
+      expect(mockCallbacks.onUsageUpdate).not.toHaveBeenCalled();
+      expect(mockCallbacks.onStreamChunk).not.toHaveBeenCalled();
+      expect(mockCallbacks.onMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['started', 'ended', 'unknown'])(
+    'ignores metadata-only tool lifecycle %s without callbacks',
+    (phase) => {
+      handler.handleSessionUpdate({
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call',
+          _meta: {
+            toolLifecycle: {
+              v: phase === 'unknown' ? 99 : 1,
+              phase,
+              kind: 'tool',
+            },
+          },
+        },
+      } as unknown as SessionNotification);
+      for (const callback of Object.values(mockCallbacks)) {
+        expect(callback).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('preserves normal text and duration-only usage metadata', () => {
+    handler.handleSessionUpdate({
+      sessionId: 'test-session',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'answer' },
+        _meta: { durationMs: 0 },
+      },
+    } as SessionNotification);
+    expect(mockCallbacks.onStreamChunk).toHaveBeenCalledWith('answer');
+    expect(mockCallbacks.onUsageUpdate).toHaveBeenCalledWith({
+      usage: undefined,
+      durationMs: 0,
+    });
+  });
+
   describe('current_mode_update handling', () => {
     it('calls onModeChanged callback with mode id', () => {
       const modeUpdate: SessionNotification = {
