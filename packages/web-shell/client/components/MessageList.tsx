@@ -50,6 +50,11 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import {
+  isShellCompletionAckRow,
+  shellAckRowFromMessage,
+  type ShellAckRow,
+} from '../utils/shellCompletionAck';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -779,70 +784,50 @@ function isBackgroundTurnMarker(item: DisplayItem): boolean {
 }
 
 /**
- * A background shell command's completion notification usually only triggers
- * a bookkeeping ack from the model — nothing left to act on. Such an ack is
- * not the turn's deliverable when it follows the marker with nothing but
- * thoughts in between (no further work, no user steering) and the turn already
- * produced an answer before the marker. Agent/peer completions carry a result
- * the parent synthesizes into its reply, so they are never treated as acks,
- * and a post-marker reply that is followed by work or user input is a real
- * continuation and stays a candidate.
+ * The ack rule itself lives in utils/shellCompletionAck.ts so the /copy
+ * path applies the same classification. This wrapper projects the turn's
+ * display rows into the rule's row view: message rows keep their fields,
+ * parallel-agent groups count as execution work, and every other
+ * non-message row reduces to an inert placeholder the rule cannot fold.
+ *
+ * A reply is folded away from the turn's final answer only on positive
+ * signals: it is the daemon-tagged reply to a background shell completion
+ * (or the raw result notification itself), the turn already produced a
+ * main answer before that specific marker, only thoughts and daemon
+ * bookkeeping rows sit between the marker and the reply, and nothing but
+ * thoughts and markers follows it. A reply to a failed or cancelled task,
+ * an untagged reply, or one followed by work or user steering stays the
+ * turn's final answer.
  */
-function isShellCompletionAck(
-  items: readonly DisplayItem[],
-  index: number,
-  markers: readonly number[],
-  hasMainAnswer: boolean,
-): boolean {
-  const item = items[index]!;
-  if (!hasMainAnswer) return false;
-  if (!(item.type === 'message' && item.message.role === 'assistant'))
-    return false;
-  let marker = -1;
-  for (const m of markers) {
-    if (m < index) marker = m;
-    else break;
-  }
-  if (marker === -1) return false;
-  const markerItem = items[marker]!;
-  if (
-    !(
-      markerItem.type === 'message' &&
-      markerItem.message.backgroundTurn?.kind === 'shell'
-    )
-  ) {
-    return false;
-  }
-  for (let i = marker + 1; i < index; i++) {
-    const between = items[i]!;
-    if (!(between.type === 'message' && between.message.role === 'thinking')) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function scanFinalAnswerIndex(
+function isShellCompletionAckItem(
   items: readonly DisplayItem[],
   start: number,
   end: number,
+  index: number,
   includeBackgroundNotifications: boolean,
-): number {
-  let hasLaterWork = false;
-  for (let i = end; i > start; i--) {
+): boolean {
+  const rows: ShellAckRow[] = [];
+  for (let i = start + 1; i <= end; i++) {
     const item = items[i]!;
-    if (isBackgroundTurnMarker(item)) {
-      hasLaterWork = false;
-    } else if (isExecutionWorkStep(item)) {
-      hasLaterWork = true;
-    } else if (
-      !hasLaterWork &&
-      isFinalContentCandidate(item, includeBackgroundNotifications)
-    ) {
-      return i;
+    if (item.type === 'message') {
+      rows.push(shellAckRowFromMessage(item.message));
+    } else {
+      rows.push({
+        role: 'inert',
+        hasContent: false,
+        isWorkStep: item.type === 'parallel_agents',
+        isAgentReply: false,
+        isCompletionRow: false,
+      });
     }
   }
-  return -1;
+  return isShellCompletionAckRow(
+    rows,
+    index - (start + 1),
+    -1,
+    rows.length - 1,
+    includeBackgroundNotifications,
+  );
 }
 
 function findFinalAnswerIndex(
@@ -851,18 +836,6 @@ function findFinalAnswerIndex(
   end: number,
   includeBackgroundNotifications = true,
 ): number {
-  const markers: number[] = [];
-  for (let i = start + 1; i <= end; i++) {
-    if (isBackgroundTurnMarker(items[i]!)) markers.push(i);
-  }
-  const hasMainAnswer =
-    markers.length > 0 &&
-    scanFinalAnswerIndex(
-      items,
-      start,
-      markers[0] - 1,
-      includeBackgroundNotifications,
-    ) !== -1;
   let hasLaterWork = false;
   for (let i = end; i > start; i--) {
     const item = items[i]!;
@@ -874,7 +847,17 @@ function findFinalAnswerIndex(
       !hasLaterWork &&
       isFinalContentCandidate(item, includeBackgroundNotifications)
     ) {
-      if (isShellCompletionAck(items, i, markers, hasMainAnswer)) continue;
+      if (
+        isShellCompletionAckItem(
+          items,
+          start,
+          end,
+          i,
+          includeBackgroundNotifications,
+        )
+      ) {
+        continue;
+      }
       return i;
     }
   }
