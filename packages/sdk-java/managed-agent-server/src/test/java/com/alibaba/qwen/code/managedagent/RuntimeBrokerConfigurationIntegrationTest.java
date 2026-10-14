@@ -85,7 +85,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     private Integer columnCount(String columnName) {
         return jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.columns "
-                        + "WHERE table_name = 'qwen_runtime_binding' "
+                        + "WHERE table_name = 'ma_runtime_binding' "
                         + "AND column_name = ?",
                 Integer.class, columnName);
     }

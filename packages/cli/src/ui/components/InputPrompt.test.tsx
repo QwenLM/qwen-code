@@ -6287,13 +6287,95 @@ describe('InputPrompt', () => {
     });
   });
 
-  describe('VP-mode bare Up/Down scrolls the conversation (#10749)', () => {
+  describe('VP-mode bare Up/Down recalls input history by default', () => {
+    // `ui.useTerminalBuffer` (VP mode, on by default) documents the transcript
+    // scroll keys as Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End and the mouse wheel,
+    // so a bare ↑/↓ reaching an empty composer has to walk input history —
+    // even when the transcript overflows and the scrollbar is on screen.
+    const vpSettings = {
+      merged: { ui: { useTerminalBuffer: true } },
+    } as LoadedSettings;
+
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
+      renderWithProviders(
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        { settings: vpSettings },
+      );
+
+    it('Up from an empty composer recalls history instead of scrolling the transcript', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer recalls history instead of scrolling the transcript', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer still descends when history is exhausted', async () => {
+      // The pre-existing ↓ fall-through (history → descendFromComposer) must
+      // survive unchanged now that the scroll fallback no longer preempts it.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+  });
+
+  describe('VP-mode bare Up/Down scrolls the conversation when opted in (#10749)', () => {
     // Terminals without SGR mouse reporting turn wheel events into bare ↑/↓.
-    // In VP mode (ui.useTerminalBuffer, on by default) those keys have to
+    // ui.arrowKeysScrollTranscript is the explicit opt-in that lets those keys
     // scroll the transcript while the composer is empty instead of rewriting
     // the input with an old prompt.
     const vpSettings = {
-      merged: { ui: { useTerminalBuffer: true } },
+      merged: {
+        ui: { useTerminalBuffer: true, arrowKeysScrollTranscript: true },
+      },
     } as LoadedSettings;
 
     const renderVp = (
@@ -6357,6 +6439,8 @@ describe('InputPrompt', () => {
     });
 
     it('keeps history navigation when VP mode is off', async () => {
+      // The opt-in is meaningless outside VP mode — there the host terminal
+      // still owns native scrollback and never translates the wheel into ↑/↓.
       const scrollBy = vi.fn();
       (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
       mockBuffer.setText('');
@@ -6367,6 +6451,16 @@ describe('InputPrompt', () => {
         >
           <InputPrompt {...props} />
         </ScrollContext.Provider>,
+        {
+          settings: {
+            merged: {
+              ui: {
+                useTerminalBuffer: false,
+                arrowKeysScrollTranscript: true,
+              },
+            },
+          } as LoadedSettings,
+        },
       );
       await wait();
 

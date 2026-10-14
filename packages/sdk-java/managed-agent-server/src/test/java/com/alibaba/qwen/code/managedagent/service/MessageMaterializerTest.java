@@ -269,4 +269,50 @@ class MessageMaterializerTest {
         verify(store, times(4)).deferMaterializationTarget("tenant",
                 "poison");
     }
+
+    @Test
+    void aNotifiedSessionRunsOneBatchThroughTheSameStoreCall() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.materializeNextBatch("tenant", "notified", 200))
+                .thenReturn(new MaterializationResult(true, 4L));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        assertThat(materializer.materializeNotified("tenant", "notified"))
+                .isTrue();
+
+        verify(store, times(1)).materializeNextBatch("tenant", "notified",
+                200);
+        verify(store, never()).deferMaterializationTarget(anyString(),
+                anyString());
+    }
+
+    // A transport notice must never bypass the pass's backoff, or a poisoned
+    // Session would warn at the event rate.
+    @Test
+    void aNotifiedFailureHandsTheSessionToThePassBackoff() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.findMaterializationTargets(33))
+                .thenReturn(List.of(POISON));
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        assertThat(materializer.materializeNotified("tenant", "poison"))
+                .isFalse();
+        // Backing off now: further notices defer without touching the store.
+        assertThat(materializer.materializeNotified("tenant", "poison"))
+                .isFalse();
+        verify(store, times(1)).materializeNextBatch("tenant", "poison",
+                200);
+
+        // The pass then owns the cadence from streak 1: due at once, and
+        // after its failure the notice still defers.
+        materializer.materialize();
+        verify(store, times(2)).materializeNextBatch("tenant", "poison",
+                200);
+        assertThat(materializer.materializeNotified("tenant", "poison"))
+                .isFalse();
+        verify(store, times(2)).materializeNextBatch("tenant", "poison",
+                200);
+    }
 }

@@ -96,6 +96,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
      3. 否则把命令作为新命令准入:发送的 run 必须是开启中团队某个成员的链头,正在运行,且未请求停止。否则回复为 `refused`:
         - 对任何开启中团队都未列出的 run,回复 `This Session is not a member of an open team.`,这包括在其命令等待期间团队被删除的成员;
         - 对不是其成员链头、已结算或正在停止的 run,回复 `Your run has ended or is being stopped; it takes no more team commands.`。
+   - **计划取代的部分提交恢复。** 只有键为 `supersede:<commandId>:<oldRequestId>` 的精确 `withdrawTeamPlan` 回执可以绕过新 run 准入。替代计划的修订号为被取消计划的修订号加一，而不是恢复时的最大修订号。如果另一提交已经占用该修订号或更高修订号，恢复回复旧提交已被取代并给出新请求标识，不开启竞争计划，也不取消任何计划；inbound 命令回执保存该结果。否则，即使原 run 已结算，也开启欠下的计划。新提交保留初始及撤回前的链头检查；取消一旦提交，run 结算不得使欠下的后继计划变成拒绝。域回滚不授权新写入：缺失后继计划时，命令保持可重试且不写入 refused 回执，直到重新启用。现有 authority 约束仍要求团队为 active 且成员需要计划模式。
    - **读取不提交任何东西。** `board_read` 自己检查发送方的血缘与 attach,因为没有记录规则做这件事,然后返回任务板当前的状态。它不提交回执:它不改变任何东西,重新运行时可能以更新的任务板作答。只有成员的 journal 保留它的回复。
    - **funnel 之间的顺序。** 团队 funnel 与 child funnel 各有一条写入链,任一方都从不在自己的链内等待另一方(H4e-b2 决策 10)。`execute` 在团队链上读取并校验,离开它,然后才为消息调用 child funnel(决策 8)。任务板写入在团队链上运行,位于 lead 自己的两次调用之间,从不在某次调用的中途。
    - **正在关闭的团队**遵循 H4e-b1:团队关闭期间 `task_create` 被拒绝,`task_update` 被允许。`plan_submit` 被拒绝,因为 `team_plan` 只在 active 的团队中开启。

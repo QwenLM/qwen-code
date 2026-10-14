@@ -297,14 +297,20 @@ export class HostedHookSession {
     private readonly session: ManagedSession,
     private readonly initialPin: ManagedHookCatalogPin,
     broker?: HostedWorkspaceBroker,
+    private readonly lifecycleV2: () => boolean = () => false,
   ) {
     this.ownsBroker = broker === undefined;
+    const previous = lifecycleV2()
+      ? session.authority.extensionRecordsInDomain('hook_execution').at(-1)
+      : undefined;
     this.broker =
       broker ??
       new HostedWorkspaceBroker(
         options,
         this.key,
-        `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
+        previous
+          ? parseHookExecution(previous.record).runtimeSessionId
+          : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
       );
   }
 
@@ -350,9 +356,37 @@ export class HostedHookSession {
     // released once.
     this.acquiring ??= (async () => {
       try {
-        await this.releaseEarlierOwners(false);
-        await this.broker.warm();
-        await this.broker.acquire();
+        if (!this.lifecycleV2()) await this.releaseEarlierOwners(false);
+        if (this.lifecycleV2()) {
+          const pins = this.session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter(
+              (entry) =>
+                parseHookExecution(entry.record).runtimeSessionId ===
+                this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : []));
+          const runtime = this.broker.runtime;
+          const expected =
+            pins[0] ??
+            (runtime && {
+              runtimeBindingId: runtime.bindingId,
+              generation: runtime.generation,
+            });
+          if (
+            !expected ||
+            pins.some(
+              (pin) =>
+                pin.runtimeBindingId !== expected.runtimeBindingId ||
+                pin.generation !== expected.generation,
+            )
+          )
+            throw new HostedHookRecoveryRequiredError();
+          await this.broker.acquire(expected);
+        } else {
+          await this.broker.warm();
+          await this.broker.acquire();
+        }
         if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
         this.acquired = true;
       } finally {
@@ -493,10 +527,12 @@ export class HostedHookSession {
   }
 
   /**
-   * Whether this Session's Hook catalog holds an eligible command Hook on a
-   * tool-result event. Such a Hook acquires the Session-owned mount when its
-   * results complete — possibly after child-agent admission — so a child
-   * must not be admitted while one exists.
+   * Whether this Session's Hook catalog holds an eligible non-prompt Hook
+   * on a tool-result event. Any such Hook acquires the Session-owned mount
+   * when its results complete — possibly after child-agent admission — so a
+   * child must not be admitted while one exists. Command, http and function
+   * Hooks all dispatch through the broker (`executionBroker`), so all three
+   * hold the mount; only prompt Hooks run in-process and never take it.
    *
    * Scans the catalog without the `matcher` predicate dispatch applies, and
    * that breadth is the intent. A foreground child cannot share a batch with
@@ -524,7 +560,7 @@ export class HostedHookSession {
     return (
       this.catalog?.hooks.some(
         (hook) =>
-          hook.config.type === HookType.Command &&
+          hook.config.type !== HookType.Prompt &&
           this.isHookEligible(hook, usedOnce, null) &&
           (hook.eventName === HookEventName.PostToolUse ||
             hook.eventName === HookEventName.PostToolUseFailure ||
