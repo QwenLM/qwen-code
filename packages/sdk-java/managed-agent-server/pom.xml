@@ -251,8 +251,15 @@
                                  gates (five letters FG7a,b,d–f plus the FG7c
                                  crash class) extend the fork's wall-clock by
                                  ~150 s — ~60 s of it test time — at 2×
-                                 headroom. -->
-                            <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                                 headroom. The L4 shell-lifecycle recovery
+                                 class (#14039) then added four cuts that each
+                                 boot a real Spring, the packaged Harness and
+                                 a durable worker — roughly another 300 s of
+                                 healthy wall-clock the FG7 sizing never
+                                 covered, so a contended main runner killed
+                                 the fork before any test reported (#14125).
+                                 1800 s restores the 2× headroom. -->
+                            <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
