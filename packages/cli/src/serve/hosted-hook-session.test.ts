@@ -44,6 +44,7 @@ import * as stdio from '../utils/stdioHelpers.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // The absent-owner release refusal is reported on the module's debug
 // logger only, and that channel is silent unless a debug session is active:
@@ -1040,7 +1041,9 @@ it('waits for Runtime admission before acknowledging an async Hook', async () =>
       completed = true;
       return result;
     });
-  await vi.waitFor(() => expect(finish).toBeDefined());
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
   expect(completed).toBe(false);
   finish!({ success: true, outcome: 'success', duration: 0 });
   await firing;
@@ -1076,7 +1079,9 @@ it('rejects a changed input while the same occurrence is still running', async (
     { tool_name: 'read_file' },
     signal(),
   );
-  await vi.waitFor(() => expect(finish).toBeDefined());
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
   await expect(
     hooks.fire(
       HookEventName.PreToolUse,
@@ -1105,7 +1110,9 @@ it('cancels an active occurrence and does not dispatch later sequential hooks', 
       finish = resolve;
     });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
-  await vi.waitFor(() => expect(finish).toBeDefined());
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
   const cancelled = await hooks.status('call-1', true);
   expect(cancelled.cancelRequested).toBe(true);
   finish!({ success: false, outcome: 'cancelled', duration: 0 });
