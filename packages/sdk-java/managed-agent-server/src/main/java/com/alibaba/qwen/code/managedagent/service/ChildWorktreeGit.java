@@ -329,7 +329,7 @@ public final class ChildWorktreeGit {
     private static void requireNoLinks(Path commonDir, String name, int depth) {
         Path directory = commonDir.resolve(name);
         try {
-            if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            if (!"objects".equals(name) && !Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 return;
             }
             if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
@@ -346,9 +346,20 @@ public final class ChildWorktreeGit {
                             }
                             return FileVisitResult.CONTINUE;
                         }
+
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException error) throws IOException {
+                            // Git can remove an object entry after the directory iterator lists it.
+                            if ("objects".equals(name) && !file.equals(directory)
+                                    && error instanceof NoSuchFileException) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                            throw error;
+                        }
                     });
         } catch (IOException error) {
-            throw ChildWorkspaceException.layout("The repository's " + name + " directory is unreadable");
+            throw new ChildWorkspaceException(ChildWorkspaceException.LAYOUT, false,
+                    "The repository's " + name + " directory is unreadable", error);
         }
     }
 
