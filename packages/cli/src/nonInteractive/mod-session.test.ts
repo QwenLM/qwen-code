@@ -277,6 +277,62 @@ describe('headless Mod session ownership', () => {
     });
   });
 
+  it.each([
+    [undefined, undefined, 'native'],
+    ['claude', undefined, 'claude'],
+    ['claude', 'native', 'native'],
+  ] as const)(
+    'selects dialect from operator settings, not workspace or plugin origin (%s, %s)',
+    async (user, system, expected) => {
+      const { config, adapter, extension } = setup();
+      Object.assign(extension, { originSource: 'claude' });
+      const settings = {
+        merged: {
+          experimental: { mods: true },
+          pluginConfigs: { 'hello-mod': { toolDialect: 'claude' } },
+        },
+        systemDefaults: { settings: {} },
+        user: {
+          settings: {
+            pluginConfigs: { 'hello-mod@inline': { toolDialect: user } },
+          },
+        },
+        system: {
+          settings: { pluginConfigs: { 'hello-mod': { toolDialect: system } } },
+        },
+      } as unknown as LoadedSettings;
+      const session = ModSession.create(
+        config as unknown as Config,
+        settings,
+        adapter as unknown as JsonOutputAdapterInterface,
+      )!;
+      sessions.push(session);
+      await session.initialize(new AbortController().signal);
+      expect(mocks.create.mock.calls[0][0][0]).toMatchObject({
+        toolDialect: expected,
+        options: {},
+      });
+    },
+  );
+
+  it('rejects an invalid dialect on a later plugin before any worker starts without userConfig', async () => {
+    const extensions = [
+      { id: 'a', name: 'a', path: '/a', version: '1.0.0', isActive: true },
+      { id: 'b', name: 'b', path: '/b', version: '1.0.0', isActive: true },
+    ];
+    const { config, adapter } = setup({ getExtensions: () => extensions });
+    const session = new ModSession(
+      config as unknown as Config,
+      adapter as unknown as JsonOutputAdapterInterface,
+      [{ b: { toolDialect: 'unsupported' } }],
+    );
+    sessions.push(session);
+    await expect(
+      session.initialize(new AbortController().signal),
+    ).rejects.toThrow('Mod b: Invalid Mod toolDialect');
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
   it.each(['missing', 'cycle', 'options'])(
     'starts no workers when a later plugin has invalid %s',
     async (kind) => {

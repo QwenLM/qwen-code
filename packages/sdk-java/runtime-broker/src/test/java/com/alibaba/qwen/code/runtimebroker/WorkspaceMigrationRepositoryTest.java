@@ -27,7 +27,7 @@ class WorkspaceMigrationRepositoryTest {
         var source = new org.h2.jdbcx.JdbcDataSource();
         source.setURL("jdbc:h2:mem:history-" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         for (RuntimeSessionRepository repository : java.util.List.of(
                 new InMemoryRuntimeSessionRepository(), new JdbcRuntimeSessionRepository(source))) {
             var old = new RuntimeScope("tenant", "workspace", "1", "/old", "capability", "session");

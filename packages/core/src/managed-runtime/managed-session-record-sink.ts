@@ -34,6 +34,7 @@ const CARRIED_SYSTEM_SUBTYPES = new Set([
   'at_command',
   'ui_telemetry',
   'attribution_snapshot',
+  'turn_attempt',
 ]);
 
 /**

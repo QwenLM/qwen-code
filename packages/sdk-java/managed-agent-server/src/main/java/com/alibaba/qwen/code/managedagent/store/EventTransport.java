@@ -7,7 +7,9 @@ import java.util.List;
  * Distribution adapter behind the after-commit seam (design
  * 2026-10-04-managed-agent-event-transport, phase MQ1). Implementations carry
  * copies of committed facts to other nodes; the local SessionEventHub fan-out
- * does not depend on them. MQ1 ships no implementation.
+ * does not depend on them. MQ1 shipped no implementation; MQ2c adds
+ * LiteTopicPublicEventTransport, present only when the event transport is
+ * enabled.
  *
  * <p>Implementer contract, as pinned by CompositeCommittedEventPublisher:
  * publish is invoked synchronously from the after-commit hook on the
