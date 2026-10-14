@@ -12458,6 +12458,22 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBe(20_000);
     });
 
+    // A pressure-monitor `compact_history` can replace the history between
+    // dispatch and acceptance; its token count must not anchor the next send.
+    it('does not reanchor a response whose history was replaced in flight', async () => {
+      const pendingResponse = async function* () {
+        yield* textStream('ok', {
+          promptTokenCount: NEAR_AUTO,
+          totalTokenCount: NEAR_AUTO + 10,
+        });
+        chat.setHistory([userText('compacted'), modelText('ack')]);
+      };
+      mockStreamsOnce(pendingResponse(), textStream('done'));
+      await sendDrain('start', 'first');
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
     it('does not reanchor a retried response after fixed inputs change during backoff', async () => {
       // `request` is built once, so the retry still carries the pre-change
       // system instruction; its usage must not anchor the next send.
@@ -12681,6 +12697,47 @@ describe('LlmChat', async () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
       expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('clears the read cache when worker invalidation of a cut read fails', async () => {
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory: vi.fn(),
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockConfig.getExecutionEnvironment = () =>
+        ({
+          invalidateReadCache: vi
+            .fn()
+            .mockRejectedValue(new Error('executor closed')),
+        }) as unknown as ReturnType<Config['getExecutionEnvironment']>;
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [
+              fnCall(
+                'tool_call',
+                { name: 'read_file', arguments: { file_path: 'cut.txt' } },
+                'rpc-cut',
+              ),
+            ],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [fnResponse('tool_call', { output: 'x'.repeat(20_000) }, 'rpc-cut')],
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThan(12_000);
+      expect(clear).toHaveBeenCalledOnce();
     });
 
     it('disarms a cut edit result, not just a cut read', async () => {

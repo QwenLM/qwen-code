@@ -3470,6 +3470,8 @@ export class LlmChat {
                       .getExecutionEnvironment?.()
                       ?.invalidateReadCache(paths);
                   } catch (error) {
+                    // Only `clear()` moves the generation the worker re-syncs on.
+                    fileReadCache.clear();
                     debugLogger.warn(
                       'Execution cache invalidation after tool-output shrink failed',
                       error,
@@ -6051,6 +6053,7 @@ export class LlmChat {
    */
   clearHistory(): void {
     this.toolBudgetUsageAnchor = undefined;
+    this.toolBudgetFixedInputVersion++;
     this.history = [];
     this.completedToolCallIds = [];
     if (!this.isForkedChat) {
@@ -6226,6 +6229,7 @@ export class LlmChat {
     completedToolCallIds?: readonly string[],
   ): void {
     this.toolBudgetUsageAnchor = undefined;
+    this.toolBudgetFixedInputVersion++;
     this.history = history;
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
