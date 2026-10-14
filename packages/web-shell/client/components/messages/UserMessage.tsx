@@ -173,10 +173,50 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
       <div className={styles.scheduledTaskPrompt}>
-        <LinkifiedText text={run.prompt} />
+        <UserMessageText text={run.prompt} />
       </div>
     </div>
   );
+}
+
+function UserMessageText({
+  text,
+  startsAtLineBeginning = true,
+}: {
+  text: string;
+  startsAtLineBeginning?: boolean;
+}) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(/(^|\r\n?|\n)(\/[^ \r\n]*)/g)) {
+    if (match[1] === '' && !startsAtLineBeginning) continue;
+    const start = match.index + match[1]!.length;
+    if (cursor < start) {
+      parts.push(
+        <LinkifiedText
+          key={`text:${cursor}`}
+          text={text.slice(cursor, start)}
+        />,
+      );
+    }
+    parts.push(
+      <span
+        key={`slash:${start}`}
+        className={styles.slashCommand}
+        data-web-shell-user-slash-command
+      >
+        <LinkifiedText text={match[2]!} />
+      </span>,
+    );
+    cursor = start + match[2]!.length;
+  }
+  if (parts.length === 0) return <LinkifiedText text={text} />;
+  if (cursor < text.length) {
+    parts.push(
+      <LinkifiedText key={`text:${cursor}`} text={text.slice(cursor)} />,
+    );
+  }
+  return parts;
 }
 
 function DefaultUserMessageContent({
@@ -206,7 +246,11 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <LinkifiedText key={index} text={segment.text} />
+          <UserMessageText
+            key={index}
+            text={segment.text}
+            startsAtLineBeginning={index === 0}
+          />
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -337,10 +381,28 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return <LinkifiedText text={content} />;
-    return parts.map((part, index) => {
+    if (!parts) return <UserMessageText text={content} />;
+    const mergedParts: Array<(typeof parts)[number]> = [];
+    for (const part of parts) {
+      const previous = mergedParts.at(-1);
+      if (part.type === 'text' && previous?.type === 'text') {
+        mergedParts[mergedParts.length - 1] = {
+          type: 'text',
+          text: previous.text + part.text,
+        };
+      } else {
+        mergedParts.push(part);
+      }
+    }
+    return mergedParts.map((part, index) => {
       if (part.type === 'text') {
-        return <LinkifiedText key={index} text={part.text} />;
+        return (
+          <UserMessageText
+            key={index}
+            text={part.text}
+            startsAtLineBeginning={index === 0}
+          />
+        );
       }
       return (
         <ReadonlyComposerTag

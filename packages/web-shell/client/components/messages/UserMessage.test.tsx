@@ -82,6 +82,147 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('hello world');
   });
 
+  it.each(['\n', '\r\n', '\r'])(
+    'preserves slash highlighting and the submitted text with %j line breaks',
+    (lineBreak) => {
+      const content = `/a2ui 你能做什么${lineBreak}/review changes`;
+      const container = render(<UserMessage content={content} />);
+      const commands = container.querySelectorAll(
+        '[data-web-shell-user-slash-command]',
+      );
+
+      expect(Array.from(commands, (command) => command.textContent)).toEqual([
+        '/a2ui',
+        '/review',
+      ]);
+      expect(container.textContent).toBe(content);
+    },
+  );
+
+  it('keeps inline slashes and indented text plain', () => {
+    const content = 'Explain /a2ui here\n /review is an example';
+    const container = render(<UserMessage content={content} />);
+
+    expect(
+      container.querySelector('[data-web-shell-user-slash-command]'),
+    ).toBeNull();
+    expect(container.textContent).toBe(content);
+  });
+
+  it('keeps URLs clickable beside a highlighted slash command', () => {
+    const content = '/review https://example.com/docs';
+    const container = render(<UserMessage content={content} />);
+
+    expect(
+      container.querySelector('[data-web-shell-user-slash-command]')
+        ?.textContent,
+    ).toBe('/review');
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'https://example.com/docs',
+    );
+    expect(container.textContent).toBe(content);
+  });
+
+  it.each(['/review @README.md/a2ui\n/help', '/review @README.md\n/help'])(
+    'preserves actual line boundaries around references: %s',
+    (content) => {
+      const container = render(
+        <UserMessage
+          content={content}
+          inputAnnotations={[
+            referenceAnnotation(content, '@README.md', {
+              id: 'file:README.md',
+              kind: 'file',
+              value: 'README.md',
+              serialized: '@README.md',
+            }),
+          ]}
+        />,
+      );
+
+      expect(
+        Array.from(
+          container.querySelectorAll('[data-web-shell-user-slash-command]'),
+          (command) => command.textContent,
+        ),
+      ).toEqual(['/review', '/help']);
+      expect(findByTitle(container, '@README.md')).not.toBeNull();
+    },
+  );
+
+  it('highlights slash commands around host-parsed tags', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: '/review ' },
+            {
+              type: 'tag',
+              tag: { id: 'context', value: 'orders' },
+            },
+            { type: 'text', text: '/inline\n/help' },
+          ],
+        }}
+      >
+        <UserMessage content="/review <context />/inline\n/help" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-user-slash-command]'),
+        (command) => command.textContent,
+      ),
+    ).toEqual(['/review', '/help']);
+    expect(container.textContent).toBe('/review orders/inline\n/help');
+  });
+
+  it.each(['first line\n', 'first line\r\n', 'first line\r', ''])(
+    'preserves line starts across adjacent host-parsed text parts: %j',
+    (prefix) => {
+      const content = `${prefix}/review changes`;
+      const container = render(
+        <WebShellCustomizationProvider
+          value={{
+            parseUserMessageContent: () => [
+              { type: 'text', text: prefix },
+              { type: 'text', text: '/review changes' },
+            ],
+          }}
+        >
+          <UserMessage content={content} />
+        </WebShellCustomizationProvider>,
+      );
+
+      expect(
+        container.querySelector('[data-web-shell-user-slash-command]')
+          ?.textContent,
+      ).toBe('/review');
+      expect(container.textContent).toBe(content);
+    },
+  );
+
+  it('highlights a slash token split across host-parsed text parts', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: '/rev' },
+            { type: 'text', text: 'iew changes' },
+          ],
+        }}
+      >
+        <UserMessage content="/review changes" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-user-slash-command]')
+        ?.textContent,
+    ).toBe('/review');
+    expect(container.textContent).toBe('/review changes');
+  });
+
   it('edits the message in place and submits the edited text', () => {
     const onEditSubmit = vi.fn();
     const container = render(
