@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -17,8 +17,59 @@ import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
+import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
+const verificationMode = process.env['G3_VERIFY_MODE'];
+if (
+  verificationMode &&
+  !['allow', 'deny', 'cancel', 'expiry', 'continuation'].includes(
+    verificationMode,
+  )
+) {
+  throw new Error(
+    'G3_VERIFY_MODE must be allow, deny, cancel, expiry or continuation',
+  );
+}
+const approvalRecovery =
+  !!verificationMode && verificationMode !== 'continuation';
+const verificationDirectory = path.resolve(
+  root,
+  process.env['G3_VERIFY_REPORT_DIR'] ??
+    `.qwen/investigations/g3-step3-implementation/packaged-${verificationMode}-${Date.now()}`,
+);
+if (verificationMode) mkdirSync(verificationDirectory, { recursive: true });
+const reliefMarker = 'G3_STEP3_RELIEF_TURN';
+const reliefResponse = 'G3_STEP3_RELIEF_COMPLETED';
+let originalApprovalId: string | undefined;
+interface SavedApprovalOptions {
+  v: number;
+  policyRevision: string;
+  continuationRef: { resourceId: string };
+}
+interface SavedApprovalPlan {
+  calls: { prepareKey: string; requestDigest: string }[];
+  actionId: string;
+  stage: string;
+  batchId: string;
+  runtime: {
+    runtimeSessionId: string;
+    bindingId: string;
+    generation: string;
+    workspaceGeneration: string;
+  };
+}
+let originalApprovalOptions: SavedApprovalOptions | undefined;
+let originalApprovalPlan: SavedApprovalPlan | undefined;
+let verifiedOriginalTerminal: string | undefined;
+function saveEvidence(name: string, body: unknown): void {
+  if (!verificationMode) return;
+  writeFileSync(
+    path.join(verificationDirectory, name),
+    JSON.stringify(body, null, 2) + '\n',
+  );
+}
+
 const argumentsList = process.argv.slice(2);
 let model = 'moonshot/kimi-k3';
 let runtimeDelayMs = 0;
@@ -80,10 +131,22 @@ if (freeze && (!continuationFailover || harnessOnly)) {
   );
 }
 
+if (verificationMode && (!continuationFailover || !harnessOnly || freeze)) {
+  throw new Error(
+    'This isolated Step 3 probe requires --continuation-failover --harness-only',
+  );
+}
+
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover || bigOutput;
 const runtimeTakeover = inflightFailover || continuationFailover;
 const workspaceTurns = runtimeTakeover || bigOutput;
+const registerStorage = process.env['QWEN_E2E_REGISTER_STORAGE'] === '1';
+if (registerStorage && process.platform !== 'linux') {
+  throw new Error(
+    'QWEN_E2E_REGISTER_STORAGE=1 requires Linux native storage identity',
+  );
+}
 // The tool-driven modes take over a dead Runtime binding, which needs the
 // durable local-Worker reclaim from the W0e line — Linux-only today. With
 // --harness-only the Spring and its Broker stay alive, the worker is never
@@ -717,7 +780,7 @@ function assertStoredAnswer(
 ): void {
   const rows = runMysql(
     port,
-    `SELECT resource_id, kind, byte_length, sha256, HEX(inline_bytes) FROM qwen_managed_agent.qwen_managed_session_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(sessionId)} AND kind IN ('managed-message', 'managed-message-chunks', 'managed-message-part')`,
+    `SELECT resource_id, kind, byte_length, sha256, HEX(inline_bytes) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(sessionId)} AND kind IN ('managed-message', 'managed-message-chunks', 'managed-message-part')`,
   ).split('\n');
   const bodies = new Map<string, { kind: string; bytes: Buffer }>();
   for (const row of rows) {
@@ -928,6 +991,8 @@ let dumpPort: number | undefined;
 // the post-finally throws, so an interrupt can never put a clean pass
 // on stdout for a run the operator explicitly stopped.
 let resultJson: string | undefined;
+let approvalResultJson: string | undefined;
+let g3SummaryJson: string | undefined;
 // The freeze arm's wake record reads as a pass line too, so it defers the
 // same way and prints after the main result, as in the base's ordering.
 let fencedWriterJson: string | undefined;
@@ -956,6 +1021,9 @@ try {
     fake = await startFakeOpenAIServer(({ body }) => {
       const messages = Array.isArray(body['messages']) ? body['messages'] : [];
       const serialized = JSON.stringify(messages);
+      // Match the new current input before any marker from restored history.
+      if (serialized.includes(reliefMarker)) return { content: reliefResponse };
+
       if (continuationFailover && serialized.includes(continuationMarker)) {
         if (!serialized.includes('"role":"tool"')) {
           return {
@@ -971,6 +1039,7 @@ try {
             ],
           };
         }
+        if (approvalRecovery) return { content: continuationResponse };
         if (!acceptReplacementContinuation) {
           return {
             contentChunks: [continuationPartial],
@@ -1103,7 +1172,9 @@ try {
         SPRING_DATASOURCE_PASSWORD: '',
         SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
         SPRING_DATASOURCE_USERNAME: 'root',
-        QWEN_MANAGED_AGENT_APPROVAL_MODE: 'yolo',
+        QWEN_MANAGED_AGENT_APPROVAL_MODE: approvalRecovery ? 'default' : 'yolo',
+        QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:
+          verificationMode === 'expiry' ? '30s' : '5m',
         QWEN_MANAGED_AGENT_CAPABILITY_DIGEST: capabilityDigest,
         QWEN_MANAGED_AGENT_HARNESS_BASE_URL: `http://127.0.0.1:${harnessPort}`,
         QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
@@ -1114,11 +1185,18 @@ try {
         // mode's previously verified behavior and keep the runner starting
         // off Linux.
         QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
+        ...(registerStorage
+          ? {
+              QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED:
+                'true',
+            }
+          : {}),
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
         ...(runtimeTakeover
           ? {
-              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
+                process.platform === 'linux' ? 'true' : 'false',
             }
           : {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
@@ -1140,7 +1218,6 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
               QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-              QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
             }
           : {
@@ -1157,7 +1234,6 @@ try {
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE:
                 runtimeDelayMs === 0 ? process.execPath : delayedNode,
-              QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
             }),
       },
@@ -1176,12 +1252,48 @@ try {
   );
   runMysql(
     mysqlPort,
-    `INSERT INTO qwen_managed_agent.managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, 1, ${sqlString(boundStorageId)}, 'E2E', 'managed-runtime-tools/1', 'preapproved-workspace-tools/1', 'ACTIVE')`,
+    `INSERT INTO qwen_managed_agent.ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, 1, ${sqlString(boundStorageId)}, 'E2E', 'managed-runtime-tools/1', 'preapproved-workspace-tools/1', 'ACTIVE')`,
   );
   runMysql(
     mysqlPort,
-    `INSERT INTO qwen_managed_agent.managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, ${sqlString(trustedActor)}, 'OPERATOR')`,
+    `INSERT INTO qwen_managed_agent.ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, ${sqlString(trustedActor)}, 'OPERATOR')`,
   );
+  if (registerStorage) {
+    // The new root's mtime must differ from its birth time; no Harness or tool can write it yet.
+    const touch = path.join(workspaceMount, '.storage-registration-touch');
+    mkdirSync(touch);
+    rmSync(touch, { recursive: true });
+    const registration = spawnSync(
+      java,
+      [
+        '-cp',
+        springJar,
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain',
+        'org.springframework.boot.loader.launch.PropertiesLauncher',
+        'register',
+        tenant,
+        boundStorageId,
+        workspaceMount,
+        randomUUID(),
+        '--offline-confirmed',
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...cleanEnvironment,
+          W1_JDBC_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
+          W1_JDBC_USER: 'root',
+          W1_JDBC_PASSWORD: '',
+        },
+      },
+    );
+    if (registration.error || registration.status !== 0) {
+      throw new Error(
+        `Native storage registration failed: ${registration.stderr || registration.error?.message || registration.status}`,
+      );
+    }
+  }
   if (inflightFailover) {
     heldStartProxy = await startHeldExecutionStartProxy(
       `http://127.0.0.1:${brokerPort}`,
@@ -1304,7 +1416,7 @@ try {
     ): [string, number] {
       const row = runMysql(
         mysqlPort,
-        `SELECT last_active_at, record_version FROM qwen_managed_agent.qwen_runtime_session WHERE runtime_session_id = ${sqlString(runtimeSessionId)}`,
+        `SELECT last_active_at, record_version FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id = ${sqlString(runtimeSessionId)}`,
       ).split('\t');
       if (row.length !== 2 || row[1].length === 0)
         throw new Error(`Runtime session row missing (${runtimeSessionId})`);
@@ -1342,6 +1454,132 @@ try {
           `Runtime execution start boundary failed; proxy=${heldStartProxy.observations().join(' | ') || 'no requests'}`,
         );
       }
+    } else if (approvalRecovery) {
+      await waitUntil(
+        'Original requested approval',
+        async () => {
+          const page = await fetchJson<PublicList<Record<string, unknown>>>(
+            `${springUrl}/v1/agents/sessions/${session.id}/actions?limit=100`,
+            { headers: tenantHeaders(tenant) },
+          );
+          const requested = page.data.filter(
+            (action) => action.state === 'requested',
+          );
+          if (requested.length !== 1) return false;
+          originalApprovalId = String(requested[0].id);
+          return originalApprovalId.startsWith('tool_approval_');
+        },
+        120_000,
+        harness,
+      );
+      const actionFilter = `tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}`;
+      originalApprovalOptions = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${actionFilter}`,
+        ),
+      );
+      if (
+        originalApprovalOptions?.v !== 3 ||
+        !originalApprovalOptions.continuationRef
+      ) {
+        throw new Error(
+          `New approval omitted the recovery continuation: version=${originalApprovalOptions?.v}`,
+        );
+      }
+      originalApprovalPlan = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(originalApprovalOptions.continuationRef.resourceId)}`,
+        ),
+      );
+      if (
+        !originalApprovalPlan ||
+        originalApprovalPlan.calls?.length !== 1 ||
+        originalApprovalPlan.actionId !== originalApprovalId ||
+        originalApprovalPlan.stage !== 'approval'
+      ) {
+        throw new Error(
+          'Original saved approval plan does not identify exactly one original call',
+        );
+      }
+      originalRuntimeSessionId = originalApprovalPlan.runtime.runtimeSessionId;
+      const runtime = runMysql(
+        mysqlPort,
+        `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+      ).split('\t');
+      if (
+        runtime[0] !== originalApprovalPlan.runtime.bindingId ||
+        runtime[1] !== originalApprovalPlan.runtime.generation ||
+        runtime[2] !== originalApprovalPlan.runtime.workspaceGeneration ||
+        runtime[3] !== 'READY'
+      ) {
+        throw new Error(
+          `Saved approval Runtime binding differs from the real Broker: ${runtime.join(',')}`,
+        );
+      }
+      firstRuntimeHeartbeat = runtimeSessionHeartbeat(
+        originalRuntimeSessionId!,
+      );
+      await waitUntil(
+        'Original durable await_action checkpoint',
+        () => {
+          const id = runMysql(
+            mysqlPort,
+            `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+          );
+          if (!id) return false;
+          const bytes = runMysql(
+            mysqlPort,
+            `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(id)}`,
+          );
+          if (!bytes) return false;
+          const checkpoint = JSON.parse(bytes);
+          return (
+            checkpoint.continuation?.phase === 'await_action' &&
+            checkpoint.approval?.requestId === originalApprovalId
+          );
+        },
+        10_000,
+        harness,
+      );
+      const privateHead = runMysql(
+        mysqlPort,
+        `SELECT storage_version, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+      ).split('\t');
+      const checkpoint = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(privateHead[1])}`,
+        ),
+      );
+      if (
+        privateHead[0] !== '2' ||
+        checkpoint.continuation?.phase !== 'await_action' ||
+        checkpoint.approval?.requestId !== originalApprovalId
+      ) {
+        throw new Error(
+          'Approval snapshot was not committed before the crash barrier',
+        );
+      }
+      const executionCount = Number(
+        runMysql(
+          mysqlPort,
+          'SELECT COUNT(*) FROM qwen_managed_agent.ma_tool_execution',
+        ),
+      );
+      if (executionCount !== 0 || existsSync(inflightSideEffect))
+        throw new Error('Tool ran before the original approval');
+      saveEvidence('original-approval.json', {
+        actionId: originalApprovalId,
+        options: originalApprovalOptions,
+        plan: originalApprovalPlan,
+        originalRuntime: runtime,
+        storageVersion: Number(privateHead[0]),
+        checkpointPhase: checkpoint.continuation.phase,
+        executionCount,
+        physicalFileExists: existsSync(inflightSideEffect),
+      });
     } else if (continuationFailover) {
       await waitUntil(
         'Continuation partial text',
@@ -1361,7 +1599,7 @@ try {
       );
       const execution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation, runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, runtime_session_id FROM qwen_managed_agent.ma_tool_execution',
       ).split('\t');
       const sideEffectBytes = existsSync(inflightSideEffect)
         ? readFileSync(inflightSideEffect, 'utf8')
@@ -1397,7 +1635,7 @@ try {
       if (firstTerminal?.type !== 'turn.completed') {
         const storeHead = runMysql(
           mysqlPort,
-          `SELECT state, writer_generation, writer_id, writer_lease_until, NOW(6), journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+          `SELECT state, writer_generation, writer_id, writer_lease_until, NOW(6), journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
         );
         throw new Error(
           `First failover Turn ended with ${firstTerminal?.type ?? 'no terminal event'}; store head=${storeHead || 'missing'}`,
@@ -1422,11 +1660,11 @@ try {
     const sessionFilter = `tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`;
     const firstBootId = runMysql(
       mysqlPort,
-      `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+      `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
     );
     const firstHead = runMysql(
       mysqlPort,
-      `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+      `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
     )
       .split('\t')
       .map(Number);
@@ -1442,11 +1680,11 @@ try {
     if (inflightFailover) {
       const execution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation, runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, runtime_session_id FROM qwen_managed_agent.ma_tool_execution',
       ).split('\t');
       const latestCheckpoint = runMysql(
         mysqlPort,
-        `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+        `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
       );
       if (
         execution.length !== 4 ||
@@ -1519,7 +1757,7 @@ try {
       (remainingMs) =>
         runMysql(
           mysqlPort,
-          `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+          `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
           remainingMs,
         ) === '1',
       10_000,
@@ -1530,7 +1768,7 @@ try {
         (remainingMs) =>
           runMysql(
             mysqlPort,
-            `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 1, 0) FROM qwen_managed_agent.managed_agent_turn WHERE ${sessionFilter}`,
+            `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 1, 0) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
             remainingMs,
           ) === '1',
         10_000,
@@ -1577,18 +1815,29 @@ try {
             SPRING_DATASOURCE_PASSWORD: '',
             SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
             SPRING_DATASOURCE_USERNAME: 'root',
-            QWEN_MANAGED_AGENT_APPROVAL_MODE: 'yolo',
+            QWEN_MANAGED_AGENT_APPROVAL_MODE: approvalRecovery
+              ? 'default'
+              : 'yolo',
+            QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:
+              verificationMode === 'expiry' ? '30s' : '5m',
             QWEN_MANAGED_AGENT_CAPABILITY_DIGEST: capabilityDigest,
             QWEN_MANAGED_AGENT_HARNESS_BASE_URL: `http://127.0.0.1:${replacementHarnessPort}`,
             QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
             QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
             QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
             QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
+            ...(registerStorage
+              ? {
+                  QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED:
+                    'true',
+                }
+              : {}),
             QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
             QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
             ...(runtimeTakeover
               ? {
-                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
+                    process.platform === 'linux' ? 'true' : 'false',
                 }
               : {
                   QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
@@ -1610,7 +1859,6 @@ try {
             QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
             QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
             QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-            QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
             QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
           },
         },
@@ -1695,7 +1943,256 @@ try {
       replacementHarness,
     );
 
-    if (inflightFailover) {
+    if (approvalRecovery) {
+      await waitUntil(
+        'Original approval attached to replacement Harness',
+        () => {
+          const boot = runMysql(
+            mysqlPort,
+            `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
+          );
+          return boot.length > 0 && boot !== firstBootId;
+        },
+        120_000,
+        replacementHarness,
+      );
+      const actionBeforeResponse = await fetchJson<Record<string, unknown>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
+        { headers: tenantHeaders(tenant) },
+      );
+      if (
+        actionBeforeResponse.id !== originalApprovalId ||
+        (verificationMode !== 'expiry' &&
+          actionBeforeResponse.state !== 'requested')
+      ) {
+        throw new Error(
+          'Replacement did not preserve the original requested Action',
+        );
+      }
+      let responseOperation: Record<string, unknown> | undefined;
+      if (verificationMode === 'allow' || verificationMode === 'deny') {
+        const response = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}/responses`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-answer-${originalApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              kind: 'permission',
+              input_revision: 1,
+              policy_revision: originalApprovalOptions!.policyRevision,
+              option_id: verificationMode,
+            }),
+          },
+        );
+        if (response.status !== 202)
+          throw new Error(
+            `Original Action response returned ${response.status}: ${await response.text()}`,
+          );
+        responseOperation = await response.json();
+      } else if (verificationMode === 'cancel') {
+        const response = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-cancel-${originalApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              type: 'agent.session.cancel',
+              turn_id: actionBeforeResponse.turn_id,
+            }),
+          },
+        );
+        if (response.status !== 202)
+          throw new Error(
+            `Original Turn cancel returned ${response.status}: ${await response.text()}`,
+          );
+      }
+      const recovered = await waitForTerminal(
+        replacementSpringUrl,
+        tenant,
+        session.id,
+        0,
+        replacementSpring,
+        120_000,
+      );
+      const terminals = recovered.events.filter((event) => event.terminal);
+      const expectedTerminal = ['allow', 'deny'].includes(verificationMode)
+        ? 'turn.completed'
+        : 'turn.cancelled';
+      if (terminals.length !== 1 || terminals[0].type !== expectedTerminal) {
+        throw new Error(
+          `Original approval terminal differs: expected=${expectedTerminal} actual=${JSON.stringify(terminals)}`,
+        );
+      }
+      verifiedOriginalTerminal = terminals[0].type;
+      const rows = runMysql(
+        mysqlPort,
+        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
+      );
+      const executions = rows
+        ? rows.split('\n').map((row) => row.split('\t'))
+        : [];
+      const expectedExecutions = verificationMode === 'allow' ? 1 : 0;
+      if (executions.length !== expectedExecutions)
+        throw new Error(
+          `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
+        );
+      if (executions.length === 1) {
+        const execution = executions[0];
+        const plan = originalApprovalPlan!;
+        if (
+          execution[1] !== plan.calls[0].prepareKey ||
+          execution[2] !== plan.runtime.bindingId ||
+          execution[3] !== plan.runtime.generation ||
+          execution[4] !== plan.runtime.runtimeSessionId ||
+          execution[5] !== 'SETTLED' ||
+          execution[6] !== '1' ||
+          execution[7] !== plan.calls[0].requestDigest
+        ) {
+          throw new Error(
+            `Replacement changed the original prepared execution identity: ${execution.join(',')}`,
+          );
+        }
+      }
+      const bytes = existsSync(inflightSideEffect)
+        ? readFileSync(inflightSideEffect, 'utf8')
+        : '';
+      if (
+        verificationMode === 'allow'
+          ? bytes !== inflightSideEffectContent
+          : existsSync(inflightSideEffect)
+      ) {
+        throw new Error(
+          `Approval physical file assertion failed for ${verificationMode}`,
+        );
+      }
+      const actionRows = runMysql(
+        mysqlPort,
+        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+      );
+      const expectedActionState =
+        verificationMode === 'expiry'
+          ? 'expired'
+          : verificationMode === 'cancel'
+            ? 'cancelled'
+            : 'decided';
+      if (actionRows !== `${originalApprovalId}\t${expectedActionState}`)
+        throw new Error(
+          `Original approval identity/state differs: ${actionRows}`,
+        );
+      const requestBodies = (fake?.requests ?? []).filter((request) =>
+        JSON.stringify(request.body.messages).includes(continuationMarker),
+      );
+      const initialRequests = requestBodies.filter(
+        (request) =>
+          !JSON.stringify(request.body.messages).includes('"role":"tool"'),
+      );
+      const modelAfterResults = requestBodies.filter((request) =>
+        JSON.stringify(request.body.messages).includes('"role":"tool"'),
+      );
+      const expectedModelsAfterResults = ['allow', 'deny'].includes(
+        verificationMode,
+      )
+        ? 1
+        : 0;
+      if (
+        initialRequests.length !== 1 ||
+        modelAfterResults.length !== expectedModelsAfterResults
+      )
+        throw new Error(
+          `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
+        );
+      if (responseOperation) {
+        await waitUntil(
+          'Approval response command completion',
+          async () => {
+            const operation = await fetchJson<Record<string, unknown>>(
+              `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${responseOperation!.id}`,
+              { headers: tenantHeaders(tenant) },
+            );
+            if (operation.status === 'failed')
+              throw new Error(
+                `Approval response operation failed: ${JSON.stringify(operation)}`,
+              );
+            return operation.status === 'completed';
+          },
+          30_000,
+          replacementSpring,
+        );
+      }
+      await waitUntil(
+        'Original Runtime cleanup confirmed',
+        () => {
+          const state = runMysql(
+            mysqlPort,
+            `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+          );
+          const confirmed = runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+          );
+          return state === 'RELEASED' && confirmed === '1';
+        },
+        30_000,
+        replacementHarness,
+      );
+      const runtimeAfter = runMysql(
+        mysqlPort,
+        `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+      ).split('\t');
+      const cleanupConfirmed = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+        ),
+      );
+      if (
+        runtimeAfter[0] !== originalApprovalPlan!.runtime.bindingId ||
+        runtimeAfter[1] !== originalApprovalPlan!.runtime.generation ||
+        runtimeAfter[2] !== originalApprovalPlan!.runtime.workspaceGeneration ||
+        runtimeAfter[3] !== 'RELEASED' ||
+        cleanupConfirmed !== 1
+      )
+        throw new Error(
+          `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
+        );
+      saveEvidence('approval-result.json', {
+        mode: verificationMode,
+        sessionId: session.id,
+        actionId: originalApprovalId,
+        replacementActionBeforeResponse: actionBeforeResponse,
+        expectedTerminal,
+        terminalCount: terminals.length,
+        executions,
+        physicalFileExists: existsSync(inflightSideEffect),
+        physicalFileBytes: bytes,
+        modelRequests: initialRequests.length + modelAfterResults.length,
+        initialRequests: initialRequests.length,
+        modelAfterResults: modelAfterResults.length,
+        runtimeAfter,
+        cleanupConfirmed,
+      });
+      approvalResultJson = JSON.stringify(
+        {
+          mode: verificationMode,
+          originalAction: originalApprovalId,
+          originalBatch: originalApprovalPlan!.batchId,
+          originalBinding: originalApprovalPlan!.runtime.bindingId,
+          executions: executions.length,
+          terminal: expectedTerminal,
+          cleanupConfirmed,
+        },
+        null,
+        2,
+      );
+    } else if (inflightFailover) {
       const recoveredTurn = await waitForTerminal(
         replacementSpringUrl,
         tenant,
@@ -1709,28 +2206,28 @@ try {
       );
       const recoveredExecution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1), runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1), runtime_session_id FROM qwen_managed_agent.ma_tool_execution',
       ).split('\t');
       const executionCount = Number(
         runMysql(
           mysqlPort,
-          'SELECT COUNT(*) FROM qwen_managed_agent.qwen_tool_execution',
+          'SELECT COUNT(*) FROM qwen_managed_agent.ma_tool_execution',
         ),
       );
       const replacementBootId = runMysql(
         mysqlPort,
-        `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+        `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
       );
       const replacementHead = runMysql(
         mysqlPort,
-        `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+        `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
       )
         .split('\t')
         .map(Number);
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -1829,27 +2326,51 @@ try {
       const visibleText = textDeltas.map((event) => eventText(event)).join('');
       const recoveredExecution = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1), runtime_session_id FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, execution_state, dispatch_generation, IF(result_json IS NULL, 0, 1), runtime_session_id FROM qwen_managed_agent.ma_tool_execution',
       ).split('\t');
       const executionCount = Number(
         runMysql(
           mysqlPort,
-          'SELECT COUNT(*) FROM qwen_managed_agent.qwen_tool_execution',
+          'SELECT COUNT(*) FROM qwen_managed_agent.ma_tool_execution',
         ),
       );
       const replacementBootId = runMysql(
         mysqlPort,
-        `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+        `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
       );
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
         JSON.stringify(body['messages']).includes(continuationMarker),
       );
+      const originalAndReplacementRequests = requests.filter(({ body }) =>
+        JSON.stringify(body['messages']).includes('"role":"tool"'),
+      );
+      if (
+        originalAndReplacementRequests.length === 2 &&
+        !isDeepStrictEqual(
+          originalAndReplacementRequests[0].body,
+          originalAndReplacementRequests[1].body,
+        )
+      ) {
+        throw new Error(
+          'The replacement model request does not equal the original effective request',
+        );
+      }
+      saveEvidence('model-request-parity.json', {
+        requests: originalAndReplacementRequests.map((request) => request.body),
+        equal:
+          originalAndReplacementRequests.length === 2 &&
+          isDeepStrictEqual(
+            originalAndReplacementRequests[0].body,
+            originalAndReplacementRequests[1].body,
+          ),
+      });
+
       const initialModelRequests = requests.filter(
         ({ body }) =>
           !JSON.stringify(body['messages']).includes('"role":"tool"'),
@@ -1928,7 +2449,7 @@ try {
         }
         const headBeforeWake = runMysql(
           mysqlPort,
-          `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+          `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
         );
         // The rest of the wake block proves the fence holds; this line
         // proves there IS a fence: the head must sit on the replacement's
@@ -1940,7 +2461,7 @@ try {
         }
         const oldGenerationTxBeforeWake = runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter})`,
         );
         // Non-vacuity, proven live rather than by signal-existence: the
         // frozen Harness must stop answering /health now and answer it
@@ -1987,11 +2508,11 @@ try {
         await new Promise((resolve) => setTimeout(resolve, 5_000));
         const headAfterWake = runMysql(
           mysqlPort,
-          `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+          `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
         );
         const bootAfterWake = runMysql(
           mysqlPort,
-          `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+          `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
         );
         // The fencing claim the exit check words: no transaction out of
         // the old writer generation after it wakes. Lease renewal touches
@@ -2000,7 +2521,7 @@ try {
         // freeze on.
         const oldGenerationTxAfterWake = runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter})`,
         );
         const awakeEvents = await fetchJson<PublicList<PublicEvent>>(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
@@ -2013,7 +2534,7 @@ try {
         const awakeTerminalCount = Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
           ),
         );
         if (
@@ -2115,18 +2636,18 @@ try {
 
       const secondBootId = runMysql(
         mysqlPort,
-        `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+        `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
       );
       const secondHead = runMysql(
         mysqlPort,
-        `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+        `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
       )
         .split('\t')
         .map(Number);
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
         ),
       );
       if (
@@ -2166,6 +2687,161 @@ try {
         null,
         2,
       );
+    }
+    if (verificationMode) {
+      // These assertions run after every A/B primary gate, never in place of it.
+      await waitUntil(
+        'Runtime cleanup before next Turn',
+        () => {
+          const state = runMysql(
+            mysqlPort,
+            `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+          );
+          const confirmed = runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+          );
+          return state === 'RELEASED' && confirmed === '1';
+        },
+        30_000,
+        replacementHarness,
+      );
+      const originalPage = await fetchJson<PublicList<PublicEvent>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
+        { headers: tenantHeaders(tenant) },
+      );
+      if (originalPage.data.filter((event) => event.terminal).length !== 1)
+        throw new Error(
+          'Original Turn must have exactly one public terminal before relief',
+        );
+      const originalCursor = Math.max(
+        0,
+        ...originalPage.data.map((event) => event.sequence),
+      );
+      const relief = await fetch(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `g3-relief-${session.id}`,
+            ...tenantHeaders(tenant),
+          },
+          body: JSON.stringify({
+            type: 'agent.session.input.message',
+            input: [
+              {
+                type: 'text',
+                text: `${reliefMarker}. Reply exactly ${reliefResponse}. Use no tools.`,
+              },
+            ],
+          }),
+        },
+      );
+      if (relief.status !== 202)
+        throw new Error(
+          `Relief Turn admission returned ${relief.status}: ${await relief.text()}`,
+        );
+      const reliefTurn = await waitForTerminal(
+        replacementSpringUrl,
+        tenant,
+        session.id,
+        originalCursor,
+        replacementSpring,
+        60_000,
+      );
+      const reliefTerminals = reliefTurn.events.filter(
+        (event) => event.terminal,
+      );
+      const reliefText = reliefTurn.events
+        .filter((event) => event.type === 'item.output_text.delta')
+        .map(eventText)
+        .join('');
+      if (
+        reliefTerminals.length !== 1 ||
+        reliefTerminals[0].type !== 'turn.completed' ||
+        reliefText !== reliefResponse
+      )
+        throw new Error(
+          `Relief Turn did not finish: terminals=${JSON.stringify(reliefTerminals)} text=${JSON.stringify(reliefText)}`,
+        );
+      const reliefRequests = (fake?.requests ?? []).filter((request) =>
+        JSON.stringify(request.body.messages).includes(reliefMarker),
+      );
+      if (reliefRequests.length !== 1)
+        throw new Error(
+          `Relief Turn inference count differs: ${reliefRequests.length}`,
+        );
+      const finalTerminalCount = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+        ),
+      );
+      if (finalTerminalCount !== 2)
+        throw new Error(
+          `Expected one terminal per original/relief Turn, observed ${finalTerminalCount}`,
+        );
+      saveEvidence('post-turn-events.json', {
+        cursorBeforeRelief: originalCursor,
+        original: originalPage.data,
+        relief: reliefTurn.events,
+        sqlTerminalCount: finalTerminalCount,
+      });
+      const close = await fetch(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/close`,
+        {
+          method: 'POST',
+          headers: {
+            'idempotency-key': `g3-close-${session.id}`,
+            ...tenantHeaders(tenant),
+          },
+        },
+      );
+      if (close.status !== 202)
+        throw new Error(
+          `Close admission returned ${close.status}: ${await close.text()}`,
+        );
+      const closeOperation = (await close.json()) as Record<string, unknown>;
+      await waitUntil(
+        'Reliable close operation completion',
+        async () => {
+          const operation = await fetchJson<Record<string, unknown>>(
+            `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${closeOperation.id}`,
+            { headers: tenantHeaders(tenant) },
+          );
+          if (operation.status === 'failed')
+            throw new Error(
+              `Close operation failed: ${JSON.stringify(operation)}`,
+            );
+          return operation.status === 'completed';
+        },
+        60_000,
+        replacementSpring,
+      );
+      const closedSession = await fetchJson<Record<string, unknown>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}`,
+        { headers: tenantHeaders(tenant) },
+      );
+      if (closedSession.status !== 'closed')
+        throw new Error(
+          `Reliable close completed with Session status ${closedSession.status}`,
+        );
+      const summary = {
+        mode: verificationMode,
+        sessionId: session.id,
+        originalRuntimeSessionId,
+        originalActionId: originalApprovalId,
+        originalTerminal: verifiedOriginalTerminal ?? 'turn.completed',
+        nextTurnCompleted: true,
+        nextTurnRequests: reliefRequests.length,
+        terminalCount: finalTerminalCount,
+        closeAdmission: close.status,
+        closeCompleted: true,
+        oldHarnessHomeDeleted: !existsSync(harnessHome),
+      };
+      saveEvidence('summary.json', summary);
+      g3SummaryJson = JSON.stringify(summary, null, 2);
     }
   } else {
     const idempotencyKey = `create-${Date.now()}`;
@@ -2267,7 +2943,7 @@ try {
     // execution record is the public-feed-independent proof.
     const executions = runMysql(
       mysqlPort,
-      `SELECT COUNT(*), GROUP_CONCAT(DISTINCT execution_state) FROM qwen_managed_agent.qwen_tool_execution`,
+      `SELECT COUNT(*), GROUP_CONCAT(DISTINCT execution_state) FROM qwen_managed_agent.ma_tool_execution`,
     ).split('\t');
     if (executions[0] !== '1' || executions[1] !== 'SETTLED') {
       // The temporary MySQL data dir is deleted on exit, so the failure
@@ -2276,7 +2952,7 @@ try {
       // one tool_call_id across two rows means a duplicate dispatch.
       const rows = runMysql(
         mysqlPort,
-        'SELECT execution_call_id, tool_call_id, execution_state FROM qwen_managed_agent.qwen_tool_execution',
+        'SELECT execution_call_id, tool_call_id, execution_state FROM qwen_managed_agent.ma_tool_execution',
       );
       throw new Error(
         `Tool execution audit failed: ${executions.join(',')}\n${rows}`,
@@ -2313,7 +2989,7 @@ try {
     }
     const durable = runMysql(
       mysqlPort,
-      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(terminal) FROM qwen_managed_agent.managed_agent_event WHERE tenant_id='${tenant}' AND session_id='${session.id}'`,
+      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
     ).split('\t');
     if (
       durable.length !== 3 ||
@@ -2348,7 +3024,7 @@ try {
   if (dumpPort !== undefined) {
     try {
       console.error(
-        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.managed_agent_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.managed_agent_event ORDER BY sequence_id')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.qwen_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head')}`,
+        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
       );
     } catch (dumpError) {
       console.error(`Durable state dump failed: ${String(dumpError)}`);
@@ -2416,6 +3092,8 @@ if (failure) throw failure;
 // payload stays a variable until both guards have run, so the decision
 // precedes the record.
 if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
+if (approvalResultJson !== undefined) console.log(approvalResultJson);
+if (g3SummaryJson !== undefined) console.log(g3SummaryJson);
 if (resultJson !== undefined) {
   console.log(resultJson);
   if (fencedWriterJson !== undefined) console.log(fencedWriterJson);

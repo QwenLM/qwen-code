@@ -780,6 +780,10 @@ export interface BridgeRestoredSession extends BridgeSession {
   compactedReplay?: BridgeEvent[];
   /** Bounded replay events for the current incomplete turn. */
   liveJournal?: BridgeEvent[];
+  /** Bounded in-memory lifecycle supplement for a persisted replay page. */
+  lifecycleReplay?: BridgeEvent[];
+  /** The lifecycle supplement does not cover the complete retained history. */
+  lifecycleReplayIncomplete?: boolean;
   /** True when persisted records exist before the returned replay page. */
   historyHasMore?: boolean;
   /**

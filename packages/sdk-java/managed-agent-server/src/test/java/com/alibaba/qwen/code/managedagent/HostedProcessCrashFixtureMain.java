@@ -49,13 +49,14 @@ public final class HostedProcessCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                        + "Linux".equals(System.getProperty("os.name")),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + root,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + root.resolve("runtime"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace);
@@ -65,11 +66,11 @@ public final class HostedProcessCrashFixtureMain {
             sessionId = Files.readString(saved);
         } else {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
                     + " 'Workspace', ?, ?, 'ACTIVE')", tenant,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             sessionId = spring.getBean(ManagedAgentStore.class).insertWorkspaceSessionCommand(tenant, "actor", "create",
                     "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,

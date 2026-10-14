@@ -24,7 +24,7 @@ class RuntimeMaintenanceRecoveryTest {
             var source = new JdbcDataSource();
             source.setURL("jdbc:h2:mem:maintenance-" + UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-            JdbcRuntimeBrokerSchema.initialize(source);
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             verifyBatches(new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
                     new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source), UUID.randomUUID().toString());
         } else {

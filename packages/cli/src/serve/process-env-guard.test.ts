@@ -38,6 +38,14 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/hosted-harness-contract.ts',
+    {
+      reason:
+        'The Hosted lifecycle v2 profile advertisement is a process-scoped deployment gate fixed when the daemon contract is created.',
+      accesses: { 'computed:HOSTED_LIFECYCLE_V2_PROFILES_ENV': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
@@ -180,6 +188,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
         'key:QWEN_MANAGED_HOOK_CONFIG': 1,
         'key:QWEN_MANAGED_MCP_CONFIG': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-csi-file-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies Pod identity for the dedicated file worker process; startup freezes that identity for its one immutable Session, independently of workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 1,
+        'key:QWEN_POD_NAMESPACE': 1,
+        'key:QWEN_POD_UID': 1,
       },
     },
   ],

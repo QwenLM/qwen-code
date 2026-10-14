@@ -143,7 +143,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     ],
     [
       'unknown event',
-      "export function register(on) { on('tool.call', () => ({})); }",
+      "export function register(on) { on('model.request', () => ({})); }",
       /event not supported/,
     ],
   ])(
