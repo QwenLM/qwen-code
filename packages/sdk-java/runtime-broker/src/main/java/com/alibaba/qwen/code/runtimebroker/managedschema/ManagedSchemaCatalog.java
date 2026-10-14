@@ -393,7 +393,7 @@ final class ManagedSchemaCatalog {
         };
     }
 
-    private static void validateGeneratedColumns(Connection connection, String name, String body)
+    static void validateGeneratedColumns(Connection connection, String name, String body)
             throws SQLException {
         Map<String, String> actual = new HashMap<>();
         try (var statement =
@@ -417,8 +417,9 @@ final class ManagedSchemaCatalog {
             String expression =
                     column.group(4).substring(generated + "GENERATED ALWAYS AS".length());
             String stored = actual.get(column.group(1));
-            List<String> expectedTokens = expressionTokens(expression);
-            List<String> actualTokens = stored == null ? List.of() : expressionTokens(stored);
+            List<String> expectedTokens = booleanLiterals(expressionTokens(expression));
+            List<String> actualTokens =
+                    stored == null ? List.of() : booleanLiterals(expressionTokens(stored));
             boolean same = expectedTokens.equals(actualTokens);
             if (!same && "projection_pending".equals(column.group(1))) {
                 int split = expectedTokens.indexOf("or");
@@ -433,6 +434,15 @@ final class ManagedSchemaCatalog {
                         "Managed schema generated column differs: " + name + "." + column.group(1));
             }
         }
+    }
+
+    // MySQL and MariaDB store boolean literals in a generated column expression as 0/1.
+    private static List<String> booleanLiterals(List<String> tokens) {
+        return tokens.stream().map(token -> switch (token) {
+            case "false" -> "0";
+            case "true" -> "1";
+            default -> token;
+        }).toList();
     }
 
     static void validateChecks(Connection connection, String name, String body)

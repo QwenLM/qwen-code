@@ -56,6 +56,39 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
+    void acceptsNumericBooleanGeneratedExpressionWithoutAcceptingDrift() throws Exception {
+        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE(tool_profile"
+                + " = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
+        String numeric =
+                "coalesce(`tool_profile` = 'csi-files-retirement/1' or `runtime_request_key`"
+                        + " is not null,0)";
+        try (var data = fixture(false); var statement = data.createStatement()) {
+            statement.execute("CREATE TABLE catalog_fixture.columns (column_name VARCHAR,"
+                    + " generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
+            try (var insert = data.prepareStatement(
+                    "INSERT INTO catalog_fixture.columns VALUES ('csi_guard', ?, 'PUBLIC', 'MA_SESSION')")) {
+                insert.setString(1, numeric);
+                insert.executeUpdate();
+            }
+            Connection connection = mariaDb(data, "MariaDB", 1, 1);
+            ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body);
+            try (var update = data.prepareStatement(
+                    "UPDATE catalog_fixture.columns SET generation_expression=?")) {
+                for (String drift : new String[] {
+                        numeric.replace("'csi-files-retirement/1'", "'other/1'"),
+                        numeric.replace("is not null", "is null"),
+                        numeric.replace(",0)", ",1)")}) {
+                    update.setString(1, drift);
+                    update.executeUpdate();
+                    assertThrows(SQLException.class,
+                            () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body),
+                            drift);
+                }
+            }
+        }
+    }
+
+    @Test
     void rejectsNonTransactionalTablesWithEitherMariaDbDriverProductName() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false); var statement = data.createStatement()) {
@@ -145,7 +178,8 @@ class ManagedSchemaCatalogTest {
                                                 + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
                                                 + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
                                         : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
-                                        .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints");
+                                        .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints")
+                                        .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns");
                     }
                     return invoke(method, data, args);
                 });
