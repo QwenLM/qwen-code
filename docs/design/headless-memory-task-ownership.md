@@ -8,7 +8,9 @@ Status: implemented in PR #13885; maintainer review required.
 
 A headless turn must stop waiting promptly when cancelled, without losing the shared tracking of unfinished extraction, dreaming, or skill-review tasks. Destructively consuming the list before an interrupt discards that tracking. A later turn or normal stdin EOF then cannot await the work.
 
-This change preserves result timing, cancellation and budget outcomes, and the existing TUI `memory_saved` delivery. It adds neither a task cancellation API nor a drain timeout. Metadata migration remains outside this list.
+This change emits the headless terminal `result` in JSON and stream-JSON output before waiting for tracked memory tasks. Normal invocation completion still waits for those tasks; cancellation and budget outcomes and the existing TUI `memory_saved` delivery are preserved. It adds neither a task cancellation API nor a drain timeout. Metadata migration remains outside this list.
+
+The emitted `usage` in both JSON formats and `stats` in successful JSON output are snapshots taken before the drain. They omit memory usage recorded during that wait, and completing the memory tasks does not update the emitted result. These totals therefore do not guarantee complete invocation accounting; see [Managed Memory Completion](../users/features/headless.md#managed-memory-completion).
 
 ## Ownership and settlement
 

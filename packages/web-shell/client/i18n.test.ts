@@ -12,6 +12,21 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('keeps task cancellation and elapsed-time copy available in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    expect(en('managed.tasks.title')).toBe('Child Agent tasks');
+    expect(zh('managed.tasks.title')).toBe('子 Agent 任务');
+    expect(en('managed.tasks.cancel.stopping')).toBe(
+      'Stop requested. Waiting for the task to end.',
+    );
+    expect(zh('managed.tasks.cancel.stopping')).toBe(
+      '停止请求已送达，等待任务结束。',
+    );
+    expect(en('managed.tasks.seconds', { seconds: 12 })).toBe('12 seconds');
+    expect(zh('managed.tasks.seconds', { seconds: 12 })).toBe('12 秒');
+  });
+
   it('keeps filter translations available and pluralizes record counts', () => {
     const en = getTranslator('en');
     expect(en('trajectory.filter.search')).toBe('Search loaded records…');

@@ -666,6 +666,58 @@ it.each(['refresh', 'close'] as const)(
   },
 );
 
+it('separates effect reconciliation from H1 release and restores the exact v2 owner', async () => {
+  await mcp.ensureReady();
+  const owner = mcp.broker.runtimeSessionId;
+  const restored = new HostedMcpSession(
+    {
+      baseUrl: 'http://127.0.0.1:1',
+      token: 'test',
+      lifecycleAuthority: () => ({
+        operationId: 'delete-1',
+        claimGeneration: 2,
+      }),
+    },
+    session,
+    [pin],
+  );
+  await restored.reconcileEffects();
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    0,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
+  await restored.closeResources();
+  expect(restored.broker.runtimeSessionId).toBe(owner);
+  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledWith({
+    runtimeBindingId: 'binding',
+    generation: '1',
+  });
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    1,
+  );
+  expect(
+    parseMcpConfiguration(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+    ).releaseState,
+  ).toBe('released');
+});
+
+it('does not release a v2 owner while a dispatched business result is unknown', async () => {
+  unknown = true;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  await expect(mcp.closeResources()).rejects.toBeInstanceOf(
+    HostedMcpRecoveryRequiredError,
+  );
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    0,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+});
+
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;

@@ -91,6 +91,32 @@ class ToolPublicationContractTest {
                 new byte[65537])).isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * Replays the shared payload vectors — the digests are pinned from the
+     * TypeScript canonicalizer, so an accepted vector also proves the two
+     * implementations canonicalize the boolean marker fields byte-identically.
+     */
+    @Test
+    void acceptsAndRefusesThePublicationPayloadFamilies() throws Exception {
+        JsonNode suite = JSON.readTree(contracts().resolve(
+                "managed-tool-publication-v1.fixtures.json").toFile());
+        JsonNode base = suite.required("cases").get(0).required("value");
+        for (JsonNode vector : suite.required("payloadVectors")) {
+            ObjectNode binding = (ObjectNode) base.deepCopy();
+            binding.put("requestDigest", vector.required("requestDigest").asText());
+            ((ObjectNode) binding.get("reference")).put("argsDigest",
+                    vector.required("argsDigest").asText());
+            String payload = vector.required("payloadJson").asText();
+            if (vector.required("valid").asBoolean()) {
+                ToolPublicationContract.requirePayload(binding, payload);
+            } else {
+                assertThatThrownBy(() -> ToolPublicationContract.requirePayload(binding, payload))
+                        .as(vector.required("id").asText())
+                        .isInstanceOf(IllegalArgumentException.class);
+            }
+        }
+    }
+
     @Test
     void acceptsEcmascriptCanonicalShellInputWithControlCharacters() throws Exception {
         JsonNode suite = JSON.readTree(contracts().resolve(

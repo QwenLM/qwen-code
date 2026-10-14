@@ -8,7 +8,9 @@
 
 Headless 回合取消后必须及时停止等待，同时保留未完成提取、整理或技能审查任务的共享跟踪。在中断前破坏性消费列表会丢失这些跟踪，使后续回合或正常 stdin EOF 无法等待这些工作。
 
-本次保留结果时点、取消及预算结果，以及现有 TUI 的 `memory_saved` 交付方式。不新增任务取消 API 或收尾超时。元数据迁移仍不属于该列表。
+本次变更在等待已跟踪记忆任务之前输出 headless JSON 和 stream-JSON 的最终 `result`。正常调用结束仍会等待这些任务；取消及预算结果，以及现有 TUI 的 `memory_saved` 交付方式保持不变。不新增任务取消 API 或收尾超时。元数据迁移仍不属于该列表。
+
+两种 JSON 格式已输出的 `usage`，以及成功 JSON 输出中的 `stats`，都是收尾等待前取得的快照。它们不包含等待期间才记录的记忆用量，记忆任务完成后也不会更新已输出的结果。因此，这些总量不保证涵盖完整调用的用量；详见 [Managed Memory Completion](../users/features/headless.md#managed-memory-completion)。
 
 ## 所有权与完成状态
 

@@ -4,6 +4,8 @@
 
 Status: implemented; under review. Part of #12952 and #12380.
 
+This document records the original files-only G0 slice. [Public foreground Shell admission](public-hosted-shell-admission.md) supersedes its files-only profile/tool boundary when the separate deployment Shell opt-in is enabled. Public callers still cannot select a profile; the Workspace files opt-in still gates creation input, and existing Sessions keep their persisted profile and approval mode.
+
 ## Problem and scope
 
 Hosted Read/Write/Edit already runs through the production Broker and worker,

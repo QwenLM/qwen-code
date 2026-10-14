@@ -771,6 +771,17 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.requiresRestart).toBe(true);
     });
 
+    it('should have arrowKeysScrollTranscript in ui settings', () => {
+      const arrowKeysScrollTranscript =
+        getSettingsSchema().ui.properties.arrowKeysScrollTranscript;
+      expect(arrowKeysScrollTranscript).toBeDefined();
+      expect(arrowKeysScrollTranscript.type).toBe('boolean');
+      // Default must stay false — bare ↑/↓ are input-history keys.
+      expect(arrowKeysScrollTranscript.default).toBe(false);
+      expect(arrowKeysScrollTranscript.showInDialog).toBe(true);
+      expect(arrowKeysScrollTranscript.requiresRestart).toBe(false);
+    });
+
     it('should expose tool call details as a live UI setting', () => {
       const showToolCallDetails =
         getSettingsSchema().ui.properties.showToolCallDetails;
