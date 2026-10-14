@@ -21335,6 +21335,167 @@ describe('Session', () => {
           .mockResolvedValueOnce(createEmptyStream());
       };
 
+      it('adds one exploration reminder after read results and permits further investigation', async () => {
+        const execute = installFailingTool();
+        execute.mockResolvedValue({
+          llmContent: 'file data',
+          returnDisplay: 'file data',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          ...mockToolRegistry.getTool('failing_tool'),
+          kind: core.Kind.Read,
+        });
+        mockToolRegistry.getAllToolNames.mockReturnValue(['failing_tool']);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(2);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(streamForBatch(1, 2))
+          .mockResolvedValueOnce(streamForBatch(2, 1))
+          .mockResolvedValueOnce(createEmptyStream());
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'investigate the files without writing' },
+            ],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(
+          sentText().filter((text) =>
+            text.includes('read-only exploration phase'),
+          ),
+        ).toHaveLength(1);
+        const followUp = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1] as { message: Part[] };
+        expect(
+          followUp.message.filter((part) => part.functionResponse),
+        ).toHaveLength(2);
+        expect(followUp.message.at(-1)?.text).toContain(
+          'does not authorize writes',
+        );
+      });
+
+      it('counts a bridged read-only MCP tool toward the exploration budget', async () => {
+        // A bridged call arrives as `tool_call` with the real target in
+        // `args.name`; the classification must resolve the target through the
+        // registry, not fall back to the bridge tool itself (Kind.Other),
+        // or every MCP call would reset the phase.
+        const execute = installFailingTool();
+        execute.mockResolvedValue({
+          llmContent: 'dataset schema',
+          returnDisplay: 'dataset schema',
+        });
+        const bridgeBuild = (envelope: Record<string, unknown>) => ({
+          params: {
+            name: envelope['name'],
+            arguments: envelope['arguments'] ?? {},
+          },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('bridge'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        });
+        const targetTool = {
+          name: 'mcp__srv__describe',
+          kind: core.Kind.Read,
+          displayName: 'Describe Dataset',
+          description: 'describes a dataset schema',
+          build: vi.fn().mockReturnValue({
+            params: {},
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Describe Dataset'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        };
+        const bridgeTool = {
+          name: 'tool_call',
+          kind: core.Kind.Other,
+          displayName: 'Tool Call',
+          description: 'bridge',
+          build: vi.fn(bridgeBuild),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        };
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'tool_call'
+            ? bridgeTool
+            : name === 'mcp__srv__describe'
+              ? targetTool
+              : name === 'tool_search'
+                ? ({ name: 'tool_search' } as never)
+                : undefined,
+        );
+        mockToolRegistry.getAllToolNames.mockReturnValue([
+          'tool_call',
+          'tool_search',
+          'mcp__srv__describe',
+        ]);
+        mockToolRegistry.isDeferredAndHidden.mockImplementation(
+          (name: string) => name === 'mcp__srv__describe',
+        );
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+          name === 'tool_call'
+            ? (bridgeTool as never)
+            : name === 'mcp__srv__describe'
+              ? (targetTool as never)
+              : undefined,
+        );
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(2);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(false);
+        const bridgedCall = (batch: number, index: number): FunctionCall => ({
+          id: `bridge_${batch}_${index}`,
+          name: 'tool_call',
+          args: { name: 'mcp__srv__describe', arguments: { dataset: index } },
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [bridgedCall(1, 0), bridgedCall(1, 1)],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: { functionCalls: [bridgedCall(2, 0)] },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              {
+                type: 'text',
+                text: 'inspect the datasets without writing',
+              },
+            ],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+        expect(execute).toHaveBeenCalledTimes(3);
+        expect(
+          sentText().filter((text) =>
+            text.includes('read-only exploration phase'),
+          ),
+        ).toHaveLength(1);
+      });
+
       it('defaults an invalid operator mode to shadow and records a warning', () => {
         debugLoggerWarnSpy.mockClear();
         const previous = process.env[guardModeEnv];

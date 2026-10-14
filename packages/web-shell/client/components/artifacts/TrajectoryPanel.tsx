@@ -103,6 +103,7 @@ export interface TrajectoryPanelProps {
    * tab is waiting to be rewired, which renders as the loading state.
    */
   loadPage?: TrajectoryPageLoader;
+  historyGapRevision?: number;
 }
 
 /**
@@ -316,17 +317,21 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
   );
 }
 
-export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
+export function TrajectoryPanel({
+  loadPage,
+  historyGapRevision = 0,
+}: TrajectoryPanelProps) {
   const { t } = useI18n();
   const {
     trajectory,
+    lifecycle,
     status,
     error,
     loadedPages,
     windowPages,
     truncated,
     olderFailure,
-    refresh,
+    refresh: refreshWindow,
     retry,
     older,
     newer,
@@ -339,6 +344,36 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     historyReleased,
     bookmarks,
   } = useTrajectoryWindow(loadPage);
+  const [refreshedGap, setRefreshedGap] = useState({
+    loader: loadPage,
+    revision: 0,
+  });
+  const pendingGapRefresh = useRef<
+    { revision: number; trajectory: typeof trajectory } | undefined
+  >(undefined);
+  const refresh = useCallback(() => {
+    pendingGapRefresh.current = { revision: historyGapRevision, trajectory };
+    refreshWindow();
+  }, [historyGapRevision, trajectory, refreshWindow]);
+  useEffect(() => {
+    pendingGapRefresh.current = undefined;
+  }, [loadPage]);
+  useEffect(() => {
+    const pending = pendingGapRefresh.current;
+    if (pending && status !== 'loading' && error) {
+      pendingGapRefresh.current = undefined;
+    } else if (
+      pending &&
+      status === 'ready' &&
+      trajectory !== pending.trajectory
+    ) {
+      setRefreshedGap({ loader: loadPage, revision: pending.revision });
+      pendingGapRefresh.current = undefined;
+    }
+  }, [status, trajectory, error, loadPage]);
+  const historyStale =
+    historyGapRevision >
+    (refreshedGap.loader === loadPage ? refreshedGap.revision : 0);
   const windowNavigationRef = useRef<HTMLDivElement | null>(null);
   const pendingWindowFocusRef = useRef(false);
   const pendingWindowScrollRef = useRef(false);
@@ -1266,6 +1301,10 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
                     : 'trajectory.truncated',
                 )
               : '',
+            historyStale ? t('trajectory.historyGap') : '',
+            lifecycle.incomplete || lifecycle.truncated
+              ? t('trajectory.lifecycleIncomplete')
+              : '',
             error && trajectory ? t('trajectory.refreshStale') : '',
           ]
             .filter(Boolean)
@@ -1279,6 +1318,10 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           {rangeCounts ? ' · ' : ''}
           {[
             olderFailureText,
+            historyStale ? t('trajectory.historyGap') : '',
+            lifecycle.incomplete || lifecycle.truncated
+              ? t('trajectory.lifecycleIncomplete')
+              : '',
             error && trajectory ? t('trajectory.refreshStale') : '',
             truncated && !olderFailureText
               ? t(
@@ -1658,6 +1701,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         inspectorSelection.loader === loadPage && (
           <TrajectoryInspector
             row={inspectorRow}
+            lifecycle={
+              inspectorCurrent && inspectorRow
+                ? lifecycle.byRowKey.get(inspectorRow.key)
+                : undefined
+            }
             stale={!inspectorCurrent}
             turnSelected={selectedEntry?.kind === 'turn'}
             title={inspectorRow ? labelOf(inspectorRow, t).text : undefined}
