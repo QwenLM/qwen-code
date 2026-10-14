@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.aliyun.oss.OSSException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.LinkedHashMap;
@@ -31,8 +33,30 @@ public class ApiExceptionHandler {
                 error.getMessage(), error.getDetails());
     }
 
+    @ExceptionHandler(RuntimeBrokerException.class)
+    public ResponseEntity<Map<String, Object>> runtime(RuntimeBrokerException error,
+            HttpServletRequest request, HttpServletResponse response) {
+        HttpStatus status = HttpStatus.resolve(error.getStatusCode());
+        Map<String, Object> details = new LinkedHashMap<>(error.getDetails());
+        details.put("retryable", error.isRetryable());
+        return response(request, response, status == null ? HttpStatus.CONFLICT : status,
+                error.getCode(), error.getMessage(), details);
+    }
+
     @ExceptionHandler(AsyncRequestNotUsableException.class)
     public void disconnectedClient() {
+    }
+
+    @ExceptionHandler(OSSException.class)
+    public ResponseEntity<Map<String, Object>> objectStore(OSSException error,
+            HttpServletRequest request, HttpServletResponse response) {
+        LOG.warn("Tool publication object store rejected request", error);
+        if ("AccessDenied".equals(error.getErrorCode())) {
+            return response(request, response, HttpStatus.FORBIDDEN,
+                    "managed_tool_publication_storage_denied", "Tool publication storage rejected the request.");
+        }
+        return response(request, response, HttpStatus.INTERNAL_SERVER_ERROR,
+                "internal_error", "The Managed Agent request failed.");
     }
 
     // The client accepts no representation of the envelope.

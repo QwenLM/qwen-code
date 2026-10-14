@@ -3,10 +3,11 @@ package com.alibaba.qwen.code.managedagent.store;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.store.EventIdentity.Identity;
+import org.junit.jupiter.api.Test;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
-import org.junit.jupiter.api.Test;
 
 class EventIdentityTest {
     private static final String TURN = "turn_a";
@@ -67,6 +68,19 @@ class EventIdentityTest {
                         "turn_a:sequence:8".getBytes(StandardCharsets.UTF_8)));
         assertThat(of("turn.completed", 9, Map.of(), null))
                 .isEqualTo(new Identity("turn.completed", null, null));
+    }
+
+    @Test
+    void toolResultUpdatesShareToolIdentityAndSequenceFallbackWithoutAPart() {
+        for (Map<String, Object> data :
+                java.util.List.<Map<String, Object>>of(Map.of("toolCallId", "tool-1"), Map.of())) {
+            assertThat(of("item.tool_result.updated", 8, data, null))
+                    .isEqualTo(
+                            new Identity(
+                                    "item.tool_result.updated",
+                                    of("item.tool_call.updated", 8, data, null).itemId(),
+                                    null));
+        }
     }
 
     private static Identity of(String type, long sequence,

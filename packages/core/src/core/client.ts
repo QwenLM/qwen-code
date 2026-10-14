@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { LlmPreparedRequestCallback } from './llm-chat.js';
+
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -19,6 +21,7 @@ import type {
   Tool,
 } from '@google/genai';
 import { buildAdvisorReminder } from './advisor-policy.js';
+import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
@@ -37,6 +40,7 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import {
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -89,7 +93,10 @@ import {
 } from './turn.js';
 
 // Services
-import { LoopDetectionService } from '../services/loopDetectionService.js';
+import {
+  isAttemptRestartEvent,
+  LoopDetectionService,
+} from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
@@ -97,12 +104,20 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import {
+  getToolExplorationKind,
+  ToolExplorationBudget,
+} from '../services/tool-exploration-budget.js';
+import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
 } from '../memory/tree.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import {
+  ToolNames,
+  canonicalToolName,
+  resolveRegisteredToolName,
+} from '../tools/tool-names.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
@@ -240,6 +255,7 @@ interface StopHookChain {
 }
 
 export interface SendMessageOptions {
+  onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
@@ -275,6 +291,13 @@ export interface SendMessageOptions {
   }) => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts
+   * (the Hosted Harness, whose streamed text is published durably). Forwarded
+   * to `LlmChat` so a post-delivery cut replays instead of continuing
+   * (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 export interface SteerInput {
@@ -395,7 +418,10 @@ type MainSessionPromptConfig = Pick<
   Partial<
     Pick<
       Config,
-      'isTrustedFolder' | 'getPromptToolSnapshot' | 'getShellExecutionSandbox'
+      | 'isTrustedFolder'
+      | 'getPromptToolSnapshot'
+      | 'getPromptAgentReachable'
+      | 'getShellExecutionSandbox'
     >
   >;
 
@@ -419,10 +445,12 @@ export function getMainSessionBaseSystemPrompt(
         config.getCodeModeOnly(),
         {
           declaredTools: config.getPromptToolSnapshot?.(),
+          agentReachable: config.getPromptAgentReachable?.(),
           executionSandboxFilesystem:
             config.getShellExecutionSandbox?.()?.filesystem,
           executionSandboxBackend:
             config.getShellExecutionSandbox?.()?.effectiveBackend,
+          executionSandboxNetwork: config.getShellExecutionSandbox?.()?.network,
         },
       );
 }
@@ -479,6 +507,12 @@ export class LlmClient {
   private readonly interactionStartTypes = new Map<string, SendMessageType>();
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly toolExplorationBudget = new ToolExplorationBudget();
+  // The prompt/turn that owns the exploration phase. A concurrent `/btw`
+  // side query reaches this same client with the full tool set, so the phase
+  // is bound to its owning interaction: every budget entrypoint below is a
+  // no-op for an invocation that does not own it.
+  private toolExplorationBudgetPromptId: string | undefined;
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -1246,7 +1280,10 @@ export class LlmClient {
     }
     const deferredTools = this.resolveDeferredToolsForReminder(deferredSummary);
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
-    const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
+    // Some providers reject an empty tool list; offer none instead.
+    const tools: Tool[] = toolDeclarations.length
+      ? [{ functionDeclarations: toolDeclarations }]
+      : [];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
     this.queueMcpServerInstructionsReminder(
@@ -1289,7 +1326,7 @@ export class LlmClient {
     if (handle.terminalLogged) return undefined;
     handle.terminalLogged = true;
     const event = new MemoryRecallDeliveryEvent({
-      phase: 'refined',
+      phase: result.selectorSkipped ? 'fast' : 'refined',
       delivery_point: deliveryPoint,
       discard_reason: discardReason,
       strategy: result.strategy,
@@ -1547,8 +1584,12 @@ export class LlmClient {
     // scorer matches anything, the fast result wins — the selector's speed is
     // irrelevant. `onFastResult` is published before recall even issues the
     // selector request, so `settledAt` is necessarily null when the wait ends
-    // on it. The settled-recall branch is reached at this point only when no
-    // fast result exists at all: no `Config`, or nothing matched
+    // on it — unless the #13003 skip-selector knob is on: a skipped selector
+    // settles the recall promise within microtasks, so the wait can meet a
+    // settled handle still carrying an undelivered fast result (the
+    // `selectorSkippedFast` term below exists for exactly that state). With
+    // the knob off, the settled-recall branch is reached at this point only
+    // when no fast result exists at all: no `Config`, or nothing matched
     // lexically. That is deliberate, not incidental — a model side query does
     // not complete inside this ceiling, so arbitrating between them would
     // cost every turn the remainder of the budget to win a race that does not
@@ -1591,7 +1632,14 @@ export class LlmClient {
     // deterministic result now rather than gambling on a later tool call:
     // a turn that makes none has no safe delivery point at all. The handle
     // stays pending so the model-selected result can still land later.
-    if (handle.settledAt === null) {
+    // A recall that skipped the selector (#13003) settles almost at once, but
+    // its result is the fast result, so the initial turn still delivers it as
+    // the fast phase; later consume points dedup it as already delivered.
+    const selectorSkippedFast =
+      handle.result?.selectorSkipped === true &&
+      deliveryPoint === 'initial' &&
+      !handle.fastDelivered;
+    if (handle.settledAt === null || selectorSkippedFast) {
       if (deliveryPoint !== 'initial' || handle.fastDelivered) {
         return null;
       }
@@ -1879,6 +1927,9 @@ export class LlmClient {
     // compression should keep session-setup reveals so the declaration list
     // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
+    // tool_search results leave with the history, so tool_call must not
+    // run a hidden tool on a review the new session never saw (#12569).
+    this.config.getToolRegistry().clearReviewedDeclarations?.();
     await runWithHookExecutionOwner(hookOwner, () =>
       this.startChat(undefined, SessionStartSource.Clear),
     );
@@ -2199,9 +2250,7 @@ export class LlmClient {
     deferredSummary: readonly DeferredToolSummary[],
   ): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
-    const bridgeAvailable =
-      !!toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
-      !!toolRegistry.getTool(ToolNames.TOOL_CALL);
+    const bridgeAvailable = isDeferredToolBridgeAvailable(toolRegistry);
     if (!bridgeAvailable) {
       if (deferredSummary.length > 0) {
         const withheld: string[] = [];
@@ -2658,6 +2707,7 @@ export class LlmClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      toolRegistry.syncReviewedDeclarations?.(extraHistory ?? []);
       const codeModeOnly =
         this.config.getToolMode?.() === ToolMode.CodeModeOnly;
       const deferredSummary = toolRegistry.getDeferredToolSummary();
@@ -2682,27 +2732,6 @@ export class LlmClient {
       profiler.timeSync('deferred_tool_preload', () => {
         this.preloadDeferredToolsWithinBudget();
       });
-      // Snapshot what this session declares once the registry is warm and the
-      // preload has settled, so the prompt built below can gate its
-      // tool-specific text on it and `/context` can report the same set
-      // (#12032). Mid-session reveals deliberately do not update this: they
-      // change only the tools block, keeping the cached system prefix stable.
-      //
-      // Not wrapped in a profiler stage: it is a map over declarations the
-      // registry has already built, and the startup stage list is asserted in
-      // client.test.ts — a stage here would be noise in that profile.
-      //
-      // Optional call: partial Config stubs (tests, derived agent shims) do not
-      // carry the setter, and a missing snapshot simply leaves the prompt
-      // ungated rather than failing session startup.
-      this.config.setPromptToolSnapshot?.(
-        new Set(
-          toolRegistry
-            .getFunctionDeclarations()
-            .map((declaration) => declaration.name)
-            .filter((name): name is string => Boolean(name)),
-        ),
-      );
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
@@ -2712,6 +2741,39 @@ export class LlmClient {
         return resolved;
       });
       deferredReminderCount = deferredTools?.length ?? 0;
+      // Snapshot what this session declares once the registry is warm, the
+      // preload has settled, and the deferred-reminder resolution has run —
+      // its incomplete-bridge fallback eagerly reveals ordinary deferred
+      // tools into the declaration list, and the snapshot must include them
+      // so the prompt built below keeps the guidance for tools the model can
+      // actually call. The prompt gates its tool-specific text on this set
+      // and `/context` reports the same set (#12032). Mid-session reveals
+      // deliberately do not update this: they change only the tools block,
+      // keeping the cached system prefix stable.
+      //
+      // Not wrapped in a profiler stage: it is a map over declarations the
+      // registry has already built, and the startup stage list is asserted in
+      // client.test.ts — a stage here would be noise in that profile.
+      //
+      // Optional call: partial Config stubs (tests, derived agent shims) do not
+      // carry the setter, and a missing snapshot simply leaves the prompt
+      // ungated rather than failing session startup.
+      const declaredTools = new Set(
+        toolRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name)
+          .filter((name): name is string => Boolean(name)),
+      );
+      this.config.setPromptToolSnapshot?.(declaredTools);
+      // The bridge test mirrors resolveDeferredToolsForReminder's
+      // registration-based check: a permission-deferred Agent withheld from
+      // the eager reveal in an incomplete-bridge session is neither declared
+      // nor bridge-reachable, so it correctly reads unreachable here.
+      this.config.setPromptAgentReachable?.(
+        declaredTools.has(ToolNames.AGENT) ||
+          (isDeferredToolBridgeAvailable(toolRegistry) &&
+            deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
+      );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
         () => getInitialChatHistory(this.config, extraHistory),
@@ -3113,6 +3175,12 @@ export class LlmClient {
     if (messageType !== SendMessageType.UserQuery) {
       return;
     }
+    // A session agent's hidden session is agent-to-agent work, not the
+    // person's conversation: extracting from it would add a model call to
+    // every agent turn and feed agent chatter into the person's memory.
+    if (this.config.isSessionAgentSession?.() === true) {
+      return;
+    }
 
     const sessionId = this.config.getSessionId();
     const history = this.getHistoryShallow();
@@ -3387,7 +3455,8 @@ export class LlmClient {
     if (!turnBudget) return;
     const sessionId = this.config.getSessionId();
     if (
-      messageType === SendMessageType.Retry &&
+      (messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.UserQuery) &&
       turnBudget.current(sessionId)?.promptId === promptId
     ) {
       return;
@@ -3754,8 +3823,13 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
-      // must not move the running turn's starting point or drop its target.
+      // must not move the running turn's starting point or drop its target —
+      // nor take over (or clear) the running turn's exploration phase, which
+      // the ownership check below every budget entrypoint enforces for the
+      // side turn's tool results too.
       if (!options?.isConcurrentSideQuery) {
+        this.toolExplorationBudget.reset();
+        this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
@@ -4029,6 +4103,17 @@ export class LlmClient {
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
       // interaction missing from chat recording entirely.
+      //
+      // `deliveredTurn: true` because this record IS the turn's user entry,
+      // written once the send path has admitted the turn: that is what
+      // separates it from a cold notification record the daemon persisted
+      // before any turn ran, which no other persisted field can tell apart
+      // (`backgroundTurn` vanishes on the `channelTask` admission branch).
+      // The stamp does not claim the model accepted a request — the pre-send
+      // refusal gates below all return after this write — and it cannot move
+      // under them without losing the resumed info item this record exists to
+      // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
+      // and the test pinning it.
       this.config
         .getChatRecordingService()
         ?.recordNotification(
@@ -4036,6 +4121,7 @@ export class LlmClient {
           options?.notificationDisplayText,
           undefined,
           goalPermit,
+          /* deliveredTurn */ true,
         );
     }
 
@@ -4110,6 +4196,14 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // A concurrent `/btw` side query runs through this same client and its
+    // tool-result continuation is submitted without the flag, so ownership is
+    // carried by the prompt id the interaction claimed at its start: a
+    // non-owner invocation leaves the running turn's phase untouched (it
+    // neither records into it nor drains its pending reminder).
+    const ownsExplorationBudget =
+      !options?.isConcurrentSideQuery &&
+      prompt_id === this.toolExplorationBudgetPromptId;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4436,6 +4530,8 @@ export class LlmClient {
         // Only a first-party user prompt opens a rewindable identity. Re-entry
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        options?.retractDeliveredOutputOnRetry,
+        options?.onPreparedRequest,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4658,16 +4754,87 @@ export class LlmClient {
         // returned (#10953): real work advanced while the parent earned a
         // single tool turn, so the turn budget cannot come due on its own.
         // Force the reminder exactly where the progress information arrives.
-        const carriesAgentToolResult = requestToSend.some(
-          (part) =>
-            typeof part === 'object' &&
-            part !== null &&
-            canonicalToolName(part.functionResponse?.name ?? '') ===
-              ToolNames.AGENT,
-        );
+        // A bridged delegation returns under the tool_call envelope (the
+        // scheduler keeps the model-facing request name on the response
+        // part), so also correlate by call id with the functionCall recorded
+        // in history and unwrap the resolved target — the same correlation
+        // seedRecentCompletedToolNamesFromHistory uses. The force stays
+        // specific to calls that actually resolved to Agent: the goal tools
+        // are bridged too, and per-turn injection grows context linearly.
+        let bridgedResponseIds: Set<string> | undefined;
+        let carriesAgentToolResult = false;
+        for (const part of requestToSend) {
+          if (typeof part !== 'object' || part === null) {
+            continue;
+          }
+          const response = part.functionResponse;
+          if (!response) {
+            continue;
+          }
+          if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
+            carriesAgentToolResult = true;
+            break;
+          }
+          if (response.name === ToolNames.TOOL_CALL && response.id) {
+            // The bridge prefixes mark calls that never started. A bridged
+            // Agent that ran before failing or being cancelled carries an
+            // unprefixed error: real work advanced, so force the reminder
+            // like the direct-Agent branch and the history seeding pass.
+            const errorText = (
+              response.response as Record<string, unknown> | undefined
+            )?.['error'];
+            if (
+              typeof errorText === 'string' &&
+              (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
+                errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
+            ) {
+              continue;
+            }
+            (bridgedResponseIds ??= new Set<string>()).add(response.id);
+          }
+        }
+        if (!carriesAgentToolResult && bridgedResponseIds) {
+          // Newest-first over raw history: the matching functionCall is the
+          // model message that just ran, so the scan exits at the first
+          // hit instead of cloning and walking the whole history per send.
+          carriesAgentToolResult =
+            this.getChat().findLastHistoryEntry((message) =>
+              (message.parts ?? []).some((historyPart) => {
+                const call = historyPart.functionCall;
+                if (
+                  call?.name !== ToolNames.TOOL_CALL ||
+                  !call.id ||
+                  !bridgedResponseIds.has(call.id)
+                ) {
+                  return false;
+                }
+                const bridgedName = (
+                  call.args as Record<string, unknown> | undefined
+                )?.['name'];
+                if (typeof bridgedName !== 'string') {
+                  return false;
+                }
+                const targetName = canonicalToolName(bridgedName);
+                return (
+                  (resolveRegisteredToolName(
+                    targetName,
+                    this.config.getToolRegistry().getAllToolNames(),
+                  ) ?? targetName) === ToolNames.AGENT
+                );
+              }),
+            ) !== undefined;
+        }
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
+        const explorationReminder =
+          this.loopDetector.isDisabledForSession() || !ownsExplorationBudget
+            ? undefined
+            : this.toolExplorationBudget.takeReminder(
+                this.config.getMaxToolCallsPerTurn(),
+              );
+        if (explorationReminder)
+          requestToSend.push({ text: explorationReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -4786,10 +4953,7 @@ export class LlmClient {
           }
           if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
-          } else if (
-            event.type === LlmEventType.Retry ||
-            event.type === LlmEventType.ModelFallback
-          ) {
+          } else if (isAttemptRestartEvent(event)) {
             modelRequestAccepted = false;
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
@@ -4834,6 +4998,38 @@ export class LlmClient {
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
             this.loopDetector.checkAlwaysOnSafeties(event);
+          // Exploration-budget lifecycle, recorded before the halt handling
+          // below takes effect: a halted batch's over-count is harmless only
+          // because every core halt is terminal (the halt branch returns the
+          // turn, and the next interaction resets the budget). Keep any
+          // future non-terminal core halt from silently counting calls that
+          // never executed. Ownership-gated like every other entrypoint: a
+          // concurrent side turn's stream neither feeds this turn's phase nor
+          // rolls it back.
+          if (ownsExplorationBudget) {
+            if (
+              event.type === LlmEventType.ToolCallRequest &&
+              !duplicateLoopGuardRequest
+            ) {
+              this.toolExplorationBudget.record(
+                getToolExplorationKind(
+                  this.config.getToolRegistry(),
+                  event.value.name,
+                  event.value.args,
+                ),
+              );
+            } else if (event.type === LlmEventType.Finished) {
+              this.toolExplorationBudget.commit();
+            } else if (isAttemptRestartEvent(event)) {
+              // A retry re-streams the failed attempt's calls, so its reads
+              // must not stay counted. A fallback attempt cannot have
+              // streamed calls (the chain only runs when the failed attempt
+              // yielded no candidate output), so its rollback is a no-op kept
+              // for symmetry — and harmless, because a rollback never goes
+              // below the committed floor.
+              this.toolExplorationBudget.rollback();
+            }
+          }
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -5159,6 +5355,7 @@ export class LlmClient {
             };
 
             this.loopDetector.reset(prompt_id);
+            if (ownsExplorationBudget) this.toolExplorationBudget.reset();
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
@@ -5267,6 +5464,7 @@ export class LlmClient {
           // protection is preserved: the cap still bounds each iteration, and
           // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
+          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
 
           const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);
@@ -5596,10 +5794,11 @@ export class LlmClient {
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
-      const requestContents = slimCompactionInput(
-        contents,
-        contentGeneratorConfig?.modalities ?? {},
-      ).slimmedHistory;
+      const requestContents = appendAutoMemoryContext(
+        slimCompactionInput(contents, contentGeneratorConfig?.modalities ?? {})
+          .slimmedHistory,
+        this.config.getAutoMemoryContext?.() ?? '',
+      );
 
       const apiCall = () => {
         currentAttemptModel = requestModel;

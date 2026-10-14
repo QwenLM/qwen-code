@@ -405,9 +405,12 @@ export class ResponsesPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): ResponsesApiRequest {
-    const { instructions, input } =
-      convertGeminiContentsToResponsesInput(request);
-    const tools = convertGeminiToolsToResponsesTools(request);
+    const freeformExec = this.cliConfig.getFreeform();
+    const { instructions, input } = convertGeminiContentsToResponsesInput(
+      request,
+      freeformExec,
+    );
+    const tools = convertGeminiToolsToResponsesTools(request, freeformExec);
 
     // History is always re-derived in full from this app's own Content[]
     // (matching every other content generator in this codebase) rather than

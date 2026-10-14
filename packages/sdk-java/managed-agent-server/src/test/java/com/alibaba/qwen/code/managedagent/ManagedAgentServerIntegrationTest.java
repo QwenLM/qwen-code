@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -26,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -35,11 +37,14 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -54,6 +59,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -79,6 +86,7 @@ import org.springframework.transaction.support.TransactionTemplate;
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.runtime-broker.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -109,6 +117,43 @@ class ManagedAgentServerIntegrationTest {
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @AfterEach
+    void settleLeftoverTurnsAndRestoreHarness() {
+        // Settle every Turn the test left non-terminal before the scanner
+        // re-arms: this H2 database backs only this class, and a leftover
+        // ACCEPTED/RUNNING/CANCELLING Turn (what findDispatchable reads)
+        // would otherwise be claimed once its dispatch lease expires and
+        // poison the counter-sensitive tests that run later in this shared
+        // context.
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED',"
+                + " error_code = 'test_cleanup', completed_at = ?,"
+                + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
+                + " retry_after = NULL WHERE status IN ('ACCEPTED',"
+                + " 'RUNNING', 'CANCELLING')", System.currentTimeMillis());
+        harness.setAvailable(true);
+    }
+
+    // This context pins the Runtime Broker off (which is also its shipped
+    // default), so the dedicated recovery scheduler must not exist: a
+    // deployment that never runs the tick should not pay for an idle
+    // scheduler thread. The enabled side is pinned by
+    // RuntimeBrokerConfigurationIntegrationTest.
+    @Test
+    void disabledBrokerDoesNotCreateTheRecoveryScheduler() {
+        // The ungated sibling proves this context really loads the
+        // configuration that declares both schedulers, so the absence below
+        // cannot pass for the wrong reason.
+        assertThat(applicationContext.containsBean("managedArtifactScheduler")).isTrue();
+        assertThat(applicationContext.containsBean("runtimeRecoveryScheduler")).isFalse();
+    }
+
+    // Keeps the dispatch recovery scanner from claiming a Turn that the
+    // test drives directly through the store: the scanner backs off while
+    // the Harness is unavailable.
+    private void pauseRecoveryScanning() {
+        harness.setAvailable(false);
+    }
 
     @Test
     void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
@@ -225,6 +270,22 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void unicodeBlankCreateTitleIsCoercedToUntitled() throws Exception {
+        // A NBSP-only title must coerce to untitled on create, matching the
+        // rename route's blankness predicate; otherwise the server stores a
+        // value it later refuses to accept back on PATCH (validRenameTitle).
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-nbsp-create")
+                        .header("Authorization", "Bearer ignored-by-design")
+                        .header("Idempotency-Key", "create-key-nbsp")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\","
+                                + "\"metadata\":{\"title\":\"\\u00a0\"}}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.metadata.title").doesNotExist());
+    }
+
+    @Test
     void createsReplaysAndStreamsATenantScopedTurn() throws Exception {
         String tenant = "tenant-create";
         String body = """
@@ -248,7 +309,7 @@ class ManagedAgentServerIntegrationTest {
         assertThat(UUID.fromString(sessionId).toString()).isEqualTo(sessionId);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " INFORMATION_SCHEMA.COLUMNS WHERE"
-                        + " LOWER(TABLE_NAME) = 'managed_agent_session' AND"
+                        + " LOWER(TABLE_NAME) = 'ma_session' AND"
                         + " LOWER(COLUMN_NAME) = 'harness_session_id'",
                 Integer.class)).isZero();
 
@@ -314,7 +375,7 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-runtime-recovery";
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.hasUnknownOutcome()).thenReturn(true);
-        harness.returnRuntimeRecovery(recovery);
+        harness.returnRuntimeRecovery(tenant, recovery);
         int submissions = harness.submitCount();
 
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
@@ -569,8 +630,9 @@ class ManagedAgentServerIntegrationTest {
         }
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                assertThat(store.findActiveTurn(tenant, sessionId))
-                        .isEmpty());
+                assertThat(store.findActiveTurns(tenant,
+                        java.util.List.of(sessionId)))
+                        .doesNotContainKey(sessionId));
         String closeId = objectMapper.readTree(lifecycle(
                         post("/v1/agents/sessions/{id}/close", sessionId),
                         tenant, "close-active")
@@ -597,7 +659,9 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
-            assertThat(store.findActiveTurn(tenant, sessionId)).isEmpty();
+            assertThat(store.findActiveTurns(tenant,
+                    java.util.List.of(sessionId)))
+                    .doesNotContainKey(sessionId);
             assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                     .isNotNull();
         });
@@ -627,7 +691,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void retriesAPendingRenameWithTheSameIdempotencyKey() throws Exception {
+    void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -648,31 +712,25 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("hosted_harness_unavailable"));
 
+        // The answered failure retired its command row, so a different key
+        // is admitted instead of wedging on session_operation_active.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"blocked\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("session_operation_active"));
+                .andExpect(status().isOk());
 
+        // An already submitted, superseded identity cannot become a new title revision.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "true"))
-                .andExpect(jsonPath("$.metadata.title")
-                        .value("retry title"));
-
-        JsonNode events = objectMapper.readTree(events(tenant, sessionId)
-                .getResponse().getContentAsString()).get("data");
-        assertThat(events).filteredOn(event -> "session.updated".equals(
-                        event.get("type").asText()))
-                .hasSize(1);
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("session_mutation_superseded"));
+        JsonNode events = objectMapper.readTree(events(tenant, sessionId).getResponse().getContentAsString()).get("data");
+        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(1);
     }
 
     @Test
@@ -736,6 +794,11 @@ class ManagedAgentServerIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
+                // The sibling title field, not metadata.title, is the
+                // Session's title surface: pinned positively here because
+                // @JsonInclude(NON_NULL) would otherwise make a dropped
+                // title indistinguishable from an ignored one.
+                .andExpect(jsonPath("$.title").value("web"))
                 .andExpect(jsonPath("$.activeTurn.status")
                         .value("completed"))
                 .andExpect(jsonPath("$.environment.state").value("failed"))
@@ -744,7 +807,10 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.environment.errorCode")
                         .value("runtime_warm_failed"));
 
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        // The snapshot gate defers a caught-up rewrite until 5s after the
+        // last one, so the trailing non-terminal event takes that long to
+        // be covered.
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             MvcResult transcript = mvc.perform(post(
                             "/api/agent/web-shell/v1/transcript/query")
                             .header(TenantContextFilter.HEADER, tenant)
@@ -970,9 +1036,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
                 .extracting(event -> event.sequence())
                 .containsExactly(before + 1, before + 2, before + 3);
-        store.materializeNextBatch(tenant, session.sessionId(), 200);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> {
+        assertThat(awaitSnapshotCovering(tenant, session.sessionId(),
+                before + 3))
+                .satisfies(snapshot -> {
                     assertThat(snapshot.coveredSequence())
                             .isEqualTo(before + 3);
                     assertThat(snapshot.items()).filteredOn(item ->
@@ -1006,9 +1072,13 @@ class ManagedAgentServerIntegrationTest {
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.reasoning.delta", Map.of("text", "thought"),
                 false, "thought");
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.output_text.delta", Map.of("text", "final"),
-                false, "final");
+                true, "final");
         store.materializeNextBatch(tenant, session.sessionId(), 100);
         assertThat(store.findSnapshot(tenant, session.sessionId()))
                 .get().satisfies(snapshot -> assertThat(snapshot.items())
@@ -1018,6 +1088,48 @@ class ManagedAgentServerIntegrationTest {
                                         .extracting(part -> part.text())
                                         .containsExactly("before", "after",
                                                 "thought", "final")));
+    }
+
+    @Test
+    void namesAWorkflowLaunchInTheProjectedUserMessage() {
+        // #13803 K1: a workflow child's first turn input is one
+        // `workflow_launch` block with no text key; the projected user
+        // message names its pin exactly as the daemon journal does
+        // (`workflowLaunchSummaryText`), never an empty parts list.
+        String tenant = "tenant-workflow-input-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "workflow-input-create", "digest-create",
+                "qwen-code", null, null, List.of(), null);
+        String turnId = "turn-workflow-input";
+        Map<String, Object> definition = new LinkedHashMap<>();
+        definition.put("definitionId", "workflow/report");
+        definition.put("definitionRevision", 1);
+        definition.put("definitionDigest",
+                "0123456789abcdef0123456789abcdef"
+                        + "0123456789abcdef0123456789abcdef");
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("type", "workflow_launch");
+        block.put("definition", definition);
+        block.put("script", "return 1;");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "turn.accepted", Map.of("input", List.of(block)), false,
+                "accepted");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.output_text.delta", Map.of("text", "done"), true,
+                "final");
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "user".equals(item.role()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content()).singleElement()
+                                        .satisfies(part -> {
+                                            assertThat(part.type())
+                                                    .isEqualTo("input_text");
+                                            assertThat(part.text()).isEqualTo(
+                                                    "<workflow workflow/report@1"
+                                                            + " sha256:0123456789abcdef>");
+                                        })));
     }
 
     @Test
@@ -1090,8 +1202,12 @@ class ManagedAgentServerIntegrationTest {
                     "item.output_text.delta", Map.of("text", text), false,
                     "single:" + text);
         }
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
-                "item.reasoning.delta", Map.of("text", "c"), false,
+                "item.reasoning.delta", Map.of("text", "c"), true,
                 "single:c");
         store.materializeNextBatch(tenant, sessionId, 100);
 
@@ -1110,6 +1226,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void retractionRenamesTheDeltaThatContinuedTheRetractedOne() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retract-identity-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-identity-create",
@@ -1145,9 +1262,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(before).extracting(EventRecord::contentPartId)
                 .containsOnly(before.get(0).contentPartId());
 
+        store.materializeNextBatch(tenant, sessionId, 100);
         store.retractContinuationOutput(tenant, sessionId, turn.turnId(),
                 owner, "boot_old", "epoch_old");
-        store.materializeNextBatch(tenant, sessionId, 100);
 
         assertThat(assertEventsNameTheSnapshot(tenant, sessionId))
                 .filteredOn(event -> event.type().endsWith(".delta"))
@@ -1158,13 +1275,31 @@ class ManagedAgentServerIntegrationTest {
                                 + before.get(1).sequence()));
     }
 
+    // The Snapshot is published after the drain that produced it commits, and
+    // a rewrite the refresh gate deferred stays behind until that floor ages
+    // out, so a drain never leaves the published Snapshot current on its own.
+    // Draining inside the wait keeps this independent of whether the 10ms
+    // materializer or the caller's own drain consumed the batch.
+    private SnapshotRecord awaitSnapshotCovering(String tenant, String sessionId,
+            long sequence) {
+        await().atMost(Duration.ofSeconds(30)).until(() -> {
+            store.materializeNextBatch(tenant, sessionId, 200);
+            return store.findSnapshot(tenant, sessionId)
+                    .filter(snapshot -> snapshot.coveredSequence() >= sequence)
+                    .isPresent();
+        });
+        return store.findSnapshot(tenant, sessionId).orElseThrow();
+    }
+
     // Every event that names an Item or a Part names one of the Snapshot.
     private List<EventRecord> assertEventsNameTheSnapshot(String tenant,
             String sessionId) {
-        List<ItemRecord> items = store.findSnapshot(tenant, sessionId)
-                .orElseThrow().items();
         List<EventRecord> events = store.findEvents(tenant, sessionId, 0,
                 100);
+        List<ItemRecord> items = awaitSnapshotCovering(tenant, sessionId,
+                events.isEmpty() ? 0
+                        : events.get(events.size() - 1).sequence())
+                .items();
         for (EventRecord event : events) {
             assertThat(event.schemaVersion()).isEqualTo(1);
             assertThat(event.projectionVersion()).isEqualTo(1);
@@ -1195,6 +1330,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
+        pauseRecoveryScanning();
         String tenant = "tenant-environment-order-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "environment-create",
@@ -1222,8 +1358,10 @@ class ManagedAgentServerIntegrationTest {
                 Map.of("code", "runtime_warm_failed"), false,
                 "environment:first:failed");
 
-        assertThat(store.findLatestEnvironmentEvent(tenant,
-                session.sessionId())).get().satisfies(event -> {
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant,
+                        java.util.List.of(session.sessionId())))
+                        .get(session.sessionId())).satisfies(event -> {
                     assertThat(event.turnId()).isEqualTo(second.turnId());
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });
@@ -1231,6 +1369,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void persistsRetryBackoffAcrossClaims() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retry-backoff-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retry-create",
@@ -1260,11 +1399,13 @@ class ManagedAgentServerIntegrationTest {
                 .doesNotContain(target);
         assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
                 "retry-owner-2", Duration.ofMinutes(1))).isEmpty();
-        assertThat(store.findDispatchable(retryAfter, 100)).contains(target);
+        assertThat(store.findDispatchable(retryAfter, 100))
+                .contains(target);
     }
 
     @Test
     void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
+        pauseRecoveryScanning();
         String tenant = "tenant-harness-takeover-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "takeover-create",
@@ -1302,6 +1443,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
+        pauseRecoveryScanning();
         String tenant = "tenant-harness-recovery-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "recovery-create",
@@ -1335,11 +1477,14 @@ class ManagedAgentServerIntegrationTest {
                 .isTrue();
 
         store.recordRecoveryAdmission(tenant, session.sessionId(),
-                turn.turnId(), owner, "epoch-old", "epoch-new", 0);
+                turn.turnId(), owner, "epoch-old", "epoch-old", "epoch-new",
+                0);
         store.recordRecoveryAdmission(tenant, session.sessionId(),
-                turn.turnId(), owner, "epoch-old", "epoch-new", 0);
+                turn.turnId(), owner, "epoch-old", "epoch-old", "epoch-new",
+                0);
         store.recordRecoveryAdmission(tenant, session.sessionId(),
-                turn.turnId(), owner, "epoch-new", "epoch-new", 3);
+                turn.turnId(), owner, "epoch-new", "epoch-new", "epoch-new",
+                3);
 
         assertThat(store.requireSession(tenant, session.sessionId()))
                 .satisfies(record -> {
@@ -1358,14 +1503,76 @@ class ManagedAgentServerIntegrationTest {
                 });
         assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
                 session.sessionId(), turn.turnId(), owner, "epoch-old",
-                "epoch-other", 0)).isInstanceOfSatisfying(
+                "epoch-old", "epoch-other", 0)).isInstanceOfSatisfying(
                         IllegalStateException.class, error ->
                                 assertThat(error.getMessage()).contains(
                                         "recovery epoch changed"));
     }
 
+    // A lost admission reply leaves the Turn epoch NULL while the Session
+    // still carries an earlier generation's: the adoption CAS must expect
+    // each as it stands (R10-4). The epoch predicates are null-safe, not
+    // `= NULL` (which never matches), so this must succeed against the
+    // real store where the Mockito suite can only mock it away.
+    @Test
+    void adoptsRecoveryAdmissionOntoANullTurnEpoch() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-null-epoch-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "null-epoch-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "null-epoch-first", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(Map.of(
+                        "type", "text", "text", "first")),
+                "sha256:" + "3".repeat(64));
+        String owner = "null-epoch-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                first.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                first.turnId(), owner, "boot-old")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                first.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), first.turnId(),
+                owner, "epoch-0", 4);
+        store.recordHarnessEvents(tenant, session.sessionId(),
+                first.turnId(), owner, "epoch-0", List.of(new HarnessEvent(5,
+                        "boot-old:epoch-0:5", new ProjectedEvent(
+                                "turn.completed", Map.of(), true,
+                                "COMPLETED", null, null))));
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "null-epoch-turn", "sha256:" + "4".repeat(64),
+                session.sessionId(), List.of(Map.of(
+                        "type", "text", "text", "lost reply")),
+                "sha256:" + "5".repeat(64));
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        // Turn epoch NULL (the reply was lost), Session epoch epoch-0.
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, null, "epoch-0", "epoch-new", 4);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.harnessEventEpoch())
+                            .isEqualTo("epoch-new");
+                    assertThat(record.harnessLastEventId()).isEqualTo(4);
+                });
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessEventEpoch()).isEqualTo("epoch-new");
+        // A wrong expected Session epoch is still refused, null-safe or
+        // not: the CAS keeps proving the row it moves.
+        assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
+                session.sessionId(), turn.turnId(), owner, null,
+                "epoch-wrong", "epoch-later", 4))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("recovery epoch changed");
+    }
+
     @Test
     void retractsOnlyTheIncompleteContinuationEpoch() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retract-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-create",
@@ -1437,7 +1644,207 @@ class ManagedAgentServerIntegrationTest {
                         .singleElement().satisfies(item ->
                                 assertThat(item.content()).singleElement()
                                         .satisfies(part -> assertThat(
+                                                part.text())
+                                                .isEqualTo("kept"))));
+        assertEventsNameTheSnapshot(tenant, session.sessionId());
+    }
+
+    // #13319: a restarted model attempt retracts the published prefix of the
+    // message it replaces. Deltas of earlier committed rounds carry smaller
+    // source ids and stay; the retraction is idempotent and advances the
+    // Harness cursor either way.
+    @Test
+    void retractsInBandRetryOutputFromItsFirstDelta() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-inband-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "inband-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "inband-turn", "sha256:" + "5".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "6".repeat(64));
+        String owner = "inband-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot_1")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_1", 1);
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_1", List.of(
+                        new HarnessEvent(2, "boot_1:epoch_1:2",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "kept"), false,
+                                        null, null, null)),
+                        new HarnessEvent(3, "boot_1:epoch_1:3",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "orphaned "), false,
+                                        null, null, null)),
+                        new HarnessEvent(4, "boot_1:epoch_1:4",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "prefix"), false,
+                                        null, null, null))));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .isPresent();
+
+        store.retractHarnessTurnOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch_1", 3, 5);
+
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .satisfies(events -> {
+                    assertThat(events).filteredOn(event ->
+                                    "boot_1:epoch_1:2".equals(
+                                            event.sourceKey()))
+                            .singleElement()
+                            .satisfies(event -> assertThat(event.data())
+                                    .containsEntry("text", "kept"));
+                    assertThat(events).filteredOn(event ->
+                                    event.sourceKey() != null
+                                            && (event.sourceKey().equals(
+                                                    "boot_1:epoch_1:3")
+                                                    || event.sourceKey().equals(
+                                                            "boot_1:epoch_1:4")))
+                            .allSatisfy(event -> {
+                                assertThat(event.data())
+                                        .containsEntry("text", "");
+                                assertThat(event.itemId()).isNull();
+                                assertThat(event.contentPartId()).isNull();
+                            });
+                });
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(
+                        record.harnessLastEventId()).isEqualTo(5));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "message".equals(item.type())
+                                && "assistant".equals(item.role()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content()).singleElement()
+                                        .satisfies(part -> assertThat(
                                                 part.text()).isEqualTo("kept"))));
+        assertEventsNameTheSnapshot(tenant, session.sessionId());
+
+        // A redelivered retraction does not retract again, but the cursor
+        // still advances past it.
+        store.retractHarnessTurnOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch_1", 3, 6);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(
+                        record.harnessLastEventId()).isEqualTo(6));
+
+        assertThatThrownBy(() -> store.retractHarnessTurnOutput(tenant,
+                session.sessionId(), turn.turnId(), owner, "epoch_other", 3,
+                7)).isInstanceOfSatisfying(IllegalStateException.class,
+                        error -> assertThat(error.getMessage()).contains(
+                                "event epoch changed"));
+    }
+
+
+
+    @Test
+    void boundedRetractionRemovesFullyConsumedOriginalNamespace() {
+        assertBoundedRetractionAcrossAttachment(4, "consumed");
+    }
+
+    @Test
+    void boundedRetractionRemovesUnconsumedReplayNamespace() {
+        assertBoundedRetractionAcrossAttachment(2, "unconsumed");
+    }
+
+    @Test
+    void boundedRetractionRemovesSplitOriginalAndReplayNamespaces() {
+        assertBoundedRetractionAcrossAttachment(3, "split");
+    }
+
+    private void assertBoundedRetractionAcrossAttachment(int consumedThrough, String caseName) {
+        pauseRecoveryScanning();
+        String tenant = "tenant-bounded-" + caseName + "-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "bounded-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "bounded-turn",
+                "sha256:" + "5".repeat(64), session.sessionId(), List.of(), "sha256:" + "6".repeat(64));
+        String owner = "bounded-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), owner, "boot_old")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(), turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(), owner, "epoch_old", 1);
+        java.util.ArrayList<HarnessEvent> old = new java.util.ArrayList<>();
+        old.add(new HarnessEvent(2, "boot_old:epoch_old:2", new ProjectedEvent("item.output_text.delta",
+                Map.of("text", "earlier-round"), false, null, null, null)));
+        for (int sequence = 3; sequence <= consumedThrough; sequence++) {
+            old.add(new HarnessEvent(sequence, "boot_old:epoch_old:" + sequence,
+                    new ProjectedEvent(sequence == 3 ? "item.output_text.delta" : "item.reasoning.delta",
+                            Map.of("text", "orphaned-" + sequence), false, null, null, null)));
+        }
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_old", old);
+        assertThat(store.bindRecoveredHarness(tenant, session.sessionId(), turn.turnId(), owner, "boot_old", "boot_new")).isTrue();
+        store.recordRecoveryAdmission(tenant, session.sessionId(), turn.turnId(), owner,
+                "epoch_old", "epoch_old", "epoch_new", consumedThrough);
+        java.util.ArrayList<HarnessEvent> replay = new java.util.ArrayList<>();
+        for (int sequence = consumedThrough + 1; sequence <= 4; sequence++) {
+            replay.add(new HarnessEvent(sequence, "boot_new:epoch_new:" + sequence,
+                    new ProjectedEvent(sequence == 3 ? "item.output_text.delta" : "item.reasoning.delta",
+                            Map.of("text", "orphaned-" + sequence), false, null, null, null)));
+        }
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new", replay);
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        long publicSequence = store.requireSession(tenant, session.sessionId()).lastSequence();
+        for (long[] invalid : List.of(new long[] {3, 5, 5}, new long[] {5, 4, 5}, new long[] {0, 4, 5})) {
+            assertThatThrownBy(() -> store.retractHarnessTurnOutput(tenant, session.sessionId(), turn.turnId(), owner,
+                    "epoch_new", invalid[0], invalid[2], "boot_old", "epoch_old", invalid[1]))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThat(store.requireSession(tenant, session.sessionId()).lastSequence()).isEqualTo(publicSequence);
+            assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId())).get()
+                    .satisfies(record -> assertThat(record.harnessLastEventId()).isEqualTo(4));
+        }
+        store.retractHarnessTurnOutput(tenant, session.sessionId(), turn.turnId(), owner,
+                "epoch_new", 3, 5, "boot_old", "epoch_old", 4L);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "boot_old:epoch_old:2".equals(event.sourceKey())).singleElement()
+                .satisfies(event -> assertThat(event.data()).containsEntry("text", "earlier-round"));
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> ("item.output_text.delta".equals(event.type()) || "item.reasoning.delta".equals(event.type())) && event.sourceKey() != null &&
+                        (event.sourceKey().endsWith(":3") || event.sourceKey().endsWith(":4")))
+                .hasSize(2).allSatisfy(event -> {
+                    assertThat(event.data()).containsEntry("text", "");
+                    assertThat(event.itemId()).isNull();
+                    assertThat(event.contentPartId()).isNull();
+                });
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new",
+                List.of(new HarnessEvent(6, "boot_new:epoch_new:6", new ProjectedEvent("item.output_text.delta",
+                        Map.of("text", "replacement"), false, null, null, null))));
+        store.retractHarnessTurnOutput(tenant, session.sessionId(), turn.turnId(), owner,
+                "epoch_new", 3, 7, "boot_old", "epoch_old", 4L);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "stream.reconciled".equals(event.type())).hasSize(1);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "boot_new:epoch_new:6".equals(event.sourceKey())).singleElement()
+                .satisfies(event -> assertThat(event.data()).containsEntry("text", "replacement"));
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId())).get()
+                .satisfies(record -> assertThat(record.harnessLastEventId()).isEqualTo(7));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId())).isPresent();
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(), owner, "epoch_new",
+                List.of(new HarnessEvent(8, "boot_new:epoch_new:8", new ProjectedEvent("turn.completed",
+                        Map.of(), true, "COMPLETED", null, null))));
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+                .filteredOn(event -> "turn.completed".equals(event.type()) && turn.turnId().equals(event.turnId())).hasSize(1);
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
+                        assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence())));
         assertEventsNameTheSnapshot(tenant, session.sessionId());
     }
 
@@ -1512,11 +1919,18 @@ class ManagedAgentServerIntegrationTest {
                                  "sessionId":"%s","turnId":"%s"}
                                 """.formatted(sessionId, turnId)))
                 .andExpect(status().isAccepted());
+        // Nothing may cancel the Turn while its submit is unresolved.
+        await().during(Duration.ofMillis(200)).atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(harness.cancelCount())
+                        .isEqualTo(cancellations));
         harness.releaseUncertainRetries();
 
+        // Once the Turn is admitted, the dispatch that resolved the submit
+        // and the queued cancellation can each deliver the cancel; the
+        // Hosted Harness treats a repeat as a no-op.
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 assertThat(harness.cancelCount())
-                        .isEqualTo(cancellations + 1));
+                        .isGreaterThan(cancellations));
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 mvc.perform(post(
                                 "/api/agent/web-shell/v1/transcript/query")
@@ -1527,6 +1941,158 @@ class ManagedAgentServerIntegrationTest {
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.cancelled')]").isNotEmpty()));
+    }
+
+    @Test
+    void rejectsInputBeyondTheAggregateCharacterBudget() throws Exception {
+        String tenant = "tenant-input-budget-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"budget-create",
+                                 "agentId":"qwen-code","input":[]}
+                                """))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        String chunk = "x".repeat(1_000_000);
+        StringBuilder oversized = new StringBuilder(
+                "{\"idempotencyKey\":\"budget-submit\",\"sessionId\":\""
+                        + sessionId + "\",\"input\":[");
+        StringBuilder okay = new StringBuilder(
+                "{\"idempotencyKey\":\"budget-okay\",\"sessionId\":\""
+                        + sessionId + "\",\"input\":[");
+        for (int index = 0; index < 5; index++) {
+            String block = "{\"type\":\"text\",\"text\":\"" + chunk + "\"}";
+            oversized.append(block);
+            if (index < 4) {
+                oversized.append(",");
+                okay.append(block).append(index < 3 ? "," : "");
+            }
+        }
+        oversized.append("]}");
+        okay.append("]}");
+
+        // 5 × 1M chars passes the per-block caps yet must fail the
+        // aggregate budget; 4 × 1M remains admitted.
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(oversized.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_input"));
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(okay.toString()))
+                .andExpect(status().isAccepted());
+    }
+
+    @Test
+    void acceptsWebShellMetadataWithoutAClientIdOnlyContract()
+            throws Exception {
+        String tenant = "tenant-metadata-" + UUID.randomUUID();
+        // The WebShell handlers forward no metadata at all (the controller
+        // passes null), so anything a client sends here is accepted and
+        // ignored — neither validated and dropped, nor persisted: a
+        // metadata title does not become the Session's title.
+        MvcResult created = mvc.perform(
+                post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"metadata-create",
+                                 "agentId":"qwen-code","input":[],
+                                 "metadata":{"clientId":"client-1",
+                                             "other":"trace",
+                                             "title":"metadata-title"}}
+                                """))
+                .andExpect(status().isAccepted())
+                .andReturn();
+        String sessionId = objectMapper.readTree(
+                created.getResponse().getContentAsString())
+                .get("sessionId").asText();
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + sessionId + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").doesNotExist());
+        // Same widened acceptance on the submit handler: a non-clientId
+        // metadata body must not be refused by the (deleted) validator;
+        // the request fails later, on the unknown Session lookup. The body
+        // is otherwise exactly what the published WebShellSubmitRequest
+        // schema allows — ManagedAgentApiContractTest pins that shape.
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"sessionId":"00000000-0000-4000-8000-000000000000",
+                                 "idempotencyKey":"metadata-submit",
+                                 "input":[{"type":"input_text","text":"hi"}],
+                                 "metadata":{"clientId":"client-1",
+                                             "other":"trace"}}
+                                """))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void anOversizedDurableRecordIsAdmittedThenRejectedByTheHarness()
+            throws Exception {
+        // The 4M aggregate is an admission ceiling only: a command whose
+        // serialized prompt or durable Session-store record exceeds the
+        // Hosted Harness's 64 KiB durable-record limit is accepted and
+        // persisted, then fails the Turn when the Harness refuses it
+        // (413 -> hosted_harness_rejected).
+        String tenant = "tenant-oversized-" + UUID.randomUUID();
+        // Prompt arm: the serialized prompt itself is over the limit.
+        assertHarnessRejectsOversizedCommand(tenant, "prompt",
+                "x".repeat(100_000));
+        // Record arm: the serialized prompt stays under the limit (the
+        // single-block wrapper adds 27 bytes), but the durable record's
+        // envelope pushes it over, so the Turn still fails. A fake
+        // checking only the serialized prompt admits this command.
+        assertHarnessRejectsOversizedCommand(tenant, "record",
+                "x".repeat(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+                        - 100));
+    }
+
+    private void assertHarnessRejectsOversizedCommand(String tenant,
+            String arm, String text) throws Exception {
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"oversized-create-"
+                                + arm + "\",\"agentId\":\"qwen-code\","
+                                + "\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"oversized-submit-"
+                                + arm + "\",\"sessionId\":\"" + sessionId
+                                + "\",\"input\":[{\"type\":\"input_text\","
+                                + "\"text\":\"" + text + "\"}]}"))
+                .andExpect(status().isAccepted());
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"sessionId\":\"" + sessionId
+                                        + "\"}"))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.activeTurn.status")
+                                .value("failed"))
+                        .andExpect(jsonPath("$.activeTurn.errorCode")
+                                .value("hosted_harness_rejected")));
+        assertThat(harness.lastRejectionArm.get())
+                .as("the %s arm is the one that fired", arm)
+                .isEqualTo(arm);
     }
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
@@ -1564,8 +2130,8 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness() {
-            return new FixtureHarness();
+        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+            return new FixtureHarness(jdbc);
         }
     }
 
@@ -1593,9 +2159,23 @@ class ManagedAgentServerIntegrationTest {
                 new ConcurrentHashMap<>();
         private final Set<String> uncertainRetries =
                 ConcurrentHashMap.newKeySet();
+        private final AtomicReference<String> lastRejectionArm =
+                new AtomicReference<>();
         private volatile boolean available = true;
         private volatile String closeAnswer = BOOT_ID;
-        private volatile HarnessRuntimeRecovery runtimeRecovery;
+        private final Map<String, HarnessRuntimeRecovery>
+                tenantRecoveries = new ConcurrentHashMap<>();
+        /** H6b: the automation funnel this fixture answers for. */
+        final AutomationHarnessFake automations;
+
+        FixtureHarness(JdbcTemplate jdbc) {
+            automations = new AutomationHarnessFake((sessionId, schedule) -> {
+                String tenantId = jdbc.queryForObject("SELECT tenant_id FROM ma_session"
+                        + " WHERE session_id = ?", String.class, sessionId);
+                AutomationHarnessFake.projectSchedule(jdbc, tenantId, sessionId, schedule,
+                        System.currentTimeMillis());
+            });
+        }
 
         @Override
         public boolean isAvailable() {
@@ -1603,18 +2183,77 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
+        public Map<String, Object> runAutomationOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            return automations.run(sessionId, body);
+        }
+
+        @Override
         public Attachment createOrLoad(String tenantId, String sessionId,
                 boolean created) {
             sessions.add(sessionId);
-            HarnessRuntimeRecovery recovery = runtimeRecovery;
-            runtimeRecovery = null;
-            return new Attachment(BOOT_ID, recovery);
+            // Keyed by tenant: a shared-scope fixture consumes its own arm;
+            // another test's background claim can never steal it.
+            return new Attachment(BOOT_ID,
+                    tenantRecoveries.remove(tenantId));
+        }
+
+        @Override
+        public Attachment recoverManagedRuntime(String tenantId,
+                String sessionId, boolean cancellation) {
+            return createOrLoad(tenantId, sessionId, true);
         }
 
         @Override
         public Admission submit(String tenantId, String sessionId,
                 String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
+            // The real Hosted Harness refuses with a 413 when EITHER the
+            // serialized prompt OR its durable Session-store record exceeds
+            // the inline limit; mirror both arms so the
+            // admission-vs-delivery gap is observable. The record arm wraps
+            // the joined block texts in the envelope the real record()
+            // adds; the fields the fake cannot know (uuid, parentUuid,
+            // timestamp, cwd) take fixed-size stand-ins.
+            var mapper = new ObjectMapper();
+            String text = input.stream()
+                    .map(block -> String.valueOf(block.get("text")))
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            Map<String, Object> record = Map.of(
+                    "uuid", "00000000-0000-4000-8000-000000000000",
+                    "parentUuid", "00000000-0000-4000-8000-000000000000",
+                    "sessionId", sessionId,
+                    "timestamp", "2000-01-01T00:00:00.000Z",
+                    "type", "user",
+                    "cwd", ".",
+                    "version", "hosted-harness/1",
+                    "daemonPromptId", promptId,
+                    "message", Map.of("role", "user",
+                            "parts", List.of(Map.of("text", text))));
+            try {
+                // Keep the real harness's check order — serialized prompt
+                // first, durable record second — and record which arm
+                // fired: the record arm only discriminates while the
+                // prompt stays under the limit, and nothing else would
+                // notice the prompt arm shadowing it.
+                boolean promptOversized = mapper.writeValueAsBytes(input)
+                        .length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
+                boolean recordOversized = !promptOversized
+                        && mapper.writeValueAsBytes(record).length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
+                if (promptOversized || recordOversized) {
+                    lastRejectionArm.set(
+                            promptOversized ? "prompt" : "record");
+                    DaemonHttpException tooLarge =
+                            mock(DaemonHttpException.class);
+                    when(tooLarge.getStatusCode()).thenReturn(413);
+                    throw tooLarge;
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException
+                    error) {
+                throw new IllegalStateException(error);
+            }
             promptIds.put(sessionId, promptId);
             boolean held = input.stream().anyMatch(block ->
                     "hold".equals(block.get("text")));
@@ -1705,11 +2344,22 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
+        public boolean supportsFencedTitles() {
+            return true;
+        }
+
+        @Override
+        public void rename(String tenantId, String sessionId, String title, long revision) {
+            rename(tenantId, sessionId, title);
+        }
+
+        @Override
         public void rename(String tenantId, String sessionId, String title) {
             renames.incrementAndGet();
             if (renameFailures.getAndUpdate(value -> Math.max(0,
                     value - 1)) > 0) {
-                throw new IllegalStateException("fixture rename failure");
+                throw new RuntimeBrokerException(503, "fixture_rename_unavailable",
+                        "fixture rename failure", true);
             }
             titles.put(sessionId, title);
         }
@@ -1776,8 +2426,9 @@ class ManagedAgentServerIntegrationTest {
             available = value;
         }
 
-        void returnRuntimeRecovery(HarnessRuntimeRecovery recovery) {
-            runtimeRecovery = recovery;
+        void returnRuntimeRecovery(String tenantId,
+                HarnessRuntimeRecovery recovery) {
+            tenantRecoveries.put(tenantId, recovery);
         }
 
         int cancelCount() {
@@ -1803,4 +2454,61 @@ class ManagedAgentServerIntegrationTest {
         }
 
     }
+    @Test
+    void preAcquireCleanupUsesCurrentLifecycleAuthorityAndDoesNotAcquire() {
+        String tenant = "tenant-cleanup-authority-" + UUID.randomUUID();
+        String harnessSession = "harness-" + UUID.randomUUID();
+        String operation = "operation-" + UUID.randomUUID();
+        var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope(tenant, "workspace", "1", "/workspace", "capability", "session");
+        var bindings = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
+                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository(jdbc.getDataSource());
+        var executions = new com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository(jdbc.getDataSource());
+        var provisioner = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,
+                org.mockito.Mockito.CALLS_REAL_METHODS);
+        var transport = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class);
+        var lease = new com.alibaba.qwen.code.runtimebroker.RuntimeLease("runtime", java.net.URI.create("http://127.0.0.1:4000"), "token", "lease", 1);
+        when(provisioner.provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class)))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(lease));
+        java.util.function.Consumer<Throwable> admissionClosed = error -> {
+            Throwable cause = error;
+            while (cause.getCause() != null) cause = cause.getCause();
+            assertThat(cause).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                    conflict -> assertThat(conflict.getCode()).isEqualTo("runtime_admission_closed"));
+        };
+        try (var broker = new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService(
+                ignored -> java.util.concurrent.CompletableFuture.completedFuture(scope), provisioner, transport,
+                bindings, sessions, executions, "cleanup-probe", Duration.ofMinutes(1), Duration.ofMinutes(1))) {
+            var binding = broker.warm(harnessSession).toCompletableFuture().join();
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
+                return null;
+            });
+            jdbc.update("UPDATE ma_session_head SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+                    System.currentTimeMillis() + 60_000, tenant, harnessSession);
+            var authority = new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, 7);
+            for (var invalid : java.util.Arrays.asList(null,
+                    new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, 8),
+                    new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority("wrong-operation", 7))) {
+                assertThatThrownBy(() -> broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(),
+                        binding.getGeneration(), invalid).toCompletableFuture().join()).satisfies(admissionClosed);
+                assertThat(sessions.findById(scope, "runtime-a")).isNull();
+            }
+            jdbc.update("UPDATE ma_session_head SET claim_lease_until = 0 WHERE tenant_id = ? AND harness_session_id = ?", tenant, harnessSession);
+            assertThatThrownBy(() -> broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(),
+                    binding.getGeneration(), authority).toCompletableFuture().join()).satisfies(admissionClosed);
+            assertThat(sessions.findById(scope, "runtime-a")).isNull();
+            jdbc.update("UPDATE ma_session_head SET claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+                    System.currentTimeMillis() + 60_000, tenant, harnessSession);
+            assertThat(broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(), binding.getGeneration(), authority)
+                    .toCompletableFuture().join()).isTrue();
+            assertThat(sessions.findById(scope, "runtime-a").getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED);
+            assertThat(broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(), binding.getGeneration(), authority)
+                    .toCompletableFuture().join()).isTrue();
+            org.mockito.Mockito.verify(transport, org.mockito.Mockito.never()).acquire(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.verify(transport, org.mockito.Mockito.never()).release(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.verify(provisioner, org.mockito.Mockito.times(1)).provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class));
+        }
+    }
+
 }

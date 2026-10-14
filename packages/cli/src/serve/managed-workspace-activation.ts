@@ -60,7 +60,7 @@ export class WorkspaceActivations {
       managedRuntimeNoStore,
       authorizeManagedRuntime(boot),
       managedRuntimeJsonBody(WORKSPACE_ACTIVATION_ROUTE.requestBodyLimitBytes),
-      (req: Request, res: Response) => {
+      async (req: Request, res: Response) => {
         const body: unknown = req.body;
         if (
           body === null ||
@@ -92,12 +92,23 @@ export class WorkspaceActivations {
         }
         const sessionId = request['sessionId'] as string;
         const active = request['operation'] === 'activate';
+        // Admission stays open for a deactivation bearing background work:
+        // its ordered drain below runs first and rechecks before refusing.
         if (
-          (active && this.sessions.get(sessionId) === false) ||
-          (!active && executor.hasActiveSession(sessionId))
+          active &&
+          (!executor.isAdmissionOpen || this.sessions.get(sessionId) === false)
         ) {
           res.status(409).json({ code: 'managed_activation_conflict' });
           return;
+        }
+        if (!active && executor.hasActiveSession(sessionId)) {
+          // Ordered close: drain this Session's background Shells first;
+          // only what still cannot be proven keeps the refusal.
+          await executor.stopBackgroundSession(sessionId);
+          if (executor.hasActiveSession(sessionId)) {
+            res.status(409).json({ code: 'managed_activation_conflict' });
+            return;
+          }
         }
         this.sessions.set(sessionId, active);
         res.json({

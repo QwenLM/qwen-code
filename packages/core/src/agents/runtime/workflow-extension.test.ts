@@ -21,6 +21,8 @@ function workflowSource(name: string, extra = ''): string {
   return `export const meta = { name: '${name}', description: 'Runs ${name}'${extra} };\nreturn 1;\n`;
 }
 
+const long = '😀'.repeat(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS + 10);
+
 describe('loadExtensionWorkflows', () => {
   let base: string;
   let root: string;
@@ -48,18 +50,23 @@ describe('loadExtensionWorkflows', () => {
     return filePath;
   }
 
+  /** Write `workflows/<name>.js` declaring the same meta name. */
+  const writeWorkflow = (name: string, extra?: string) =>
+    write(`workflows/${name}.js`, workflowSource(name, extra));
+  const load = (declared?: unknown, options?: { followSymlinks?: boolean }) =>
+    loadExtensionWorkflows(root, owner, declared, options);
+  const names = async (declared?: unknown) =>
+    (await load(declared)).map((w) => w.name);
+
   it('returns nothing when the extension ships no workflows directory', async () => {
-    expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([]);
+    expect(await load()).toEqual([]);
   });
 
   it('reads the default directory, qualified and sorted by name', async () => {
-    await write('workflows/b-audit.js', workflowSource('b-audit'));
-    await write(
-      'workflows/a-review.js',
-      workflowSource('a-review', ", whenToUse: 'on review'"),
-    );
+    await writeWorkflow('b-audit');
+    await writeWorkflow('a-review', ", whenToUse: 'on review'");
 
-    const workflows = await loadExtensionWorkflows(root, owner, undefined);
+    const workflows = await load();
 
     expect(workflows).toEqual([
       {
@@ -87,23 +94,20 @@ describe('loadExtensionWorkflows', () => {
   it('records a content digest that follows the script code', async () => {
     const source = workflowSource('audit');
     await write('workflows/audit.js', source);
-    const [first] = await loadExtensionWorkflows(root, owner, undefined);
+    const [first] = await load();
     expect(first?.contentDigest).toBe(computeWorkflowScriptDigest(source));
 
     await write('workflows/audit.js', source.replace('return 1;', 'return 2;'));
-    const [second] = await loadExtensionWorkflows(root, owner, undefined);
+    const [second] = await load();
     expect(second?.description).toBe(first?.description);
     expect(second?.contentDigest).not.toBe(first?.contentDigest);
   });
 
   it('reads one directory level only', async () => {
-    await write('workflows/top.js', workflowSource('top'));
+    await writeWorkflow('top');
     await write('workflows/sub/nested.js', workflowSource('nested'));
 
-    const names = (await loadExtensionWorkflows(root, owner, undefined)).map(
-      (w) => w.name,
-    );
-    expect(names).toEqual(['gcp:top']);
+    expect(await names()).toEqual(['gcp:top']);
   });
 
   it('registers the meta name independently of the file name', async () => {
@@ -112,97 +116,81 @@ describe('loadExtensionWorkflows', () => {
       workflowSource('child'),
     );
 
-    expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([
+    expect(await load()).toEqual([
       expect.objectContaining({ name: 'gcp:child', scriptPath }),
     ]);
   });
 
   it('skips non-.js files and meta names that are not legal workflow names', async () => {
-    await write('workflows/ok.js', workflowSource('ok'));
+    await writeWorkflow('ok');
     await write('workflows/notes.md', workflowSource('notes'));
     await write('workflows/bad.js', workflowSource('Bad'));
     await write('workflows/number.js', workflowSource('1x'));
 
-    const names = (await loadExtensionWorkflows(root, owner, undefined)).map(
-      (w) => w.name,
-    );
-    expect(names).toEqual(['gcp:ok']);
+    expect(await names()).toEqual(['gcp:ok']);
   });
 
   it.skipIf(isWindows)('skips a symlinked workflow file', async () => {
-    await write('workflows/ok.js', workflowSource('ok'));
+    await writeWorkflow('ok');
     const target = path.join(outside, 'secret.js');
     await fs.writeFile(target, workflowSource('secret'));
     await fs.symlink(target, path.join(root, 'workflows', 'secret.js'));
 
-    const names = (await loadExtensionWorkflows(root, owner, undefined)).map(
-      (w) => w.name,
-    );
-    expect(names).toEqual(['gcp:ok']);
+    expect(await names()).toEqual(['gcp:ok']);
   });
 
   it.skipIf(isWindows)('refuses a symlinked workflows directory', async () => {
     await fs.writeFile(path.join(outside, 'leak.js'), workflowSource('leak'));
     await fs.symlink(outside, path.join(root, 'workflows'));
 
-    expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([]);
+    expect(await load()).toEqual([]);
   });
 
   it('refuses declared paths that resolve outside the extension', async () => {
     await fs.writeFile(path.join(outside, 'leak.js'), workflowSource('leak'));
 
-    expect(await loadExtensionWorkflows(root, owner, '../outside')).toEqual([]);
-    expect(await loadExtensionWorkflows(root, owner, [outside])).toEqual([]);
-    expect(
-      await loadExtensionWorkflows(root, owner, path.join(outside, 'leak.js')),
-    ).toEqual([]);
+    expect(await load('../outside')).toEqual([]);
+    expect(await load([outside])).toEqual([]);
+    expect(await load(path.join(outside, 'leak.js'))).toEqual([]);
   });
 
   it('accepts an absolute declared path inside the extension (as ${extensionPath} produces)', async () => {
     await write('flows/deploy.js', workflowSource('deploy'));
 
-    const names = (
-      await loadExtensionWorkflows(root, owner, path.join(root, 'flows'))
-    ).map((w) => w.name);
-    expect(names).toEqual(['gcp:deploy']);
+    expect(await names(path.join(root, 'flows'))).toEqual(['gcp:deploy']);
   });
 
   it('reads exactly the declared paths, not the default directory', async () => {
-    await write('workflows/default.js', workflowSource('default'));
+    await writeWorkflow('default');
     await write('flows/custom.js', workflowSource('custom'));
     await write('single/one.js', workflowSource('one'));
 
-    const names = (
-      await loadExtensionWorkflows(root, owner, ['flows', 'single/one.js'])
-    ).map((w) => w.name);
-    expect(names).toEqual(['gcp:custom', 'gcp:one']);
-    expect(await loadExtensionWorkflows(root, owner, [])).toEqual([]);
+    expect(await names(['flows', 'single/one.js'])).toEqual([
+      'gcp:custom',
+      'gcp:one',
+    ]);
+    expect(await load([])).toEqual([]);
   });
 
   it('ignores a declared file that is not a .js file', async () => {
     await write('flows/readme.txt', 'not a workflow');
 
-    expect(
-      await loadExtensionWorkflows(root, owner, 'flows/readme.txt'),
-    ).toEqual([]);
+    expect(await load('flows/readme.txt')).toEqual([]);
   });
 
   it('skips a file over the size cap', async () => {
-    await write('workflows/ok.js', workflowSource('ok'));
+    await writeWorkflow('ok');
     await write(
       'workflows/huge.js',
       workflowSource('huge') +
         '//'.padEnd(MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES, 'x'),
     );
 
-    const names = (await loadExtensionWorkflows(root, owner, undefined)).map(
-      (w) => w.name,
-    );
-    expect(names).toEqual(['gcp:ok']);
+    expect(await names()).toEqual(['gcp:ok']);
   });
 
   it('skips scripts without a readable meta block and keeps their siblings', async () => {
-    await write('workflows/ok.js', workflowSource('ok'));
+    await writeWorkflow('ok');
     await write('workflows/no-meta.js', 'return 1;\n');
     await write(
       'workflows/computed.js',
@@ -213,20 +201,14 @@ describe('loadExtensionWorkflows', () => {
       "export const meta = { name: 'no-description' };\n",
     );
 
-    const names = (await loadExtensionWorkflows(root, owner, undefined)).map(
-      (w) => w.name,
-    );
-    expect(names).toEqual(['gcp:ok']);
+    expect(await names()).toEqual(['gcp:ok']);
   });
 
   it('keeps distinct meta names from files with the same basename', async () => {
     await write('first/same.js', workflowSource('same-first'));
     await write('second/same.js', workflowSource('same-second'));
 
-    const workflows = await loadExtensionWorkflows(root, owner, [
-      'first',
-      'second',
-    ]);
+    const workflows = await load(['first', 'second']);
     expect(workflows.map((workflow) => workflow.name)).toEqual([
       'gcp:same-first',
       'gcp:same-second',
@@ -239,28 +221,22 @@ describe('loadExtensionWorkflows', () => {
     await write('first/same.js', workflowSource('shared'));
     await write('second/other.js', workflowSource('shared'));
 
-    const workflows = await loadExtensionWorkflows(root, owner, [
-      'first',
-      'second',
-    ]);
+    const workflows = await load(['first', 'second']);
     expect(workflows).toHaveLength(1);
     expect(workflows[0].name).toBe('gcp:shared');
     expect(workflows[0].scriptPath).toBe(path.join(root, 'first', 'same.js'));
   });
 
   it('ignores a malformed workflows value without throwing', async () => {
-    await write('workflows/ok.js', workflowSource('ok'));
+    await writeWorkflow('ok');
 
-    expect(await loadExtensionWorkflows(root, owner, 42)).toEqual([]);
-    expect(await loadExtensionWorkflows(root, owner, { dir: 'x' })).toEqual([]);
-    const names = (
-      await loadExtensionWorkflows(root, owner, ['', 7, 'workflows'])
-    ).map((w) => w.name);
-    expect(names).toEqual(['gcp:ok']);
+    expect(await load(42)).toEqual([]);
+    expect(await load({ dir: 'x' })).toEqual([]);
+    expect(await names(['', 7, 'workflows'])).toEqual(['gcp:ok']);
   });
 
   it('returns nothing for an extension name that cannot prefix a workflow name', async () => {
-    await write('workflows/ok.js', workflowSource('ok'));
+    await writeWorkflow('ok');
 
     expect(
       await loadExtensionWorkflows(root, { name: 'has space' }, undefined),
@@ -280,10 +256,7 @@ describe('loadExtensionWorkflows', () => {
       await fs.mkdir(path.join(root, 'bad'));
       await fs.chmod(path.join(root, 'bad'), 0o000);
       try {
-        const names = (
-          await loadExtensionWorkflows(root, owner, ['bad', 'good'])
-        ).map((w) => w.name);
-        expect(names).toEqual(['gcp:x']);
+        expect(await names(['bad', 'good'])).toEqual(['gcp:x']);
       } finally {
         await fs.chmod(path.join(root, 'bad'), 0o755);
       }
@@ -291,13 +264,12 @@ describe('loadExtensionWorkflows', () => {
   );
 
   it('shortens an overlong description without splitting a character', async () => {
-    const long = '😀'.repeat(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS + 10);
     await write(
       'workflows/long.js',
       `export const meta = { name: 'long', description: '${long}' };\nreturn 1;\n`,
     );
 
-    const [workflow] = await loadExtensionWorkflows(root, owner, undefined);
+    const [workflow] = await load();
     const chars = Array.from(workflow.description);
     expect(chars).toHaveLength(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS);
     expect(chars.at(-1)).toBe('…');
@@ -307,23 +279,11 @@ describe('loadExtensionWorkflows', () => {
   // `whenToUse` decides whether the model may start the workflow on its own,
   // so a blank one must read as absent rather than as an empty condition.
   it('keeps whenToUse only when it says something, shortened like the description', async () => {
-    const long = '😀'.repeat(MAX_EXTENSION_WORKFLOW_DESCRIPTION_CHARS + 10);
-    await write(
-      'workflows/blank.js',
-      workflowSource('blank', ", whenToUse: '   '"),
-    );
-    await write(
-      'workflows/long.js',
-      workflowSource('long', `, whenToUse: '  ${long}  '`),
-    );
-    await write('workflows/none.js', workflowSource('none'));
+    await writeWorkflow('blank', ", whenToUse: '   '");
+    await writeWorkflow('long', `, whenToUse: '  ${long}  '`);
+    await writeWorkflow('none');
 
-    const byName = new Map(
-      (await loadExtensionWorkflows(root, owner, undefined)).map((w) => [
-        w.name,
-        w,
-      ]),
-    );
+    const byName = new Map((await load()).map((w) => [w.name, w]));
     expect('whenToUse' in byName.get('gcp:blank')!).toBe(false);
     expect('whenToUse' in byName.get('gcp:none')!).toBe(false);
     const chars = Array.from(byName.get('gcp:long')!.whenToUse!);
@@ -350,20 +310,14 @@ describe('loadExtensionWorkflows', () => {
         path.join(root, 'workflows', 'external.js'),
       );
 
-      expect(await loadExtensionWorkflows(root, owner, undefined)).toEqual([]);
-      const copied = await loadExtensionWorkflows(root, owner, undefined, {
-        followSymlinks: true,
-      });
+      expect(await load()).toEqual([]);
+      const copied = await load(undefined, { followSymlinks: true });
       expect(copied.map((w) => w.name)).toEqual(['gcp:external', 'gcp:linked']);
       expect(copied[1].scriptPath).toBe(
         path.join(root, 'workflows', 'linked.js'),
       );
       // Containment is still checked on the path as spelled.
-      expect(
-        await loadExtensionWorkflows(root, owner, '../outside', {
-          followSymlinks: true,
-        }),
-      ).toEqual([]);
+      expect(await load('../outside', { followSymlinks: true })).toEqual([]);
     },
   );
 });

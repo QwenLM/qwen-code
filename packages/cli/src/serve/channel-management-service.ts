@@ -158,6 +158,16 @@ export interface CreateChannelManagementServiceOptions {
   store: ChannelManagementSettingsStore | WorkspaceChannelSettingsStore;
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
   /**
+   * A workspace's merged channel config map (system + user + workspace
+   * scopes) — the same view the worker resolves. `remove` consults it to
+   * distinguish a configuration that is lost from one this scope never held.
+   * It must read settings from disk at call time with environment loading
+   * skipped, the way the `resolveChannelWorkspaceGroups` injections receive
+   * it: the default `loadSettings(cwd)` would write the target workspace's
+   * `.env` into the daemon's process-global environment.
+   */
+  loadChannelsConfig: (workspaceCwd: string) => Record<string, unknown>;
+  /**
    * The daemon's record of `serve.channels` names that were not restored. A
    * failed restore never reaches the committed selection, so without it such
    * a channel would list as `stopped`.
@@ -232,24 +242,62 @@ export function createChannelManagementService(
     return matches;
   };
 
+  const ownedWorkers = (name: string) =>
+    workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+
   const workspaceCommittedNames = (): string[] =>
     opts.manager
       .committedChannelNames()
-      .filter((name) =>
-        workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd),
-      );
+      .filter((name) => ownedWorkers(name).length > 0);
+
+  const runtimeOwnerMismatch = (name: string, reason?: string) =>
+    new ChannelManagementError(
+      'channel_runtime_owner_mismatch',
+      `Channel "${name}" does not have one confirmed runtime owner in this workspace.${reason ? ` ${reason}` : ''}`,
+    );
 
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
-    const workers = workerFor(name).filter(
-      (worker) => worker.workspaceCwd === opts.workspaceCwd,
-    );
-    if (workers.length !== 1) {
-      throw new ChannelManagementError(
-        'channel_runtime_owner_mismatch',
-        `Channel "${name}" does not have one confirmed runtime owner in this workspace.`,
-      );
+    if (ownedWorkers(name).length !== 1) {
+      throw runtimeOwnerMismatch(name);
     }
+  };
+
+  // Returns whether exactly one committed worker owned by this workspace was
+  // confirmed, so `remove` can stop it without re-deriving ownership.
+  const assertConvergeableRuntimeOwner = (name: string): boolean => {
+    const workers = workerFor(name);
+    const committed = opts.manager.committedChannelNames().includes(name);
+    if (!committed && workers.length === 0) return false;
+    if (committed && workers.length === 1 && ownedWorkers(name).length === 1) {
+      return true;
+    }
+    const reason = !committed
+      ? 'A worker exists but the channel is not committed.'
+      : workers.length === 0
+        ? 'Committed selection has no observed worker.'
+        : workers.length !== 1
+          ? `${workers.length} workers claim this channel.`
+          : 'The only worker belongs to another workspace.';
+    throw runtimeOwnerMismatch(name, reason);
+  };
+
+  // Whether a mid-transition manager may be bringing this channel up. It
+  // publishes neither a committed name nor a worker for a channel it is still
+  // starting, so any name in its candidate selection that this workspace does
+  // not already run is unknown until it settles. A channel this workspace
+  // runs is safe to act on — its stop queues behind the transition and
+  // rechecks the owner inside the manager's lane — and so is one the
+  // candidate selection leaves out.
+  const mayBeStarting = (name: string): boolean => {
+    const { transition, pendingSelection } = opts.manager.state();
+    if (transition === 'idle' || !pendingSelection) return false;
+    if (workspaceCommittedNames().includes(name)) return false;
+    return (
+      pendingSelection.mode === 'all' || pendingSelection.names.includes(name)
+    );
   };
 
   const runtimeFor = (name: string): ChannelRuntimeState => {
@@ -263,9 +311,7 @@ export function createChannelManagementService(
       return { state: 'stopped' };
     }
     const state = opts.manager.state();
-    const workers = workerFor(name).filter(
-      (worker) => worker.workspaceCwd === opts.workspaceCwd,
-    );
+    const workers = ownedWorkers(name);
     if (workers.length !== 1) {
       return {
         state: 'error',
@@ -473,15 +519,64 @@ export function createChannelManagementService(
     async remove(name, request) {
       assertManageableInstanceName(name);
       const current = opts.store.snapshot();
-      if (!Object.hasOwn(current.channels, name)) {
+      const configured = Object.hasOwn(current.channels, name);
+      if (configured) assertWorkspaceConfig(current.channels[name]!);
+      assertExpectedRevision(current, request.expectedRevision);
+      // A mid-transition manager reports the candidate selection as no
+      // workers and nothing committed, which reads as silent without being
+      // it; the caller retries once the manager settles. Guarded above the
+      // branch split because the configured branch reads the same
+      // mid-transition committed set, but only for a channel the transition
+      // may be starting: `transition` is one value for the whole daemon.
+      if (
+        configured
+          ? mayBeStarting(name)
+          : opts.manager.state().transition !== 'idle'
+      ) {
         throw new ChannelManagementError(
-          'channel_instance_not_found',
-          `Channel "${name}" is not configured in this workspace.`,
+          'channel_service_conflict',
+          'The channel runtime is mid-transition; retry shortly.',
         );
       }
-      assertWorkspaceConfig(current.channels[name]!);
-      assertExpectedRevision(current, request.expectedRevision);
-      if (workspaceCommittedNames().includes(name)) {
+      if (!configured) {
+        // Only a record-valued merged entry proves the channel lives in
+        // another scope: every other reader of the merged map filters
+        // non-record values, so a legacy scalar entry runs nothing and its
+        // stale startup selection is exactly what this branch converges.
+        const mergedHoldsConfig = (): boolean => {
+          const merged = opts.loadChannelsConfig(opts.workspaceCwd);
+          if (!Object.hasOwn(merged, name)) return false;
+          const entry = merged[name];
+          return (
+            typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+          );
+        };
+        if (mergedHoldsConfig()) {
+          // The worker resolves the merged system + user + workspace view, so
+          // a channel configured outside this scope still runs here. Its
+          // configuration is not lost — this scope never held it — and
+          // stopping the worker would tear down a channel this route never
+          // listed and cannot delete, so report the scope-local truth
+          // instead.
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace's settings scope, but its runtime is resolved from another scope (user or system settings); it cannot be deleted from here.`,
+          );
+        }
+        if (assertConvergeableRuntimeOwner(name)) {
+          await stopChannel(name);
+        }
+        // The revision token covers only this scope's files, so the merged
+        // view is re-read after the stop window: a configuration that
+        // reappeared at another scope mid-delete must fail closed rather
+        // than converge.
+        if (mergedHoldsConfig()) {
+          throw new ChannelManagementError(
+            'channel_settings_conflict',
+            'Channel settings changed; reload before trying again.',
+          );
+        }
+      } else if (workspaceCommittedNames().includes(name)) {
         assertOwnedRuntime(name);
         await stopChannel(name);
       }

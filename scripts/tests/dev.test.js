@@ -53,6 +53,7 @@ vi.mock('node:fs', () => ({
   symlinkSync: vi.fn(),
   mkdirSync: vi.fn(),
   readFileSync: readFileSyncMock,
+  readdirSync: vi.fn(() => []),
 }));
 
 const normalizePath = (path) => String(path).replaceAll('\\', '/');

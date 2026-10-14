@@ -102,7 +102,10 @@ import {
 } from 'lucide-react';
 import { FileTypeIcon } from './FileTypeIcon';
 import { FileAttachmentContent } from './FileAttachmentContent';
-import { WorkspaceSelector } from './WorkspaceSelector';
+import {
+  WorkspaceSelector,
+  type WorkspaceSelectorOption,
+} from './WorkspaceSelector';
 import {
   Popover,
   PopoverAnchor,
@@ -254,6 +257,7 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  liveVoicePortalContainer?: HTMLElement | null;
   /**
    * Where the composer's context chips (workspace selector, git branch) land.
    * `toolbar` (default) keeps both in the composer toolbar. `below` moves both
@@ -279,16 +283,16 @@ interface ChatEditorProps {
     value: ReasoningSelection,
     source?: 'toggle',
   ) => Promise<void> | void;
-  workspaces?: Array<{
-    id: string;
-    cwd: string;
-    label: string;
-    primary: boolean;
-    trusted: boolean;
-  }>;
+  workspaces?: WorkspaceSelectorOption[];
   selectedWorkspaceCwd?: string;
   workspaceSelectionDisabled?: boolean;
+  workspaceSelectorAlwaysVisible?: boolean;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  /** Host-aware variant; see WorkspaceSelector. */
+  onSelectHostedWorkspace?: (
+    hostOrigin: string,
+    workspaceCwd: string | undefined,
+  ) => void;
   scratchWorkspaceSupported?: boolean;
   existingFolderWorkspaceSupported?: boolean;
   standaloneTargetSupported?: boolean;
@@ -299,6 +303,8 @@ interface ChatEditorProps {
   onOpenExistingWorkspace?: () => void;
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
+  disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   workspaceFeaturesEnabled?: boolean;
   attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
@@ -1428,6 +1434,7 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      liveVoicePortalContainer,
       contextChipPlacement = 'toolbar',
       tokenCount = 0,
       contextWindow = 0,
@@ -1443,7 +1450,9 @@ export const ChatEditor = memo(
       workspaces,
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
+      workspaceSelectorAlwaysVisible = false,
       onSelectWorkspace,
+      onSelectHostedWorkspace,
       scratchWorkspaceSupported = false,
       existingFolderWorkspaceSupported = false,
       standaloneTargetSupported = false,
@@ -1454,6 +1463,8 @@ export const ChatEditor = memo(
       onOpenExistingWorkspace,
       atWorkspaceCwd,
       composerScopeKey,
+      disableLegacyHistoryFallback,
+      shellModeEnabled = true,
       workspaceFeaturesEnabled = true,
       attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
@@ -1637,7 +1648,9 @@ export const ChatEditor = memo(
       atProviders: resolvedAtProviders,
       atWorkspaceCwd,
       composerScopeKey,
-      disableLegacyHistoryFallback: composerScopeKey === 'standalone',
+      disableLegacyHistoryFallback:
+        disableLegacyHistoryFallback ?? composerScopeKey === 'standalone',
+      shellModeEnabled,
       attachmentsEnabled,
       workspaceFeaturesEnabled,
       composerTagIcons,
@@ -2104,6 +2117,11 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    // A host with no details surface — the embedded side-task pane, which
+    // already lives inside the right panel — keeps the transcript snapshot as
+    // its only way to read the breakdown, and only that case advertises it.
+    const contextRingAction = onOpenContextUsage ?? onShowContextUsage;
+    const contextRingHint = Boolean(onShowContextUsage) && !onOpenContextUsage;
     const showModeAction = showToolbarAction('approvalMode');
     const showPlanAction = Boolean(
       onTogglePlan && visibleActionSet?.has('plan'),
@@ -2345,7 +2363,8 @@ export const ChatEditor = memo(
       workspaces &&
         onSelectWorkspace &&
         showToolbarAction('workspace') &&
-        (workspaces.length > 1 ||
+        (workspaceSelectorAlwaysVisible ||
+          workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
           (standaloneTargetSupported && onSelectStandaloneTarget)),
@@ -2389,6 +2408,7 @@ export const ChatEditor = memo(
           selectedWorkspaceCwd={selectedWorkspaceCwd}
           disabled={workspaceSelectionDisabled}
           busy={workspaceMutationBusy}
+          alwaysVisible={workspaceSelectorAlwaysVisible}
           scratchSupported={scratchWorkspaceSupported}
           existingFolderSupported={existingFolderWorkspaceSupported}
           standaloneSupported={standaloneTargetSupported}
@@ -2397,6 +2417,7 @@ export const ChatEditor = memo(
             compact ? styles.workspaceSelectTriggerCompact : ''
           }`}
           onSelectWorkspace={onSelectWorkspace}
+          onSelectHostedWorkspace={onSelectHostedWorkspace}
           onSelectStandalone={onSelectStandaloneTarget}
           onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
           onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
@@ -3189,7 +3210,7 @@ export const ChatEditor = memo(
                     <HistoryIcon />
                   </button>
                 )}
-                {(core.shellMode || !showAddMenuAction) && (
+                {shellModeEnabled && (core.shellMode || !showAddMenuAction) && (
                   <button
                     type="button"
                     className={styles.toolBtn}
@@ -3688,7 +3709,7 @@ export const ChatEditor = memo(
                       contextWindow={contextWindow}
                       controls={contextUsageControls}
                       onOpenDetails={onOpenContextUsage}
-                      showSnapshotHint={Boolean(onShowContextUsage)}
+                      showSnapshotHint={contextRingHint}
                     >
                       <button
                         className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
@@ -3696,9 +3717,9 @@ export const ChatEditor = memo(
                         data-web-shell-context-usage
                         onClick={(e) => {
                           e.stopPropagation();
-                          onShowContextUsage?.();
+                          contextRingAction?.();
                         }}
-                        disabled={!onShowContextUsage}
+                        disabled={!contextRingAction}
                         aria-label={
                           contextWindow > 0 && tokenCount > 0
                             ? t('status.contextUsed', {
@@ -3757,6 +3778,7 @@ export const ChatEditor = memo(
                 {showToolbarAction('voice') && (
                   <>
                     <LiveVoiceButton
+                      portalContainer={liveVoicePortalContainer}
                       hideInactiveTrigger={
                         isMobile && Boolean(showAddMenuAction)
                       }

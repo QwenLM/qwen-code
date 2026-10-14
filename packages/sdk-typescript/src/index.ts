@@ -15,6 +15,7 @@ export {
   DaemonCapabilityMissingError,
   DaemonClient,
   DaemonHttpError,
+  DaemonAttachmentUploadError,
   DaemonPendingPromptLimitError,
   DaemonSessionIdProtocolError,
   WorkspaceDaemonClient,
@@ -170,6 +171,7 @@ export {
   type DaemonPendingPromptsResult,
   type DaemonRemovePendingPromptResult,
   type DaemonRemoveMidTurnMessageResult,
+  type DaemonSendMidTurnMessagesNowResult,
   // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   type DaemonStateResyncRequiredData,
