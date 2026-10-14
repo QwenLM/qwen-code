@@ -1,10 +1,107 @@
 import { expect, test } from '@playwright/test';
-import type { DaemonSessionContextUsageStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionContextUsageStatus,
+  PromptRequest,
+} from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  turnCompleteEvent,
 } from './utils/mockDaemon';
+
+test('shows context usage after first-prompt model metadata overtakes attach metadata', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    state: {
+      models: {
+        currentModelId: 'qwen3.8-max',
+        availableModels: [
+          {
+            modelId: 'qwen3.8-max',
+            name: 'qwen3.8-max',
+            _meta: { contextLimit: 65_536 },
+          },
+        ],
+      },
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'medium',
+          options: [{ value: 'none' }, { value: 'medium' }],
+        },
+      ],
+    },
+  });
+  for (const provider of scenario.providers.providers) {
+    for (const model of provider.models) {
+      delete model.contextLimit;
+      model.name = model.baseModelId;
+    }
+  }
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  let contextReads = 0;
+  let releaseInitialContext!: () => void;
+  const initialContextReady = new Promise<void>((resolve) => {
+    releaseInitialContext = resolve;
+  });
+  await page.route(/\/session\/[^/]+\/context(?:\?|$)/, async (route) => {
+    if (++contextReads === 1) await initialContextReady;
+    await route.fulfill({
+      json: {
+        v: 1,
+        sessionId: scenario.sessionId,
+        workspaceCwd: scenario.workspaceCwd,
+        state: scenario.state,
+      },
+    });
+  });
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-model-button]')).toContainText(
+    'qwen3.8-max',
+  );
+  await page.locator('[data-web-shell-composer-editor] .cm-content').fill('Hi');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => contextReads).toBe(2);
+  await expect(page.locator('[data-web-shell-model-button]')).toContainText(
+    'Medium',
+  );
+  releaseInitialContext();
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const prompt = daemon.promptRequests()[0].body as PromptRequest;
+  await daemon.sendEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      sessionId: scenario.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Hello' },
+        _meta: { usage: { inputTokens: 16_384, outputTokens: 10 } },
+      },
+    },
+  });
+  await daemon.sendEvent(
+    turnCompleteEvent(String(prompt._meta?.['promptId'] ?? 'prompt-e2e'), {
+      id: 2,
+      sessionId: scenario.sessionId,
+    }),
+  );
+  await expect(page.locator('[data-web-shell-message-list]')).toContainText(
+    'Hello',
+  );
+  await expect(page.locator('[data-web-shell-context-usage]')).toBeVisible();
+  await expect(page.locator('[data-web-shell-context-usage]')).toContainText(
+    '25',
+  );
+  await page.screenshot({ path: testInfo.outputPath('context-usage.png') });
+});
 
 for (const width of [390, 1200]) {
   test(`large context details stay readable at ${width}px @smoke`, async ({
