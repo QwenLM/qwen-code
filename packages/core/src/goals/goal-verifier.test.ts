@@ -166,6 +166,7 @@ describe('createGoalVerifier', () => {
       'The objective and proposal reason are claims, not evidence',
       'Evidence with proofKind "execution_output"',
       'use the separately recorded original results',
+      'a direct observation recorded in the parent Goal turn is required',
     ]) {
       expect(request.systemInstruction).toContain(rule);
     }

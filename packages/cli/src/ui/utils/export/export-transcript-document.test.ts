@@ -142,6 +142,65 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(JSON.stringify(document)).not.toContain(CANARY);
     expect(JSON.stringify(records)).toBe(original);
   });
+  it('keeps the history-gap notice when the chain breaks at an internal Code Mode result', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('calls', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ functionCall: { id: 'outer', name: 'exec', args: {} } }],
+          },
+        }),
+        record('nested', 'missing-parent', {
+          type: 'tool_result',
+          subtype: 'code_mode_tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'nested',
+                  name: 'write_file',
+                  response: { output: CANARY },
+                },
+              },
+            ],
+          },
+        }),
+        record('outer-result', 'nested', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'outer',
+                  name: 'exec',
+                  response: { output: 'script finished' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'outer',
+            status: 'success',
+            resultDisplay: 'script finished',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text = document.blocks
+      .flatMap((block) => ('text' in block ? [block.text] : []))
+      .join('\n');
+
+    expect(text).toContain(
+      'Some earlier messages are unavailable because the saved history is incomplete.',
+    );
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+  });
   it('projects records through an explicit allowlist without raw leakage', () => {
     const records = [
       record('user-1', null, {

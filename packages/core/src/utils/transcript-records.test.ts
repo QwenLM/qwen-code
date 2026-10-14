@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
+  isInternalCodeModeToolResult,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
   projectUserTranscriptForDisplay,
@@ -64,6 +65,29 @@ function expectNoUnknownSubtype(prepared: Prepared, recordId?: string) {
 
 const errorWithCode = (code: TranscriptRecordPreparationError['code']) =>
   expect.objectContaining<Partial<TranscriptRecordPreparationError>>({ code });
+
+describe('isInternalCodeModeToolResult', () => {
+  it('requires both the tool-result type and internal subtype', () => {
+    expect(
+      isInternalCodeModeToolResult({
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+      }),
+    ).toBe(true);
+    expect(
+      isInternalCodeModeToolResult({
+        type: 'assistant',
+        subtype: 'code_mode_tool_result',
+      }),
+    ).toBe(false);
+    expect(
+      isInternalCodeModeToolResult({
+        type: 'tool_result',
+        subtype: 'other',
+      }),
+    ).toBe(false);
+  });
+});
 
 describe('prepareTranscriptRecords', () => {
   it.each([undefined, '', '   ', 42, { id: 'untrusted' }])(
