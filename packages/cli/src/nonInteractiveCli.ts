@@ -100,6 +100,7 @@ import {
   handleToolError,
   handleCancellationError,
   handleMaxTurnsExceededError,
+  createMaxTurnsExceededError,
   handleBudgetExceededError,
 } from './utils/errors.js';
 import { RunBudgetEnforcer } from './utils/runBudget.js';
@@ -603,7 +604,7 @@ export async function runNonInteractive(
         config.getContentGeneratorConfig()?.authType,
       );
       if (outputFormat === OutputFormat.TEXT) {
-        process.stderr.write(`${errorText}\n`);
+        process.stderr.write(`${sanitizeTerminalText(errorText)}\n`);
       }
       return errorText;
     };
@@ -707,6 +708,16 @@ export async function runNonInteractive(
     const observeGoalRuntime = (runtime: GoalRuntime) => {
       goalRuntimeUnsubscribe ??= runtime.subscribe(emitGoalSnapshot);
     };
+    const stopAtSessionTurnLimit = async (): Promise<never> => {
+      await failClosedActiveGoalTurn(
+        'Headless Goal stopped after the session turn limit',
+      );
+      await settleBeforeTerminalOutput();
+      if (!ownsAdapter) {
+        throw createMaxTurnsExceededError(config);
+      }
+      return handleMaxTurnsExceededError(config);
+    };
     const enforceSessionTurnLimit = async (
       isRuntimeGoalTurn: boolean,
     ): Promise<void> => {
@@ -715,11 +726,7 @@ export async function runNonInteractive(
       limitedTurnCount++;
       const maxSessionTurns = config.getMaxSessionTurns();
       if (maxSessionTurns >= 0 && limitedTurnCount > maxSessionTurns) {
-        await failClosedActiveGoalTurn(
-          'Headless Goal stopped after the session turn limit',
-        );
-        await settleBeforeTerminalOutput();
-        await handleMaxTurnsExceededError(config);
+        await stopAtSessionTurnLimit();
       }
     };
     let goalHostUnbind: (() => void) | undefined;
@@ -901,8 +908,8 @@ export async function runNonInteractive(
      * `handleCancellationError` directly. If a budget tripped, surface the
      * structured budget error (exit 55); otherwise fall through to the
      * SIGINT / user-cancel path (exit 130) so existing behavior is
-     * preserved. Both branches call into `process.exit(...)` so the
-     * `unreachable` throw is only present to keep the type-checker honest.
+     * preserved for one-shot runs. Caller-owned turns throw to emit their
+     * terminal result without exiting the host process.
      */
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
@@ -939,6 +946,9 @@ export async function runNonInteractive(
         abortController.signal.reason instanceof TurnInterruptedError
       ) {
         throw abortController.signal.reason;
+      }
+      if (!ownsAdapter) {
+        throw new Error('Operation cancelled.');
       }
       await handleCancellationError(config);
       throw new Error('Operation cancelled.');
@@ -2635,6 +2645,7 @@ export async function runNonInteractive(
         const attemptPreviewLength = plainTextPreview.length;
         const apiStartTime = Date.now();
         let terminalApiError: string | undefined;
+        let terminalTurnLimitExceeded = false;
         const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
@@ -2736,6 +2747,9 @@ export async function runNonInteractive(
             }
             loopDetected = true;
           }
+          if (event.type === LlmEventType.MaxSessionTurns) {
+            terminalTurnLimitExceeded = true;
+          }
           if (event.type === LlmEventType.Error) {
             // Do not throw from inside the async-generator loop. Closing the
             // iterator early skips provider post-yield bookkeeping. Remember
@@ -2755,6 +2769,9 @@ export async function runNonInteractive(
           flushQueuedNotificationsToSdk(localQueue);
           finalizeOneShotMonitors();
           await routeAbort();
+        }
+        if (terminalTurnLimitExceeded) {
+          await stopAtSessionTurnLimit();
         }
         if (terminalApiError) {
           logSkippedTerminalToolCalls(toolCallRequests);
@@ -3007,6 +3024,7 @@ export async function runNonInteractive(
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
               let itemTerminalApiError: string | undefined;
+              let itemTurnLimitExceeded = false;
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
               const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
@@ -3072,6 +3090,9 @@ export async function runNonInteractive(
                   }
                   loopDetected = true;
                 }
+                if (event.type === LlmEventType.MaxSessionTurns) {
+                  itemTurnLimitExceeded = true;
+                }
                 if (event.type === LlmEventType.Error) {
                   // Match the main loop: drain provider post-yield work before
                   // surfacing the terminal error.
@@ -3090,6 +3111,9 @@ export async function runNonInteractive(
                 flushQueuedNotificationsToSdk(localQueue);
                 finalizeOneShotMonitors();
                 await routeAbort();
+              }
+              if (itemTurnLimitExceeded) {
+                await stopAtSessionTurnLimit();
               }
               if (itemTerminalApiError) {
                 logSkippedTerminalToolCalls(itemToolCallRequests);

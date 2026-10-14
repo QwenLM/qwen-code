@@ -2086,6 +2086,227 @@ describe('runNonInteractive', () => {
     }
   });
 
+  it.each([false, true])(
+    'reports a caller-owned turn cap without exiting (schema=%s)',
+    async (withSchema) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+      vi.mocked(mockConfig.getJsonSchema).mockReturnValue(
+        withSchema ? { type: 'object' } : undefined,
+      );
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      const exitCleanup = vi.fn();
+      const unregisterCleanup = registerCleanup(exitCleanup);
+      try {
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'turn cap',
+            'session-cap',
+            {
+              adapter,
+              captureBackgroundTaskNotifications: false,
+              captureBackgroundTaskRegistrations: false,
+              captureMonitorNotifications: false,
+              captureMonitorRegistrations: false,
+            },
+          ),
+        ).rejects.toMatchObject({
+          message: expect.stringContaining('Reached max session turns'),
+        });
+        const results = processStdoutSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('')
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .filter((frame) => frame.type === 'result');
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({
+          is_error: true,
+          error: {
+            message: expect.stringContaining('Reached max session turns'),
+          },
+        });
+        expect(
+          results[0].error.message.includes('--json-schema is active'),
+        ).toBe(withSchema);
+        expect(process.exit).not.toHaveBeenCalled();
+        expect(exitCleanup).not.toHaveBeenCalled();
+        expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
+      } finally {
+        unregisterCleanup();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'reports the core cumulative turn cap after draining the stream (drain=%s)',
+    async (drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      let streamDrained = false;
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation(
+          (callback) => {
+            callback?.(
+              'Monitor ready',
+              '<task-notification>ready</task-notification>',
+              {
+                monitorId: 'mon_cap',
+                toolUseId: 'monitor_cap',
+                status: 'running',
+                eventCount: 1,
+              },
+            );
+          },
+        );
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+      }
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'pending-cap-tool',
+              name: 'test-tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'core-cap',
+            },
+          } satisfies ServerLlmStreamEvent;
+          yield {
+            type: LlmEventType.MaxSessionTurns,
+          } satisfies ServerLlmStreamEvent;
+          streamDrained = true;
+        })(),
+      );
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'cap', 'core-cap', {
+          adapter,
+        }),
+      ).rejects.toThrow('Reached max session turns');
+      expect(streamDrained).toBe(true);
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const results = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((frame) => frame.type === 'result');
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        is_error: true,
+        error: {
+          message: expect.stringContaining('Reached max session turns'),
+        },
+      });
+    },
+  );
+
+  it('reports a caller-owned bare abort without exiting the host', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    const abortController = new AbortController();
+    const exitCleanup = vi.fn();
+    const unregisterCleanup = registerCleanup(exitCleanup);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: LlmEventType.Content,
+          value: 'started',
+        } satisfies ServerLlmStreamEvent;
+        abortController.abort();
+        yield {
+          type: LlmEventType.Content,
+          value: 'after cancellation',
+        } satisfies ServerLlmStreamEvent;
+      })(),
+    );
+    try {
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'abort me',
+          'session-abort',
+          {
+            adapter,
+            abortController,
+            recoverableCancellation: true,
+            captureBackgroundTaskNotifications: false,
+            captureBackgroundTaskRegistrations: false,
+            captureMonitorNotifications: false,
+            captureMonitorRegistrations: false,
+          },
+        ),
+      ).rejects.toMatchObject({
+        message: 'Operation cancelled.',
+      });
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const results = stdout
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((frame) => frame.type === 'result');
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        is_error: true,
+        error: { message: 'Operation cancelled.' },
+      });
+      expect(stdout).not.toContain('after cancellation');
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(exitCleanup).not.toHaveBeenCalled();
+      expect(mockBackgroundTaskRegistry.abortAll).not.toHaveBeenCalled();
+    } finally {
+      unregisterCleanup();
+    }
+  });
+
+  it('sanitizes provider terminal controls in TEXT stderr without rewriting the error', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+    setupMetricsMock();
+    const payload = 'provider failed \x1b]52;c;YWI=\x07 \u202eevil';
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: LlmEventType.Error, value: { error: { message: payload } } },
+      ]),
+    );
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'error me', 'text-error'),
+    ).rejects.toThrow(payload);
+    const stderr = processStderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
+    expect(stderr).toContain('provider failed');
+    expect(stderr).not.toContain('\x1b');
+    expect(stderr).not.toContain('\u202e');
+  });
+
   it('records a budget error when an in-flight model stream rejects after abort', async () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
