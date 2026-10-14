@@ -21,9 +21,14 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -36,12 +41,15 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -482,6 +490,146 @@ class ManagedSessionGuardConvoyIT {
                 });
         transactions.executeWithoutResult(ignored -> store.acquireWriter(tenant, "neighbor",
                 token, new AcquireWriterRequest(workspace, "writer-neighbor", 60_000L)));
+    }
+
+    /**
+     * Writer acquisition must hold the Session root exclusively before any
+     * shared lock on it. Since #13800 ordinary writers lock that root
+     * without a tenant guard, and on MariaDB a shared root lock upgraded
+     * behind one of their queued exclusive requests is an InnoDB 1213
+     * deadlock. The acquisition pauses right after ensureSessionRoot's
+     * INSERT IGNORE while an ordinary blockRecovery of the same Session
+     * queues on the root; both must then complete. (MySQL 8.4 lets the
+     * shared holder upgrade ahead of the queue, so only MariaDB fails
+     * without the exclusive-first order.)
+     */
+    @Test
+    void writerAcquisitionHoldsTheSessionRootExclusivelyAgainstOrdinaryWriters() throws Exception {
+        assertNoDeadlockAgainstOrdinaryWriter("INSERT IGNORE INTO ma_session (",
+                (store, grant) -> store.acquireWriter(TENANT, "victim", TOKEN,
+                        new AcquireWriterRequest(WORKSPACE, "writer-victim", 60_000L)));
+    }
+
+    /**
+     * Ordinary authorisation reads the drain admission off the head row;
+     * it must lock the Session root before that read, or it holds the head
+     * while waiting for the root that an ordinary writer holds while
+     * waiting for the head (#13800).
+     */
+    @Test
+    void ordinaryAuthorizationLocksTheSessionRootBeforeTheHead() throws Exception {
+        assertNoDeadlockAgainstOrdinaryWriter("SELECT phase FROM ma_session_head WHERE phase <> 'OPEN'",
+                (store, grant) -> {
+                    store.authorizeOrdinary(TENANT, "victim", TOKEN,
+                            new AuthorizeLifecycleRequest(WORKSPACE, "writer-victim", grant.writerGeneration()));
+                    return null;
+                });
+    }
+
+    private static final String TENANT = "tenant-a";
+    private static final String WORKSPACE = "workspace-a";
+    private static final String TOKEN = "w".repeat(32);
+
+    private interface PausedCall {
+        Object run(ManagedSessionStore store, ManagedSessionStoreModels.WriterGrant grant);
+    }
+
+    private void assertNoDeadlockAgainstOrdinaryWriter(String trigger, PausedCall paused) throws Exception {
+        var pausing = new PauseAfterDataSource(source, trigger);
+        var jdbc = new ManagedSchemaJdbcTemplate(pausing);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(pausing));
+        var store = new ManagedSessionStore(jdbc);
+        var grant = transactions.execute(ignored -> store.acquireWriter(TENANT, "victim", TOKEN,
+                new AcquireWriterRequest(WORKSPACE, "writer-victim", 60_000L)));
+        long deadlocksBefore = innodbDeadlocks(jdbc);
+        try (var pausedThread = Executors.newSingleThreadExecutor(task -> new Thread(task, "paused"));
+                var ordinaryThread = Executors.newSingleThreadExecutor()) {
+            pausing.enabled = true;
+            var pausedCall = pausedThread.submit(() -> transactions.execute(ignored -> paused.run(store, grant)));
+            assertThat(pausing.reached.await(10, TimeUnit.SECONDS)).isTrue();
+            var ordinary = ordinaryThread.submit(() -> transactions.execute(ignored ->
+                    store.blockRecovery(TENANT, "victim", TOKEN, new BlockRecoveryRequest(WORKSPACE,
+                            "writer-victim", grant.writerGeneration(), "BLOCKED_RESOURCE", "root-order"))));
+            awaitLockWaitInSchema(jdbc);
+            pausing.release.countDown();
+            assertThatCode(() -> pausedCall.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
+            assertThatCode(() -> ordinary.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
+        } finally {
+            pausing.release.countDown();
+        }
+        assertThat(innodbDeadlocks(jdbc) - deadlocksBefore)
+                .as("ordinary writers and the paused call must not form an InnoDB deadlock")
+                .isZero();
+    }
+
+    private void awaitLockWaitInSchema(JdbcTemplate jdbc) throws InterruptedException {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            Integer waits = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.INNODB_TRX t"
+                    + " JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id"
+                    + " WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?", Integer.class, schema);
+            if (waits != null && waits > 0) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("Timed out waiting for the ordinary writer to queue");
+    }
+
+    /** Pauses the thread named "paused" right after its first statement that starts with the trigger. */
+    private static final class PauseAfterDataSource extends DelegatingDataSource {
+        private final String trigger;
+        private final CountDownLatch reached = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final AtomicBoolean fired = new AtomicBoolean();
+        private volatile boolean enabled;
+
+        private PauseAfterDataSource(DataSource source, String trigger) {
+            super(source);
+            this.trigger = trigger;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            return wrap(super.getConnection());
+        }
+
+        @Override
+        public Connection getConnection(String user, String password) throws SQLException {
+            return wrap(super.getConnection(user, password));
+        }
+
+        private Connection wrap(Connection connection) {
+            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Connection.class},
+                    (proxy, method, args) -> {
+                        try {
+                            Object result = method.invoke(connection, args);
+                            if (!method.getName().equals("prepareStatement")
+                                    || !(result instanceof PreparedStatement statement)) {
+                                return result;
+                            }
+                            String sql = (String) args[0];
+                            return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                    new Class<?>[] {PreparedStatement.class}, (prepared, call, values) -> {
+                                        try {
+                                            Object value = call.invoke(statement, values);
+                                            if (enabled && call.getName().startsWith("execute")
+                                                    && "paused".equals(Thread.currentThread().getName())
+                                                    && sql.startsWith(trigger) && fired.compareAndSet(false, true)) {
+                                                reached.countDown();
+                                                if (!release.await(30, TimeUnit.SECONDS)) {
+                                                    throw new AssertionError("Paused call was never released");
+                                                }
+                                            }
+                                            return value;
+                                        } catch (InvocationTargetException error) {
+                                            throw error.getCause();
+                                        }
+                                    });
+                        } catch (InvocationTargetException error) {
+                            throw error.getCause();
+                        }
+                    });
+        }
     }
 
     private static void awaitWaitingLock(JdbcTemplate jdbc, String table)

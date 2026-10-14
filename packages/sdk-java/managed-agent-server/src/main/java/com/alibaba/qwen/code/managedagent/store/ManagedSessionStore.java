@@ -288,7 +288,10 @@ public class ManagedSessionStore {
                 writerToken);
         // Ordinary authorisation fences per Session (drain + head): the
         // tenant-wide guard rows stay with lifecycle/publication paths, or
-        // any long holder of them wedges unrelated Sessions (#13800).
+        // any long holder of them wedges unrelated Sessions (#13800). The
+        // Session root is locked before the drain admission reads the head
+        // row, keeping the root-then-head order of every other writer.
+        ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
@@ -2057,6 +2060,11 @@ public class ManagedSessionStore {
     }
 
     private void ensureSessionRoot(String tenantId, String sessionId) {
+        // Take the root row exclusively first: ordinary writers lock it
+        // without a tenant guard (#13800), and the shared lock INSERT IGNORE
+        // takes on an existing row would otherwise upgrade behind one of
+        // them and deadlock.
+        ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
