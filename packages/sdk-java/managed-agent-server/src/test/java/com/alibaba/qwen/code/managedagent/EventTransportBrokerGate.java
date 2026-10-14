@@ -410,10 +410,13 @@ class EventTransportBrokerGate {
     /**
      * MQ2 exit row: the post-commit path does not regress. The same batches
      * go through the deployed composite (hub, then the public transport) and
-     * through a flag-off composite (hub only), interleaved; the committing
-     * thread's publish time and the hub subscriber's delivery time are
-     * compared at p95. The journal wire's after-commit hand-off is measured
-     * alongside. The figures are written to target/ for the record.
+     * through a flag-off composite (hub only), interleaved on one thread; the
+     * committing thread's publish time and the hub subscriber's delivery time
+     * are compared at p95 as the per-round growth — on a shared CI runner an
+     * elevated machine baseline lands on both arms of the round and cancels,
+     * so only the flag's own cost remains. The journal wire's after-commit
+     * hand-off is measured alongside. The figures are written to target/ for
+     * the record.
      */
     @Test
     void thePostCommitPathDoesNotRegress() throws Exception {
@@ -442,18 +445,20 @@ class EventTransportBrokerGate {
                 journalHandOff.add(System.nanoTime() - started);
             }
         }
-        // Discard the warm-up quarter.
+        // Discard the warm-up quarter, then the flag's per-round growth.
         long onP95 = p95(onPublish.subList(rounds / 4, rounds));
         long offP95 = p95(offPublish.subList(rounds / 4, rounds));
         long onDeliveryP95 = p95(onDelivery.subList(rounds / 4, rounds));
         long offDeliveryP95 = p95(offDelivery.subList(rounds / 4, rounds));
+        long publishDeltaP95 = p95(deltas(onPublish, offPublish, rounds / 4));
+        long deliveryDeltaP95 = p95(deltas(onDelivery, offDelivery, rounds / 4));
         long journalP95 = p95(journalHandOff.subList(rounds / 4, rounds));
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("rounds", rounds);
         record.put("publishP95Micros", Map.of("on", onP95 / 1000,
-                "off", offP95 / 1000));
+                "off", offP95 / 1000, "delta", publishDeltaP95 / 1000));
         record.put("hubDeliveryP95Micros", Map.of("on", onDeliveryP95 / 1000,
-                "off", offDeliveryP95 / 1000));
+                "off", offDeliveryP95 / 1000, "delta", deliveryDeltaP95 / 1000));
         record.put("journalHandOffP95Micros", journalP95 / 1000);
         Files.createDirectories(Path.of("target"));
         Files.writeString(Path.of("target/event-transport-latency.json"),
@@ -461,10 +466,11 @@ class EventTransportBrokerGate {
         // The public transport only copies and enqueues on the committing
         // thread: a regression is a whole millisecond at p95.
         long budget = Duration.ofMillis(1).toNanos();
-        assertThat(onP95).as("publish p95, flag on vs off (ns)")
-                .isLessThanOrEqualTo(offP95 + budget);
-        assertThat(onDeliveryP95).as("hub delivery p95, flag on vs off (ns)")
-                .isLessThanOrEqualTo(offDeliveryP95 + budget);
+        assertThat(publishDeltaP95).as("publish growth p95, flag on vs off (ns)")
+                .isLessThanOrEqualTo(budget);
+        assertThat(deliveryDeltaP95)
+                .as("hub delivery growth p95, flag on vs off (ns)")
+                .isLessThanOrEqualTo(budget);
         assertThat(journalP95).as("journal hand-off p95 (ns)")
                 .isLessThanOrEqualTo(Duration.ofMillis(20).toNanos());
     }
@@ -588,6 +594,21 @@ class EventTransportBrokerGate {
                 .contains(event.sequence());
         publish.add(published - started);
         delivery.add(received - started);
+    }
+
+    /**
+     * The per-round growth of the flag-on arm over the flag-off arm, from the
+     * warm-up discard on. A stall on the shared runner lands on the arm it
+     * interrupts; the growth statistic leaves a real regression — the flag
+     * adding work to every round — standing out above that noise.
+     */
+    private static List<Long> deltas(List<Long> on, List<Long> off,
+            int from) {
+        List<Long> delta = new ArrayList<>();
+        for (int index = from; index < on.size(); index++) {
+            delta.add(on.get(index) - off.get(index));
+        }
+        return delta;
     }
 
     private static long p95(List<Long> samples) {
