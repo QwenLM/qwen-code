@@ -1,0 +1,118 @@
+diff --git a/node_modules/@pierre/trees/dist/model/publicTypes.d.ts b/node_modules/@pierre/trees/dist/model/publicTypes.d.ts
+--- a/node_modules/@pierre/trees/dist/model/publicTypes.d.ts
++++ b/node_modules/@pierre/trees/dist/model/publicTypes.d.ts
+@@ -171,6 +171,7 @@
+   id?: string;
+   icons?: FileTreeIcons;
+   onSelectionChange?: FileTreeSelectionChangeListener;
++  formatItemName?: (name: string) => string;
+   renderRowDecoration?: FileTreeRowDecorationRenderer;
+   search?: boolean;
+   searchFakeFocus?: boolean;
+diff --git a/node_modules/@pierre/trees/dist/model/internalTypes.d.ts b/node_modules/@pierre/trees/dist/model/internalTypes.d.ts
+--- a/node_modules/@pierre/trees/dist/model/internalTypes.d.ts
++++ b/node_modules/@pierre/trees/dist/model/internalTypes.d.ts
+@@ -45,6 +45,7 @@
+   initialViewportHeight?: number;
+   instanceId?: string;
+   renamingEnabled?: boolean;
++  formatItemName?: (name: string) => string;
+   renderRowDecoration?: FileTreeRowDecorationRenderer;
+   searchBlurBehavior?: FileTreeSearchBlurBehavior;
+   searchEnabled?: boolean;
+diff --git a/node_modules/@pierre/trees/dist/render/FileTree.js b/node_modules/@pierre/trees/dist/render/FileTree.js
+--- a/node_modules/@pierre/trees/dist/render/FileTree.js
++++ b/node_modules/@pierre/trees/dist/render/FileTree.js
+@@ -64,6 +64,7 @@
+ 	#id;
+ 	#onSelectionChange;
+ 	#renderRowDecoration;
++	#formatItemName;
+ 	#renamingEnabled;
+ 	#searchBlurBehavior;
+ 	#searchEnabled;
+@@ -83,7 +84,7 @@
+ 	#wroteHostItemHeight = false;
+ 	#wroteHostDensityFactor = false;
+ 	constructor(options) {
+-		const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange, onSelectionChange, overscan, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
++		const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange, onSelectionChange, overscan, formatItemName, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
+ 		this.#composition = composition;
+ 		this.#id = createClientId(id);
+ 		this.#gitStatusState = resolveFileTreeGitStatusState(gitStatus);
+@@ -91,6 +92,7 @@
+ 		this.#unsafeCSS = unsafeCSS;
+ 		this.#onSelectionChange = onSelectionChange;
+ 		this.#renderRowDecoration = renderRowDecoration;
++		this.#formatItemName = formatItemName;
+ 		this.#renamingEnabled = renaming != null && renaming !== false;
+ 		this.#searchBlurBehavior = searchBlurBehavior;
+ 		this.#searchEnabled = search === true;
+@@ -310,6 +312,7 @@
+ 			icons: this.#icons,
+ 			instanceId: this.#id,
+ 			renamingEnabled: this.#renamingEnabled,
++			formatItemName: this.#formatItemName,
+ 			renderRowDecoration: this.#renderRowDecoration,
+ 			searchBlurBehavior: this.#searchBlurBehavior,
+ 			searchEnabled: this.#searchEnabled,
+@@ -447,7 +450,7 @@
+ 	}
+ };
+ function preloadFileTree(options) {
+-	const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange: _onSearchChange, onSelectionChange: _onSelectionChange, overscan, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
++	const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange: _onSearchChange, onSelectionChange: _onSelectionChange, overscan, formatItemName, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
+ 	const resolvedDensity = resolveFileTreeDensity(density, itemHeight);
+ 	const resolvedItemHeight = resolvedDensity.itemHeight;
+ 	const resolvedId = createServerId(id);
+@@ -478,6 +481,7 @@
+ 		itemHeight: resolvedItemHeight,
+ 		overscan,
+ 		renamingEnabled: renaming != null && renaming !== false,
++		formatItemName,
+ 		renderRowDecoration,
+ 		searchBlurBehavior,
+ 		searchEnabled: search === true,
+diff --git a/node_modules/@pierre/trees/dist/render/FileTreeView.js b/node_modules/@pierre/trees/dist/render/FileTreeView.js
+--- a/node_modules/@pierre/trees/dist/render/FileTreeView.js
++++ b/node_modules/@pierre/trees/dist/render/FileTreeView.js
+@@ -401,6 +401,11 @@
+ 	] });
+ }
+ function renderStyledRow(frame, row, key, options = {}) {
++	if (frame.formatItemName) row = {
++		...row,
++		name: frame.formatItemName(row.name),
++		flattenedSegments: row.flattenedSegments?.map(segment => ({ ...segment, name: frame.formatItemName(segment.name) }))
++	};
+ 	const { controller, renameView, visualFocusPath, contextHoverPath, draggedPathSet, dragTarget, dragAndDropEnabled, shouldSuppressContextMenu, handleRowDragStart, handleRowDragEnd, handleRowTouchStart, instanceId, itemHeight, gitStatusByPath, ignoredGitDirectories, ignoredInheritanceCache, directoriesWithGitChanges, gitLaneActive, contextMenuEnabled, contextMenuTriggerMode, contextMenuButtonTriggerEnabled, contextMenuButtonVisibility, contextMenuRightClickEnabled, registerRenameInput, registerButton, resolveIcon, renderDecorationForRow, openContextMenuForRow, onRowClick, onKeyDown } = frame;
+ 	const targetPath = getFileTreeRowPath(row);
+ 	const { isParked = false, mode = "flow", style } = options;
+@@ -517,7 +522,7 @@
+ 	if (range.end < range.start) return [];
+ 	return frame.controller.getVisibleRows(range.start, range.end).filter((row) => !hiddenRowPaths.has(getFileTreeRowPath(row))).map((row, slotIndex) => renderStyledRow(frame, row, range.start + slotIndex));
+ }
+-function FileTreeView({ composition, controller, gitStatusByPath, ignoredGitDirectories, directoriesWithGitChanges, icons, instanceId, itemHeight = FILE_TREE_DEFAULT_ITEM_HEIGHT, overscan = 10, renamingEnabled = false, renderRowDecoration, searchBlurBehavior = "close", searchEnabled = false, searchFakeFocus = false, slotHost, stickyFolders = false, initialViewportHeight = 420 }) {
++function FileTreeView({ composition, controller, gitStatusByPath, ignoredGitDirectories, directoriesWithGitChanges, icons, instanceId, itemHeight = FILE_TREE_DEFAULT_ITEM_HEIGHT, overscan = 10, renamingEnabled = false, formatItemName, renderRowDecoration, searchBlurBehavior = "close", searchEnabled = false, searchFakeFocus = false, slotHost, stickyFolders = false, initialViewportHeight = 420 }) {
+ 	"use no memo";
+ 	const contextMenuAnchorRef = useRef(null);
+ 	const contextMenuTriggerRef = useRef(null);
+@@ -1759,6 +1764,7 @@
+ 		registerRenameInput,
+ 		renameView,
+ 		renderDecorationForRow,
++		formatItemName,
+ 		resolveIcon,
+ 		shouldSuppressContextMenu,
+ 		visualFocusPath
+diff --git a/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts b/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts
+--- a/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts
++++ b/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts
+@@ -13,6 +13,7 @@
+   itemHeight,
+   overscan,
+   renamingEnabled,
++  formatItemName,
+   renderRowDecoration,
+   searchBlurBehavior,
+   searchEnabled,

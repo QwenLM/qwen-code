@@ -1,6 +1,19 @@
-import { DIFFS_TAG_NAME, VirtualizedFile, Virtualizer } from '@pierre/diffs';
+import { bundledLanguages } from './pierre-resources';
+import {
+  DIFFS_TAG_NAME,
+  getFiletypeFromFileName,
+  VirtualizedFile,
+  Virtualizer,
+} from '@pierre/diffs';
 import { useEffect, useRef } from 'react';
 import { useTheme } from '../../themeContext';
+
+export function getPreviewLanguage(path: string) {
+  const detected = getFiletypeFromFileName(path);
+  const language =
+    detected === 'yml' ? 'yaml' : detected === 'kts' ? 'kotlin' : detected;
+  return Object.hasOwn(bundledLanguages, language) ? language : 'text';
+}
 
 export default function PierreFilePreview({
   path,
@@ -54,7 +67,8 @@ export default function PierreFilePreview({
         file: {
           name: path,
           contents: content,
-          lang: content.length > 1024 * 1024 ? 'text' : undefined,
+          lang:
+            content.length > 1024 * 1024 ? 'text' : getPreviewLanguage(path),
         },
         fileContainer,
       });

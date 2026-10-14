@@ -1,3 +1,4 @@
+import { pierreResources } from './pierre-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
@@ -219,6 +220,7 @@ function stubTranscriptModules(): Plugin {
 
 export default defineConfig(({ mode }) => ({
   plugins: [
+    pierreResources(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
@@ -275,6 +277,7 @@ export default defineConfig(({ mode }) => ({
           'clsx',
           'tailwind-merge',
           'vaul',
+          'react-resizable-panels',
           '@qwen-code/sdk',
           /^@qwen-code\/sdk\//,
           '@datafe-open/markdown-chart',
