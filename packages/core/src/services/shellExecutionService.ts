@@ -309,17 +309,16 @@ function decodeBufferedOutput(finalBuffer: Buffer): string {
   return new TextDecoder(fallbackEncoding).decode(finalBuffer);
 }
 
-const ORPHAN_CSI_SUFFIX = /^\[?[0-9;]+m/;
+const ORPHAN_CSI_SUFFIX = /^[0-9;]+m/;
 
 function stripOrphanCsiSuffix(text: string): string {
-  if (!text) return text;
   const match = text.match(ORPHAN_CSI_SUFFIX);
   return match ? text.slice(match[0].length) : text;
 }
 
-// Add a new `previewEncoding` parameter so the detector is fed the complete
-// buffer (per its documented contract), not the truncated tail fragment.
-
+// Detects the encoding on the complete final buffer (passed in),
+// NOT on the truncated tail fragment. Falls back to legacy full-buffer decode
+// for non-UTF-8 encodings (e.g. GBK) to preserve legitimate DBCS lead bytes.
 function decodePreviewTail(buffer: Buffer, previewEncoding?: string): string {
   let start = 0;
   while (start < buffer.length && start < 3 && (buffer[start] & 0xc0) === 0x80)
@@ -329,19 +328,22 @@ function decodePreviewTail(buffer: Buffer, previewEncoding?: string): string {
   }
   const aligned = buffer.subarray(start);
 
-  // Use the encoding detected on the complete final buffer (passed in),
-  // NOT on this truncated fragment. Falls back to legacy full-buffer decode
-  // for non-UTF-8 encodings (e.g. GBK) to preserve legitimate DBCS lead bytes.
   const isUtf8path =
     previewEncoding === 'utf8' ||
     previewEncoding === 'utf-8' ||
     (previewEncoding === undefined && isUtf8(aligned));
 
-  if (isUtf8path && isUtf8(aligned)) {
+  // Require positive evidence of a multibyte UTF-8 sequence before discarding
+  // leading bytes, to avoid silently dropping legacy single-byte lead bytes.
+  if (isUtf8path && isUtf8(aligned) && aligned.some((byte) => byte >= 0xc2)) {
     return decodeBufferedOutput(aligned);
   }
   if (previewEncoding) {
-    return new TextDecoder(previewEncoding).decode(buffer);
+    try {
+      return new TextDecoder(previewEncoding).decode(buffer);
+    } catch {
+      return new TextDecoder('utf-8').decode(buffer);
+    }
   }
   return decodeBufferedOutput(buffer);
 }
@@ -1324,7 +1326,9 @@ export class ShellExecutionService {
             stdout + (stderr ? (stdout ? separator : '') + stderr : '');
 
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
-          const previewEncoding = getCachedEncodingForBuffer(finalBuffer);
+          const previewEncoding = rawCapture
+            ? getCachedEncodingForBuffer(finalBuffer)
+            : undefined;
           const stderrPreview = stderrTail?.read() ?? Buffer.alloc(0);
           const tailPreview = retainedTail();
           const tailText = rawCapture
