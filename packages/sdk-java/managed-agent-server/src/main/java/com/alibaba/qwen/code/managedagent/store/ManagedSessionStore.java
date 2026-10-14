@@ -394,7 +394,8 @@ public class ManagedSessionStore {
         checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
-        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        var continuation = lockCsiContinuation(tenantId, sessionId, true);
+        var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
@@ -2031,11 +2032,15 @@ public class ManagedSessionStore {
     }
 
     JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
-        var continuation = lockCsiContinuation(tenantId, sessionId);
+        var continuation = lockCsiContinuation(tenantId, sessionId, false);
         return continuation == null ? null : continuation.original();
     }
 
     private CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
+        return lockCsiContinuation(tenantId, sessionId, false);
+    }
+
+    private CsiContinuation lockCsiContinuation(String tenantId, String sessionId, boolean createRoot) {
         return jdbc.execute(
                 (org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>)
                         connection -> {
@@ -2060,6 +2065,15 @@ public class ManagedSessionStore {
                             }
                             JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
                             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+                            if (createRoot) {
+                                // A first writer has no root yet, and the
+                                // pin read below locks the root by primary
+                                // key. On a missing key that lock is a gap
+                                // other tenants' first writers insert their
+                                // roots into, so both sides would deadlock
+                                // once each inserted its own (#13996).
+                                ensureSessionRoot(tenantId, sessionId);
+                            }
                             var original =
                                     JdbcCsiFilesRetirementGuard.lockManagedSession(
                                             target, tenantId, sessionId);

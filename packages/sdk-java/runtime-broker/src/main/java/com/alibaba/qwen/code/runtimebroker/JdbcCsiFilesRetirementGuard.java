@@ -345,19 +345,17 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
-        String product = connection.getMetaData().getDatabaseProductName();
-        String index = "MySQL".equals(product) || "MariaDB".equals(product)
-                ? " FORCE INDEX (ma_session_csi_guard_idx)"
-                        : "";
+        // By primary key: on an existing root this locks that record alone.
+        // Through ma_session_csi_guard_idx, an unpinned root left a gap lock
+        // that spans other tenants' keys, so their first writers could not
+        // insert their own roots (#13996).
         try (PreparedStatement statement = statement(connection,
-                        "SELECT csi_guard FROM ma_session"
-                                + index
-                                + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR"
+                        "SELECT csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
                                 + " UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
+                if (!rows.next() || !rows.getBoolean(1)) {
                     return null;
                 }
             }
