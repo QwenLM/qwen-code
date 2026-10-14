@@ -1097,3 +1097,13 @@ CREATE INDEX ix_ma_operation_result_due ON ma_operation (operation_kind, state, 
 CREATE INDEX ix_ma_operation_result_lease ON ma_operation (operation_kind, state, claim_until, operation_id);
 
 CREATE INDEX ix_ma_hook_definition ON ma_session_record (session_scope_key, hook_definition_hash, record_kind);
+
+
+-- Runtime history cleanup uses these predicates without scanning active families.
+CREATE INDEX ix_ma_runtime_retention ON ma_runtime_binding (binding_state, last_active_at, binding_id);
+
+CREATE INDEX ix_ma_runtime_tenant_state ON ma_runtime_binding (tenant_id, binding_state);
+
+CREATE INDEX ix_ma_capture_execution ON ma_output_capture (execution_key);
+
+CREATE INDEX ix_ma_work_execution ON ma_operation_work (work_kind, target_key, operation_key);
