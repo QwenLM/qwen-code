@@ -12059,6 +12059,40 @@ Other open files:
         );
       });
 
+      it('does not re-append an unchanged UserPromptSubmit context block already in history', async () => {
+        const taggedContext =
+          '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [{ text: 'earlier prompt' }, { text: taggedContext }],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-dedup');
+
+        // The identical block from the earlier turn is not appended again, so
+        // no provenance is recorded for this turn either.
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).not.toContain('extra hook context');
+
+        expect(recordUserMessage).toHaveBeenCalledWith(
+          [{ text: 'my prompt' }],
+          undefined,
+          undefined,
+          'prompt-hook-context-dedup',
+        );
+      });
+
       it('uses the pre-injection prompt for managed auto-memory recall', async () => {
         promptSubmitBus(extraHookContext());
         mockTurnRunFn.mockReturnValue(textTurn('ok'));

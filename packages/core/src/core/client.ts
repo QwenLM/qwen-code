@@ -196,6 +196,7 @@ import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
+import { isUserPromptSubmitContextInHistory } from '../hooks/user-prompt-submit-context.js';
 import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
@@ -3971,8 +3972,17 @@ export class LlmClient {
         // `<`/`>`, so hook output cannot forge the closing tag.
         // `promptText` is declared above this block so assignment here cannot
         // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
+        // An unchanged payload is already in history from an earlier turn, so
+        // re-appending it would duplicate it once per turn for the rest of the
+        // session; the earlier copy still carries the same text.
         const additionalContext = hookOutput?.getAdditionalContext();
-        if (additionalContext) {
+        if (
+          additionalContext &&
+          !isUserPromptSubmitContextInHistory(
+            this.getHistoryShallow(),
+            additionalContext,
+          )
+        ) {
           const requestArray = Array.isArray(request) ? request : [request];
           request = [
             ...requestArray,

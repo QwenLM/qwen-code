@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isUserPromptSubmitContextPartText as isUserPromptSubmitContextPartTextInternal } from '../utils/transcript-records.js';
+import {
+  isUserPromptSubmitContextPartText as isUserPromptSubmitContextPartTextInternal,
+  wrapUserPromptSubmitContext,
+} from '../utils/transcript-records.js';
 
 /**
  * Reserved tag wrapping UserPromptSubmit `additionalContext` when it is
@@ -39,4 +42,22 @@ export function stripTrailingUserPromptSubmitContextPart<T>(
     return parts;
   }
   return parts.slice(0, -1);
+}
+
+/**
+ * Matches the whole wrapped block rather than a substring, so `context` must be
+ * the escaped string that injection appends, not the raw hook output.
+ */
+export function isUserPromptSubmitContextInHistory(
+  history: readonly unknown[],
+  context: string,
+): boolean {
+  const tagged = wrapUserPromptSubmitContext(context);
+  return history.some((content) => {
+    const parts = (content as { parts?: unknown } | null)?.parts;
+    return (
+      Array.isArray(parts) &&
+      parts.some((part) => (part as { text?: unknown } | null)?.text === tagged)
+    );
+  });
 }

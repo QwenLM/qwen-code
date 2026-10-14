@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  isUserPromptSubmitContextInHistory,
   isUserPromptSubmitContextPartText,
   stripTrailingUserPromptSubmitContextPart,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
@@ -52,6 +53,44 @@ describe('stripTrailingUserPromptSubmitContextPart', () => {
       { text: `quote: ${wrapUserPromptSubmitContext('ctx')}` },
     ];
     expect(stripTrailingUserPromptSubmitContextPart(parts)).toBe(parts);
+  });
+});
+
+describe('isUserPromptSubmitContextInHistory', () => {
+  it('finds a tagged block in an earlier user content', () => {
+    const history = [
+      { role: 'user', parts: [{ text: 'earlier prompt' }] },
+      {
+        role: 'user',
+        parts: [
+          { text: 'my prompt' },
+          { text: wrapUserPromptSubmitContext('ctx') },
+        ],
+      },
+    ];
+    expect(isUserPromptSubmitContextInHistory(history, 'ctx')).toBe(true);
+  });
+
+  it('does not match when the payload bytes differ', () => {
+    const history = [
+      { parts: [{ text: wrapUserPromptSubmitContext('older ctx') }] },
+    ];
+    expect(isUserPromptSubmitContextInHistory(history, 'new ctx')).toBe(false);
+  });
+
+  it('does not match the same text outside the reserved tag', () => {
+    const history = [{ parts: [{ text: 'my prompt' }] }];
+    expect(isUserPromptSubmitContextInHistory(history, 'my prompt')).toBe(
+      false,
+    );
+  });
+
+  it('returns false for empty or malformed history', () => {
+    expect(isUserPromptSubmitContextInHistory([], 'ctx')).toBe(false);
+    expect(isUserPromptSubmitContextInHistory([null, {}], 'ctx')).toBe(false);
+    expect(
+      isUserPromptSubmitContextInHistory([{ parts: 'not-an-array' }], 'ctx'),
+    ).toBe(false);
   });
 });
 
