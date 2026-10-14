@@ -2,7 +2,7 @@
 
 [English](2026-10-13-managed-workflow-task-cancel.md) | [简体中文](2026-10-13-managed-workflow-task-cancel.zh-CN.md)
 
-状态：本变更实现，Stage F 待验证。`workflow` 任务类型加入公开任务取消路径：`CANCELLABLE_TASK_KINDS` 放宽以准纳它，契约在 `1.45.0` 中予以点名。它所走的每一个停止机构都已存在且与 kind 无关；本变更打开这道闸门，并用 workflow 链路测试把路径钉住。该类型的 F 阶段故障轮次（决定 6）欠账未跑 —— 下文引用的证据仅为单元、契约与记录层。
+状态：本变更实现，Stage F 待验证。`workflow` 任务类型加入公开任务取消路径：`CANCELLABLE_TASK_KINDS` 放宽以准纳它，契约在 `1.46.0` 中予以点名。它所走的每一个停止机构都已存在且与 kind 无关；本变更打开这道闸门，并用 workflow 链路测试把路径钉住。该类型的 F 阶段故障轮次（决定 6）欠账未跑 —— 下文引用的证据仅为单元、契约与记录层。
 
 这是 [#13746](https://github.com/QwenLM/qwen-code/issues/13746) F1 剩余的一个 `child_run` 类型。H4f 切片（#13823）实现了 `child_agent` 任务的取消，其余类型全部推迟；其 follow-up 表点名了这一片 ——「Workflow, automation: with the workflow runtime (#13803) … a stop request on their records, then the same delivery and stop arms」——[workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md)（「public cancel —— 各自具名的切片」）与 `CANCELLABLE_TASK_KINDS` 注释本身也各自点名。本片唯一的前置 —— workflow child 运行时 —— 已由 #13858 落地。本片是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H4f-b 切片，即 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。
 
@@ -31,15 +31,15 @@
    - record-first 判定的关键不变量对该 kind 成立：终态 `child_run` 修订冻结除 delivery 行之外的一切（`isChildRunSuccessor` 同时服务两种 kind），所以「已结束且无停止请求」仍是唯一确定性的拒绝；赢得竞争的天然完成保留其普通结算，并把该请求记录在案。
 2. **TypeScript 生产代码零改动。** 上面的现状清单就是整条路径，其中每一环要么已经与 kind 无关，要么已经准纳 `workflow`。本片在 TS 侧不新增任何东西；现有的 workflow funnel 测试（`hosted-child-agent-session.test.ts:1123`、`hosted-workflow-turn.test.ts` 的 abort 接线钉住）即为证据。
 3. **无迁移。** `managed_agent_operation.task_id`（V62）与 kind 无关，operation 行不携带 kind。单 open operation 规则、parked 取消的排除与生命周期扫描的排除都按 `TASK_CANCEL` 键控，与任务 kind 无关。
-4. **契约 1.45.0 只是点名该 kind；没有形状或状态变化。** 两条取消路由保持 `partial` —— 路由集、结果集与 operation 形状都是 v1.40 的。只点名 `child_agent` 的两处描述文本予以更新，`info.description` 增加 v1.45 段。版本号假设合入时没有开放 PR 占用 `1.45.0`；落地前再核一次，如同 H4f 设计所做的。
+4. **契约 1.46.0 只是点名该 kind；没有形状或状态变化。** 两条取消路由保持 `partial` —— 路由集、结果集与 operation 形状都是 v1.40 的。只点名 `child_agent` 的两处描述文本予以更新，`info.description` 增加 v1.46 段。本片按 `1.45.0` 撰写；main 的持久化整合（#14069）在本分支在飞期间占用了 `1.45.0`，故本片以 `1.46.0` 交付。
 5. **WebShell 面板在本片保持 child_agent 范围。** 面板的任务过滤是 #13936 自己的范围决定；把面板与其提交闸门放宽到 workflow 任务是 WebShell 的后续工作，不属于提供路由本身。服务端在 workflow 任务上公布的 `cancel` 无论如何都符合契约事实：路由确实提供它。
 6. **该类型的 F 阶段故障轮次随本片一起走。** #13746 的 F 阶段说明要求在某个 kind 上提供取消就欠该 kind 的故障轮次 —— 取消应答丢失、结算过程中取消、所有者消失后取消 —— 按 #13823 的形状在真实栈上运行（打包链路、脚本化模型、故障注入 tap）。同一场次顺带关闭 `child_agent` 轮次剩余的一个时序（所有者消失后取消），那是 #13823 验收推迟的。
 
-## 契约变更（1.45.0）
+## 契约变更（1.46.0）
 
-- `info.version`：`1.44.0` → `1.45.0`。
-- `info.description` 增加：「v1.45 extends public task cancel to workflow tasks (the H4f follow-up of the workflow runtime): a workflow task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation as a child agent's, and the result relay stops the workflow child through its own Turn's abort.」
-- `TaskActionCapability` 的 description：「cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent and 1.45 for workflow, tasks of those kinds in pending, running, waiting or degraded, in an active Session); …」—— 其余不变。
+- `info.version`：`1.45.0` → `1.46.0`。
+- `info.description` 增加：「v1.46 extends public task cancel to workflow tasks (the H4f follow-up of the workflow runtime): a workflow task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation as a child agent's, and the result relay stops the workflow child through its own Turn's abort.」
+- `TaskActionCapability` 的 description：「cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent and 1.46 for workflow, tasks of those kinds in pending, running, waiting or degraded, in an active Session); …」—— 其余不变。
 - 生成的 WebShell 类型在同一变更中重新生成（在 `packages/web-shell` 跑 `npm run generate:managed-agent-api`）：`TaskActionCapability` 的 JSDoc 随 description 同步，无形状变化。一致性门禁 `managed-agent-api.test.ts` 会把生成文件与契约的即时渲染逐字节比较，不一致即失败 —— 任何契约文本改动都要重新生成。
 - 没有其他：无路由、形状、错误码或状态变化。
 

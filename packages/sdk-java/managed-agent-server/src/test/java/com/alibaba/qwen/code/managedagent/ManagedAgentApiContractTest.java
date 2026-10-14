@@ -1723,7 +1723,7 @@ class ManagedAgentApiContractTest {
         // H4f-b: a workflow task serves the same cancel on both surfaces,
         // and its view advertises the action.
         String workflowKey = "e".repeat(64);
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
@@ -1750,7 +1750,7 @@ class ManagedAgentApiContractTest {
                         "contract-workflow-blocked"), null))
                 .at("/error/code").asText())
                 .isEqualTo("session_operation_active");
-        jdbc.update("UPDATE managed_agent_operation SET state = 'COMPLETED'"
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
                 + " WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_kind = 'TASK_CANCEL'"
                 + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);

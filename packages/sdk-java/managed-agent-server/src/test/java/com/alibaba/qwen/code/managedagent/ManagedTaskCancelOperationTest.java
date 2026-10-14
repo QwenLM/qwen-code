@@ -181,7 +181,7 @@ class ManagedTaskCancelOperationTest {
         settle(first.operation(), TaskCancelOutcome.completed());
         for (String state : new String[] {"pending", "waiting",
                 "degraded"}) {
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+            jdbc.update("UPDATE ma_session_record SET"
                     + " task_state = ? WHERE record_key = ?", state,
                     "e".repeat(64));
             settle(begin("wf-key-" + state, "wf-digest-" + state, WORKFLOW)
@@ -189,7 +189,7 @@ class ManagedTaskCancelOperationTest {
         }
         for (String state : new String[] {"completed", "failed",
                 "cancelled", "recovery_blocked"}) {
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+            jdbc.update("UPDATE ma_session_record SET"
                     + " task_state = ? WHERE record_key = ?", state,
                     "e".repeat(64));
             refused(() -> begin("wf-key-" + state, "wf-digest-" + state,

@@ -776,7 +776,7 @@ class ManagedExtensionRecordStoreTest {
                 "managed-input",
                 "{\"script\":\"return 1\"}".getBytes(StandardCharsets.UTF_8));
         String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                 + " session_id, agent_id, status, created_at, updated_at)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
