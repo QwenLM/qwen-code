@@ -634,6 +634,38 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadAutoMemoryStatus() {
+      const client = requireClient(getClient, 'Load auto-memory failed');
+      return withActionTimeout(
+        client.workspaceAutoMemory(),
+        'Load auto-memory timed out',
+      );
+    },
+
+    async readAutoMemoryFile(filePath) {
+      const client = requireClient(
+        getClient,
+        'Read auto-memory file failed',
+      );
+      return withActionTimeout(
+        client.workspaceAutoMemoryFile(filePath),
+        'Read auto-memory file timed out',
+      );
+    },
+
+    async openAutoMemoryFolder(scope, workspaceCwd) {
+      const client = requireClient(
+        getClient,
+        'Open auto-memory folder failed',
+      );
+      await withActionTimeout(
+        client
+          .workspaceByCwd(workspaceCwd)
+          .openAutoMemoryFolderLocally(scope),
+        'Open auto-memory folder timed out',
+      );
+    },
+
     async *generateContent(prompt, opts) {
       const client = requireClient(getClient, 'Generate content failed');
       yield* client.generateWorkspaceContent(prompt, {

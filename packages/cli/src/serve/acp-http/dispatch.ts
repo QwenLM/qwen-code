@@ -153,6 +153,11 @@ import {
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
+import {
+  AutoMemoryPathError,
+  collectWorkspaceAutoMemoryStatus,
+  readWorkspaceAutoMemoryFile,
+} from '../workspace-auto-memory.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
   createDaemonSubagentManager,
@@ -421,6 +426,8 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/memory/forget/get`,
   `${QWEN_METHOD_NS}workspace/memory/dream`,
   `${QWEN_METHOD_NS}workspace/memory/dream/get`,
+  `${QWEN_METHOD_NS}workspace/auto-memory`,
+  `${QWEN_METHOD_NS}workspace/auto-memory/file`,
   // Wave 1: files
   `${QWEN_METHOD_NS}file/read`,
   `${QWEN_METHOD_NS}file/read_bytes`,
@@ -473,6 +480,8 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/memory/forget/get`,
   `${QWEN_METHOD_NS}workspace/memory/dream`,
   `${QWEN_METHOD_NS}workspace/memory/dream/get`,
+  `${QWEN_METHOD_NS}workspace/auto-memory`,
+  `${QWEN_METHOD_NS}workspace/auto-memory/file`,
   `${QWEN_METHOD_NS}file/write`,
   `${QWEN_METHOD_NS}file/edit`,
   `${QWEN_METHOD_NS}workspace/tools`,
@@ -4397,6 +4406,48 @@ export class AcpDispatcher {
           );
           assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auto-memory`: {
+          const result = await collectWorkspaceAutoMemoryStatus(
+            this.boundWorkspace,
+          );
+          assertGenerationOpen?.();
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auto-memory/file`: {
+          const filePath = params['path'];
+          if (typeof filePath !== 'string' || filePath.length === 0) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` required, must be string'),
+              );
+            return;
+          }
+          try {
+            const result = await readWorkspaceAutoMemoryFile(
+              this.boundWorkspace,
+              filePath,
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result as unknown);
+          } catch (err) {
+            if (id === undefined) return;
+            const message =
+              err instanceof Error ? err.message : String(err);
+            conn.sendConn(
+              error(
+                id,
+                err instanceof AutoMemoryPathError
+                  ? RPC.INVALID_PARAMS
+                  : RPC.INTERNAL_ERROR,
+                message,
+              ),
+            );
+          }
           return;
         }
 

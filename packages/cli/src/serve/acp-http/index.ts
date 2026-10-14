@@ -356,6 +356,8 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/agents/list',
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',
+  '_qwen/workspace/auto-memory',
+  '_qwen/workspace/auto-memory/file',
   '_qwen/workspace/memory/remember/get',
   '_qwen/workspace/memory/forget/get',
   '_qwen/workspace/memory/dream/get',
