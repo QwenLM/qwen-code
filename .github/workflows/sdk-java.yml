@@ -13,8 +13,10 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.ref }}'
-  cancel-in-progress: false
+  group: 'sdk-java-${{ github.event.pull_request.number || github.ref }}'
+  # Post-merge runs must not cancel each other: cancelled push runs would erase
+  # the only post-merge regression evidence (see e2e.yml / pnpm-worktree-smoke.yml).
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
 
 jobs:
   test:
