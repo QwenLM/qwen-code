@@ -784,12 +784,14 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
 
 The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
-suffix-less number binds as seconds unless the setting's `@DurationUnit`
-declares milliseconds. Millisecond-bound settings — `auth.allowed-drift` (so
+suffix-less number binds as seconds except for `runtime-broker.retention.max-age`,
+which binds as days, and the millisecond-bound settings below.
+Millisecond-bound settings — `auth.allowed-drift` (so
 a stale `300000` keeps meaning five minutes instead of widening the
 signature-replay window to ~83 hours), the sub-second `events.batch-interval`
 and `events.materialize-interval`,
-`runtime-broker.child-workspace-git-timeout`, `automation.scan-delay`,
+`runtime-broker.child-workspace-git-timeout`, `runtime-broker.retention.scan-delay`,
+`automation.scan-delay`,
 `automation.lease`, `automation.late-tolerance` and `automation.lookback`
 — bind a suffix-less number as milliseconds. Always write the suffix (`90s`,
 `500ms`). At startup the server reads each seconds-convention setting's
@@ -886,6 +888,61 @@ historical reads. New Sessions belong to the new database, which must remain ava
 if routing is rolled back. The retired SQL/Java migration chain and upgrade tests are
 [archived outside the runtime classpath](../../../docs/archive/managed-agent-schema/README.md).
 The former separate Broker `schema.sql` has been removed.
+
+### Terminal Runtime record retention
+
+Runtime JDBC retention is disabled by default. It removes old terminal
+executions, Sessions and bindings in bounded batches on a dedicated scheduler;
+it does not stop workers or delete Workspace files. Configure
+`qwen.managed-agent.runtime-broker.retention` with these environment variables:
+
+| Variable                                          | Default | Meaning                                                                                                                               |
+| ------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                                |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be at least 1ms; unit-less values use days; explicit units such as `12h` are preserved |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                                   |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                            |
+
+Recovery records, Workspace holders and CSI retirement keep their bindings.
+Child Session lineage also keeps a binding until its canonical parent child_run
+has a committed terminal projection; a missing projection remains protected.
+This lets cascade and relay repair a stopped child's original Runtime identity.
+Lineage and permanent relay classifications are never collected here.
+A `:process` execution also keeps its whole binding family while its owning
+Session has an unsettled background Shell child_run, including top-level
+Sessions and Workspace isolation. This preserves the process-status evidence
+used by Session-open never-started reconciliation until those Shell records
+settle; the association conservatively protects the whole owning Session.
+The lookup deduplicates owning Sessions by both raw value and binary identity
+before checking their records on the sweep connection.
+Publication and CSI ACK references keep the original execution and its parents,
+including already collected publications; unreferenced siblings may be removed.
+Nonterminal children, live operation/dispatch leases and managed bindings without
+stop evidence remain retained. Binding slots and generation counters, placement
+guards, harness drains and storage fences remain durable. Successful ticks log
+scanned, skipped and deleted counts and duration; failures retry on the next tick.
+
+Enabling retention allows eligible, unreferenced historical records to be deleted
+once they age past `max-age`; it does not guarantee deletion by that age.
+Publication and CSI ACK references retain executions and their parent sessions and
+bindings regardless of age, including COLLECTED publications.
+After cleanup, existing missing-record responses apply. Callers must not reuse
+expired Runtime Session IDs or idempotency keys. Initialize a fresh database with
+the single canonical 32-table V1 baseline and keep cleanup disabled. Legacy
+catalogs are rejected; no in-place upgrade or old-data migration is provided.
+Verify repeated initialization preserves terminal receipts, retain the old
+environment for historical reads and settle its in-flight work before cutover.
+Shared publication, CSI operation/work and Session record variants are checked
+by their typed discriminators; their metadata and physical owner headers are
+not collected. Every publication writer must use the locking protocol, and
+retention stays disabled until the exact-identity Hosted cleanup
+release-proof contract in [#13992](https://github.com/QwenLM/qwen-code/issues/13992)
+is delivered and verified. An owed cleanup descriptor can outlive its RELEASED binding;
+collection then makes the original release conflict and blocks the Hosted
+Session. This PR does not implement that release-proof contract.
+Disable retention before reverting to older writers;
+disabling prevents future cleanup but cannot restore deleted records. See the
+[retention design](../../../docs/design/runtime-broker-jdbc-retention.md).
 
 ### Private Workspace tool execution (W0c-3)
 
