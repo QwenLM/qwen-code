@@ -15,7 +15,12 @@ on:
     # one per red merge, not per red nightly only.
     # Daily Java and Desktop checks report main regressions through the same
     # deduplicated issue and autofix route as the nightly CLI checks.
-    workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI', 'Desktop Checks']
+    workflows:
+      - 'E2E Tests'
+      - 'SDK Java'
+      - 'SDK Python'
+      - 'Qwen Code CI'
+      - 'Desktop Checks'
     types: ['completed']
     # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
     # completes on every pull request, and without this each of those would
