@@ -411,7 +411,11 @@ to the configured transport producer. Publication failure or delay never
 blocks the local post-commit SSE (#12380 constraint); the durable delivery
 line in SQL remains complete, and any missed notification is recovered by
 SQL-side scans, exactly as a missed in-process `SessionEventHub` publish is
-today (overflowed → re-read).
+today (overflowed → re-read). (As built, MQ2d: a missed public notice is
+covered by the scheduled materialization pass, but a missed wake has no
+generic scan — it recovers through the ledger of the source that committed
+its input, where one exists; see the MQ2 design's "Where a missed or burned
+wake recovers".)
 
 Consumer path (design reserve): on each Java node, wake consumers attempt
 Session activation through the Session Authority — the activation fence and
@@ -463,6 +467,12 @@ selected broker.
 | Broker long outage                                | Transport consumers idle; Sessions are still discoverable by SQL scans and lease-fencing; no capability data loss because no truth lives on the broker.                                                                                                                                |
 | Clock skew between Java nodes                     | Fencing and leases use the database clock (the house lease pattern); envelope `committedAt` is advisory only.                                                                                                                                                                          |
 | Stale wake after a Session re-route or epoch bump | Activation fence rejects; no-op.                                                                                                                                                                                                                                                       |
+
+As built (MQ2d): the rows' "SQL-side scans" and "SQL scans" are, for a
+public notice, the scheduled materialization pass; for a wake, the ledger of
+the source that committed its input, where one exists — there is no generic
+wake scan. The MQ2 design's "Where a missed or burned wake recovers" names
+the ledgers and the gaps they already have.
 
 ## 9. Constraints and risks
 
@@ -526,7 +536,10 @@ This slice's validation is documentation-only:
    coexist briefly, the dispatcher may select it, and its fenced no-op ACK
    still advances the group offset, so the new owner can miss that
    notification — SQL reconciliation (the backstop above) covers the miss,
-   and the handoff case is on MQ2's verification list.
+   and the handoff case is on MQ2's verification list. (As built, MQ2d: the
+   handoff row runs against a real broker; the "SQL scans" backstop is each
+   input source's own ledger, not a generic scan — see the MQ2 design's
+   "Where a missed or burned wake recovers".)
 3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
    results are pinned in §5.1's resolution block; what remains is the
    MQ2-start staging re-check against a real 5.5.0+ cluster.

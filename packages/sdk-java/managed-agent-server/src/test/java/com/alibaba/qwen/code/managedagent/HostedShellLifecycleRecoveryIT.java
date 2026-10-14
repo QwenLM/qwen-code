@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -102,6 +103,8 @@ class HostedShellLifecycleRecoveryIT {
             this.cut = cut;
             root = Files.createDirectory(temporary.resolve(cut)).toRealPath();
             Files.createDirectories(root.resolve("workspace/child"));
+            // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+            Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
             Files.createDirectory(root.resolve("broker"), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
             Files.createDirectory(root.resolve("decoy"));
             var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
