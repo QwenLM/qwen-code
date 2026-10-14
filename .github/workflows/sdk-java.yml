@@ -2,7 +2,7 @@ name: 'SDK Java'
 
 on:
   schedule:
-    - cron: '47 19 * * 6'
+    - cron: '47 19 * * *'
   workflow_dispatch:
 
 permissions:

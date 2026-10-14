@@ -13,7 +13,7 @@ on:
     # to surface a regression as it lands; a failure there files an issue with
     # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
     # one per red merge, not per red nightly only.
-    # Weekly Java and Desktop checks report main regressions through the same
+    # Daily Java and Desktop checks report main regressions through the same
     # deduplicated issue and autofix route as the nightly CLI checks.
     workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI', 'Desktop Checks']
     types: ['completed']
