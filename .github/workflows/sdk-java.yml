@@ -92,7 +92,7 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -215,6 +215,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -272,8 +277,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
@@ -443,6 +448,11 @@ jobs:
                   fi
                 done || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -623,6 +633,11 @@ jobs:
       # gate certifies what merging would produce, cancel-in-progress
       # re-runs a displaced head, and the pool queue is seconds short.
       # Pinned in scripts/tests/sdk-java-workflow.test.js.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -646,6 +661,14 @@ jobs:
           echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+
+      - name: 'Configure MariaDB packet budget for large-object tests'
+        env:
+          MARIADB_CONTAINER: '${{ job.services.mariadb.id }}'
+        run: |-
+          # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
+          # Set this job's disposable service before its first JDBC connection.
+          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
 
       - name: 'Run Runtime Broker MySQL integration tests'
         working-directory: 'packages/sdk-java/runtime-broker'
@@ -723,13 +746,16 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (35 + 9×10 + 20 = 145 — the Verify and O4 steps
-    # sit above their failsafe fork timeouts; the FG7 channel classes
-    # raised the hosted fork 900→1200 s) plus ~13 minutes for the
+    # The step ceilings (35 + 9×10 + 20 + 50 = 195 — the Verify, admission
+    # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
+    # classes raised the hosted fork 900→1200 s; the admission gates share
+    # a 2400 s fork for both witness classes)) plus ~13 minutes for the
     # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~158; 160 keeps a thin margin, and each arm buys its
+    # checks) need ~208; 210 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
-    timeout-minutes: 160
+    timeout-minutes: 210
+    env:
+      QWEN_E2E_REGISTER_STORAGE: '1'
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -858,7 +884,29 @@ jobs:
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
+            packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
+
+      - name: 'Verify Hosted admission gates'
+        # Its clean would otherwise discard the hosted lane's failsafe
+        # reports and the fg7-cases evidence the hosts upload above, so it
+        # runs after the fixture. The hosted-harness-gates profile carries a
+        # 2400 s failsafe fork budget for both admission witness classes
+        # (@Timeout(1800) each); the same killed-after-timeout pattern as the
+        # hosted-harness-mysql verify applies.
+        timeout-minutes: 50
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
+          -Phosted-harness-gates
+          -Dnode.executable="$(command -v node)"
+          -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
+          -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
+          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+      - name: 'Check that every Hosted admission gate class ran'
+        run: 'node scripts/check-failsafe-reports.js hosted-gates packages/sdk-java/managed-agent-server'
 
       - name: 'Verify O4 filesystem process and capacity gates'
         id: 'o4_mysql'
@@ -1009,6 +1057,11 @@ jobs:
                   fi
                 done || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

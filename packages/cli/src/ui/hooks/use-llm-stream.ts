@@ -110,7 +110,7 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   getEnclosingFenceInfo,
-} from '../utils/markdownUtilities.js';
+} from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
