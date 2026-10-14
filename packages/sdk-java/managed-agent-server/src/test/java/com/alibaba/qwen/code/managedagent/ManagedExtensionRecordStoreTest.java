@@ -216,6 +216,7 @@ class ManagedExtensionRecordStoreTest {
         // The template's promptRef names a resource this Session never held.
         String unheld = UUID.randomUUID().toString();
         ExtensionRecordJournal unheldJournal = journal(unheld);
+        schedule.put("scheduleId", "prompt-schedule-" + unheld);
         schedule.put("targetSessionId", unheld);
         assertRefused("a Schedule citing a prompt the Session does not hold",
                 unheld, ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
@@ -249,13 +250,14 @@ class ManagedExtensionRecordStoreTest {
         ObjectNode schedule = ((ObjectNode) templates.get("schedule")).deepCopy();
         schedule.set("promptRef", hookRef(prompt));
         schedule.put("targetSessionId", sessionId);
+        schedule.put("scheduleId", "schedule-" + sessionId);
         ObjectNode run = ((ObjectNode) templates.get("automation_run")).deepCopy();
-        run.put("scheduleId", "schedule-1");
+        run.put("scheduleId", "schedule-" + sessionId);
         run.put("definitionRevision", 1);
         run.put("targetSessionId", sessionId);
         String occurrenceKey = run.get("occurrenceKey").asText();
         run.put("automationRunId", AutomationLedgerStore.automationRunId(
-                "schedule-1", occurrenceKey));
+                "schedule-" + sessionId, occurrenceKey));
         // H6b: no definition, a stale revision and an underived id refuse
         // before anything is written; the bound run commits.
         assertRefused("a run without its definition", sessionId,
@@ -688,7 +690,7 @@ class ManagedExtensionRecordStoreTest {
                 "managed-input",
                 "{\"prompt\":\"audit\"}".getBytes(StandardCharsets.UTF_8));
         String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                 + " session_id, agent_id, status, created_at, updated_at)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
@@ -720,14 +722,14 @@ class ManagedExtensionRecordStoreTest {
         assertThat(stopped.actionCapabilities()).containsExactly("cancel");
         // A Session that is not active admits no new cancel, so its live
         // tasks advertise none, on both surfaces.
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT,
                 sessionId);
         assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
                 .actionCapabilities()).isEmpty();
         assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
                 10).data().getFirst().actionCapabilities()).isEmpty();
-        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT,
                 sessionId);
         assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
@@ -742,6 +744,76 @@ class ManagedExtensionRecordStoreTest {
                 .isTrue();
         assertThat(records.findTaskTarget(TENANT, sessionId,
                 "task_missing")).isEmpty();
+        ObjectNode cancelled = stopping.deepCopy();
+        cancelled.put("stopReason", "stop_requested");
+        cancelled.withObject("/run").put("state", "cancelled")
+                .put("execution", "settled");
+        cancelled.withObject("/run/delivery").put("state", "cancelled");
+        commitDomain(journal, "stop-5", "child_run", cancelled, List.of());
+        var settled = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        assertThat(settled.state()).isEqualTo("cancelled");
+        assertThat(settled.actionCapabilities()).isEmpty();
+        var events = tasks.listPublicTaskEvents(TENANT, TENANT, sessionId,
+                taskId, null, 20);
+        assertThat(events.data())
+                .extracting(event -> event.state() + "/"
+                        + event.runtimeState())
+                .containsExactly("pending/unbound", "running/provisioning",
+                        "running/ready", "running/draining",
+                        "cancelled/null");
+        assertThat(settled.outputCursor()).isEqualTo(
+                events.data().get(events.data().size() - 1).cursor());
+    }
+
+    // H4f-b: the same cancel pin for the workflow kind — the advertised
+    // action at each step, the draining runtime, the journaled events and
+    // the output cursor are the child_agent one's, read off a workflow
+    // chain.
+    @Test
+    void aWorkflowTaskCarriesItsCancelAndItsEventsThroughTheStop()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-stop-wf",
+                "managed-input",
+                "{\"script\":\"return 1\"}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
+                + " session_id, agent_id, status, created_at, updated_at)"
+                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
+                sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        commitDomain(journal, "stop-1", "child_run", workflow(childAgent(
+                sessionId, "sent", "admitted", "intent", null,
+                inputResource)), List.of(inputResource));
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .actionCapabilities()).containsExactly("cancel");
+        ObjectNode attached = workflow(childAgent(sessionId, "sent",
+                "running", "running_attached", "binding-1", inputResource));
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        ObjectNode dispatching = attached.deepCopy();
+        dispatching.withObject("/run").put("execution", "dispatch_started");
+        dispatching.putNull("childSessionId");
+        commitDomain(journal, "stop-2", "child_run", dispatching,
+                List.of());
+        commitDomain(journal, "stop-3", "child_run", attached, List.of());
+        ObjectNode stopping = attached.deepCopy();
+        stopping.put("stopRequested", true);
+        commitDomain(journal, "stop-4", "child_run", stopping, List.of());
+        var stopped = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        assertThat(stopped.state()).isEqualTo("running");
+        assertThat(stopped.runtimeState()).isEqualTo("draining");
+        // Requests coalesce: a stop already recorded still takes a cancel.
+        assertThat(stopped.actionCapabilities()).containsExactly("cancel");
+        var target = records.findTaskTarget(TENANT, sessionId, taskId)
+                .orElseThrow();
+        assertThat(target.domain()).isEqualTo("child_run");
+        assertThat(target.recordId()).isEqualTo("run-x");
+        assertThat(target.kind()).isEqualTo("workflow");
+        assertThat(target.body().path("stopRequested").booleanValue())
+                .isTrue();
         ObjectNode cancelled = stopping.deepCopy();
         cancelled.put("stopReason", "stop_requested");
         cancelled.withObject("/run").put("state", "cancelled")
@@ -882,6 +954,51 @@ class ManagedExtensionRecordStoreTest {
         run.set("delivery", line);
         body.set("run", run);
         return body;
+    }
+
+    @Test
+    void pausedStaleChannelReclaimerCannotCommitUnknownAfterANewerClaim() throws Exception {
+        JsonNode templates = ManagedChannelRecordContractTest.fixtures().required("templates");
+        CommitResource policy = channelResource("policy-race", "channel-policy", "{}");
+        CommitResource result = channelResource("reply-race", "managed-tool-result", "reply");
+        CommitResource segment1 = channelResource("part1-race", "channel-delivery-segment", "one");
+        CommitResource segment2 = channelResource("part2-race", "channel-delivery-segment", "two");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        var route = journal.requestDomain("route-race", "channel_route", channelRoute(templates, policy), List.of(policy), 1000);
+        journal.commit(route); journal.committed(route);
+        ObjectNode delivery = channelDelivery(templates, result, segment1, segment2);
+        var planned = journal.requestDomain("planned-race", "channel_delivery", delivery, List.of(result, segment1, segment2), 2000);
+        journal.commit(planned); journal.committed(planned);
+        ((ObjectNode) delivery.path("run")).put("state", "running");
+        ((ObjectNode) delivery.path("run").path("delivery")).put("state", "sending");
+        var sending = journal.requestDomain("sending-race", "channel_delivery", delivery, List.of(), 3000);
+        journal.commit(sending); journal.committed(sending);
+        var instances = new com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore(jdbc);
+        var ledger = new com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository(jdbc);
+        String deliveryId = delivery.path("deliveryId").asText();
+        ledger.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery(
+                TENANT, "race-channel", deliveryId, "seg-1", 0, "planned", null, 0, 0));
+        var oldClaim = instances.claim(TENANT, "race-channel", deliveryId, sessionId);
+        ledger.transition(TENANT, "race-channel", deliveryId, "planned", "sending", null, oldClaim.claimGeneration());
+        assertThat(instances.reserveReconciliation(oldClaim)).isTrue();
+        ObjectNode unknown = delivery.deepCopy();
+        ((ObjectNode) unknown.path("run")).put("state", "waiting");
+        ((ObjectNode) unknown.path("run").path("delivery")).put("state", "unknown");
+        var stale = journal.requestDomain(com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore.reconciliationOperationId(oldClaim),
+                "channel_delivery", unknown, List.of(), 4000);
+        long before = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE tenant_id=? AND session_id=?", Long.class, TENANT, sessionId);
+        var newClaim = instances.touchClaim(TENANT, "race-channel", deliveryId);
+        assertThatThrownBy(() -> journal.commit(stale)).isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).getCode()).isEqualTo("channel_claim_stale"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE tenant_id=? AND session_id=?", Long.class, TENANT, sessionId)).isEqualTo(before);
+        assertThat(records.listRecords(TENANT, sessionId, "channel_delivery").getFirst().path("run").path("delivery").path("state").asText()).isEqualTo("sending");
+        assertThat(ledger.transition(TENANT, "race-channel", deliveryId, "sending", "unknown", null, oldClaim.claimGeneration())).isNull();
+        assertThat(instances.reserveReconciliation(newClaim)).isTrue();
+        var current = journal.requestDomain(com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore.reconciliationOperationId(newClaim),
+                "channel_delivery", unknown, List.of(), 4000);
+        journal.commit(current); journal.committed(current);
+        assertThat(records.listRecords(TENANT, sessionId, "channel_delivery").getFirst().path("run").path("delivery").path("state").asText()).isEqualTo("unknown");
     }
 
     @Test
@@ -1464,8 +1581,8 @@ class ManagedExtensionRecordStoreTest {
      */
     private void assertRefused(String label, String sessionId, String code,
             String message, ThrowingCallable commit) {
-        long transactions = rows("qwen_managed_session_journal_tx", sessionId);
-        long references = rows("qwen_managed_session_resource_ref",
+        long transactions = rows("ma_session_journal_tx", sessionId);
+        long references = rows("ma_resource_ref",
                 sessionId);
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
@@ -1482,9 +1599,9 @@ class ManagedExtensionRecordStoreTest {
                                 .contains(message);
                     }
                 });
-        assertThat(rows("qwen_managed_session_journal_tx", sessionId))
+        assertThat(rows("ma_session_journal_tx", sessionId))
                 .as(label).isEqualTo(transactions);
-        assertThat(rows("qwen_managed_session_resource_ref", sessionId))
+        assertThat(rows("ma_resource_ref", sessionId))
                 .as(label).isEqualTo(references);
         assertThat(revisions(sessionId)).as(label).isEqualTo(revisions);
     }
@@ -1509,16 +1626,18 @@ class ManagedExtensionRecordStoreTest {
         // The announcement leaves the message projection's sequence, so the
         // two deltas keep one Part instead of splitting into two.
         List<String> partIds = jdbc.queryForList("SELECT content_part_id"
-                        + " FROM managed_agent_event WHERE tenant_id = ?"
+                        + " FROM ma_public_event WHERE tenant_id = ?"
                         + " AND session_id = ? AND event_type ="
                         + " 'item.output_text.delta' ORDER BY sequence_id",
                 String.class, TENANT, sessionId);
         assertThat(partIds).hasSize(2);
         assertThat(partIds.get(0)).isEqualTo(partIds.get(1));
-        List<String> parts = jdbc.queryForList("SELECT part_text FROM"
-                        + " managed_agent_item_part WHERE tenant_id = ?"
-                        + " AND session_id = ? AND part_type = 'output_text'",
-                String.class, TENANT, sessionId);
+        List<String> parts = new ArrayList<>();
+        for (String encoded : jdbc.queryForList("SELECT parts_json FROM ma_message WHERE tenant_id=? AND session_id=?", String.class, TENANT, sessionId)) {
+            for (JsonNode part : new com.fasterxml.jackson.databind.ObjectMapper().readTree(encoded)) {
+                if ("output_text".equals(part.path("type").asText())) parts.add(part.path("text").asText());
+            }
+        }
         assertThat(parts).containsExactly("onetwo");
     }
 
@@ -1824,7 +1943,7 @@ class ManagedExtensionRecordStoreTest {
             registration.withObject("/run").put("state", status);
             commitDomain(journal, "register-" + status, "hook_registration", registration, List.of(data));
         }
-        long resourcesBefore = rows("qwen_managed_session_resource", sessionId);
+        long resourcesBefore = rows("ma_resource", sessionId);
         byte[] messages = ("[{\"role\":\"user\",\"content\":\"" + "😀".repeat(20_000) + "\"}]")
                 .getBytes(StandardCharsets.UTF_8);
         CommitResource first = hookResource("messages-part-1", "managed-hook-message-part",
@@ -1847,7 +1966,7 @@ class ManagedExtensionRecordStoreTest {
             assertThatThrownBy(() -> journal.commit(journal.requestDomain("missing-messages", "hook_execution",
                     execution, incomplete, 1000))).isInstanceOf(ApiException.class);
             assertThat(revisions(sessionId)).isEqualTo(3);
-            assertThat(rows("qwen_managed_session_resource", sessionId)).isEqualTo(resourcesBefore);
+            assertThat(rows("ma_resource", sessionId)).isEqualTo(resourcesBefore);
         }
         for (boolean mismatchPart : List.of(false, true)) {
             ObjectNode badPlanBody = planBody.deepCopy();
@@ -1865,7 +1984,7 @@ class ManagedExtensionRecordStoreTest {
                     invalid, List.of(badPlan, badManifest, first, second), 1000)))
                     .isInstanceOf(ApiException.class).hasMessageContaining("does not match");
             assertThat(revisions(sessionId)).isEqualTo(3);
-            assertThat(rows("qwen_managed_session_resource", sessionId)).isEqualTo(resourcesBefore);
+            assertThat(rows("ma_resource", sessionId)).isEqualTo(resourcesBefore);
         }
         commitDomain(journal, "messages-valid", "hook_execution", execution, List.of(plan, manifest, first, second));
         assertThat(new ManagedExtensionRecordStore(jdbc, state).listRecords(TENANT, sessionId, "hook_execution"))
@@ -1909,7 +2028,7 @@ class ManagedExtensionRecordStoreTest {
 
     private long revisions(String sessionId) {
         Long total = jdbc.queryForObject("SELECT COALESCE(SUM(revision), 0)"
-                        + " FROM qwen_managed_session_extension_record"
+                        + " FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 Long.class, TENANT, sessionId);
         return total == null ? 0 : total;
@@ -1960,10 +2079,10 @@ class ManagedExtensionRecordStoreTest {
         // pass cannot expire anything and the bound starts refusing. The
         // output admission gate reads the durable Session row, so bind this
         // Session to its workspace first.
-        if (jdbc.update("UPDATE managed_agent_session SET workspace_id = ?"
+        if (jdbc.update("UPDATE ma_session SET workspace_id = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 WORKSPACE, TENANT, sessionId) == 0) {
-            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+            jdbc.update("INSERT INTO ma_session (tenant_id,"
                             + " session_id, agent_id, status, created_at,"
                             + " updated_at, workspace_id,"
                             + " workspace_generation, workspace_storage_id,"
@@ -2007,7 +2126,7 @@ class ManagedExtensionRecordStoreTest {
         JsonNode chain = fixtures().required("monitorChainCases").get(0);
         JsonNode first = chain.required("revisions").get(0);
         String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, status, created_at,"
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
@@ -2042,7 +2161,7 @@ class ManagedExtensionRecordStoreTest {
         };
         ManagedTaskService service = new ManagedTaskService(agents, records,
                 racing);
-        String cursor = ManagedTaskEventStore.encodeCursor(taskId, 2);
+        String cursor = ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 2);
         assertThatThrownBy(() -> service.queryWebShellTaskEvents(TENANT,
                 TENANT, sessionId, taskId, cursor, 10))
                 .isInstanceOfSatisfying(ApiException.class, error -> {
@@ -2055,7 +2174,7 @@ class ManagedExtensionRecordStoreTest {
         JsonNode chain = fixtures().required("monitorChainCases").get(0);
         JsonNode first = chain.required("revisions").get(0);
         String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, status, created_at,"
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
@@ -2070,7 +2189,7 @@ class ManagedExtensionRecordStoreTest {
                 taskId, null, 10);
         assertThat(page.data()).hasSize(1);
         assertThat(page.nextCursor()).isEqualTo(
-                ManagedTaskEventStore.encodeCursor(taskId, 1));
+                ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 1));
         // An as-of-now explicit cursor still admits: the floor did not move
         // past it while the read was happening.
         assertThat(tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
@@ -2104,13 +2223,13 @@ class ManagedExtensionRecordStoreTest {
         corruptJournal.commitMonitor("corrupt-1", first, 1_000);
         String corruptId = jdbc.queryForObject(
                 "SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record"
+                        + " ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
                 String.class, TENANT, corruptSession);
         // Its bytes no longer hold its recorded digest.
         byte[] shifted = ExtensionRecordJournal.bytes(((ObjectNode) first
                 .deepCopy()).put("maxEvents", 1));
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
+        jdbc.update("UPDATE ma_resource SET"
                         + " inline_bytes = ?, byte_length = ? WHERE"
                         + " tenant_id = ? AND resource_id = ?",
                 shifted, shifted.length, TENANT, corruptId);
@@ -2128,10 +2247,10 @@ class ManagedExtensionRecordStoreTest {
         foreignJournal.commitMonitor("foreign-1", first, 1_000);
         String foreignId = jdbc.queryForObject(
                 "SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record"
+                        + " ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
                 String.class, TENANT, foreignSession);
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
+        jdbc.update("UPDATE ma_resource SET"
                         + " tenant_id = 'other-tenant' WHERE tenant_id = ?"
                         + " AND resource_id = ?",
                 TENANT, foreignId);
