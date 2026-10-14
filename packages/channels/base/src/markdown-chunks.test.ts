@@ -225,6 +225,121 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
       ).toBe(text);
     }
   });
+  it.each(['> quoted body', '- item body', 'x'.repeat(3000)])(
+    'keeps content after a gap that consumes the target',
+    (body) => {
+      for (const length of [3801, 19895, 19900]) {
+        const text = '\n'.repeat(length) + body;
+        const parts = split(text);
+        expect(parts.length).toBeLessThan(20);
+        expect(parts.join('')).toBe(text);
+      }
+    },
+  );
+  it('keeps bare list items after a nearly full heading', () => {
+    const text = '# ' + 'h'.repeat(3795) + '\n\n1.\n\nrest';
+    expect(split(text).join('')).toBe(text);
+  });
+  it('retains heading references when their reserved budget is exhausted', () => {
+    const definition = '[ref]: https://docs.example.com/ref';
+    const text = '# [ref] ' + 'h'.repeat(3740) + '\n\nbody\n\n' + definition;
+    const parts = split(text);
+    expect(parts.every((part) => part.includes(definition))).toBe(true);
+    expect(
+      parts.flatMap(nodes).filter((node) => node.type === 'linkReference'),
+    ).toHaveLength(1);
+  });
+  it('preserves large code metadata without one-character fragments', () => {
+    const language = 'x'.repeat(3797);
+    const body = 'y'.repeat(30000);
+    const blocks = split('```' + language + '\n' + body + '\n```').flatMap(
+      code,
+    );
+    expect(blocks.length).toBeLessThan(100);
+    expect(blocks.every((block) => block.lang === language)).toBe(true);
+    expect(blocks.map((block) => block.value).join('')).toBe(body);
+  });
+  it('preserves nested code after a nearly exhausted prefix budget', () => {
+    const body = 'x'.repeat(39500);
+    const text = '\n'.repeat(19883) + '> - ```sh\n>   ' + body + '\n>   ```';
+    const blocks = split(text).flatMap(code);
+    expect(blocks.every((block) => block.lang === 'sh')).toBe(true);
+    expect(blocks.map((block) => block.value).join('')).toBe(body);
+  });
+  it('retains an oversized header-only table after its introduction', () => {
+    const table =
+      Array.from({ length: 1400 }, (_, i) => 'column-' + i).join('|') +
+      '\n' +
+      Array(1400).fill('---').join('|');
+    const parts = split('Synthetic lead-in.\n' + table);
+    expect(parts[0]).toBe('Synthetic lead-in.\n');
+    expect(
+      parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join(''),
+    ).toBe(table);
+  });
+  it('preserves task checkboxes with continued fenced code', () => {
+    const body = 'a'.repeat(25000);
+    const text = '- [x]\n    ```bash\n    ' + body + '\n    ```';
+    const parts = split(text);
+    expect(parts.every((part) => part.startsWith('- [x]'))).toBe(true);
+    expect(
+      parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join(''),
+    ).toBe(code(text)[0]!.value);
+  });
+  it('keeps code metadata when a list item and its gap reach the hard limit', () => {
+    const body = 'x'.repeat(19982);
+    const parts = split('- ```ts\n  ' + body + '\n  ```\n- next');
+    const blocks = parts.flatMap(code);
+    expect(blocks.every((block) => block.lang === 'ts')).toBe(true);
+    expect(blocks.map((block) => block.value).join('')).toBe(body);
+    expect(parts.at(-1)).toContain('- next');
+  });
+  it('preserves original list item gaps across chunk boundaries', () => {
+    for (const separator of ['\n', '\n\n']) {
+      const text = Array.from(
+        { length: 60 },
+        (_, i) => '- bullet ' + i + ' filler '.repeat(15),
+      ).join(separator);
+      expect(split(text).join('')).toBe(text);
+    }
+    expect(split(fixture).join('')).toBe(fixture);
+  });
+  it('does not turn a split literal backtick run into inline code', () => {
+    const stem = '[a](https://docs.example.com/';
+    const link = stem + 'x'.repeat(3798 - stem.length - 1) + ')';
+    for (const prefix of [
+      'x'.repeat(3798) + '```',
+      link + '```',
+      stem + ')' + '`'.repeat(3801 - stem.length - 1),
+    ]) {
+      const text = prefix + 'y'.repeat(10) + '`' + 'z'.repeat(10);
+      const parts = split(text);
+      expect(parts.join('')).toBe(text);
+      expect(parts.flatMap(links)).toEqual(links(text));
+      expect(
+        parts
+          .flatMap(nodes)
+          .filter((node) => node.type === 'inlineCode' || node.type === 'code'),
+      ).toEqual([]);
+      expect(parts.filter((part) => part.includes('```'))).toHaveLength(1);
+    }
+  });
+  it('reserves reference definitions within the ordinary prose target', () => {
+    const definition = '[ref]: https://docs.example.com/' + 'a'.repeat(70);
+    const text = 'Ordinary [ref] sentence. '.repeat(600) + '\n\n' + definition;
+    const parts = split(text);
+    expect(parts.every((part) => measure(part) <= 3800)).toBe(true);
+    expect(parts.every((part) => part.includes(definition))).toBe(true);
+    expect(
+      parts.flatMap(nodes).filter((node) => node.type === 'linkReference'),
+    ).toHaveLength(600);
+  });
   it('preserves escaped punctuation and character references across cuts', () => {
     const text = 'x'.repeat(3799) + '\\* &amp; ' + 'y'.repeat(5000);
     const parts = split(text);

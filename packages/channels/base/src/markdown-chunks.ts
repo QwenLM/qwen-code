@@ -107,7 +107,11 @@ function split(
     ? '\n\n' + definitions.map(source).join('\n')
     : '';
   const hard = maximum - size(suffix);
-  const soft = Math.min(target, hard);
+  const minimum = size(notice + '```text\n😀\n```');
+  const soft = Math.min(
+    target - size(suffix) >= minimum ? target - size(suffix) : target,
+    hard,
+  );
   if (hard < size(notice + '```text\n😀\n```')) return plain(text, maximum);
   const references = new Map(
     definitions.map((node) => [node.identifier.toUpperCase(), source(node)]),
@@ -129,6 +133,7 @@ function split(
         const table = raw.slice(offset);
         if (size(table) <= limit) return [...before, table];
         const result = [...before];
+        const tableStart = result.length;
         let current = header;
         for (const row of lines.slice(i + 1)) {
           if (size(header + row) > limit) {
@@ -144,7 +149,8 @@ function split(
           }
         }
         if (current !== header) result.push(current);
-        return result.length ? result : plain(table, limit);
+        if (result.length === tableStart) result.push(...plain(table, limit));
+        return result;
       }
       offset += lines[i - 1]!.length;
     }
@@ -212,6 +218,10 @@ function split(
               : null;
           if (entity && amp + entity[0].length > end)
             end = amp || entity[0].length;
+          if (/[`~]/u.test(value[end] ?? '') && value[end - 1] === value[end]) {
+            const run = value.slice(0, end).match(/(`+|~+)$/u)!;
+            end = run.index || /^(`+|~+)/u.exec(value)![0].length;
+          }
           const escapes = value.slice(0, end).match(/\\+$/u)?.[0].length ?? 0;
           if (escapes % 2 && /[!-/:-@[-`{-~]/u.test(value[end]!))
             end = end > 1 ? end - 1 : 2;
@@ -254,7 +264,10 @@ function split(
       if (size(wrap(node.value)) <= limit) return [wrap(node.value)];
       const overhead = size(wrap(''));
       if (overhead + size('😀') >= limit) return plain(raw, limit);
-      const budget = Math.max(size('😀'), preferred - overhead);
+      const budget =
+        preferred > overhead + size('😀')
+          ? preferred - overhead
+          : limit - overhead;
       const result: string[] = [];
       let current = '';
       for (let line of node.value.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
@@ -263,7 +276,16 @@ function split(
           current = '';
         }
         while (size(line) > Math.min(budget, limit - overhead)) {
-          const end = cut(line, Math.min(budget, limit - overhead));
+          const end = cut(
+            line,
+            Math.min(
+              Math.max(
+                budget,
+                size(String.fromCodePoint(line.codePointAt(0)!)),
+              ),
+              limit - overhead,
+            ),
+          );
           result.push(wrap(line.slice(0, end)));
           line = line.slice(end);
         }
@@ -290,12 +312,22 @@ function split(
       ).map(wrap);
     }
     if (node.type === 'list') {
-      return node.children.flatMap((item) => {
+      return node.children.flatMap((item, itemIndex) => {
+        const nextItem = node.children[itemIndex + 1];
+        const gap = nextItem
+          ? text.slice(
+              item.position!.end.offset!,
+              nextItem.position!.start.offset!,
+            )
+          : '';
         const itemText = source(item);
-        if (size(itemText) <= preferred) return [itemText];
-        const marker = /^(\s*(?:[-+*]|\d+[.)])\s+)(?:\[[ xX]\]\s+)?/u.exec(
-          itemText,
-        )!;
+        if (size(itemText) <= preferred)
+          return gap ? [itemText, gap] : [itemText];
+        const marker =
+          /^(\s*(?:[-+*]|\d+[.)])\s+)(?:\[[ xX]\](?:[ \t]+|(?=\r?\n|$)))?/u.exec(
+            itemText,
+          );
+        if (!marker) return gap ? [itemText, gap] : [itemText];
         const indent = ' '.repeat(marker[1]!.length);
         const body = itemText
           .slice(marker[0].length)
@@ -313,17 +345,21 @@ function split(
         const wrap = (part: string) => {
           const head =
             /^(?:`{3,}|~{3,}|#{1,6}(?:\s|$)|>|\||[-+*] |\d+[.)] )/u.test(part)
-              ? `${marker[1]!.trimEnd()}\n${indent}`
+              ? `${marker[0].trimEnd()}\n${indent}`
               : marker[0];
           return head + part.replace(/\n/g, `\n${indent}`);
         };
-        return split(
+        const parts = split(
           body,
           preferred,
           limit,
-          (value) => (value ? size(wrap(value)) : 0),
+          (value) => (value ? size(wrap(value) + '\n') : 0),
           depth + 1,
-        ).map(wrap);
+        ).map(
+          (part, index, parts) =>
+            wrap(part) + (index < parts.length - 1 ? '\n' : ''),
+        );
+        return gap ? [...parts, gap] : parts;
       });
     }
     return size(raw) <= limit ? [raw] : plain(raw, limit);
@@ -345,20 +381,26 @@ function split(
       heading += gap + source(node);
       continue;
     }
-    const head = heading ? heading + gap : '';
-    const leading = heading ? '' : gap;
+    let head = heading ? heading + gap : '';
+    let leading = heading ? '' : gap;
     heading = '';
-    const reserve = size(head + leading);
-    if (reserve >= hard - size(notice + '```text\n😀\n```')) {
+    let reserve = size(head + leading);
+    if (reserve && (reserve >= hard - minimum || soft - reserve < minimum)) {
       flush();
-      result.push(...plain(head + source(node) + suffix, maximum));
-      continue;
+      result.push(
+        ...split(head + leading, soft, hard, size, depth + 1).map(
+          (part) => part + suffix,
+        ),
+      );
+      head = '';
+      leading = '';
+      reserve = 0;
     }
     const pieces = block(node, Math.max(1, soft - reserve), hard - reserve);
     for (const [index, piece] of pieces.entries()) {
       let next = index === 0 ? head + piece : piece;
       const separator =
-        index === 0 ? leading : node.type === 'list' ? '\n' : '\n\n';
+        index === 0 ? leading : node.type === 'list' ? '' : '\n\n';
       let prefix = index === 0 ? leading : '';
       if (
         current &&
