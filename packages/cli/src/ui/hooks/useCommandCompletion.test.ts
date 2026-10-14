@@ -487,6 +487,61 @@ describe('useCommandCompletion', () => {
   });
 
   describe('Completion mode detection', () => {
+    it.each([
+      ['hello @README.md', 'README.md'],
+      ['中文 @文件.ts', '文件.ts'],
+      ['😀 @README.md', 'README.md'],
+      ['@😀file.ts', '😀file.ts'],
+      ['😀😀 @src/𠮷file.ts', 'src/𠮷file.ts'],
+      ['😀 @src/😀file.ts', 'src/😀file.ts'],
+    ])('uses the complete file query from %s', (text, pattern) => {
+      renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest(text, Array.from(text).length),
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      expect(useAtCompletion).toHaveBeenLastCalledWith(
+        expect.objectContaining({ enabled: true, pattern }),
+      );
+    });
+
+    it('keeps code-point replacement bounds with the cursor inside a Unicode path', async () => {
+      setupMocks({
+        atSuggestions: [{ label: '😀done.ts', value: '😀done.ts' }],
+      });
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('😀 @src/😀file.ts tail', 7);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      expect(useAtCompletion).toHaveBeenLastCalledWith(
+        expect.objectContaining({ enabled: true, pattern: 'src/😀file.ts' }),
+      );
+      await waitFor(() => {
+        expect(result.current.suggestions).toHaveLength(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('😀 @😀done.ts tail');
+    });
+
     it('should switch to AT mode when typing @ after a slash command (#2518)', async () => {
       setupMocks({
         atSuggestions: [{ label: 'src/file.txt', value: 'src/file.txt' }],
