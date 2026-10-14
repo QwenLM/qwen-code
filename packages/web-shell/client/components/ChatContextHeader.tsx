@@ -36,6 +36,8 @@ interface ChatContextHeaderProps {
   hideWorkspaceIcon?: boolean;
   environmentOpen: boolean;
   environmentAvailable: boolean;
+  /** Whether the panel holds an in-progress subagent or background task. */
+  environmentRunning?: boolean;
   rightPanelOpen: boolean;
   rightPanelAvailable: boolean;
   onToggleEnvironment: () => void;
@@ -56,6 +58,7 @@ export function ChatContextHeader({
   hideWorkspaceIcon,
   environmentOpen,
   environmentAvailable,
+  environmentRunning,
   rightPanelOpen,
   rightPanelAvailable,
   onToggleEnvironment,
@@ -129,6 +132,13 @@ export function ChatContextHeader({
             onClick={onToggleEnvironment}
           >
             <LayoutListIcon />
+            {environmentRunning && (
+              <span
+                className={styles.activityDot}
+                data-testid="chat-header-environment-activity"
+                aria-hidden="true"
+              />
+            )}
           </button>
         )}
         {onOpenContextUsage && (

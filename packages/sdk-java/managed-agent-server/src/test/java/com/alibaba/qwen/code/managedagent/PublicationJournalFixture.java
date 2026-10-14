@@ -73,7 +73,7 @@ public final class PublicationJournalFixture {
 
     private PublicationJournalFixture(DataSource source,
             boolean journalHeadAuthorization) {
-        jdbc = new JdbcTemplate(source);
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = new ManagedSessionStore(jdbc);
         bindings = new JdbcRuntimeBindingRepository(source,

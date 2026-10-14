@@ -75,7 +75,7 @@ class WorkspaceSessionCloseTest {
                 .content("{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"close\"}"))
                 .andExpect(status().isAccepted()).andExpect(jsonPath("$.operationId").value(operation))
                 .andExpect(jsonPath("$.replayed").value(true));
-        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", tenant);
+        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", tenant);
         close.complete(null);
         await().untilAsserted(() -> assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED"));
         assertThat(store.findOperation(tenant, session, operation).orElseThrow().state()).isEqualTo("COMPLETED");
@@ -85,7 +85,7 @@ class WorkspaceSessionCloseTest {
                 .andExpect(status().isAccepted()).andExpect(jsonPath("$.id").value(operation));
         mvc.perform(get("/v1/agents/sessions/" + session + "/events").header(TenantContextFilter.HEADER, tenant)
                 .principal(actor(tenant, "owner"))).andExpect(status().isOk());
-        assertThat(jdbc.queryForObject("SELECT state FROM managed_workspace_registry WHERE tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace WHERE tenant_id = ?",
                 String.class, tenant)).isEqualTo("ACTIVE");
     }
 
@@ -100,16 +100,14 @@ class WorkspaceSessionCloseTest {
         mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
                 .header("Idempotency-Key", "other").principal(actor(tenant, "other")))
                 .andExpect(status().isNotFound());
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, session,
-                "tool_approval_" + UUID.randomUUID().toString().replace("-", ""),
-                mapper.writeValueAsString(java.util.Map.of("expiresAt", System.currentTimeMillis() + 86_400_000L,
-                        "inputRevision", 1, "policyRevision", "policy")));
+        seedAction(tenant, session, mapper.writeValueAsString(java.util.Map.of(
+                "expiresAt", System.currentTimeMillis() + 86_400_000L,
+                "inputRevision", 1, "policyRevision", "policy")));
         mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
                 .header("Idempotency-Key", "approval").principal(actor(tenant, "owner")))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("turn_active"));
-        jdbc.update("DELETE FROM managed_agent_action WHERE tenant_id = ?", tenant);
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id, turn_id, prompt_id, input_json,"
+        jdbc.update("DELETE FROM ma_session_record WHERE record_kind = 'ACTION' AND tenant_id = ?", tenant);
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json,"
                 + " payload_digest, status, created_at, updated_at) VALUES (?, ?, 'turn', ?, '[]', 'digest', 'CANCELLING', 0, 0)",
                 tenant, session, UUID.randomUUID().toString());
         mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
@@ -124,14 +122,12 @@ class WorkspaceSessionCloseTest {
         for (String options : java.util.List.of("{\"expiresAt\":1}", "{}")) {
             String tenant = "close-expired-" + UUID.randomUUID();
             String session = create(tenant);
-            jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                    + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, session,
-                    "tool_approval_" + UUID.randomUUID().toString().replace("-", ""), options);
+            seedAction(tenant, session, options);
             mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
                     .header("Idempotency-Key", "expired").principal(actor(tenant, "owner")))
                     .andExpect(status().isAccepted());
             await().untilAsserted(() -> assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED"));
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_action WHERE tenant_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'ACTION' AND tenant_id = ?",
                     Integer.class, tenant)).isEqualTo(1);
         }
     }
@@ -146,8 +142,8 @@ class WorkspaceSessionCloseTest {
                 .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", "close")
                 .principal(actor(tenant, "owner"))).andExpect(status().isAccepted()).andReturn();
         String operation = mapper.readTree(admitted.getResponse().getContentAsString()).path("id").asText();
-        await().untilAsserted(() -> assertThat(jdbc.queryForObject("SELECT attempt_count FROM managed_agent_operation"
-                + " WHERE operation_id = ?", Integer.class, operation)).isGreaterThan(0));
+        await().untilAsserted(() -> assertThat(jdbc.queryForObject("SELECT attempt_count FROM ma_operation"
+                + " WHERE operation_kind = 'CLOSE' AND tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class, tenant, session, operation)).isGreaterThan(0));
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSING");
         assertThat(journal.hasLiveWriter(tenant, session)).isTrue();
         journal.sealWriter(tenant, session, token, new SealWriterRequest("ws", "original", grant.writerGeneration()));
@@ -175,8 +171,18 @@ class WorkspaceSessionCloseTest {
         assertThat(store.findOperation(tenant, session, operation).orElseThrow().failureCode()).isNull();
     }
 
+    private void seedAction(String tenant, String session, String options) {
+        String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
+                        + "domain,record_id,action_id,revision,action_version,state,options_json,created_at,first_sequence)"
+                        + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,'requested',?,0,1)",
+                scope, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, "ACTION", action),
+                tenant, session, action, action, options);
+    }
+
     private String create(String tenant) throws Exception {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'ws', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "owner");
@@ -189,7 +195,7 @@ class WorkspaceSessionCloseTest {
     }
 
     private void grant(String tenant, String actor) {
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'ws', ?, 'OPERATOR')", tenant, actor.getBytes(StandardCharsets.UTF_8));
     }
 
