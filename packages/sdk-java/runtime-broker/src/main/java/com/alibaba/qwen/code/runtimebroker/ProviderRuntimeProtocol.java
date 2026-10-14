@@ -81,7 +81,7 @@ final class ProviderRuntimeProtocol {
                     default -> throw invalid();
                 }
             }
-            case "manifest", "history" -> required = Set.of("kind");
+            case "manifest", "history", "workspace-context" -> required = Set.of("kind");
             case "begin-turn" -> required = Set.of("kind", "identity");
             case "prepare" -> {
                 required = Set.of("kind", "identity", "toolName", "input");

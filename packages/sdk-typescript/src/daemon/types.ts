@@ -1547,6 +1547,10 @@ export interface DaemonRestoredSession extends DaemonSession {
   compactedReplay?: DaemonEvent[];
   /** Bounded replay events for the current incomplete turn (load only). */
   liveJournal?: DaemonEvent[];
+  /** Bounded in-memory lifecycle supplement for a persisted replay page. */
+  lifecycleReplay?: DaemonEvent[];
+  /** The lifecycle supplement does not cover the complete retained history. */
+  lifecycleReplayIncomplete?: boolean;
   /** True when older persisted records precede this load replay page. */
   historyHasMore?: boolean;
   /**
@@ -4496,6 +4500,14 @@ export interface DaemonRemoveMidTurnMessageResult {
 }
 
 /**
+ * `requested` is true when user messages were waiting in the mid-turn queue
+ * and the agent was asked to deliver them now; false when none were waiting.
+ */
+export interface DaemonSendMidTurnMessagesNowResult {
+  requested: boolean;
+}
+
+/**
  * One entry still waiting in the daemon's mid-turn queue (projection of the
  * bridge's `MidTurnQueueEntry`). The queue is session-global. `content` carries
  * any image blocks attached to the message, so a refreshed client
@@ -5517,6 +5529,16 @@ export interface DaemonWorkspaceExtensionsStatus {
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
 }
+
+export type DaemonExtensionSummary = Omit<
+  DaemonExtensionEntry,
+  'capabilities' | 'details'
+>;
+
+export type DaemonWorkspaceExtensionSummaries = Omit<
+  DaemonWorkspaceExtensionsStatus,
+  'extensions'
+> & { extensions: DaemonExtensionSummary[] };
 
 export interface ExtensionInstallRequest {
   /** Git, GitHub, npm, or an absolute path on the daemon host. */

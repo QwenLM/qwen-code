@@ -229,6 +229,10 @@ function runAssign(dryRun, options = {}) {
     denyPerm = 'read',
     editExit = 0,
     editErr = '',
+    // What the assignees endpoint reports back: 'added' echoes the requested
+    // login, 'lowercase' echoes it in another case, and 'dropped' models
+    // GitHub silently ignoring an assignee it cannot accept.
+    assignResult = 'added',
     // 'once' fails only the first issue-list lookup (the retry and every
     // later call succeed); 'always' fails every one.
     loadFail = '',
@@ -282,7 +286,24 @@ case "$*" in
       *) printf '%s' '5' ;;
     esac
     ;;
-  "pr edit "*) printf '%s' "$GH_STUB_EDIT_ERR" >&2; exit "$GH_STUB_EDIT_EXIT" ;;
+  *"issues/77/assignees"*)
+    if [ "$GH_STUB_EDIT_EXIT" != 0 ]; then
+      printf '%s' "$GH_STUB_EDIT_ERR" >&2
+      exit "$GH_STUB_EDIT_EXIT"
+    fi
+    # What the --jq filter prints: one login per assignee after the add.
+    for arg in "$@"; do
+      case "$arg" in
+        "assignees[]="*) requested="$(printf '%s' "$arg" | cut -d= -f2)" ;;
+      esac
+    done
+    echo 'someone-else'
+    case "$GH_STUB_ASSIGN" in
+      dropped) ;;
+      lowercase) printf '%s' "$requested" | tr 'A-Z' 'a-z' ;;
+      *) printf '%s' "$requested" ;;
+    esac
+    ;;
 esac
 `,
   );
@@ -314,6 +335,7 @@ esac
       GH_STUB_DENY_PERM: denyPerm,
       GH_STUB_EDIT_EXIT: String(editExit),
       GH_STUB_EDIT_ERR: editErr,
+      GH_STUB_ASSIGN: assignResult,
       GH_STUB_LOAD_FAIL: loadFail,
       GH_STUB_LOAD_ERR: loadErr,
       GITHUB_REPOSITORY: 'QwenLM/qwen-code',
@@ -330,16 +352,48 @@ esac
   };
 }
 
+// The assignment goes through the REST assignees endpoint, never
+// `gh pr edit` (its projectCards lookup fails on older gh builds).
+const ASSIGN_CALL = /issues\/77\/assignees/;
+const assignCall = (login) =>
+  new RegExp(
+    `^api -X POST repos/QwenLM/qwen-code/issues/77/assignees -f assignees\\[\\]=${login} `,
+    'm',
+  );
+
 describe('assign-pr-owner: apply boundary', () => {
   it('assigns the least loaded eligible owner', () => {
     const { log, stdout } = runAssign(false);
-    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @DennisYu07/);
+    // `gh pr edit` requests repository.pullRequest.projectCards, which
+    // GitHub rejects on the gh builds the ECS runners carry.
+    assert.doesNotMatch(log, /pr edit/);
+  });
+
+  it('matches the returned assignee case-insensitively', () => {
+    const { stdout } = runAssign(false, { assignResult: 'lowercase' });
+    assert.match(stdout, /assigned @DennisYu07/);
+  });
+
+  it('does not claim an assignment GitHub silently dropped', () => {
+    // The REST endpoint answers 201 and simply leaves out a login it cannot
+    // assign, so the exit status alone would report a false success.
+    const { log, stdout, stderr } = runAssign(false, {
+      assignResult: 'dropped',
+    });
+    assert.match(log, assignCall('DennisYu07'));
+    assert.doesNotMatch(stdout, /assigned @/);
+    assert.match(
+      stdout,
+      /skipped — GitHub did not accept @DennisYu07 as an assignee/,
+    );
+    assert.match(stderr, /::warning::GitHub did not add @DennisYu07/);
   });
 
   it('performs no mutation in dry-run mode', () => {
     const { log, stdout } = runAssign(true);
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /dry-run — would assign @DennisYu07/);
   });
 
@@ -360,7 +414,7 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout } = runAssign(false, {
       prJson: JSON.stringify({ ...corePr, author: null }),
     });
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /skipped — PR author account was deleted/);
   });
 
@@ -372,7 +426,7 @@ describe('assign-pr-owner: apply boundary', () => {
         assignees: [{ login: owner }],
       }),
     });
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /already on the PR/);
   });
 
@@ -380,7 +434,7 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout } = runAssign(false, {
       files: 'packages/cli/src/index.ts',
     });
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /no area path matched/);
   });
 
@@ -395,7 +449,7 @@ describe('assign-pr-owner: apply boundary', () => {
         assignees: [{ login: owner }],
       }),
     });
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /already on the PR/);
   });
 
@@ -403,7 +457,7 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout } = runAssign(false, {
       prLatestJson: JSON.stringify({ ...corePr, state: 'MERGED' }),
     });
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /skipped — PR is not open/);
   });
 
@@ -412,7 +466,7 @@ describe('assign-pr-owner: apply boundary', () => {
       prLatestJson: JSON.stringify({ ...corePr, headRefOid: 'head-2' }),
     });
     assert.equal((log.match(/headRefOid/g) ?? []).length, 2);
-    assert.doesNotMatch(log, /pr edit/);
+    assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /skipped — PR head changed during routing/);
   });
 
@@ -426,7 +480,7 @@ describe('assign-pr-owner: apply boundary', () => {
       files: 'packages/core/src/skills/loader.ts',
     });
     assert.match(stdout, /falling back to core/);
-    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(log, assignCall('DennisYu07'));
   });
 
   it('drops an owner who lost push access and falls back to the coarser area', () => {
@@ -440,7 +494,7 @@ describe('assign-pr-owner: apply boundary', () => {
       log,
       new RegExp(`--add-assignee ${module.owners[0]}\\b`),
     );
-    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(log, assignCall('DennisYu07'));
   });
 
   it('exits without assigning when no owner passes the push-access check', () => {
@@ -450,7 +504,7 @@ describe('assign-pr-owner: apply boundary', () => {
     // never a blind assignment past the collaborator check.
     for (const permission of ['read', 'error']) {
       const { log, stdout, stderr } = runAssign(false, { permission });
-      assert.doesNotMatch(log, /pr edit/);
+      assert.doesNotMatch(log, ASSIGN_CALL);
       assert.match(stdout, /no eligible owner for the matched areas/);
       if (permission === 'error') {
         assert.match(stderr, /Cannot verify push access/);
@@ -465,16 +519,16 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.doesNotMatch(stdout, /assigned @/);
     assert.match(stdout, /token cannot assign/);
-    assert.match(log, /pr edit/);
+    assert.match(log, ASSIGN_CALL);
   });
 
-  it('re-throws a non-permission pr edit failure instead of swallowing it', () => {
+  it('re-throws a non-permission assignment failure instead of swallowing it', () => {
     const { log } = runAssign(false, {
       editExit: 1,
       editErr: 'network error',
       expectExit: 1,
     });
-    assert.match(log, /pr edit/);
+    assert.match(log, ASSIGN_CALL);
   });
 
   it('skips gracefully when GitHub refuses agent-assignee edits for App tokens', () => {
@@ -493,7 +547,7 @@ describe('assign-pr-owner: apply boundary', () => {
       stdout,
       /skipped — token cannot assign PRs with agent assignees/,
     );
-    assert.match(log, /pr edit/);
+    assert.match(log, ASSIGN_CALL);
   });
 
   it('tolerates a transient issue-list failure after one retry', () => {
@@ -504,7 +558,7 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout, stderr } = runAssign(false, { loadFail: 'once' });
     assert.equal((log.match(/issue list/g) ?? []).length, owners.length + 1);
     assert.doesNotMatch(stderr, /Cannot read open-issue load/);
-    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @DennisYu07 \(0 open\)/);
   });
 
@@ -518,7 +572,7 @@ describe('assign-pr-owner: apply boundary', () => {
     const rotated = pickOwner(owners, degraded, 77);
     const { log, stdout, stderr } = runAssign(false, { loadFail: 'always' });
     assert.match(stderr, /Cannot read open-issue load/);
-    assert.match(log, new RegExp(`pr edit 77 .*--add-assignee ${rotated}`));
+    assert.match(log, assignCall(rotated));
     assert.match(stdout, new RegExp(`assigned @${rotated}`));
   });
 });
@@ -530,7 +584,7 @@ describe('assign-pr-owner: untrusted filename decoding', () => {
       previousFiles: ['packages/core/src/old.ts'],
     });
     assert.match(log, /previous_filename/);
-    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /Area: core/);
   });
 
@@ -582,11 +636,11 @@ esac
     // End to end: a PR carrying only the forged name is skipped instead of
     // being routed to core through the phantom split entry...
     const alone = runAssign(false, { fileList: [forged] });
-    assert.doesNotMatch(alone.log, /pr edit/);
+    assert.doesNotMatch(alone.log, ASSIGN_CALL);
     assert.match(alone.stdout, /no area path matched/);
     // ...and adding a legit core file routes to core for that file's sake.
     const mixed = runAssign(false, { fileList: fileNames });
-    assert.match(mixed.log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(mixed.log, assignCall('DennisYu07'));
     assert.match(mixed.stdout, /Area: core/);
   });
 });
@@ -631,7 +685,9 @@ describe('assign-pr-owner: workflow invariants', () => {
   it('scopes the write permission to the job and the token to the step', () => {
     assert.equal(doc.permissions['pull-requests'], undefined);
     assert.equal(assignJob.permissions['pull-requests'], 'write');
-    const runStep = assignJob.steps.find((step) => step.run);
+    const runStep = assignJob.steps.find(
+      (step) => step.name === 'Assign area owner',
+    );
     assert.ok(runStep.env.GH_TOKEN);
     assert.equal(doc.env?.GH_TOKEN, undefined);
     assert.equal(
@@ -655,32 +711,45 @@ describe('assign-pr-owner: workflow invariants', () => {
     );
     assert.match(checkout.with.ref, /pull_request\.base\.sha/);
     assert.equal(checkout.with['persist-credentials'], false);
-    assert.match(checkout.with['sparse-checkout'], /issue-owners\.json/);
-    // The run step's guard skips when this entry is dropped, so pin the
-    // membership — otherwise routing could be silently disabled forever.
-    assert.match(
-      checkout.with['sparse-checkout'],
-      /^\.github\/scripts\/assign-pr-owner\.mjs$/m,
-    );
-    // The entry script statically imports assign-issue-owner.mjs, and the
-    // bootstrap guard only checks for assign-pr-owner.mjs — dropping this
-    // entry makes node fail on the missing module after the guard passed.
-    assert.match(
-      checkout.with['sparse-checkout'],
-      /^\.github\/scripts\/assign-issue-owner\.mjs$/m,
-    );
+    // One cone-mode directory carries everything the run step needs: both
+    // entry scripts (the run step's guard skips without assign-pr-owner.mjs,
+    // and it statically imports assign-issue-owner.mjs), plus
+    // issue-owners.json, which cone mode adds as a direct child of .github/.
+    // File entries break on a reused ECS workspace — cone mode dies with
+    // "is not a directory" once the index holds them as files — and
+    // non-cone mode leaves core.sparseCheckout behind, so the next full
+    // checkout on that runner comes out sparse.
+    assert.equal(checkout.with['sparse-checkout'], '.github/scripts');
+    assert.equal(checkout.with['sparse-checkout-cone-mode'], undefined);
     // Nothing from the PR head can execute: the checkout never follows it.
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);
   });
 
   it('bootstrap-skips on a base without the script, before running node', () => {
-    const runStep = assignJob.steps.find((step) => step.run);
+    const runStep = assignJob.steps.find(
+      (step) => step.name === 'Assign area owner',
+    );
     // Pin the guard's shape and ordering: an inverted guard turns every run
     // into a silent no-op, a non-zero exit re-breaks the bootstrap PR's own
     // check, and a node call ahead of the guard fails on the base checkout.
     assert.match(
       runStep.run,
       /if \[ ! -f \.github\/scripts\/assign-pr-owner\.mjs \]; then[\s\S]*?exit 0[\s\S]*?fi[\s\S]*?node \.github\/scripts\/assign-pr-owner\.mjs\s*$/,
+    );
+  });
+
+  it('restores pool workspace ownership before the checkout', () => {
+    // #13245 routes trusted runs onto the shared ECS pool, where a prior
+    // containerised job can leave root-owned files that fail the checkout.
+    const names = assignJob.steps.map((step) => step.name);
+    const heal = names.indexOf('Restore workspace ownership');
+    const checkout = assignJob.steps.findIndex((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    assert.ok(heal !== -1 && heal < checkout);
+    assert.equal(
+      assignJob.steps[heal].if,
+      "${{ runner.environment == 'self-hosted' }}",
     );
   });
 

@@ -9,6 +9,8 @@ import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
+import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
+import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -68,6 +70,10 @@ import {
   type SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import type {
+  AgentMentionRecordPayload,
+  AgentMessageRecordPayload,
+} from '../agents/session-agents/contract.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
@@ -271,19 +277,25 @@ export type ChatRecordProvenance =
   | 'real_user'
   | 'assistant_output'
   | 'tool_result'
+  | 'execution_output'
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  /** Written on behalf of a workspace agent (session multi-agent). */
+  | 'external_agent';
 
-export type RecordToolResultOptions =
+export type RecordToolResultOptions = {
+  subtype?: 'code_mode_tool_result';
+} & (
   | {
       goalContext?: GoalTurnPermit;
       provenance?: 'tool_result';
     }
   | {
       goalContext: GoalTurnPermit;
-      provenance: 'goal_runtime';
-    };
+      provenance: 'goal_runtime' | 'execution_output';
+    }
+);
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
@@ -291,6 +303,13 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
     revision: goalContext.revision,
     turnId: goalContext.turnId,
   };
+}
+
+/** An `agent_mention` / `agent_message` record found by its key. */
+export interface ExternalAgentRecordRef {
+  uuid: string;
+  /** The record's own ISO 8601 timestamp. */
+  timestamp: string;
 }
 
 /**
@@ -382,16 +401,51 @@ export interface ChatRecord {
     | 'goal_state'
     | 'goal_runtime'
     | 'goal_turn_end'
+    | 'code_mode_tool_result'
     | 'realtime_message'
     | 'turn_result'
     | 'managed_session_header_v1'
     | 'managed_session_event_v1'
-    | 'managed_session_commit_v1';
+    | 'managed_session_commit_v1'
+    // Session multi-agent records (agents/session-agents/contract.ts). Both
+    // are `type: 'user'`: kept in model history, but never a real user
+    // prompt, a turn boundary, a title source, or a cold notification.
+    | 'agent_mention'
+    | 'agent_message';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
   backgroundTurn?: BackgroundNotificationTurn;
+  /**
+   * `true` on a `subtype: 'notification'` record that IS the user entry of a
+   * turn the `LlmClient.sendMessageStream` send path admitted and went on to
+   * send (`client.ts`), so the stamp exists even where the admission branch
+   * runs outside `backgroundTurnContext`. Records persisted BEFORE their turn
+   * ran (`recordNotificationStrict`, the pre-send `recordNotification` copies)
+   * carry no stamp. This is the only reliable separator between the two — both
+   * share `provenance: 'system'` + `subtype: 'notification'`, and
+   * `backgroundTurn` vanishes on the `channelTask` admission branch
+   * (`backgroundTurnContext.exit`). Session recovery trims only unstamped
+   * notification records: a stamped-but-unanswered entry is treated as an
+   * `interrupted_prompt`, not as a cold notification nobody owes a response.
+   *
+   * The stamp means "admitted and sent", NOT "the model accepted a request".
+   * Every pre-send refusal gate on that path — `MaxSessionTurns`,
+   * `!boundedTurns`, the session token limit, the arena control signal —
+   * returns after the record is appended, and an abort before the first token
+   * does too, so a refused or aborted turn is stamped as well and then
+   * recovers as `interrupted_prompt`. That false positive is accepted: the
+   * record cannot move below the gates without losing the resumed info item it
+   * exists to restore, and an appended JSONL record cannot be mutated
+   * afterwards. Only the abort arm needs no setup — the gates are off or
+   * unreachable by default (`maxSessionTurns` is `-1`, the arena client is
+   * unset, `boundedTurns` reaches 0 only once the turn recursion is
+   * exhausted) — and the only observable symptom today is one recovery banner
+   * line, because no consumer of a record-derived plan reads `continuation`.
+   * Pinned by the cap-refusal case in `client.test.ts`.
+   */
+  deliveredTurn?: boolean;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -417,6 +471,12 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Effective session settings when user input reaches the recorder. */
+  executionContext?: {
+    modelId: string;
+    authType?: string;
+    approvalMode: ApprovalMode;
+  };
   /** Context window size of the model used for this response */
   contextWindowSize?: number;
   /**
@@ -456,7 +516,9 @@ export interface ChatRecord {
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
-    | TurnResultRecordPayload;
+    | TurnResultRecordPayload
+    | AgentMessageRecordPayload
+    | AgentMentionRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -472,6 +534,12 @@ export interface ChatRecord {
   agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
+  /**
+   * Idempotency key of an `agent_mention` / `agent_message` record the daemon
+   * asked for (`recordExternalAgentRecordStrict`). Persisted so a re-sent
+   * request after a restart finds the record instead of writing a second one.
+   */
+  externalRecordKey?: string;
 
   /**
    * Set on every record of a forked session to record its lineage.
@@ -791,7 +859,7 @@ export function sessionModelPayloadsEqual(
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent;
+  uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord;
 }
 
 /**
@@ -1117,6 +1185,16 @@ export class ChatRecordingService {
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
   private readonly writerLeaseRequired: boolean;
+  /**
+   * `externalRecordKey` -> record of the active chain, built from the
+   * transcript on first use and extended by every external record written.
+   */
+  private externalRecordIndex: Map<string, ExternalAgentRecordRef> | undefined;
+  private externalRecordIndexLoad:
+    | Promise<Map<string, ExternalAgentRecordRef>>
+    | undefined;
+  /** Bumped whenever recorder state is rebuilt; a stale index load is dropped. */
+  private externalRecordIndexGeneration = 0;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -1319,6 +1397,7 @@ export class ChatRecordingService {
   ): void {
     this.lastRecordUuid = sessionData?.lastCompletedUuid ?? null;
     this.lastPersistedRecordUuid = this.lastRecordUuid;
+    this.resetExternalRecordIndex();
     this.currentCustomTitle = undefined;
     this.currentTitleSource = undefined;
     this.currentParentSessionId = undefined;
@@ -1392,6 +1471,7 @@ export class ChatRecordingService {
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
     this.currentCustomTitle = state.customTitle;
@@ -2237,6 +2317,15 @@ export class ChatRecordingService {
     }
     this.chatsDirEnsured = false;
     this.cachedConversationFile = undefined;
+    this.resetExternalRecordIndex();
+  }
+
+  private getExecutionContext(): NonNullable<ChatRecord['executionContext']> {
+    return {
+      modelId: this.config.getModel(),
+      authType: this.config.getAuthType(),
+      approvalMode: this.config.getApprovalMode(),
+    };
   }
 
   /**
@@ -2261,6 +2350,7 @@ export class ChatRecordingService {
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -2323,6 +2413,7 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        executionContext: this.getExecutionContext(),
         subtype: 'mid_turn_user_message',
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
@@ -2374,12 +2465,19 @@ export class ChatRecordingService {
    * Records a background agent notification.
    * Stored as a user-role message with subtype 'notification' so the
    * UI restores it as an info item, not a user turn.
+   *
+   * `deliveredTurn` must be `true` exactly when the record IS the user entry
+   * of a notification turn the `client.ts` send path admitted and went on to
+   * send; copies persisted before the turn runs leave it unset so session
+   * recovery can still trim them. See `ChatRecord.deliveredTurn` for what the
+   * stamp does and does not guarantee.
    */
   recordNotification(
     message: PartListUnion,
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     this.recordNotificationLike(
       message,
@@ -2387,6 +2485,7 @@ export class ChatRecordingService {
       displayText,
       backgroundTask,
       goalContext,
+      deliveredTurn,
     );
   }
 
@@ -2410,12 +2509,150 @@ export class ChatRecordingService {
     );
   }
 
+  /**
+   * Durably records a session multi-agent record (`agent_mention` or
+   * `agent_message`) the daemon asked the ACP child to write, and returns
+   * its uuid (the agents' read-cursor anchor) and its own timestamp, so a live
+   * update can carry exactly what replay will.
+   *
+   * Written as `type: 'user'` so the main model reads it as input on its next
+   * turn (resume rebuilds it through `appendApiHistoryRecord`). It never
+   * starts a turn, never feeds the auto title (only subtype-less user records
+   * do), and is never trimmed as a cold notification.
+   *
+   * Idempotent per `recordKey`, durably: the key is persisted on the record
+   * (`externalRecordKey`) and a repeat returns the existing record with
+   * `created: false`, also after a restart (see
+   * {@link findExternalAgentRecord}).
+   *
+   * Managed sessions: `ManagedSessionRecordSink.canCarry` has no mapping for
+   * these subtypes, so `appendRecordStrict` throws
+   * `ManagedSessionRecordRefusedError` before queueing. That refusal is left
+   * in place on purpose and propagates to the caller, which reports the
+   * feature as not supported in managed sessions.
+   * TODO(multi-agent): add a managed mapping if managed sessions need agents.
+   */
+  async recordExternalAgentRecordStrict(
+    input:
+      | {
+          kind: 'agent_mention';
+          modelText: string;
+          payload: AgentMentionRecordPayload;
+          recordKey: string;
+        }
+      | {
+          kind: 'agent_message';
+          modelText: string;
+          payload: AgentMessageRecordPayload;
+          recordKey: string;
+        },
+  ): Promise<ExternalAgentRecordRef & { created: boolean }> {
+    const existing = await this.findExternalAgentRecord(input.recordKey);
+    if (existing) return { ...existing, created: false };
+    const generation = this.externalRecordIndexGeneration;
+    const record: ChatRecord = {
+      ...this.createBaseRecord('user'),
+      subtype: input.kind,
+      provenance:
+        input.kind === 'agent_mention' && input.payload.author === undefined
+          ? 'real_user'
+          : 'external_agent',
+      message: createUserContent([{ text: input.modelText }]),
+      systemPayload: input.payload,
+      externalRecordKey: input.recordKey,
+      ...(input.kind === 'agent_message'
+        ? {
+            agentId: input.payload.author.agentId,
+            agentName: input.payload.author.name,
+            ...(input.payload.author.color
+              ? { agentColor: input.payload.author.color }
+              : {}),
+          }
+        : {}),
+    };
+    // Not part of any background notification turn.
+    delete record.backgroundTurn;
+    await this.appendRecordStrict(record);
+    const ref = { uuid: record.uuid, timestamp: record.timestamp };
+    // A rebuilt index (generation moved) reads this record from disk instead.
+    if (generation === this.externalRecordIndexGeneration) {
+      this.externalRecordIndex?.set(input.recordKey, ref);
+    }
+    return { ...ref, created: true };
+  }
+
+  /**
+   * The external record written for `recordKey` on the active chain, if any.
+   * The first call reads the transcript once (`readActiveTranscriptChain`);
+   * later calls are answered from memory. Throws when that read fails, so a
+   * caller never mistakes an unreadable transcript for a missing record.
+   */
+  async findExternalAgentRecord(
+    recordKey: string,
+  ): Promise<ExternalAgentRecordRef | undefined> {
+    return (await this.loadExternalRecordIndex()).get(recordKey);
+  }
+
+  private loadExternalRecordIndex(): Promise<
+    Map<string, ExternalAgentRecordRef>
+  > {
+    if (this.externalRecordIndex) {
+      return Promise.resolve(this.externalRecordIndex);
+    }
+    if (this.externalRecordIndexLoad) return this.externalRecordIndexLoad;
+    const generation = this.externalRecordIndexGeneration;
+    const load = (async () => {
+      const index = new Map<string, ExternalAgentRecordRef>();
+      // Nothing persisted yet (a fresh session, whose transcript cannot be
+      // loaded at all), or a Managed log, which refuses these records anyway.
+      if (this.lastPersistedRecordUuid !== null && !this.managedSink) {
+        for (const record of await this.readActiveTranscriptChain()) {
+          if (
+            typeof record.externalRecordKey === 'string' &&
+            (record.subtype === 'agent_mention' ||
+              record.subtype === 'agent_message')
+          ) {
+            index.set(record.externalRecordKey, {
+              uuid: record.uuid,
+              timestamp: record.timestamp,
+            });
+          }
+        }
+      }
+      return index;
+    })();
+    this.externalRecordIndexLoad = load;
+    void load.then(
+      (index) => {
+        if (this.externalRecordIndexLoad !== load) return;
+        this.externalRecordIndexLoad = undefined;
+        if (generation === this.externalRecordIndexGeneration) {
+          this.externalRecordIndex = index;
+        }
+      },
+      () => {
+        // Retried on the next call.
+        if (this.externalRecordIndexLoad === load) {
+          this.externalRecordIndexLoad = undefined;
+        }
+      },
+    );
+    return load;
+  }
+
+  private resetExternalRecordIndex(): void {
+    this.externalRecordIndexGeneration += 1;
+    this.externalRecordIndex = undefined;
+    this.externalRecordIndexLoad = undefined;
+  }
+
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     try {
       const record = this.createNotificationRecord(
@@ -2424,6 +2661,7 @@ export class ChatRecordingService {
         displayText,
         backgroundTask,
         goalContext,
+        deliveredTurn,
       );
       this.appendRecord(record);
     } catch (error) {
@@ -2437,12 +2675,14 @@ export class ChatRecordingService {
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): ChatRecord {
     return {
       ...this.createBaseRecord('user'),
       subtype,
       provenance: 'system',
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+      ...(deliveredTurn ? { deliveredTurn: true } : {}),
       message: createUserContent(message),
       systemPayload: displayText
         ? {
@@ -2779,6 +3019,7 @@ export class ChatRecordingService {
 
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
+        ...(options?.subtype ? { subtype: options.subtype } : {}),
         ...(options?.goalContext
           ? { goalContext: copyGoalContext(options.goalContext) }
           : {}),
@@ -2874,7 +3115,9 @@ export class ChatRecordingService {
   /**
    * Records a UI telemetry event for replaying metrics on resume.
    */
-  recordUiTelemetryEvent(uiEvent: UiEvent): void {
+  recordUiTelemetryEvent(
+    uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord,
+  ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -2980,6 +3223,7 @@ export class ChatRecordingService {
    * `lastRecordUuid` to the last record in the chain.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
+    this.resetExternalRecordIndex();
     this.turnParentUuids = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
@@ -2993,7 +3237,9 @@ export class ChatRecordingService {
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message' &&
-        record.subtype !== 'realtime_message'
+        record.subtype !== 'realtime_message' &&
+        record.subtype !== 'agent_mention' &&
+        record.subtype !== 'agent_message'
       ) {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.

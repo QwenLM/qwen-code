@@ -10,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -56,6 +57,12 @@ class ManagedAgentDefinitionTest {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore definitions;
+
+    @Autowired
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
     @Test
     void createsAndReplaysTheFirstRevision() throws Exception {
         String tenant = tenant();
@@ -94,8 +101,8 @@ class ManagedAgentDefinitionTest {
         assertThat(same.get("digest")).isEqualTo(first.get("digest"));
         assertThat(rows(tenant)).isEqualTo(1);
 
-        JsonNode second = json(update(tenant, agentId, "changed",
-                DEFINITION.replace("Review the change.", "Review it twice."))
+        String changed = DEFINITION.replace("Review the change.", "Review it twice.");
+        JsonNode second = json(update(tenant, agentId, "changed", changed)
                 .andExpect(status().isAccepted()));
         assertThat(second.get("id").asText()).isEqualTo(agentId);
         assertThat(second.get("revision").asText()).isEqualTo("2");
@@ -108,7 +115,19 @@ class ManagedAgentDefinitionTest {
         assertThat(json(read(tenant, agentId, "1")
                 .andExpect(status().isOk())).get("digest"))
                 .isEqualTo(first.get("digest"));
-        for (String missing : new String[] {"3", "0", "01", "latest"}) {
+        update(tenant, agentId, "third", DEFINITION.replace(
+                "Review the change.", "Review it three times."))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.revision").value("3"));
+        assertThat(json(update(tenant, agentId, "changed", changed)
+                .andExpect(status().isAccepted())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))))
+                .isEqualTo(second);
+        assertThat(rows(tenant)).isEqualTo(3);
+        assertThat(json(read(tenant, agentId, null)
+                .andExpect(status().isOk())).path("revision").asText())
+                .isEqualTo("3");
+        for (String missing : new String[] {"4", "0", "01", "latest"}) {
             read(tenant, agentId, missing).andExpect(status().isNotFound())
                     .andExpect(jsonPath("$.error.code").value("agent_not_found"));
         }
@@ -117,14 +136,53 @@ class ManagedAgentDefinitionTest {
     @Test
     void absentAndNullOptionalFieldsStoreTheSameContent() throws Exception {
         String tenant = tenant();
-        JsonNode absent = json(create(tenant, "absent", DEFINITION)
+        ObjectNode minimum = (ObjectNode) objectMapper.readTree(DEFINITION);
+        minimum.remove("metadata");
+        JsonNode absent = json(create(tenant, "absent", minimum.toString())
                 .andExpect(status().isAccepted()));
+        ObjectNode withNulls = minimum.deepCopy();
+        for (String field : new String[] {"skills", "mcp_servers",
+                "environment_template_id", "metadata"}) {
+            withNulls.putNull(field);
+        }
         JsonNode explicit = json(create(tenant, "explicit",
-                DEFINITION.replace("\"metadata\"",
-                        "\"skills\":null,\"mcp_servers\":null,\"metadata\""))
+                withNulls.toString())
                 .andExpect(status().isAccepted()));
         assertThat(explicit.get("id")).isNotEqualTo(absent.get("id"));
         assertThat(explicit.get("digest")).isEqualTo(absent.get("digest"));
+        assertThat(absent.has("metadata")).isFalse();
+        assertThat(explicit.has("metadata")).isFalse();
+        assertThat(objectMapper.readTree(jdbc.queryForObject(
+                "SELECT definition_json FROM ma_agent_definition"
+                        + " WHERE tenant_id = ? AND agent_id = ?",
+                String.class, tenant, explicit.path("id").asText())))
+                .isEqualTo(minimum);
+    }
+
+    @Test
+    void storesOptionalDefinitionContent() throws Exception {
+        String tenant = tenant();
+        ObjectNode content = (ObjectNode) objectMapper.readTree(DEFINITION);
+        content.putArray("skills").addObject().put("name", "review");
+        content.putArray("mcp_servers").addObject().put("name", "docs");
+        content.put("environment_template_id", "template-1");
+        JsonNode first = json(create(tenant, "optional", content.toString())
+                .andExpect(status().isAccepted()));
+        String agentId = first.path("id").asText();
+        assertThat(objectMapper.readTree(jdbc.queryForObject(
+                "SELECT definition_json FROM ma_agent_definition"
+                        + " WHERE tenant_id = ? AND agent_id = ? AND revision = 1",
+                String.class, tenant, agentId))).isEqualTo(content);
+
+        content.put("environment_template_id", "template-2");
+        JsonNode second = json(update(tenant, agentId, "template", content.toString())
+                .andExpect(status().isAccepted()));
+        assertThat(second.path("revision").asText()).isEqualTo("2");
+        assertThat(second.get("digest")).isNotEqualTo(first.get("digest"));
+        assertThat(objectMapper.readTree(jdbc.queryForObject(
+                "SELECT definition_json FROM ma_agent_definition"
+                        + " WHERE tenant_id = ? AND agent_id = ? AND revision = 2",
+                String.class, tenant, agentId))).isEqualTo(content);
     }
 
     @Test
@@ -179,15 +237,23 @@ class ManagedAgentDefinitionTest {
     void scopesMatrixParametersBeforeDefinitionAdmission() throws Exception {
         String tenant = tenant();
         String path = "/v1/agents;jsessionid=abc";
-        mvc.perform(post(path).header("Idempotency-Key", "matrix")
+        String key = "matrix-" + UUID.randomUUID();
+        Integer before = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_agent_definition", Integer.class);
+        mvc.perform(post(path).header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON).content(DEFINITION))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_tenant"));
-        assertThat(rows(tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " ma_request_receipt WHERE namespace = 'AGENT_DEFINITION' AND idempotency_key = ?",
+                Integer.class, key)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition",
+                Integer.class)).isEqualTo(before);
         mvc.perform(post(path).header(TENANT, tenant)
-                        .header("Idempotency-Key", "matrix")
+                        .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON).content(DEFINITION))
                 .andExpect(status().isAccepted())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"))
                 .andExpect(jsonPath("$.revision").value("1"));
         assertThat(rows(tenant)).isEqualTo(1);
     }
@@ -199,12 +265,13 @@ class ManagedAgentDefinitionTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code")
                         .value("invalid_idempotency_key"));
-        create(tenant, "no-instructions",
-                DEFINITION.replace("\"instructions\":\"Review the change.\",", ""))
-                .andExpect(status().isBadRequest());
-        create(tenant, "no-tools",
-                DEFINITION.replace("\"tools\":[{\"name\":\"read_file\"}],", ""))
-                .andExpect(status().isBadRequest());
+        for (String field : new String[] {"model", "instructions", "tools",
+                "permission_policy"}) {
+            ObjectNode missing = (ObjectNode) objectMapper.readTree(DEFINITION);
+            missing.remove(field);
+            create(tenant, "no-" + field, missing.toString())
+                    .andExpect(status().isBadRequest());
+        }
         // Array items must be objects; a null item is refused, not stored.
         create(tenant, "null-tool", DEFINITION.replace(
                 "[{\"name\":\"read_file\"}]", "[null]"))
@@ -215,6 +282,72 @@ class ManagedAgentDefinitionTest {
                     .andExpect(status().isBadRequest());
         }
         assertThat(rows(tenant)).isZero();
+    }
+
+    @Test
+    void latestForUpdateBlocksAConcurrentLockingReadUntilCommit() throws Exception {
+        // Design §8: "no partially updated read under a concurrent update".
+        // A plain latest() takes no lock, so a concurrent transaction could
+        // interleave; latestForUpdate must hold the row lock until commit.
+        // Both threads drive the production store read through a
+        // transaction-bound JdbcTemplate over the shared DataSource bean, so
+        // dropping FOR UPDATE from the production query turns this red: the
+        // contender would read immediately instead of blocking.
+        String tenant = tenant();
+        String agentId = json(create(tenant, "for-update", DEFINITION)
+                .andExpect(status().isAccepted())).path("id").asText();
+        com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore store =
+                new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(
+                        new org.springframework.jdbc.core.JdbcTemplate(
+                                jdbc.getDataSource()));
+        org.springframework.transaction.support.TransactionTemplate template =
+                new org.springframework.transaction.support.TransactionTemplate(
+                        transactionManager);
+        java.util.concurrent.atomic.AtomicReference<Throwable> contenderFailure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicLong contenderReadMillis =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+        java.util.concurrent.CountDownLatch holderLocked =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch contenderEntered =
+                new java.util.concurrent.CountDownLatch(1);
+        Thread contender = new Thread(() -> {
+            try {
+                assertThat(holderLocked.await(5,
+                        java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                contenderEntered.countDown();
+                template.executeWithoutResult(ignored -> {
+                    long started = System.nanoTime();
+                    store.latestForUpdate(tenant, agentId);
+                    contenderReadMillis.set(
+                            (System.nanoTime() - started) / 1_000_000);
+                });
+            } catch (Throwable error) {
+                contenderFailure.set(error);
+            }
+        });
+        contender.start();
+        template.executeWithoutResult(ignored -> {
+            store.latestForUpdate(tenant, agentId);
+            holderLocked.countDown();
+            try {
+                // The contender enters its transaction right after the
+                // latch; give it time to reach the blocked locking read.
+                assertThat(contenderEntered.await(5,
+                        java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                Thread.sleep(300);
+            } catch (InterruptedException error) {
+                throw new RuntimeException(error);
+            }
+        });
+        contender.join(5000);
+        assertThat(contenderFailure.get()).as(
+                "the contender's locking read failed for another reason")
+                .isNull();
+        assertThat(contender.isAlive()).isFalse();
+        // The contender's locking read must block on the holder's row lock
+        // for most of the holder's remaining hold, not return immediately.
+        assertThat(contenderReadMillis.get()).isGreaterThanOrEqualTo(150);
     }
 
     private ResultActions create(String tenant, String key, String body)
@@ -241,7 +374,7 @@ class ManagedAgentDefinitionTest {
     }
 
     private int rows(String tenant) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition"
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_agent_definition"
                 + " WHERE tenant_id = ?", Integer.class, tenant);
     }
 

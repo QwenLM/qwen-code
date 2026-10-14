@@ -877,6 +877,19 @@ describe('DaemonSessionClient', () => {
           lastEventId: 7,
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 7, v: 1, type: 'session_update', data: {} }],
+          lifecycleReplay: [
+            {
+              id: 6,
+              v: 1,
+              type: 'session_update',
+              data: {
+                _meta: {
+                  executionLifecycle: { executionId: 'only-lifecycle' },
+                },
+              },
+            },
+          ],
+          lifecycleReplayIncomplete: true,
         });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -887,7 +900,12 @@ describe('DaemonSessionClient', () => {
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
 
+    expect(session.replaySnapshot.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplayIncomplete).toBe(true);
+    expect(JSON.stringify(session.session)).not.toContain('only-lifecycle');
     const consumed = session.consumeReplaySnapshot();
+    expect(consumed.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplay).toBeUndefined();
     expect(consumed.compactedReplay).toHaveLength(1);
     expect(consumed.liveJournal).toHaveLength(1);
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
@@ -2159,6 +2177,31 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/session%20with%2Fslash/mid-turn-messages/message%20with%2Fslash',
     );
     expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards send-now for queued mid-turn messages with clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { requested: false }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.sendMidTurnMessagesNow()).resolves.toEqual({
+      requested: false,
+    });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages/send-now',
+    );
+    expect(calls[0]?.method).toBe('POST');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 

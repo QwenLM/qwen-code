@@ -19,7 +19,6 @@ import {
   HELP_DOCS_URL,
   HELP_KEY_COL_WIDTH,
   HELP_LAYOUT_FIXED_ROWS,
-  HELP_LAYOUT_RESERVED_ROWS,
   buildHelpCommandsLines,
   computeHelpBodyRows,
   computeHelpWidthLayout,
@@ -146,27 +145,33 @@ describe('help command lines (signature/meta/description/subcommands)', () => {
   });
 });
 
-describe('overlay row budget (80x24 bounded rows, footer kept visible)', () => {
-  it('leaves body rows so header+footer+hints fit at 24 rows', () => {
-    // banner (3) + mount margin (1) + status (1) + composer chrome (5) +
-    // overlay borders/padding/header/footer/hints/margins (10) = 20, so a
-    // 24-row terminal keeps 4 rows for the tab body.
-    expect(computeHelpBodyRows(24)).toBe(4);
+describe('overlay row budget (the popup region owns the surrounding chrome)', () => {
+  it('gives the tab body what the region leaves after the overlay chrome', () => {
+    // A 24-row terminal hands the popup region 19 rows, and the overlay's own
+    // borders, padding, header, footer, hints and separator margins take 10 of
+    // them. The banner, the status bar and the composer occupy none of those
+    // 19 rows while a dialog is open.
+    expect(computeHelpBodyRows(19)).toBe(9);
   });
 
-  it('never goes negative on tiny terminals', () => {
+  it("windows the command list at ink's fixed 18 rows on a 40-row terminal", () => {
+    // The region is 35 rows there, so the body is 25 and the commands tab's
+    // own chrome 4: 21 rows of list, held to ink's hard-coded 18.
+    expect(helpCommandWindowRows(computeHelpBodyRows(35))).toBe(
+      HELP_COMMAND_LIST_VISIBLE_LINES,
+    );
+  });
+
+  it('never goes negative on tiny regions', () => {
     expect(computeHelpBodyRows(0)).toBe(0);
-    expect(computeHelpBodyRows(12)).toBe(0);
-    expect(computeHelpBodyRows(19)).toBe(0);
+    expect(computeHelpBodyRows(10)).toBe(0);
   });
 
-  it('body + fixed overlay rows + reserved chrome never exceeds the screen', () => {
-    for (const height of [24, 25, 30, 40, 60]) {
-      const total =
-        computeHelpBodyRows(height) +
-        HELP_LAYOUT_FIXED_ROWS +
-        HELP_LAYOUT_RESERVED_ROWS;
-      expect(total).toBeLessThanOrEqual(height);
+  it('body + fixed overlay rows never exceeds the region', () => {
+    for (const regionHeight of [19, 20, 25, 35, 55]) {
+      expect(
+        computeHelpBodyRows(regionHeight) + HELP_LAYOUT_FIXED_ROWS,
+      ).toBeLessThanOrEqual(regionHeight);
     }
   });
 });

@@ -12,6 +12,7 @@ import {
 import { ManagedSessionConflictError } from './managed-session-authority.js';
 import {
   assertManagedSessionKey,
+  assertManagedSessionSequence,
   assertManagedSessionStableId,
   ManagedSessionRecordError,
   type ManagedSessionJsonValue,
@@ -88,7 +89,10 @@ export class ManagedOperationGrantGate {
     operationRevision: number,
   ): void {
     const key = gateKey(sessionKey, operationId);
-    if (!Number.isSafeInteger(operationRevision) || operationRevision < 1) {
+    // Both sides of the gate agree on the ceiling: a revocation parked
+    // above every representable revision could never be overtaken.
+    assertManagedSessionSequence(operationRevision, 'operationRevision');
+    if (operationRevision < 1) {
       throw new ManagedSessionRecordError(
         'operationRevision must be a positive safe integer.',
       );

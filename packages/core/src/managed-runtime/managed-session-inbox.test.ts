@@ -24,6 +24,7 @@ import {
   managedSessionPayloadRef,
   type ManagedSessionUserMessageInput,
 } from './managed-session-inbox.js';
+import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
 
 const limits = { maxPending: 10, maxPendingPerTenant: 5 };
 
@@ -61,6 +62,34 @@ describe('FileManagedSessionInbox', () => {
   let root: string;
   let filePath: string;
   let now: number;
+
+  const nested = (levels: number): unknown => {
+    let payload: unknown = null;
+    for (let index = 0; index < levels; index++) {
+      payload = { nested: payload };
+    }
+    return payload;
+  };
+
+  it('bounds payload depth at the shared managed-session JSON depth limit', async () => {
+    const inbox = await openInbox();
+    await expect(
+      inbox.admit(
+        userMessage('exact', {
+          payload: nested(MANAGED_SESSION_LIMITS.maxJsonDepth),
+        }),
+        limits,
+      ),
+    ).resolves.toMatchObject({ created: true });
+    await expect(
+      inbox.admit(
+        userMessage('over', {
+          payload: nested(MANAGED_SESSION_LIMITS.maxJsonDepth + 1),
+        }),
+        limits,
+      ),
+    ).rejects.toThrow(/maximum JSON depth/);
+  });
 
   const openInbox = (maxPayloadBytes?: number) =>
     FileManagedSessionInbox.open(filePath, {
@@ -308,6 +337,33 @@ describe('FileManagedSessionInbox', () => {
     ).resolves.toMatchObject({
       created: true,
     });
+  });
+
+  it('latches a persist failure and halts every later operation until reopen', async () => {
+    const inbox = await openInbox();
+    await inbox.admit(userMessage('m1'), limits);
+
+    const contents = await readFile(filePath, 'utf8');
+    await rm(filePath);
+    await mkdir(filePath);
+
+    const m2 = userMessage('m2');
+    await expect(inbox.admit(m2, limits)).rejects.toBeInstanceOf(Error);
+    expect(inbox.haltedError).toBeInstanceOf(Error);
+    // The latch, not the original errno, is what later operations see.
+    await expect(inbox.admit(m2, limits)).rejects.toBe(inbox.haltedError);
+    // A failed persist must not have applied the event to memory either.
+    expect(inbox.get(m2)).toBeUndefined();
+    expect(inbox.listPending()).toHaveLength(1);
+
+    await rm(filePath, { recursive: true, force: true });
+    await writeFile(filePath, contents);
+    const reopened = await openInbox();
+    expect(reopened.get(userMessage('m1'))?.state).toBe('admitted');
+    expect(reopened.get(m2)).toBeUndefined();
+    await expect(
+      reopened.admit(userMessage('m3'), limits),
+    ).resolves.toMatchObject({ created: true });
   });
 
   it('requires the deterministic payload reference and matching fence identity', async () => {

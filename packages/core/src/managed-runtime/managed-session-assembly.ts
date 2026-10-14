@@ -5,7 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  activationAlreadyInstalledError,
+} from './managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -120,13 +123,24 @@ export interface ManagedSession {
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
+   * The successor's ID is random unless `activationId` names it. Hosted Hook
+   * release reads a random successor as a load that may own a Hook Runtime,
+   * so a successor that never acquires one carries a `hook_operation` subject
+   * or the ID `managedHookRestoreActivationId` derives. A named ID must be new
+   * to the log; a repeat is refused before the current activation is released.
    */
-  replaceActivation(subject?: ManagedSessionSubject): Promise<{
+  replaceActivation(
+    subject?: ManagedSessionSubject,
+    activationId?: string,
+  ): Promise<{
     readonly activationId: string;
     readonly epoch: number;
   }>;
-  /** Seals the writer, leaving the at-rest barrier in place. */
-  close(): Promise<void>;
+  /**
+   * Seals the writer, leaving the at-rest barrier in place. Omit activation
+   * release only when an external permanent lifecycle fence forbids appends.
+   */
+  close(options?: { readonly releaseActivation?: boolean }): Promise<void>;
 }
 
 /**
@@ -223,10 +237,18 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
-    async replaceActivation(subject) {
+    async replaceActivation(subject, activationId) {
+      // Refuse before the release, or the current activation would be left
+      // released with no successor.
+      if (
+        activationId !== undefined &&
+        authority.hasInstalledActivation(activationId)
+      ) {
+        throw activationAlreadyInstalledError(activationId);
+      }
       await authority.releaseActivation();
       activation = await authority.installActivation({
-        activationId: randomUUID(),
+        activationId: activationId ?? randomUUID(),
         workerId: options.workerId,
         leaseDurationMs: options.activationLeaseDurationMs,
         subject,
@@ -234,13 +256,14 @@ export async function openManagedSession(
       return activation;
     },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
-    // A call that owns the whole lifecycle also records the boundary, or the
-    // activation would read as abandoned. An adopted lease still stops the
-    // renewal it started; only the lease itself stays with its owner.
-    close: async () => {
+    // Normally the lifecycle owner also records the boundary, or the activation
+    // reads as abandoned. An external permanent fence can forbid that append.
+    // An adopted lease stops renewal but leaves the lease with its owner.
+    close: async (options) => {
       renewal.stop();
       if (adopted) return;
-      await authority.releaseActivation();
+      if (options?.releaseActivation !== false)
+        await authority.releaseActivation();
       await authority.close();
     },
   };
