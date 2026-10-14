@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,13 +38,14 @@ class ManagedSchemaConfigurationTest {
         flyway.migrate();
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         jdbc.update(
-                "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 "Tenant ",
                 "Session");
         var history =
                 jdbc.queryForMap("SELECT * FROM \"flyway_schema_history\" WHERE \"version\" = '1'");
-        var session = jdbc.queryForMap("SELECT * FROM ma_session");
+        var session = jdbc.queryForMap("SELECT "
+                + ManagedSchemaProjection.SESSION.columns().replace(
+                        ", runtime_request_key, csi_guard", "") + " FROM ma_session");
         assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(1);
         assertThatThrownBy(() -> ManagedSchema.initialize(source))
                 .hasRootCauseMessage(
@@ -58,7 +61,7 @@ class ManagedSchemaConfigurationTest {
                         jdbc.queryForMap(
                                 "SELECT * FROM \"flyway_schema_history\" WHERE \"version\" = '1'"))
                 .isEqualTo(history);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_session"))
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session"))
                 .containsAllEntriesOf(session)
                 .containsEntry("csi_guard", false)
                 .containsEntry("runtime_request_key", null);
@@ -97,8 +100,7 @@ class ManagedSchemaConfigurationTest {
             }
             var jdbc = new ManagedSchemaJdbcTemplate(source);
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1)");
+                    "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1)");
             var flyway =
                     Flyway.configure()
                             .dataSource(source)

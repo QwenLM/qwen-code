@@ -6,17 +6,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
 
 /** Bounded cleanup of unreferenced retired Runtime generations. */
 public final class JdbcRuntimeRetention {
-    private static final DateTimeFormatter CURSOR_TIMESTAMP = DateTimeFormatter
-            .ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS").withZone(ZoneOffset.UTC);
-
     public interface ReferenceGuard {
         boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding) throws SQLException;
 
@@ -198,6 +193,9 @@ public final class JdbcRuntimeRetention {
     }
 
     private static Candidate candidate(Connection connection, Cursor cursor, Instant cutoff) throws SQLException {
+        if (cutoff.isBefore(Instant.EPOCH)) {
+            return null;
+        }
         boolean resume = cursor != null && cursor.phase() != Phase.BINDINGS;
         String sql = "SELECT binding_id, binding_state, last_active_at, tenant_id, request_key FROM ma_runtime_binding "
                 + (resume ? "WHERE binding_id = ?" : "WHERE binding_state IN ('FAILED', 'RELEASED') AND last_active_at < ?"
@@ -210,13 +208,11 @@ public final class JdbcRuntimeRetention {
             } else {
                 JdbcRepositorySupport.setInstant(statement, 1, cutoff);
                 if (cursor != null) {
-                    // Connector/J can drop Timestamp fractions with MariaDB's MySQL 5.5 compatibility handshake.
-                    String lastActiveAt = CURSOR_TIMESTAMP.format(cursor.lastActiveAt());
                     statement.setString(2, cursor.bindingState());
                     statement.setString(3, cursor.bindingState());
-                    statement.setString(4, lastActiveAt);
+                    JdbcRepositorySupport.setInstant(statement, 4, cursor.lastActiveAt());
                     statement.setString(5, cursor.bindingState());
-                    statement.setString(6, lastActiveAt);
+                    JdbcRepositorySupport.setInstant(statement, 6, cursor.lastActiveAt());
                     JdbcRepositorySupport.setIdentity(statement, 7, cursor.bindingId());
                 }
             }

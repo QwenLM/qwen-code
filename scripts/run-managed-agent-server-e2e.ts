@@ -20,6 +20,9 @@ import {
 import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
+const databaseEpochMillisSql =
+  'CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000' +
+  ' + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000)';
 const verificationMode = process.env['G3_VERIFY_MODE'];
 if (
   verificationMode &&
@@ -1635,7 +1638,7 @@ try {
       if (firstTerminal?.type !== 'turn.completed') {
         const storeHead = runMysql(
           mysqlPort,
-          `SELECT state, writer_generation, writer_id, writer_lease_until, NOW(6), journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+          `SELECT state, writer_generation, writer_id, writer_lease_until, ${databaseEpochMillisSql} AS observed_now, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
         );
         throw new Error(
           `First failover Turn ended with ${firstTerminal?.type ?? 'no terminal event'}; store head=${storeHead || 'missing'}`,
@@ -1757,7 +1760,7 @@ try {
       (remainingMs) =>
         runMysql(
           mysqlPort,
-          `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+          `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < (${databaseEpochMillisSql}), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
           remainingMs,
         ) === '1',
       10_000,
@@ -1768,7 +1771,7 @@ try {
         (remainingMs) =>
           runMysql(
             mysqlPort,
-            `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 1, 0) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
+            `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < (${databaseEpochMillisSql}), 1, 0) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
             remainingMs,
           ) === '1',
         10_000,

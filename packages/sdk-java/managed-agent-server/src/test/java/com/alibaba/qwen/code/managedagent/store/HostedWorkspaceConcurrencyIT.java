@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
@@ -239,7 +241,7 @@ class HostedWorkspaceConcurrencyIT {
     }
 
     private static Map<String, Object> row(JdbcTemplate jdbc, String tenant) {
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE tenant_id = ?", tenant);
+        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE tenant_id = ?", tenant);
     }
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {

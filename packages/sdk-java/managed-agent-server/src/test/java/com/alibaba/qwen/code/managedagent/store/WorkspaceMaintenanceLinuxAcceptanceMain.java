@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
@@ -98,8 +100,7 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
             state.put("keeperPid", keeper.pid());
             Files.write(stateFile, JSON.writeValueAsBytes(state));
             requireBlocked(() -> recovery.reconcileAfterReboot(binding, claimed.childWorkspaceId(), claimed.claimGeneration(), (String) original.get("executionId")));
-            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6))"
-                    + " WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ? AND claim_generation = ? AND tenant_id = ?",
+            jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ? AND claim_generation = ? AND tenant_id = ?",
                     claimed.childWorkspaceId(), claimed.claimGeneration(), tenant);
             if (children.claim(child, "replacement-before-reboot", System.currentTimeMillis(), 60_000) != null) {
                 throw new IllegalStateException("Expiry replaced an original physical hold");

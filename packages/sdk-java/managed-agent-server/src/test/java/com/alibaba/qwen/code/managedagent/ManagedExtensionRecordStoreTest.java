@@ -691,7 +691,7 @@ class ManagedExtensionRecordStoreTest {
                 "{\"prompt\":\"audit\"}".getBytes(StandardCharsets.UTF_8));
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id,"
-                + " session_id, agent_id, status, created_at, updated_at)"
+                + " session_id, agent_id, status, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
@@ -776,9 +776,7 @@ class ManagedExtensionRecordStoreTest {
                 "managed-input",
                 "{\"script\":\"return 1\"}".getBytes(StandardCharsets.UTF_8));
         String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ma_session (tenant_id,"
-                + " session_id, agent_id, status, created_at, updated_at)"
-                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
         String taskId = ManagedExtensionProjection.taskId(
@@ -2083,8 +2081,8 @@ class ManagedExtensionRecordStoreTest {
                         + " WHERE tenant_id = ? AND session_id = ?",
                 WORKSPACE, TENANT, sessionId) == 0) {
             jdbc.update("INSERT INTO ma_session (tenant_id,"
-                            + " session_id, agent_id, status, created_at,"
-                            + " updated_at, workspace_id,"
+                            + " session_id, agent_id, status, gmt_create,"
+                            + " gmt_modified, workspace_id,"
                             + " workspace_generation, workspace_storage_id,"
                             + " cwd_relative, context_config_ref,"
                             + " context_revision, workspace_config_ref,"
@@ -2127,8 +2125,8 @@ class ManagedExtensionRecordStoreTest {
         JsonNode first = chain.required("revisions").get(0);
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode monitor = first.required("monitorRun");
@@ -2175,8 +2173,8 @@ class ManagedExtensionRecordStoreTest {
         JsonNode first = chain.required("revisions").get(0);
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode monitor = first.required("monitorRun");

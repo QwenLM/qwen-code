@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -672,7 +674,7 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     private List<Map<String, Object>> head() {
-        return jdbc.queryForList("SELECT * FROM ma_session_head");
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head");
     }
 
     private void generate(boolean conversation) throws Exception {

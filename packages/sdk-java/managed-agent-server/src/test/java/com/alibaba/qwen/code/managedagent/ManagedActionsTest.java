@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -893,7 +895,7 @@ class ManagedActionsTest {
                             .header("Idempotency-Key", "disabled-ended")
                             .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
                     .path("id").asText();
-            var before = jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
+            var before = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
             var claim = sessions.claimOperation(tenant, session, endedOp, "stopped-worker", Duration.ofMinutes(10))
                     .orElseThrow();
             ended.change("expired", null);
@@ -905,7 +907,7 @@ class ManagedActionsTest {
             assertThat(result.state()).isEqualTo("FAILED");
             assertThat(result.claimGeneration()).isEqualTo(claim.claimGeneration());
             assertThat(actions.response(tenant, session, endedOp).errorCode()).isEqualTo("action_expired");
-            assertThat(jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
+            assertThat(jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
                     .isEqualTo(before);
         } finally {
             doReturn(true).when(harness).isAvailable();
@@ -1222,7 +1224,7 @@ class ManagedActionsTest {
                         .asText();
         String key = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
-                        + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,created_at,updated_at)"
+                        + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,gmt_create,gmt_modified)"
                         + " VALUES (?,'SESSION_CREATE_ACTOR',?,?,'ACTOR',?,?,?,?,?, ?,?,'COMPLETED',?,?)",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("fixture",tenant,key),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant), tenant,

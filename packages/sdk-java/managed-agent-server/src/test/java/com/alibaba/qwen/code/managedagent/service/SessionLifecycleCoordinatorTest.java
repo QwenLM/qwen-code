@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -269,7 +271,7 @@ class SessionLifecycleCoordinatorTest {
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
-                        + " delivery_state, created_at)"
+                        + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, 'tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
                         + " 'res-run-1', '" + taskKind + "', 'running', 'session',"
@@ -281,11 +283,10 @@ class SessionLifecycleCoordinatorTest {
                         + " (resource_key, session_scope_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at)"
+                        + " publish_command_id, state, gmt_create)"
                         + " VALUES (?, ?, 'tenant', 'workspace', ?,"
                         + " 'res-run-1', 'managed-input', 1, ?,"
-                        + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?,"
-                        + " 'command', 'REFERENCED', CURRENT_TIMESTAMP)",
+                        + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.resourceKey(
                         com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"),
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, bytes);
@@ -524,7 +525,7 @@ class SessionLifecycleCoordinatorTest {
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " created_at)"
+                        + " gmt_create)"
                         + " VALUES (?, ?, 'tenant',"
                         + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
                         + " 'res-team-1', 1)",
@@ -855,7 +856,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, completed_at, version)"
+                        + " gmt_create, gmt_modified, completed_at, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'FAILED', FALSE, 1, 2, 2, 1)",
                 world.child);
@@ -898,7 +899,7 @@ class SessionLifecycleCoordinatorTest {
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
                         + " payload_digest, status, submission_attempted,"
-                        + " created_at, updated_at, completed_at, version)"
+                        + " gmt_create, gmt_modified, completed_at, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'COMPLETED', TRUE, 1, 2, 2, 1)",
                 world.child);

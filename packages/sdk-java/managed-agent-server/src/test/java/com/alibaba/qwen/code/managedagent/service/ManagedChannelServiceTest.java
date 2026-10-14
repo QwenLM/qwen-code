@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -736,7 +738,7 @@ class ManagedChannelServiceTest {
             String crowdSession = "crowd-" + i + '-' + channel;
             jdbc.update("INSERT IGNORE INTO ma_session"
                             + " (tenant_id, session_id, agent_id, title,"
-                            + " status, created_at, updated_at)"
+                            + " status, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 'qwen-code', 'mail thread',"
                             + " 'ACTIVE', 1, 1)",
                     TENANT, crowdSession);
@@ -769,7 +771,7 @@ class ManagedChannelServiceTest {
         assertThat(listedChannel.platform()).isEqualTo("email");
         assertThat(listedChannel.state()).isEqualTo("connected");
         // Two bindings created inside one database millisecond tie on
-        // created_at and order by route key, so only the set is pinned.
+        // gmt_create and order by route key, so only the set is pinned.
         assertThat(listedChannel.routes())
                 .extracting(r -> r.platformEventId())
                 .containsExactlyInAnyOrder("1700:90", "1700:91");
@@ -831,14 +833,7 @@ class ManagedChannelServiceTest {
                  "run":{"state":"admitted","reason":null,"definition":null,"executionCallId":null,"effectId":"%s","dispatchId":null,"deliveryId":"%s","execution":null,"runtime":null,"delivery":{"target":"channel","state":"planned"}}}
                 """.formatted(deliveryId, routeId, "a".repeat(64), deliveryId,
                 "b".repeat(64), deliveryId, deliveryId);
-        jdbc.update("INSERT INTO ma_resource"
-                        + " (resource_key, session_scope_key, tenant_id, workspace_id,"
-                        + " session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'managed-channel_delivery',"
-                        + " 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED',"
-                        + " CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, ?, ?, 'managed-channel_delivery', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scopeKey(sessionId), resourceId), scopeKey(sessionId), TENANT, WORKSPACE, sessionId, resourceId,
                 body.length(), "c".repeat(64),
                 body.getBytes(StandardCharsets.UTF_8), "publish-" + resourceId);
@@ -847,7 +842,7 @@ class ManagedChannelServiceTest {
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
-                        + " delivery_state, created_at)"
+                        + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, 'channel_delivery', ?, ?,"
                         + " 1, ?, NULL, NULL, 'channel', 'planned', ?)",
                 scopeKey(sessionId),

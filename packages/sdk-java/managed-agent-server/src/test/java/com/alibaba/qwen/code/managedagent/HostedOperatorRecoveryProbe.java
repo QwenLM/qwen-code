@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
@@ -72,7 +74,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", id);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", id);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         String binding = execution.get("binding_id").toString();

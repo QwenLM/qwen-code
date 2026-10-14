@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
@@ -152,20 +154,17 @@ final class HostedSseGapProbe implements AutoCloseable {
     }
 
     private List<Map<String, Object>> events() {
-        return jdbc.queryForList("SELECT * FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY sequence_id", tenant, session);
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE tenant_id = ? AND session_id = ? ORDER BY sequence_id", tenant, session);
     }
 
     private void assertExecution(boolean finished) throws Exception {
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         if (!finished) executionId = execution.get("execution_call_id").toString();
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
         String storage = "storage-0";
-        var owner = jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
-                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
-                + " AND s.storage_id = ?",
+        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
         if (finished) assertThat(owner.get("holder_key")).isNull();

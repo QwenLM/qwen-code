@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -82,8 +84,8 @@ public class ManagedSchemaSessionStoreTest {
                 .isEqualTo(2);
         for (String scope : List.of(tenant, tenant + "other")) {
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, created_at,"
-                            + " updated_at) VALUES (?, ?, 'CONTROL', 1, 1)",
+                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, gmt_create,"
+                            + " gmt_modified) VALUES (?, ?, 'CONTROL', 1, 1)",
                     scope,
                     "same-private");
         }
@@ -305,8 +307,7 @@ public class ManagedSchemaSessionStoreTest {
         materialize();
         String original = messageBody("big");
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
-                        + " resource_key, tenant_id, session_id, created_at) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scope, scope, original, tenant, session);
         event("big", "b");
         clock.advance(Duration.ofSeconds(6));
@@ -347,7 +348,7 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     private void makeProjectionCandidatesDue() {
-        jdbc.update("UPDATE ma_resource SET retention_until = TIMESTAMP '2000-01-01 00:00:00' WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
+        jdbc.update("UPDATE ma_resource SET retention_until = 946684800000 WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
     }
 
     @Test
@@ -364,7 +365,7 @@ public class ManagedSchemaSessionStoreTest {
                                                 candidate, "same-owner", Duration.ofSeconds(1)))
                         .orElseThrow();
         jdbc.update(
-                "UPDATE ma_operation SET claim_until = TIMESTAMP '2000-01-01 00:00:00' WHERE"
+                "UPDATE ma_operation SET claim_until = 946684800000 WHERE"
                         + " operation_kind = 'RENAME' AND tenant_id = ?",
                 tenant);
         var current =
@@ -638,9 +639,7 @@ public class ManagedSchemaSessionStoreTest {
     void harnessOnlyHeadHasNoPrivateJournalReadAuthority() {
         String token = "a".repeat(32);
         jdbc.update(
-                "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
-                    + " harness_session_id, session_id, head_kind, created_at, updated_at) VALUES"
-                    + " (?, ?, ?, ?, ?, 'HARNESS', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(
                         tenant),
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -185,7 +187,7 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
                     assertThat(error.isRetryable()).isFalse();
                 });
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation)))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(409);
@@ -306,7 +308,7 @@ class WorkspaceLifecycleStoreTest {
             ManagedHookRecords.requireExecution(record);
             var ref = fixture.resource(event + "-record", "hook-execution", record);
             fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, created_at, first_sequence)"
+                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
                     + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                     ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
                     ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
@@ -377,7 +379,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle("tenant", fixture.session, "w".repeat(32), cleanup, authority));
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle(
                 "tenant", fixture.session, "w".repeat(32), dispatch, authority))).hasMessageContaining("writer");
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle(
                 "tenant", fixture.session, "w".repeat(32), cleanup, authority))).hasMessageContaining("blocked");
     }
@@ -409,7 +411,7 @@ class WorkspaceLifecycleStoreTest {
                 .hasMessageContaining("unavailable");
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'");
         execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary("tenant", fixture.session,
                 "w".repeat(32), legacy))).hasMessageContaining("admission is closed");
     }
@@ -490,7 +492,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.bindings.requireHarnessAdmission(scope, fixture.session, WorkspaceLifecycleStore.authority(first));
         assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(scope, fixture.session, null))
                 .hasMessageContaining("closed");
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         OperationRecord second = fixture.transactions.execute(ignored -> fixture.store.claimOperation(
                 "tenant", fixture.session, first.operationId(), "second", Duration.ofSeconds(30)).orElseThrow());
         assertThat(second.claimGeneration()).isGreaterThan(first.claimGeneration());
@@ -568,9 +570,7 @@ class WorkspaceLifecycleStoreTest {
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
-                    + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                    + " VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
             return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }

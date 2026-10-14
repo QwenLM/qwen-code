@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -67,7 +69,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         String scope = ManagedSessionStore.sessionScopeKey("neighbor", "other-session");
         String record = ManagedExtensionProjection.recordKey("other-session", "hook_execution", "other-hook");
         fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, created_at, first_sequence)"
+                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, gmt_create, first_sequence)"
                 + " VALUES (?, ?, 'neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)",
                 scope, record, "a".repeat(64));
         var entered = new CountDownLatch(1);
@@ -134,7 +136,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
                     "tenant", fixture.session, "w".repeat(32), ordinary))).isInstanceOfSatisfying(ApiException.class,
                             error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
-            fixture.jdbc.update("UPDATE ma_operation SET claim_until = CURRENT_TIMESTAMP(6) - INTERVAL 1 SECOND WHERE operation_id = ?", id);
+            fixture.jdbc.update("UPDATE ma_operation SET claim_until = " + ManagedSchemaTime.SQL_NOW + " - 1000 WHERE operation_id = ?", id);
             assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
                     .isFalse();
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(

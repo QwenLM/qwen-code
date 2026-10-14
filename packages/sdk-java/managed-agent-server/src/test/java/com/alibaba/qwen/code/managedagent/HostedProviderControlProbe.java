@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
@@ -158,16 +160,14 @@ final class HostedProviderControlProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(Map<String, Object> session) {
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
-                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
-                + " AND s.storage_id = ?",
+        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
     }

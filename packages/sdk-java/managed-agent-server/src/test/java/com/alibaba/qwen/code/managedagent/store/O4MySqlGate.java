@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -115,8 +117,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
             var objects = new O4FileObjects(root);
             assertThat(Files.exists(root.resolve("exact/one"))).isFalse();
-            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -60, CURRENT_TIMESTAMP(6))"
-                    + " WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?", scope);
+            jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -60000) WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?", scope);
             assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact/one", new byte[] {7}, objects))
                     .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
             assertThat(Files.exists(root.resolve("exact/one"))).isFalse();

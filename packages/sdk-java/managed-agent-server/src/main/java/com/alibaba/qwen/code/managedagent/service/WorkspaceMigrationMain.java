@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -78,7 +80,7 @@ public final class WorkspaceMigrationMain {
                     var local = LocalProcessRuntimeProvisioner.durable(List.of("maintenance-never-starts-worker"),
                             stateDirectory, http, false);
                     var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, sessionId -> {
-                        var found = jdbc.query("SELECT * FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
+                        var found = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                                 (row, index) -> ManagedAgentStore.readBinding(row),
                                 request.path("tenantId").asText(), sessionId);
                         if (found.size() != 1 || found.getFirst() == null) {

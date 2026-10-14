@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -98,8 +100,7 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     private void due(String operation) {
-        fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = CURRENT_TIMESTAMP(6)"
-                + " WHERE operation_id = ?", operation);
+        fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_id = ?", operation);
     }
 
     private void blockRecovery(String recovery) {
@@ -185,8 +186,7 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(other.verifyNextOperation()).isTrue();
         assertThat(other.verifyNextOperation()).isFalse();
         assertThat(status("csi").path("state").asText()).isEqualTo("PENDING");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
-                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
         assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class))
                 .isEqualTo("csi");
         due("csi");
@@ -606,8 +606,7 @@ public class ToolPublicationAsyncVerificationTest {
             bucket.readRelease.countDown();
             assertThat(attempt.get(5, TimeUnit.SECONDS)).isTrue();
             assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
-            assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
-                    + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
+            assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
             assertThat(verifier.runOnce()).isFalse();
             assertThatThrownBy(() -> publish("next", 1, "later")).hasMessageContaining("busy");
             due("retry");

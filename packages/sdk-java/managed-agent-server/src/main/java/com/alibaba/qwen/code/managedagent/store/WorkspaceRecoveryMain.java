@@ -26,7 +26,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
@@ -48,7 +47,7 @@ public final class WorkspaceRecoveryMain {
         // The private RPC loop is single-threaded; transactions still commit separately.
         try (var source = new SingleConnectionDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"),
                 requiredPresent("W1_JDBC_PASSWORD"), true)) {
-            var jdbc = new JdbcTemplate(source);
+            var jdbc = new ManagedSchemaJdbcTemplate(source);
             var manager = new DataSourceTransactionManager(source);
             var properties = new ManagedAgentProperties();
             properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -160,7 +162,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 }));
                 awaitLatch(reachedPublicLock);
                 assertThrows(TimeoutException.class, () -> queued.get().get(100, TimeUnit.MILLISECONDS));
-                jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_id = ?", claimed.operationId());
+                jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_id = ?", claimed.operationId());
                 return true;
             });
             assertThat(queued.get().get(5, TimeUnit.SECONDS)).isFalse();
@@ -220,10 +222,7 @@ class WorkspaceSessionRetentionMySqlIT {
         String projectionKey = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION,
                 projectionScope, digest, "result-1");
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id,"
-                + " tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, created_at, updated_at)"
-                + " VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1,"
-                + " TIMESTAMPADD(SECOND, 60, CURRENT_TIMESTAMP(6)), 0, 0)", projectionKey, projectionScope, projectionScope,
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1, (" + ManagedSchemaTime.SQL_NOW + " + 60000), 0, 0)", projectionKey, projectionScope, projectionScope,
                 digest, tenant, session, digest, digest);
         var projection = new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
         var claim = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source("result-1", tenant,
@@ -280,8 +279,7 @@ class WorkspaceSessionRetentionMySqlIT {
         String tenant = "renewal";
         String session = closed(store, tenant, true);
         // Restore a residual private writer to exercise the retirement safety check.
-        jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE',"
-                + " writer_lease_until = TIMESTAMPADD(SECOND, 60, CURRENT_TIMESTAMP(6))");
+        jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE', writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + 60000)");
         var deletion = deleteClaim(store, tenant, session);
         var sessions = new ManagedSessionStore(jdbc);
         var renewed = new CountDownLatch(1);

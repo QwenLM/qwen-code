@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
@@ -516,8 +518,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(report.path("fault").asText()).isEqualTo(fault);
         assertThat(target.path("workspaceId").asText()).isEqualTo(session.get("workspaceId"));
         assertThat(target.path("resources").isArray()).isTrue();
-        List<Map<String, Object>> committed = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation = ? AND command_id = ?",
+        List<Map<String, Object>> committed = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND operation = ? AND command_id = ?",
                 tenant, sessionId, target.path("operation").asText(), target.path("commandId").asText());
         assertThat(committed).as(fault + " target commit").hasSize(applied ? 1 : 0);
         assertThat(report.path("receipt").isMissingNode()).isEqualTo(!applied);
@@ -543,8 +544,7 @@ class HostedWorkspaceToolTurnIT {
                     .isEqualTo(target.path("lastSequence").asLong()).isEqualTo(receipt.path("committedSequence").asLong());
         }
         for (JsonNode resource : target.path("resources")) {
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT * FROM ma_resource"
-                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                     tenant, sessionId, resource.path("resourceId").asText());
             if (!applied) {
                 if (resource.has("bytesBase64")) assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -582,8 +582,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(restored).as(fault + " target restored exactly once").isEqualTo(applied ? 1 : 0);
 
         ObjectMapper mapper = new ObjectMapper();
-        List<Map<String, Object>> journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, sessionId);
+        List<Map<String, Object>> journal = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, sessionId);
         var transactionIds = new HashSet<String>();
         var eventIds = new HashSet<String>();
         List<JsonNode> events = new ArrayList<>();
@@ -618,8 +617,7 @@ class HostedWorkspaceToolTurnIT {
                 checkpointId = transaction.get("latest_checkpoint_resource_id");
             }
         }
-        Map<String, Object> head = jdbc.queryForMap("SELECT * FROM ma_session_head"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        Map<String, Object> head = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
