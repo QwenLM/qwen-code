@@ -458,6 +458,18 @@ describe('fitPendingSlice', () => {
     ).toBe(0);
   });
 
+  it('does not collapse the charge of an unclipped two-row vertical table', () => {
+    const lines = ['| A |', '| --- |', `| ${'x'.repeat(20)} |`];
+    expect(fitPendingSlice(lines, 20, 3, 2, false)).toEqual({
+      keptLines: 0,
+      clipped: true,
+    });
+    expect(fitPendingSlice(lines, 20, 4, 2, false)).toEqual({
+      keptLines: lines.length,
+      clipped: false,
+    });
+  });
+
   it('charges expanded tabs in code blocks', () => {
     expect(
       fitPendingSlice(['```', '\t'.repeat(6) + 'x', '```'], 24, 3, CLAMP)
@@ -501,6 +513,22 @@ describe('fitPendingSlice', () => {
     ).toBe(true);
   });
 
+  it('charges only the rendered rows of completed literal math', () => {
+    const lines = ['$$', 'a', 'b', 'c', '$$'];
+    expect(
+      fitPendingSlice(lines, 80, 3, CLAMP, false, {
+        rejectVisualBlocks: false,
+      }),
+    ).toEqual({ keptLines: lines.length, clipped: false });
+    expect(
+      fitPendingSlice(lines, 80, 2, CLAMP, false, {
+        rejectVisualBlocks: false,
+      }),
+    ).toEqual({ keptLines: 3, clipped: true });
+    expect(fitPendingSlice(lines, 80, 3, CLAMP).clipped).toBe(true);
+    expect(fitPendingSlice(lines, 80, 5, CLAMP).clipped).toBe(false);
+  });
+
   it('counts literal bounded math source without parsing internal fences or tables', () => {
     const lines = [
       '$$',
@@ -512,7 +540,7 @@ describe('fitPendingSlice', () => {
       'after',
     ];
     expect(
-      fitPendingSlice(lines, 80, lines.length, CLAMP, false, {
+      fitPendingSlice(lines, 80, lines.length - 2, CLAMP, false, {
         rejectVisualBlocks: false,
       }).clipped,
     ).toBe(false);

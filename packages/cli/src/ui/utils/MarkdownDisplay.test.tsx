@@ -106,6 +106,40 @@ describe('<MarkdownDisplay />', () => {
     },
   );
 
+  it.each([0, 1])(
+    'keeps exact-fit literal math and following steps with %s spare rows',
+    (spareRows) => {
+      const { lastFrame } = renderWithProviders(
+        <Box width={80} flexDirection="column">
+          <MarkdownDisplay
+            {...baseProps}
+            text={'$$\na\nb\nc\n$$\nStep 2\nStep 3'}
+            availableTerminalHeight={7 + spareRows}
+            enforceHeightBudget
+          />
+        </Box>,
+      );
+      expect(lastFrame()).toBe('a\nb\nc\nStep 2\nStep 3');
+    },
+  );
+
+  it('discloses steps that exceed the literal math budget', () => {
+    const { lastFrame } = renderWithProviders(
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={'$$\na\nb\nc\n$$\nStep 2\nStep 3'}
+          availableTerminalHeight={6}
+          enforceHeightBudget
+        />
+      </Box>,
+    );
+    expect(lastFrame()).toContain('Step 2');
+    expect(lastFrame()).not.toContain('Step 3');
+    expect(lastFrame()).toContain('1 more line not shown');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(6);
+  });
+
   it('still renders unbounded visuals when enforceHeightBudget has no height', () => {
     const { lastFrame } = renderWithProviders(
       <MarkdownDisplay
@@ -154,6 +188,24 @@ describe('<MarkdownDisplay />', () => {
     expect(lastFrame()).toContain('after');
     expect(lastFrame()).not.toContain('more lines');
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(17);
+  });
+
+  it('keeps a following step when a tiny table collapses to one cue row', () => {
+    const { lastFrame } = renderWithProviders(
+      <Box width={80} flexDirection="column">
+        <MarkdownDisplay
+          {...baseProps}
+          text={'| A | B |\n| --- | --- |\n| x | y |\nStep 2'}
+          availableTerminalHeight={6}
+          enforceHeightBudget
+        />
+      </Box>,
+    );
+    expect(lastFrame()).toContain('more rows not shown');
+    expect(lastFrame()).toContain('Step 2');
+    expect(lastFrame()).not.toContain('more lines');
+    expect(lastFrame()).not.toContain('┌');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(6);
   });
 
   it('retains a fitting pending frontier when following text would close it too tall', () => {

@@ -28,8 +28,11 @@ This is a CLI-only bugfix; no core, configuration, dependency, or protocol chang
   tail and hidden-row count, not an assistant-style head slice.
 - Completed enforceHeightBudget callers with an actual height budget render
   Mermaid as code and display-math as literal source. Math contents are not
-  reparsed as Markdown. This keeps following plan steps readable when they fit,
-  without guessing visual height; unbounded callers retain visual rendering.
+  reparsed as Markdown, and their invisible `$$` delimiters do not consume the
+  completed height budget. This keeps following plan steps readable when they
+  fit, without guessing visual height; unbounded callers retain visual rendering.
+  Plan confirmation passes the actual body width after margins and padding to
+  the shared renderer, so wrapping and height accounting use the same width.
 - Use Ink's word-aware wrap-ansi options for height accounting. Include list
   indentation/markers, render-mode task checkboxes, blockquote prefixes, and
   fenced-code padding, numbered gutters, and tab expansion. Count the code
@@ -44,7 +47,7 @@ This is a CLI-only bugfix; no core, configuration, dependency, or protocol chang
   while following text is retained. Skip the second layout when the first alone
   forces a cut. Count table height per rendered line. Wrap bounded table text only until overflow is known,
   not the invisible tail. Reserve margins and cues separately; tiny clamps show
-  only the cue rather than an isolated border.
+  and charge only the cue rather than an isolated border.
 - Do not mark complete results as streaming to obtain clipping. Callers without
   a budget retain full rendering. Only the plain-text tool preview registers
   expandable overflow; plan and assistant table cues are pure text. Keep the

@@ -183,7 +183,13 @@ export function fitPendingSlice(
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
     if (inMathBlock) {
-      if (/^ *\$\$ *$/.test(line)) inMathBlock = false;
+      if (/^ *\$\$ *$/.test(line)) {
+        inMathBlock = false;
+        if (!isPending) {
+          i++;
+          continue;
+        }
+      }
       rendered += estimateWrappedRows(line, contentWidth);
       if (rendered > budget) {
         kept = i;
@@ -260,6 +266,10 @@ export function fitPendingSlice(
         break;
       }
       inMathBlock = true;
+      if (!isPending) {
+        i++;
+        continue;
+      }
     }
     if (renderVisualBlocks && isTableStart(allLines, i)) {
       let j = i + 2;
@@ -270,8 +280,8 @@ export function fitPendingSlice(
       const rows = allLines
         .slice(i + 2, j)
         .map((row) => splitMarkdownTableRow(TABLE_ROW_RE.exec(row)![1]!));
-      const layoutRows = (isStreaming: boolean) =>
-        renderTableText({
+      const layoutRows = (isStreaming: boolean) => {
+        const renderedRows = renderTableText({
           headers,
           rows,
           contentWidth,
@@ -283,9 +293,17 @@ export function fitPendingSlice(
             (count, line) =>
               count + estimateWrappedRows(line, Math.max(1, contentWidth)),
             0,
-          ) + TABLE_MARGIN_ROWS;
-      const clampedRows = tableClampRows + TABLE_MARGIN_ROWS;
-      let cost = Math.min(layoutRows(isPending), clampedRows);
+          );
+        // TableText collapses tiny clamps to one cue only when actually clipped.
+        const keptRows =
+          renderedRows > tableClampRows
+            ? tableClampRows <= 2
+              ? 1
+              : tableClampRows
+            : renderedRows;
+        return keptRows + TABLE_MARGIN_ROWS;
+      };
+      let cost = layoutRows(isPending);
       if (rendered + cost > budget) {
         kept =
           i > 0 || !isPending || !keepFirstTable || budget <= TABLE_MARGIN_ROWS
@@ -294,7 +312,7 @@ export function fitPendingSlice(
         break;
       }
       if (isPending && j < allLines.length) {
-        const completedCost = Math.min(layoutRows(false), clampedRows);
+        const completedCost = layoutRows(false);
         // Keep a fitting frontier rather than drop it for unseen following text.
         if (rendered + completedCost > budget) {
           kept = j;

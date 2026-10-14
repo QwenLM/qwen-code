@@ -59,6 +59,32 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).not.toContain('**');
   });
 
+  it.each([false, true])(
+    'formats the real three-line answer at the minimum budget with pending=%s',
+    (isPending) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          isPending,
+          availableTerminalHeight: 9,
+          resultDisplay: {
+            type: 'ask_user_question_answers',
+            text: 'User has provided the following answers:\n\n**Color**: Blue',
+            answers: [
+              { question: 'Which color do you prefer?', answer: 'Blue' },
+            ],
+          },
+        }),
+      );
+      expect(lastFrame()).toContain('User has provided the following answers:');
+      expect(lastFrame()).toContain('Color: Blue');
+      expect(lastFrame()).not.toContain('**');
+      expect(lastFrame()).not.toContain('hidden');
+      expect(lastFrame()).toContain('overflow:0');
+      expect((lastFrame() ?? '').split('\n')).toHaveLength(5);
+    },
+  );
+
   it('keeps the tail of an overflowing completed Markdown result', () => {
     const { lastFrame } = renderWithProviders(
       resultWithOverflow({

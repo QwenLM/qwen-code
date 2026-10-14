@@ -10,7 +10,11 @@ import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
-import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
+import {
+  TableRenderer,
+  TABLE_MARGIN_ROWS,
+  type ColumnAlign,
+} from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
@@ -203,7 +207,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let droppedSourceLines = 0;
   const tableMaxHeight =
     pendingRenderedBudget !== undefined
-      ? Math.max(1, pendingRenderedBudget - 2)
+      ? Math.max(1, pendingRenderedBudget - TABLE_MARGIN_ROWS)
       : undefined;
   if (pendingRenderedBudget !== undefined) {
     const tableClampRows = tableMaxHeight ?? Number.MAX_SAFE_INTEGER;
@@ -215,7 +219,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       isPending,
       {
         renderVisualBlocks,
-        rejectVisualBlocks: !isPending && renderDiagrams,
+        rejectVisualBlocks: false,
         showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true,
       },
     );

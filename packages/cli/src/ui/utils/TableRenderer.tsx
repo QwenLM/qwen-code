@@ -74,8 +74,9 @@ interface TableRendererProps {
   /**
    * Maximum rendered text lines the table may occupy. When set and the fully
    * rendered table exceeds it, output is clipped to
-   * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
-   * overflowing the viewport and triggering the scroll-to-top lock.
+   * `maxHeight - 1` lines plus a cue, or only a cue when `maxHeight <= 2`.
+   * Backstop against a wrapped-cell table overflowing the viewport and
+   * triggering the scroll-to-top lock.
    */
   maxHeight?: number;
 }
