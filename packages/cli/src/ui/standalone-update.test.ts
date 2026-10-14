@@ -452,6 +452,7 @@ describe('standalone-update', () => {
         manifest?: Record<string, unknown>;
         rawManifest?: string;
         target?: string;
+        interpreterIdentity?: string;
       } = {},
     ) {
       const fixtureTarget = options.target ?? 'linux-x64';
@@ -488,7 +489,7 @@ describe('standalone-update', () => {
             'bin',
             options.runtime ?? 'node',
           ),
-          '#!/bin/sh\nprintf "1.2.3\\n"\n',
+          `#!/bin/sh\nif [ "$1" = "-e" ]; then\n  printf '%s\\n' '${options.interpreterIdentity ?? JSON.stringify({ runtime: options.runtime ?? 'node', platform: fixtureTarget.split('-')[0], arch: fixtureTarget.split('-')[1] })}'\nelse\n  printf "1.2.3\\n"\nfi\n`,
           { mode: 0o755 },
         );
         fs.writeFileSync(
@@ -546,6 +547,56 @@ describe('standalone-update', () => {
         expect(
           fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
         ).toBe(oldManifest);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32').each([
+      ['runtime', { runtime: 'node', platform: 'linux', arch: 'x64' }],
+      ['platform', { runtime: 'bun', platform: 'darwin', arch: 'x64' }],
+      ['arch', { runtime: 'bun', platform: 'linux', arch: 'arm64' }],
+      ['shape', []],
+    ])(
+      'rejects a mismatched interpreter %s before replacement',
+      async (_name, identity) => {
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          JSON.stringify({
+            target: 'linux-x64',
+            runtime: 'bun',
+            version: '0.1.0',
+          }),
+        );
+        const original = fs.readFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          'utf8',
+        );
+        const backup = `${standaloneDir}.old`;
+        fs.mkdirSync(backup);
+        fs.writeFileSync(path.join(backup, 'sentinel'), 'previous rollback');
+        await serveArchive({
+          runnable: true,
+          runtime: 'bun',
+          interpreterIdentity: JSON.stringify(identity),
+        });
+        const prepared = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
+        mockFetch.mockRejectedValue(new Error('offline'));
+        await expect(prepared.activate()).rejects.toThrow(
+          'interpreter identity',
+        );
+        expect(
+          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+        ).toBe(original);
+        expect(fs.readFileSync(path.join(backup, 'sentinel'), 'utf8')).toBe(
+          'previous rollback',
+        );
+        expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+          false,
+        );
+        expect(
+          fs
+            .readdirSync(tempDir)
+            .some((entry) => entry.startsWith('.qwen-code-update-')),
+        ).toBe(false);
       },
     );
 

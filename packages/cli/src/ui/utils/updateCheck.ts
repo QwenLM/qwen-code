@@ -14,6 +14,7 @@ import {
 } from '../../utils/installationInfo.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { getGlobalNpmRegistryConfig } from '../../utils/npm-registry-config.js';
 
 const debugLogger = createDebugLogger('UPDATE_CHECK');
 
@@ -170,15 +171,42 @@ export async function fetchGlobalNpmUpdateInfo(
   run: typeof execFileAsync = execFileAsync,
 ): Promise<UpdateInfo> {
   if (getInstallationInfo('', false).isStandalone) {
-    const registry =
-      process.env['npm_config_registry'] || 'https://registry.npmjs.org';
-    const url = new URL(
+    const { registry, authorization } = getGlobalNpmRegistryConfig(packageName);
+    let url = new URL(
       `-/package/${encodeURIComponent(packageName)}/dist-tags`,
-      registry.endsWith('/') ? registry : `${registry}/`,
+      registry,
     );
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    let auth = authorization;
+    let response: Response;
+    for (let redirects = 0; ; redirects++) {
+      response = await fetch(url, {
+        signal,
+        headers: auth ? { Authorization: auth } : undefined,
+        redirect: 'manual',
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location || redirects === 5) {
+        throw new Error('Invalid npm registry redirect');
+      }
+      let next: URL;
+      try {
+        next = new URL(location, url);
+      } catch {
+        throw new Error('Invalid npm registry redirect');
+      }
+      if (
+        !['https:', 'http:'].includes(next.protocol) ||
+        next.username ||
+        next.password
+      ) {
+        throw new Error('Invalid npm registry redirect');
+      }
+      if (next.origin !== url.origin) auth = undefined;
+      url = next;
+    }
     if (!response.ok)
       throw new Error(`Registry returned HTTP ${response.status}`);
     const tags: unknown = await response.json();

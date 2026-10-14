@@ -6,6 +6,9 @@
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import * as installationInfo from '../../utils/installationInfo.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   checkForUpdates,
   checkForUpdatesDetailed,
@@ -603,10 +606,20 @@ describe('classifyUpdateCheckError', () => {
 });
 
 describe('standalone update lookup', () => {
+  let configDir: string;
+  beforeEach(() => {
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'update-lookup-'));
+    for (const key of Object.keys(process.env)) {
+      if (/^npm_config_/i.test(key)) vi.stubEnv(key, undefined);
+    }
+    vi.stubEnv('npm_config_userconfig', path.join(configDir, 'user.npmrc'));
+    vi.stubEnv('npm_config_globalconfig', path.join(configDir, 'global.npmrc'));
+  });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
+    fs.rmSync(configDir, { recursive: true, force: true });
   });
 
   it('reads stable and nightly tags without invoking npm', async () => {
@@ -658,4 +671,50 @@ describe('standalone update lookup', () => {
       fetchGlobalNpmUpdateInfo('@qwen-code/qwen-code', '1.0.0', 'latest'),
     ).rejects.toThrow('HTTP 503');
   });
+
+  it.each(['same-origin', 'cross-origin'])(
+    'follows a %s redirect without forwarding credentials across origins',
+    async (mode) => {
+      vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+        packageManager: installationInfo.PackageManager.STANDALONE,
+        isGlobal: true,
+        isStandalone: true,
+      });
+      fs.writeFileSync(
+        path.join(configDir, 'user.npmrc'),
+        'registry=https://registry.test/\n//registry.test/:_authToken=dummy-token',
+      );
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: {
+              location:
+                mode === 'same-origin' ? '/tags' : 'https://other.test/tags',
+            },
+          }),
+        )
+        .mockResolvedValueOnce(new Response('{"latest":"1.2.3"}'));
+      vi.stubGlobal('fetch', fetch);
+      expect(
+        (
+          await fetchGlobalNpmUpdateInfo(
+            '@qwen-code/qwen-code',
+            '1.0.0',
+            'latest',
+          )
+        ).latest,
+      ).toBe('1.2.3');
+      expect(fetch.mock.calls[0][1].headers).toEqual({
+        Authorization: 'Bearer dummy-token',
+      });
+      expect(fetch.mock.calls[1][1].headers).toEqual(
+        mode === 'same-origin'
+          ? { Authorization: 'Bearer dummy-token' }
+          : undefined,
+      );
+      expect(fetch.mock.calls[0][1].signal).toBe(fetch.mock.calls[1][1].signal);
+    },
+  );
 });
