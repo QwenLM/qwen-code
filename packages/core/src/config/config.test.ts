@@ -10,7 +10,15 @@ import {
 } from '../hooks/hook-execution-context.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import type {
   ConfigParameters,
@@ -79,6 +87,7 @@ import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
 import { ShellTool } from '../tools/shell.js';
+import { TodoWriteTool } from '../tools/todoWrite.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
   getSessionProjectDir,
@@ -10982,6 +10991,57 @@ describe('setApprovalMode with folder trust', () => {
             todosDirectory: '../project-todos',
           }),
       ).toThrow('todosDirectory must resolve within the project root');
+    });
+
+    it('should still write todos after relocateWorkingDirectory', async () => {
+      const targetDir = await mkdtemp(path.join(os.tmpdir(), 'todos-anchor-'));
+      const otherDir = await mkdtemp(
+        path.join(os.tmpdir(), 'todos-anchor-other-'),
+      );
+      try {
+        const config = new Config({
+          ...baseParams,
+          targetDir,
+          todosDirectory: './project-todos',
+        });
+        await config.relocateWorkingDirectory(otherDir, undefined, {
+          skipProcessChdir: true,
+          skipArtifactMigration: true,
+        });
+
+        const result = await new TodoWriteTool(config)
+          .build({
+            todos: [{ id: '1', content: 'Keep the list', status: 'pending' }],
+          })
+          .execute(new AbortController().signal);
+
+        expect(result.returnDisplay).toEqual(
+          expect.objectContaining({
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Keep the list', status: 'pending' }],
+          }),
+        );
+        expect(config.getTargetDir()).toBe(otherDir);
+        expect(config.getTodosDir()).toBe(
+          path.join(targetDir, 'project-todos'),
+        );
+        const written = JSON.parse(
+          await readFile(
+            path.join(
+              targetDir,
+              'project-todos',
+              `${config.getSessionId()}.json`,
+            ),
+            'utf-8',
+          ),
+        ) as { todos: Array<{ id: string; content: string; status: string }> };
+        expect(written.todos).toEqual([
+          { id: '1', content: 'Keep the list', status: 'pending' },
+        ]);
+      } finally {
+        await rm(targetDir, { recursive: true, force: true });
+        await rm(otherDir, { recursive: true, force: true });
+      }
     });
 
     it('should reject configured todosDirectory symlink outside targetDir', () => {

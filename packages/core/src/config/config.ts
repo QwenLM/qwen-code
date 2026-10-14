@@ -3250,6 +3250,7 @@ export class Config {
   private readonly inputFile: string | undefined;
   private readonly plansDir: string;
   private readonly todosDir: string;
+  private readonly todosAnchorTargetDir: string;
   private readonly plansDirectoryConfigured: boolean;
   private readonly todosDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
@@ -3370,6 +3371,7 @@ export class Config {
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
     this.todosDirectoryConfigured = Boolean(params.todosDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
+    this.todosAnchorTargetDir = this.targetDir;
     this.todosDir = Storage.getTodosDir(this.targetDir, params.todosDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
@@ -9630,6 +9632,10 @@ export class Config {
 
   getTodosDir(): string {
     return this.todosDir;
+  }
+
+  getTodosAnchorTargetDir(): string {
+    return this.todosAnchorTargetDir;
   }
 
   isTodosDirectoryConfigured(): boolean {

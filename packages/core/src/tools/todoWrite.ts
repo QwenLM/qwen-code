@@ -123,9 +123,16 @@ function getTodoDirectoryContext(source?: string | Config): {
         isTodosDirectoryConfigured?: () => boolean;
       }
     ).isTodosDirectoryConfigured;
+    const anchorTargetDir = (
+      source as Config & {
+        getTodosAnchorTargetDir?: () => string;
+      }
+    ).getTodosAnchorTargetDir;
     return {
       todoDir,
-      projectRoot: source.getTargetDir?.(),
+      projectRoot: anchorTargetDir
+        ? anchorTargetDir.call(source)
+        : source.getTargetDir?.(),
       configured: configured
         ? configured.call(source)
         : isConfiguredTodoDir(todoDir),
