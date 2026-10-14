@@ -51,6 +51,7 @@ vi.mock('../serve/ssh-workspace-store.js', () => ({
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockMemoryHandler = vi.hoisted(() => vi.fn());
 const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
@@ -77,6 +78,14 @@ vi.mock('../commands/update.js', () => ({
     command: 'update',
     describe: 'mock update command',
     handler: mockUpdateHandler,
+  },
+}));
+
+vi.mock('../commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory <operation> <provider>',
+    describe: 'mock memory command',
+    handler: mockMemoryHandler,
   },
 }));
 
@@ -623,6 +632,29 @@ describe('parseArguments', () => {
     expect(mockExit).toHaveBeenCalledWith(0);
     mockExit.mockRestore();
   });
+
+  it.each([0, 1])(
+    'exits after memory commands with status %i',
+    async (exitCode) => {
+      const previousExitCode = process.exitCode;
+      process.argv = ['node', 'script.js', 'memory', 'import', 'codex'];
+      mockMemoryHandler.mockImplementation(() => {
+        process.exitCode = exitCode;
+      });
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+      try {
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
+        expect(mockMemoryHandler).toHaveBeenCalled();
+        expect(mockExit).toHaveBeenCalledWith(exitCode);
+      } finally {
+        mockExit.mockRestore();
+        mockMemoryHandler.mockReset();
+        process.exitCode = previousExitCode;
+      }
+    },
+  );
 
   it('propagates non-zero exitCode from the update handler', async () => {
     process.argv = ['node', 'script.js', 'update'];

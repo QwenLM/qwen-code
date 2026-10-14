@@ -49,6 +49,7 @@ const mocks = vi.hoisted(() => ({
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
   mcpRemoveHandler: vi.fn(),
+  runMemoryCommand: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
   runWorkspaceRecoveryWorker: vi.fn(),
@@ -70,6 +71,10 @@ vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
 
 vi.mock('./llm.js', () => ({
   main: mocks.main,
+}));
+
+vi.mock('./commands/memory.js', () => ({
+  runMemoryCommand: mocks.runMemoryCommand,
 }));
 
 vi.mock('./serve/fast-path.js', () => ({
@@ -134,6 +139,20 @@ vi.mock('./commands/mcp.js', () => ({
 }));
 
 describe('resolveBootstrapRoute', () => {
+  it('keeps memory operations and leading flags on the offline route', () => {
+    expect(
+      resolveBootstrapRoute(['memory', 'import', 'codex', '--dry-run']),
+    ).toBe('memory');
+    expect(
+      resolveBootstrapRoute(['--debug', 'memory', 'import', 'codex']),
+    ).toBe('memory');
+    expect(
+      resolveBootstrapRoute(['--model', 'test-model', 'memory', '--help']),
+    ).toBe('memory');
+    expect(resolveBootstrapRoute(['--prompt', 'memory'])).toBe('default');
+    expect(resolveBootstrapRoute(['--', 'memory'])).toBe('default');
+    expect(resolveBootstrapRoute(['explain', 'memory'])).toBe('default');
+  });
   it('routes top-level help, version, serve, mcp, and the Runtime worker correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
@@ -904,6 +923,19 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['memory', 'import', 'codex', '--dry-run'],
+    ['--debug', 'memory', 'import', 'codex'],
+  ])(
+    'runs memory commands offline without loading the full CLI graph: %j',
+    async (...argv) => {
+      await runCliEntry(argv);
+      expect(mocks.runMemoryCommand).toHaveBeenCalledWith(argv);
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+    },
+  );
+
   it('prints top-level help without loading the full CLI graph', async () => {
     await runCliEntry(['--help']);
 
@@ -921,6 +953,7 @@ describe('runCliEntry', () => {
     expect(helpText).toContain('Positional prompt.');
     expect(helpText).toContain('Manage Qwen Code hooks');
     expect(helpText).toContain('Manage MCP servers');
+    expect(helpText).toContain('Manage native memories offline');
     expect(helpText).toContain('Run Qwen Code as a local HTTP daemon');
     expect(helpText).toContain('--model');
     expect(helpText).toContain('-p, --prompt');
@@ -1847,6 +1880,7 @@ describe('bootstrap import boundaries', () => {
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
+      ['memoryCommand', 'memory'],
       ['reviewCommand', 'review'],
       ['sandboxCommand', 'sandbox'],
       ['serveCommand', 'serve'],

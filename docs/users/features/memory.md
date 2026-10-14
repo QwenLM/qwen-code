@@ -267,6 +267,87 @@ Runs the memory cleanup now instead of waiting for the automatic schedule:
 
 ---
 
+## Import selected Codex memories
+
+Use the offline import command to preview existing Codex memories without starting a model session:
+
+```bash
+qwen memory import codex --dry-run
+qwen memory import codex --source /path/to/codex/memories --dry-run --json
+```
+
+The default source is `$CODEX_HOME/memories`, or `~/.codex/memories` when `CODEX_HOME` is unset. With no `--select`, an interactive terminal opens review and lets you confirm importing; non-interactive commands only preview. `--dry-run` never writes memory files, indexes, import records, or locks, even when IDs are selected. Preview output and any full-text review snapshots contain private memory text; keep them out of repositories, shared logs, and PRs.
+
+The preview shows candidate IDs, text, source locations, destination directories, and status. It reads recognized user-profile and preference sections in `memory_summary.md`, and preference, reusable-knowledge, and lessons sections in `MEMORY.md`. These are candidates for your review, not automatic assertions that historical information is still correct. It does not import transcripts, rollout summaries, or skills.
+
+### Review in the terminal
+
+In an interactive terminal, previews open a browser with three views: groups, entries, and detail. Resolved project entries are grouped by memory destination and labeled with their resolved main project; user memory has its own group. Entries without a reliable project destination appear in a separate `User memory (global fallback)` group. Their list labels explicitly mark the global fallback; details and full text show the reason and any original project path. All eligible `ready` and `duplicate` candidates, including global fallbacks, are selected by default. Conflicts, blocked entries, and previously imported entries are excluded. Counts and status totals help you choose what to review first. Supplemental source notes and warnings share one `Source notes & warnings` review group.
+
+| Key                  | Action                                                                     |
+| -------------------- | -------------------------------------------------------------------------- |
+| `↑` / `↓`, `j` / `k` | Move through a list.                                                       |
+| `Enter`              | Open the focused group or item.                                            |
+| `Space`              | Toggle an eligible candidate or all eligible entries in the focused group. |
+| `Esc`                | Go back one view; cancel from the groups view.                             |
+| `d`                  | Close a dry-run preview; otherwise open import confirmation (same as `i`). |
+| `i`                  | Start import confirmation (unavailable during `--dry-run`).                |
+| `a` / `n`            | Select all eligible entries / clear all selections.                        |
+| `o`                  | Open the focused entry, source note, or warning from a list or detail.     |
+
+Selections remain checked when you move between groups. Other statuses, source notes, and warnings are readable but cannot be selected for import. Long details show a truncation notice; use `o` to read the complete text in the platform's default editor.
+
+The `o` action creates a private temporary review copy outside your repositories and memory directories. A temporary location inside the source, a native memory directory, or any Git checkout is rejected before the copy is created. It never opens the original source for editing, and changes to the copy do not affect the preview or any memory. Keep the preview open while reading the copy; review copies are removed when the preview closes. If the editor or temporary file cannot be opened, the preview reports the error and remains usable. Browsing, selecting, and closing without import confirmation or `o` create no files.
+
+To import interactively, run `qwen memory import codex` without `--dry-run` or `--select`. Review the default selection, press `i`, and choose **Import** in the confirmation (the initial choice is **Back to review**). The summary lists project/user counts and global fallbacks; if source amendment notes exist, the import action explicitly acknowledges reviewing them. `--dry-run` always stays read-only: close it and restart without those options to import. `--json` returns complete JSON, and redirected or non-interactive input/output keeps plaintext; without explicit IDs these modes only preview. These modes do not open the browser. The preview does not start a model session or make network requests.
+
+### Resolve projects and apply selected entries
+
+Global summary preferences go to user memory. Handbook entries, including project-specific feedback, stay project-scoped when an unambiguous project directory can be resolved. Otherwise the entry becomes a clearly marked global candidate; it is never silently assigned to the current project. If a known source project moved, supply an explicit mapping:
+
+```json
+{
+  "/old/projects/atlas": "/new/projects/atlas"
+}
+```
+
+Save the mapping outside your repository and preview it with `--project-map /path/to/project-map.json`. A mapping can keep a known moved project project-scoped instead of using the global fallback. Destinations follow native runtime and project-scope settings; imports into repository-local memory or any Git checkout are refused. Team memory is never a destination.
+
+For Codex imports, a verified Git worktree or repository subdirectory resolves to the main checkout before applying native runtime and memory settings. Exact mappings are applied first, so a mapping to a worktree also resolves to its main project. The preview preserves the original `sourceProject` and displays `resolvedProject`; entries from the same main project share a group, destination, duplicate checks, and conflict checks. Separate clones and submodules remain separate projects; non-Git directories keep their explicit scope. This import rule does not change Qwen's usual per-worktree memory recall.
+
+Unverifiable Git metadata, bare repositories, unsupported linked-worktree layouts, and missing project directories produce global fallback candidates with an explanation. Repair metadata or map the exact source path to an existing main checkout to keep those entries project-scoped. The importer never guesses repositories from directory names or remotes.
+
+An explicit `cwd` can include supplemental worktree, source-reference, or branch annotations: `cwd=/work/atlas and worktree=/work/atlas-feature` still belongs to `/work/atlas`. Backtick-quote paths containing scope delimiters such as commas or parentheses. Quoted or unquoted branch annotations are accepted. Named worktrees remain associated with the primary cwd; `or atlas worktree` is treated as the same project only when `atlas` exactly matches the cwd basename. A parenthesized `rollout metadata cwd=...` is historical provenance, not a second primary project. Other multiple scopes, conflicting primary cwd values, wildcards, and unsupported annotations become global fallback candidates.
+
+JSON exposes the effective `scope` (`user` or `project`). For global fallback candidates, `scopeReason` explains why project ownership could not be established; it remains visible even if `reason` later reports a duplicate or conflict. Global fallback makes the selected memory available across projects, so review its applicability before confirming the default selection. Fallback entries are clearly labeled and counted separately in the confirmation; they are never written just by opening the preview. Credential blocks, unsafe destinations, source-reading failures, and invalid ledgers are not bypassed by fallback.
+
+For scripted import, review the text and destinations, then supply specific IDs:
+
+```bash
+qwen memory import codex --source /path/to/codex/memories --select <candidate-id>
+```
+
+If the source has supplemental `extensions/ad_hoc/notes/*.md` files, the preview includes them as review material. They may amend or delete information in the handbook. Resolve their meaning while selecting entries; the importer cannot interpret arbitrary prose deletion requests. Scripted import also requires `--review-source <sourceDigest>` from the unchanged preview. Interactive import supplies the displayed digest after you confirm that the notes have been reviewed. A changed source requires a fresh preview and review.
+
+| Status                | Meaning                                                                                                                 |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `ready`               | Can be imported when explicitly selected.                                                                               |
+| `duplicate`           | Exact normalized content is already present or repeated in this batch.                                                  |
+| `conflict`            | An imported source/document changed, or a destination/title already exists with different content. No overwrite occurs. |
+| `previously-imported` | Already handled; missing documents are not recreated after forgetting or consolidation.                                 |
+| `blocked`             | A known credential pattern was detected; content is redacted.                                                           |
+| `imported`            | The selected new native document was written.                                                                           |
+
+Deduplication uses normalized exact text within each destination; it is not semantic contradiction detection. Selecting a conflict or blocked entry stops the import before memory writes. Existing topic files are never overwritten. Known source update times are preserved; unknown source dates are labeled unknown.
+
+The private `.codex-import.json` ledger remains after Qwen edits, consolidates, or forgets imported notes. Do not delete it when cleaning up memory: it prevents a later import from restoring forgotten content. The importer reserves entries before creating documents; an interrupted import may leave a reserved entry requiring manual inspection instead of automatically retrying it. A `.codex-import.lock` prevents concurrent imports; remove a leftover lock only after confirming that no import is running. Index generation follows the existing native limits.
+
+Candidate IDs remain stable for text edits within the same slot. Changing headings or inserting/reordering entries may change IDs or produce conservative conflicts; preview again after reorganizing the source.
+
+Import is a one-time snapshot. Codex continues to own its source files, and Qwen owns imported copies. There is no automatic synchronization or overwrite of later Qwen corrections.
+
+---
+
 ## Troubleshooting
 
 ### Qwen isn't following my QWEN.md

@@ -40,6 +40,7 @@ initCpuProfiler();
 type BootstrapRoute =
   | 'serve'
   | 'mcp'
+  | 'memory'
   | 'managed-runtime-worker'
   | 'session-send-mcp'
   | 'help'
@@ -58,6 +59,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
   ['mcp', 'Manage MCP servers'],
+  ['memory <command>', 'Manage native memories offline'],
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
@@ -375,6 +377,9 @@ export function resolveBootstrapRoute(
   const fastPathSafe = argvSafeForFastPath(argv);
 
   const firstPositional = firstPositionalArg(argv);
+  if (firstPositional === 'memory') {
+    return 'memory';
+  }
   if (
     fastPathSafe &&
     hasFlag(argv, '--help', '-h') &&
@@ -580,6 +585,10 @@ export async function runCliEntry(
     }
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
+    return;
+  } else if (route === 'memory') {
+    const { runMemoryCommand } = await import('./commands/memory.js');
+    await runMemoryCommand(argv);
     return;
   } else if (route === 'managed-runtime-worker') {
     const containerBoot =
