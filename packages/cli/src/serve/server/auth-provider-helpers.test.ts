@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { parseAuthProviderInstallRequest } from './auth-provider-helpers.js';
+import {
+  buildAuthProviderCatalog,
+  parseAuthProviderInstallRequest,
+} from './auth-provider-helpers.js';
 
 const request = {
   providerId: 'custom-openai-compatible',
@@ -93,4 +96,22 @@ describe('advanced form replacement', () => {
       });
     },
   );
+});
+
+describe('buildAuthProviderCatalog', () => {
+  it('lists QwenCloud first with both of its access methods', () => {
+    const catalog = buildAuthProviderCatalog('/tmp/workspace');
+    expect(catalog.workspaceCwd).toBe('/tmp/workspace');
+    expect(catalog.groups[0]).toMatchObject({
+      id: 'qwencloud',
+      label: 'QwenCloud',
+      providerIds: ['qwencloud-token-plan', 'qwencloud-standard'],
+    });
+    expect(catalog.groups.map((group) => group.id)).toEqual([
+      'qwencloud',
+      'alibaba',
+      'third-party',
+      'custom',
+    ]);
+  });
 });

@@ -1454,6 +1454,7 @@ describe('the wizard frame keeps its natural height', () => {
     // later Esc.
     const { onClose } = renderDialog({ availableTerminalHeight: 6 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('QwenCloud')).toBeNull();
     expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
     expect(screen.queryByText('Third-party Providers')).toBeNull();
 

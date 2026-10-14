@@ -11,6 +11,10 @@ import {
   QWENCLOUD_CHINA_BASE_URL,
   QWENCLOUD_GLOBAL_BASE_URL,
 } from '../../presets/qwencloud-standard.js';
+import {
+  qwencloudTokenPlanProvider,
+  QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+} from '../../presets/qwencloud-token-plan.js';
 import { tokenPlanProvider } from '../../presets/alibaba-token-plan.js';
 import { alibabaStandardProvider } from '../../presets/alibaba-standard.js';
 import { codingPlanProvider } from '../../presets/alibaba-coding-plan.js';
@@ -135,6 +139,34 @@ describe('qwencloudStandardProvider', () => {
     expect(qwencloudOwns?.(modelstudioModel)).toBe(false);
     expect(modelstudioOwns?.(modelstudioModel)).toBe(true);
     expect(modelstudioOwns?.(qwencloudModel)).toBe(false);
+  });
+
+  it('never claims the QwenCloud Token Plan sibling, nor a foreign key on its own endpoint', () => {
+    // Both QwenCloud presets share uiGroup, catalog and protocol bucket, so
+    // this envKey gate is the only thing keeping applyModelProvidersPatch from
+    // dropping a Token Plan install when the Standard wizard re-runs.
+    const owns = qwencloudStandardProvider.ownsModel!;
+    expect(
+      owns({
+        id: 'qwen3.8-max',
+        envKey: 'QWENCLOUD_TOKEN_PLAN_API_KEY',
+        baseUrl: QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+      }),
+    ).toBe(false);
+    expect(
+      owns({
+        id: 'qwen3.8-max',
+        envKey: 'MY_OWN_ENV_KEY',
+        baseUrl: QWENCLOUD_CHINA_BASE_URL,
+      }),
+    ).toBe(false);
+    expect(
+      qwencloudTokenPlanProvider.ownsModel!({
+        id: 'qwen3.8-max',
+        envKey: 'QWENCLOUD_API_KEY',
+        baseUrl: QWENCLOUD_CHINA_BASE_URL,
+      }),
+    ).toBe(false);
   });
 
   it('matches credentials for both platforms but not ModelStudio endpoints', () => {
