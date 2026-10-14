@@ -48,8 +48,10 @@ describe('SpotBugs gate witness', () => {
     );
     const byName = (name) => steps.filter((step) => step.name === name);
 
+    // Hosted MySQL, MariaDB and the EventTransport broker gates each stage
+    // the sibling modules before their own verify.
     const staging = byName('Install Managed Agent dependencies');
-    expect(staging.length).toBe(2);
+    expect(staging.length).toBe(3);
     for (const step of staging) {
       const brokerInstall = step.run
         .split('\n')
@@ -61,8 +63,9 @@ describe('SpotBugs gate witness', () => {
       ...byName('Run Runtime Broker MySQL integration tests'),
       ...byName('Run Managed Agent tests, Checkstyle, and MySQL integration'),
       ...byName('Verify Hosted Java, Spring and MySQL processes'),
+      ...byName('Verify the EventTransport broker gates'),
     ];
-    expect(enforcing.length).toBe(3);
+    expect(enforcing.length).toBe(4);
     for (const step of enforcing) {
       expect(step.run).toContain('verify');
       expect(step.run).not.toContain('spotbugs.skip');
@@ -83,6 +86,7 @@ describe('SpotBugs gate witness', () => {
       step.run?.includes('spotbugs.skip'),
     );
     expect(withSkip.map((step) => step.name)).toEqual([
+      'Install Managed Agent dependencies',
       'Install Managed Agent dependencies',
       'Install Managed Agent dependencies',
     ]);

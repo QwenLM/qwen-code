@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
@@ -123,6 +124,11 @@ class WorkspaceCsiRuntimeIdentityTest {
             WorkspaceCsiRuntimeIdentity.verify(original);
             assertThat(WorkspaceCsiRuntimeIdentity.expectedPod(original).get("uid")).isEqualTo(UID);
             assertThat(WorkspaceCsiRuntimeIdentity.boot(original).get("version")).isEqualTo(3);
+            com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.verify(original);
+            assertThat(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.expectedPod(original))
+                    .isEqualTo(WorkspaceCsiRuntimeIdentity.expectedPod(original));
+            assertThat(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.boot(original))
+                    .isEqualTo(WorkspaceCsiRuntimeIdentity.boot(original));
             assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
                     .doesNotContain(original.getProvisionSeed().getToken());
             var pod = api.objects.get("pods");
