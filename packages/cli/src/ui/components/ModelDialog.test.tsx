@@ -2310,27 +2310,24 @@ describe('<ModelDialog />', () => {
 
   it('writes an empty-string tombstone for model.baseUrl at workspace scope when baseUrl carries credentials', async () => {
     const credentialUrl = 'https://user:sk-secret@api.example.com/v1';
-    const { mockSettings } = renderComponent(
-      { persistScope: 'workspace' },
-      {
-        getModel: vi.fn(() => 'gpt-4'),
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        switchModel: vi.fn().mockResolvedValue(undefined),
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: 'gpt-4',
-            label: 'GPT-4',
-            authType: AuthType.USE_OPENAI,
-            baseUrl: credentialUrl,
-          },
-        ]),
-        getContentGeneratorConfig: vi.fn(() => ({
+    const { mockSettings } = renderComponent({ persistScope: 'workspace' }, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
           authType: AuthType.USE_OPENAI,
-          model: 'gpt-4',
           baseUrl: credentialUrl,
-        })),
-      } as unknown as Partial<Config>,
-    );
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+        baseUrl: credentialUrl,
+      })),
+    } as unknown as Partial<Config>);
 
     await act(async () => {
       await mockedSelect.mock.calls[0][0].onSelect(

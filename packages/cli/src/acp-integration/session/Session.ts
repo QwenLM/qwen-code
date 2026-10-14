@@ -12270,10 +12270,6 @@ export class Session implements SessionContext {
         (persistScope === SettingScope.Workspace
           ? this.settings.user.settings.security?.auth?.selectedType
           : undefined);
-      const persistedBaseUrl =
-        resolvedRoute && !resolvedRoute.isRuntime
-          ? (resolvedRoute.baseUrl ?? '')
-          : '';
       // Keep the OpenAI choice when id-only startup can recover Responses.
       // Raw models and same-id routes across wires need the effective type.
       let persistedAuthType = effectiveAuthType;
