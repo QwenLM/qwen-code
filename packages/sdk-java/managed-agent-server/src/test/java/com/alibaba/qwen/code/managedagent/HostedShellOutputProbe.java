@@ -75,8 +75,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String key = sha256((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8));
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", key);
+        return HostedProbeStorageOwners.owner(jdbc, tenant, "storage-" + sessions.indexOf(session));
     }
 
     private List<?> owned() {

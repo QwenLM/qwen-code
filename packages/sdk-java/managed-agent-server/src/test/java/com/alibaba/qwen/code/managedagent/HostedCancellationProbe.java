@@ -96,8 +96,7 @@ final class HostedCancellationProbe implements AutoCloseable {
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String storageKey = sha256((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8));
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        return HostedProbeStorageOwners.owner(jdbc, tenant, "storage-" + sessions.indexOf(session));
     }
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {

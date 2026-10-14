@@ -16,11 +16,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -166,9 +164,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8)));
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", key);
+        return HostedProbeStorageOwners.owner(jdbc, tenant, "storage-" + sessions.indexOf(session));
     }
 
     private String sessionState(Map<String, Object> session, String runtimeId) {
