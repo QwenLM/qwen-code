@@ -91,7 +91,7 @@ export function MemoryMessage({
   const selectedEntry =
     selectedTab === 'auto'
       ? undefined
-      : entries.find((entry) => entry.scope === selectedTab) ?? entries[0];
+      : (entries.find((entry) => entry.scope === selectedTab) ?? entries[0]);
 
   // Replace needs both the file's full text and the list that says whether
   // the file exists. While the status load is outstanding (`status` is

@@ -3148,8 +3148,7 @@ const EN: Messages = {
     'Another goal control is still running. Try again once it finishes.',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
-  'memory.autoContentUnavailable':
-    'Content is not available for this entry.',
+  'memory.autoContentUnavailable': 'Content is not available for this entry.',
   'memory.autoEmpty': 'No auto-memory entries yet.',
   'memory.autoMemoryTab': 'Auto memory',
   'memory.autoNotInitialized':
