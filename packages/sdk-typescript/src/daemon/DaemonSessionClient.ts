@@ -670,7 +670,11 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.cancel().catch(() => {});
+          this.client
+            .cancel(this.sessionId, this.clientId, {
+              cancelReason: 'interrupted',
+            })
+            .catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -882,6 +886,13 @@ export class DaemonSessionClient {
     } finally {
       this.reattaching = undefined;
     }
+  }
+
+  /** Stop lifecycle work while preserving recovery; use cancel() for a user stop. */
+  async interrupt(): Promise<void> {
+    await this.client.cancel(this.sessionId, this.clientId, {
+      cancelReason: 'interrupted',
+    });
   }
 
   async cancel(): Promise<void> {
