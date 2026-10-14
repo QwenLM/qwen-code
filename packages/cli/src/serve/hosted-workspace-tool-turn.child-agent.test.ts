@@ -1558,25 +1558,29 @@ it.each([false, true])(
       await original.close();
       await hooks.ensureReady();
       expect(hooks.mountHeld).toBe(false);
-      const result = executeAgent(
-        turn,
-        call({
-          description: 'audit',
-          prompt: 'review',
-          run_in_background: background,
-        }),
-      );
-      if (!background) {
-        await vi.waitFor(() =>
-          expect(children.record('prompt:call-1')).toBeDefined(),
-        );
-        await children.settleFailed('prompt:call-1', {
-          stopReason: 'creation_failed',
-          reason: null,
-          started: false,
-        });
-      }
-      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
+      const [result] = await Promise.all([
+        executeAgent(
+          turn,
+          call({
+            description: 'audit',
+            prompt: 'review',
+            run_in_background: background,
+          }),
+        ),
+        (async () => {
+          if (background) return;
+          await vi.waitFor(
+            () => expect(children.record('prompt:call-1')).toBeDefined(),
+            { timeout: 10_000 },
+          );
+          await children.settleFailed('prompt:call-1', {
+            stopReason: 'creation_failed',
+            reason: null,
+            started: false,
+          });
+        })(),
+      ]);
+      expect(JSON.stringify(result)).not.toContain(mountRefusal);
       expect(children.record('prompt:call-1')).toBeDefined();
       expect(
         broker.hookControl.mock.calls.filter(
@@ -1668,25 +1672,29 @@ it.each(
       output: {},
     }));
     try {
-      const result = executeAgent(
-        turn,
-        call({
-          description: 'audit',
-          prompt: 'review',
-          run_in_background: background,
-        }),
-      );
-      if (!background) {
-        await vi.waitFor(() =>
-          expect(children.record('prompt:call-1')).toBeDefined(),
-        );
-        await children.settleFailed('prompt:call-1', {
-          stopReason: 'creation_failed',
-          reason: null,
-          started: false,
-        });
-      }
-      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
+      const [result] = await Promise.all([
+        executeAgent(
+          turn,
+          call({
+            description: 'audit',
+            prompt: 'review',
+            run_in_background: background,
+          }),
+        ),
+        (async () => {
+          if (background) return;
+          await vi.waitFor(
+            () => expect(children.record('prompt:call-1')).toBeDefined(),
+            { timeout: 10_000 },
+          );
+          await children.settleFailed('prompt:call-1', {
+            stopReason: 'creation_failed',
+            reason: null,
+            started: false,
+          });
+        })(),
+      ]);
+      expect(JSON.stringify(result)).not.toContain(mountRefusal);
       expect(children.record('prompt:call-1')).toBeDefined();
     } finally {
       await turn.finish();
