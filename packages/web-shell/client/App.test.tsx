@@ -46762,3 +46762,184 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
     }
   });
 });
+
+describe('App view navigation shortcuts (#13175)', () => {
+  // Same marker the shell-ref overview test uses: the panel container with a
+  // stable aria-label (the session table viewport is virtualized and does not
+  // render in jsdom).
+  const OVERVIEW_PANEL =
+    '[data-testid="inline-panel"][aria-label="Session Overview"]';
+
+  function pressViewShortcut(init: KeyboardEventInit): void {
+    window.dispatchEvent(new KeyboardEvent('keydown', init));
+  }
+
+  it('opens the Session Overview panel with Cmd+Shift+O', async () => {
+    const { container } = renderApp();
+    await flush();
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    await act(async () => {
+      pressViewShortcut({
+        key: 'O',
+        code: 'KeyO',
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('opens the split view with Ctrl+Backslash', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      pressViewShortcut({
+        key: '\\',
+        code: 'Backslash',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('matches the physical key, not the produced character (RU layout)', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      // On the Russian layout the physical O key produces "л".
+      pressViewShortcut({
+        key: 'л',
+        code: 'KeyO',
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('does not fire from the character alone (KeyL typing "o")', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      pressViewShortcut({
+        key: 'o',
+        code: 'KeyL',
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+  });
+
+  it('skips both shortcuts while a dialog is open (Esc keeps priority)', async () => {
+    const { container } = renderApp();
+    await flush();
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    document.body.appendChild(dialog);
+    try {
+      await act(async () => {
+        pressViewShortcut({
+          key: 'O',
+          code: 'KeyO',
+          metaKey: true,
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        pressViewShortcut({
+          key: '\\',
+          code: 'Backslash',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        await Promise.resolve();
+      });
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+    } finally {
+      dialog.remove();
+    }
+  });
+
+  it('ignores alt-combos, unmodified presses, and key auto-repeat', async () => {
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      pressViewShortcut({
+        key: 'O',
+        code: 'KeyO',
+        metaKey: true,
+        shiftKey: true,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      pressViewShortcut({
+        key: '\\',
+        code: 'Backslash',
+        bubbles: true,
+        cancelable: true,
+      });
+      pressViewShortcut({
+        key: 'O',
+        code: 'KeyO',
+        metaKey: true,
+        shiftKey: true,
+        repeat: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await Promise.resolve();
+    });
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
+  it('does not hijack keys targeted at the web terminal', async () => {
+    const { container } = renderApp();
+    await flush();
+    const terminal = document.createElement('div');
+    terminal.setAttribute('data-web-terminal', '');
+    const input = document.createElement('input');
+    terminal.appendChild(input);
+    document.body.appendChild(terminal);
+    try {
+      await act(async () => {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'O',
+            code: 'KeyO',
+            metaKey: true,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        await Promise.resolve();
+      });
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    } finally {
+      terminal.remove();
+    }
+  });
+});

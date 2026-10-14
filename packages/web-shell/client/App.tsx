@@ -18678,6 +18678,32 @@ export function App({
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
   }, [interactionBlocked, handleClearScreen, handleRetry, store, t]);
 
+  useEffect(() => {
+    // View navigation hotkeys mirroring the sidebar buttons: Cmd/Ctrl+Shift+O
+    // opens the Session Overview panel, Cmd/Ctrl+\ opens Split View. Match the
+    // physical key (e.code) rather than the produced character so the
+    // shortcuts work on non-QWERTY layouts without switching to English.
+    const onViewShortcut = (e: KeyboardEvent) => {
+      if (e.repeat || e.isComposing) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.altKey) return;
+      if (isWebTerminalTarget(e)) return;
+      // Keep Esc dialog priority: skip while any dialog is open.
+      if (document.querySelector('[role=dialog]')) return;
+      if (e.shiftKey && e.code === 'KeyO') {
+        e.preventDefault();
+        e.stopPropagation();
+        shellApi.openSessionOverview();
+      } else if (!e.shiftKey && e.code === 'Backslash') {
+        e.preventDefault();
+        e.stopPropagation();
+        shellApi.openSplitView();
+      }
+    };
+    window.addEventListener('keydown', onViewShortcut, true);
+    return () => window.removeEventListener('keydown', onViewShortcut, true);
+  }, [shellApi]);
+
   const resetEscapeState = useCallback(() => {
     escArmedActionRef.current = null;
     setEscapeHintVisible(false);
