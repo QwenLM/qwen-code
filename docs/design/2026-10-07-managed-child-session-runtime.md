@@ -141,6 +141,28 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 1. **The G3 reset mark is evidence-neutral, never evidence-negative.** `withdrawSubmissionAttempted` after a lost reply leaves the Turn `CANCELLED` with neither dispatch mark nor epoch — the identical field shape as the genuine pre-admission failure — while the historical binding remains, so the terminal shape `FAILED|CANCELLED && !dispatched()` still cannot prove never-started alone. The intent reconciliation now orders its evidence: an outstanding Turn outcome (live, neither dispatched nor terminal pre-admission) always owes the bounded defer; the proven pair or the historical binding row takes the dispatch replay with the same identity; only their joint absence plus a terminal pre-admission failure settles the named never-started pairing. Terminal status never upgrades a reset to a proof.
 
+## Cold control-plane child attachments (#13838)
+
+Child-result relay and lifecycle/task cancellation verbs write existing
+child-run records; they do not admit a new parent input. When the connector
+cache is empty but the Session records a prior Harness attachment, the
+connector reloads that original Session with passive recovery before sending
+the child operation. It does not set `driveRuntimeRecovery` or cancellation
+takeover. A parked parent Turn remains owned by its coordinator.
+
+The existing passive-load path preserves Workspace/profile authorization,
+approval-mode confirmation, pinned AgentDefinition and generation checks. The
+attachment resolves before the current client is read, and subsequent child
+operations reuse the verified attachment. A refused load or unknown operation
+continues through the existing relay reconciliation; no success or terminal
+child result is invented to hide a failure.
+
+The connector regression models a resident Harness refusing an ordinary cold
+load after a control-plane restart, and requires the passive/no-drive load of
+the same Session followed by successful child operations without repeated
+loading. This is controlled connector evidence; physical restart and durable
+relay settlement require the separate isolated Hosted fault acceptance.
+
 ## Follow-up work
 
 | Slice     | Scope                                                                                                                                                                                                                                                                                                                                                                                                                                 |

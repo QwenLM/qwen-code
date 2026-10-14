@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 
@@ -131,6 +132,39 @@ describe('build artifact — package boundary', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
+  });
+
+  it('bundles Pierre highlighter dependencies instead of resolving the host Shiki major', () => {
+    const notices = readFileSync(resolve(DIST_DIR, '../NOTICES.txt'), 'utf8');
+    for (const name of ['diffs', 'trees', 'theming', 'theme']) {
+      expect(notices).toContain(`@pierre/${name}@`);
+    }
+    const treeAttribution = notices
+      .split('@pierre/trees@')[1]!
+      .split(
+        '============================================================',
+      )[0]!;
+    // This is the bundled tree's NOTICE credit, not a separate dependency entry.
+    expect(treeAttribution).toContain('Original license for');
+    expect(treeAttribution).toContain('headless-tree/core');
+    expect(notices).toContain('shiki@4.');
+    expect(readPackageJavascript()).not.toMatch(
+      /(?:from\s*|import\s*\()\s*["']@pierre\//,
+    );
+    const previews = readdirSync(DIST_DIR).filter((name) =>
+      /^PierreFilePreview-.*\.js$/.test(name),
+    );
+    expect(previews).toHaveLength(1);
+    const preview = readFileSync(resolve(DIST_DIR, previews[0]!), 'utf8');
+    expect(preview).not.toMatch(/from\s+["']shiki["']/);
+    expect(preview).toContain('createJavaScriptRegexEngine');
+    const hostHighlighter = readdirSync(DIST_DIR).find((name) =>
+      /^codeHighlighter-.*\.js$/.test(name),
+    );
+    expect(hostHighlighter).toBeDefined();
+    expect(readFileSync(resolve(DIST_DIR, hostHighlighter!), 'utf8')).toContain(
+      'from "shiki"',
+    );
   });
 
   it('scopes every component CSS rule to a WebShell root', () => {
@@ -473,10 +507,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
     // Managed task panel's copy (#13936) stays stubbed out of this entry.
     // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
-    // preview adds shared locale strings while its parser, worker and markup
-    // remain in the lazy SpreadsheetPreview chunk. Teammate activity notices
-    // add attributed tool and inter-agent message bubbles to this entry.
-    // The merged JS remainder measures 1,330,944; retain the existing margin.
+    // preview puts its ten excel.* strings into that same shared table in
+    // both locales; its parser, worker and markup stay inside the lazily
+    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
+    // Merging 6212189f with that copy measured 1,330,011 UTF-16 code units.
+    // Teammate activity notices add attributed tool and inter-agent message
+    // bubbles to this entry; merged with main at 3071807d the remainder
+    // measures 1,332,271, which the 1,333,500 ceiling still bounds.
+    // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
@@ -491,6 +529,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     );
     expect(js).not.toContain('data-selection-copy-math');
     expect(js).not.toContain('selectionCopyListWrapper');
+  });
+
+  it('excludes Files-only messages from the transcript entry', () => {
+    const bundle = readTranscriptBundle();
+    for (const key of [
+      'files.description',
+      'files.reloadUnavailable',
+      'files.sourceTooLarge',
+    ] as const)
+      expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

@@ -204,8 +204,15 @@ public class ToolPublicationController {
             JsonNode body = ToolPublicationContract.readJson(read(request, 8 * 1024 * 1024));
             try {
                 CommitTransactionRequest commit = JSON.treeToValue(body, CommitTransactionRequest.class);
+                HttpHeaders headers = new HttpHeaders();
+                for (String header : java.util.List.of(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER,
+                        com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER)) {
+                    if (request.getHeader(header) != null) {
+                        headers.set(header, request.getHeader(header));
+                    }
+                }
                 return admissions.commitReceipt(scope(tenant, workspaceId, sessionId),
-                        publicationId, writerToken, commit);
+                        publicationId, writerToken, commit, ManagedSessionStoreController.lifecycleAuthority(headers));
             } catch (IOException error) {
                 throw new UncheckedIOException(error);
             }

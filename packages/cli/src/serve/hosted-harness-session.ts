@@ -398,6 +398,7 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
   workspaceContext?: string;
   monitorWake?: HostedMonitorWakeScheduler;
@@ -2087,6 +2088,7 @@ async function verifyWorkspaceRestore(
         // H4e-b1: the lead's team roster and board.
         'team_state',
         'team_task',
+        'team_plan',
         // H4e-b3: member command ledgers — the outbox entries, the
         // lead's inbound receipts, and the replies they carry.
         'session_command',
@@ -3300,7 +3302,12 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     try {
-      if (toolProfile === HOSTED_MCP_PROFILE)
+      if (
+        toolProfile === HOSTED_MCP_PROFILE &&
+        (create ||
+          body?.['lifecycleAuthority'] === undefined ||
+          body?.['mcpServers'] !== undefined)
+      )
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
       else if (body?.['mcpServers'] !== undefined)
         throw new Error('MCP requires its explicit profile.');
@@ -3366,11 +3373,28 @@ export function registerHostedHarnessSessionRoutes(
     let lifecycle: ManagedSessionLifecycleAuthority | undefined;
     try {
       lifecycle = lifecycleAuthority(body?.['lifecycleAuthority']);
-      if (lifecycle && create)
-        throw new Error('Lifecycle load cannot create a Session.');
+      if (
+        lifecycle &&
+        (create ||
+          (body?.['lifecycleProtocolVersion'] !== undefined &&
+            body['lifecycleProtocolVersion'] !== 1 &&
+            body['lifecycleProtocolVersion'] !== 2))
+      )
+        throw new Error('Invalid lifecycle load.');
     } catch {
       error(res, 400, 'invalid_hosted_lifecycle_authority');
       return;
+    }
+    const lifecycleProtocolVersion =
+      body?.['lifecycleProtocolVersion'] === 2 ? 2 : 1;
+    if (
+      lifecycle &&
+      (lifecycleProtocolVersion === 1
+        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+        : typeof toolProfile !== 'string' ||
+          !contract.lifecycleV2Profiles?.includes(toolProfile))
+    ) {
+      return error(res, 409, 'hosted_lifecycle_profile_unavailable');
     }
     const resident = sessions.get(sessionId);
     // H4f × H4d-b: the load of a stopped run's child carries the stop, so
@@ -3440,8 +3464,17 @@ export function registerHostedHarnessSessionRoutes(
     if (resident !== undefined && lifecycle) {
       if (
         !isDeepStrictEqual(store, resident.storeDescriptor) ||
-        toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE ||
-        resident.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE ||
+        toolProfile !== resident.toolProfile ||
+        (mcpServers !== undefined &&
+          !isDeepStrictEqual(
+            mcpServers,
+            resident.definition?.['mcpServers'],
+          )) ||
+        (hookCatalog !== undefined &&
+          !isDeepStrictEqual(
+            hookCatalog,
+            resident.definition?.['hookCatalog'],
+          )) ||
         (resident.lifecycle &&
           resident.lifecycle.operationId !== lifecycle.operationId)
       ) {
@@ -3463,6 +3496,8 @@ export function registerHostedHarnessSessionRoutes(
       try {
         await resident.stores!.assertWritable();
         resident.lifecycle = lifecycle;
+        resident.lifecycleProtocolVersion = lifecycleProtocolVersion;
+        resident.mcpClosing = true;
         sendAttachment(res, sessionId, resident);
       } catch (cause) {
         resident.stores!.setLifecycleAuthority(previous);
@@ -4017,6 +4052,14 @@ export function registerHostedHarnessSessionRoutes(
         isHostedWorkspaceProfile(savedProfile)
       )
         toolProfile = savedProfile;
+      if (
+        !create &&
+        lifecycle &&
+        toolProfile === HOSTED_MCP_PROFILE &&
+        mcpServers === undefined
+      ) {
+        mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
+      }
       if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
         try {
           hookCatalog = parseHostedHookPin(definition['hookCatalog']);
@@ -4073,6 +4116,7 @@ export function registerHostedHarnessSessionRoutes(
         stores,
         storeDescriptor: store,
         lifecycle,
+        ...(lifecycle ? { lifecycleProtocolVersion, mcpClosing: true } : {}),
         ...(childWorkspaces ? { childWorkspaces: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
@@ -4125,13 +4169,18 @@ export function registerHostedHarnessSessionRoutes(
         return;
       }
       if (mcpServers && brokerOptions)
-        session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
+        session.mcp = new HostedMcpSession(
+          { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+          managed,
+          mcpServers,
+        );
       if (hookCatalog && brokerOptions)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
           hookCatalog,
           session.mcp?.broker,
+          () => session.lifecycleProtocolVersion === 2,
         );
       if (session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
@@ -5418,14 +5467,27 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 400, 'invalid_hosted_lifecycle_authority');
     }
     const kind = body?.['kind'];
+    const protocolVersion =
+      body?.['protocolVersion'] === undefined ? 1 : body['protocolVersion'];
+    const phase = protocolVersion === 1 ? 'effects' : body?.['phase'];
+    const v2 =
+      protocolVersion === 2 &&
+      typeof session.toolProfile === 'string' &&
+      contract.lifecycleV2Profiles?.includes(session.toolProfile) &&
+      body?.['toolProfile'] === session.toolProfile;
     if (
       !authority ||
+      (protocolVersion !== 1 && !v2) ||
+      !['effects', 'prepare_resources', 'settle_resources'].includes(
+        String(phase),
+      ) ||
       (kind !== 'close' && kind !== 'delete') ||
       !isDeepStrictEqual(
         body?.['sessionKey'],
         session.managed.authority.sessionHeader.sessionKey,
       ) ||
-      session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+      (protocolVersion === 1 &&
+        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE)
     )
       return error(res, 400, 'invalid_hosted_lifecycle_request');
     if (
@@ -5448,18 +5510,70 @@ export function registerHostedHarnessSessionRoutes(
     session.hooksBusy = true;
     let authorized = false;
     try {
-      await session.stores!.authorizeLifecycle(kind);
+      if (phase !== 'effects') await session.stores!.assertWritable();
+      await session.stores!.authorizeLifecycle(
+        phase === 'effects' ? kind : undefined,
+      );
       authorized = true;
       session.lifecycle = authority;
       session.lifecycleKind = kind;
+      session.lifecycleProtocolVersion = protocolVersion as 1 | 2;
       session.mcpClosing = true;
-      if (brokerOptions)
-        await retryHostedCleanup(session, {
-          ...brokerOptions,
-          lifecycleAuthority: () => session.lifecycle,
+      if (phase === 'effects') {
+        if (brokerOptions)
+          await retryHostedCleanup(session, {
+            ...brokerOptions,
+            lifecycleAuthority: () => session.lifecycle,
+          });
+        if (hasHostedCleanupDebt(session.managed))
+          throw new Error('Runtime cleanup remains owed.');
+      }
+      session.monitorWake?.close();
+      session.shell?.publisher?.prepareLifecycle();
+      session.backgroundLane?.publisher?.prepareLifecycle();
+      for (const loop of session.shell?.monitorLoops?.values() ?? [])
+        loop.prepareLifecycle();
+      for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
+        loop.prepareLifecycle();
+      if (phase !== 'effects') {
+        await Promise.all(session.messageOperations ?? []);
+        await settlePendingMonitorInputs({
+          authority: session.managed.authority,
+          sink: session.managed.sink,
+          sessionId: req.params['id'],
+          cwd: session.cwd,
+          sources: [
+            ...(session.monitors ? ['monitor'] : []),
+            ...(session.childAgents ? ['child_agent'] : []),
+            ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
+            ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
+            ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+          ],
         });
-      if (hasHostedCleanupDebt(session.managed))
-        throw new Error('Runtime cleanup remains owed.');
+        await session.automations?.reconcileRuns();
+        if (phase === 'settle_resources') {
+          await session.hooks?.close();
+          await releaseLeaseNow(session);
+          for (const loop of session.shell?.monitorLoops?.values() ?? [])
+            await loop.stop('stop_requested');
+          for (const loop of session.backgroundLane?.monitorLoops?.values() ??
+            [])
+            await loop.stop('stop_requested');
+          await session.shell?.publisher?.close();
+          await session.backgroundLane?.publisher?.close();
+          await session.mcp?.closeResources();
+        }
+        res.json({
+          protocolVersion: 2,
+          phase,
+          toolProfile: session.toolProfile,
+          sessionKey: session.managed.authority.sessionHeader.sessionKey,
+          operationId: authority.operationId,
+          kind,
+        });
+        return;
+      }
+      await session.mcp?.reconcileEffects();
       const events =
         kind === 'close'
           ? [HookEventName.SessionEnd]
@@ -5492,7 +5606,8 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       res.json({
-        protocolVersion: 1,
+        protocolVersion,
+        ...(v2 ? { phase, toolProfile: session.toolProfile } : {}),
         sessionKey: session.managed.authority.sessionHeader.sessionKey,
         operationId: authority.operationId,
         kind,
@@ -5503,7 +5618,29 @@ export function registerHostedHarnessSessionRoutes(
       writeStderrLineSafe(
         `qwen serve: Hosted lifecycle requires recovery: ${String(cause)}`,
       );
-      error(res, 503, 'hosted_lifecycle_recovery_required');
+      const code =
+        cause instanceof ManagedSessionStoreHttpError
+          ? cause.remoteCode
+          : cause instanceof HostedWorkspaceBrokerRejection
+            ? String(cause.code)
+            : '';
+      if (
+        v2 &&
+        (code.startsWith('workspace_lifecycle_claim') ||
+          code.startsWith('workspace_lifecycle_authorization') ||
+          code === 'workspace_close_identity_unverified' ||
+          code === 'workspace_close_execution_unsettled' ||
+          code === 'runtime_admission_closed')
+      ) {
+        return error(res, 503, code);
+      }
+      error(
+        res,
+        503,
+        phase === 'effects'
+          ? 'hosted_lifecycle_recovery_required'
+          : 'workspace_lifecycle_resources_unsettled',
+      );
     } finally {
       if (!authorized) session.stores!.setLifecycleAuthority(previousAuthority);
       session.hooksBusy = false;
@@ -7152,7 +7289,15 @@ export function registerHostedHarnessSessionRoutes(
     const body = object(req.body);
     const operationId = body?.['operationId'];
     const kind = body?.['kind'];
-    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+    const reconciliation =
+      typeof operationId === 'string' &&
+      kind === 'settle_delivery' &&
+      body?.['outcome'] === 'unknown' &&
+      /^channel-reconcile:[0-9a-f]{64}$/.test(operationId);
+    if (
+      typeof operationId !== 'string' ||
+      (!HOSTED_UUID.test(operationId) && !reconciliation)
+    ) {
       return error(res, 400, 'invalid_channel_operation');
     }
     const channels = session.channels;
@@ -7231,7 +7376,11 @@ export function registerHostedHarnessSessionRoutes(
           }
           result = {
             delivery: summary(
-              await channels.settle(deliveryId as string, outcome),
+              await channels.settle(
+                deliveryId as string,
+                outcome,
+                reconciliation ? operationId : undefined,
+              ),
             ),
           };
           break;
@@ -8682,119 +8831,121 @@ export function registerHostedHarnessSessionRoutes(
           session.hooksBusy = false;
         }
       }
-      await session.hooks?.close();
-      // Deferred until the close is known terminal: a Hook fence refusal
-      // above keeps the Session attached and retryable, and its wake pump
-      // with it. wakeBusy() holds mcpClosing for the whole drain, so no
-      // wake turn can start meanwhile; pending notifications settle below.
-      session.monitorWake?.close();
-      // A lease a recovery load acquired must go back with the Session, or
-      // the Workspace stays pinned after every later route is gone.
-      await releaseLeaseNow(session);
-      // #13856: drain every Runtime a turn left held, ahead of the loop
-      // stops and the publisher close. The drain's stops land their
-      // finalize through the still-open publisher — the maintenance
-      // answer rides the completion that carries the finalize — so the
-      // records project the requested stop before anything else settles
-      // them. A drain that cannot prove a stop fails the close honestly
-      // below: the Session stays reopenable and nothing claims settled.
-      let heldDrainFailed: unknown = null;
-      if (brokerOptions) {
-        for (const heldTurn of [...session.heldRuntimeTurns]) {
-          try {
-            await new HostedWorkspaceBroker(
-              brokerOptions,
-              session.managed.authority.sessionHeader.sessionKey,
-              hostedRuntimeSessionId(heldTurn),
-            ).release({ drain: true });
-            session.heldRuntimeTurns.delete(heldTurn);
-          } catch (cause) {
-            // A "not found" answer means nothing remains to stop: the Runtime
-            // is already gone, so the turn owes nothing and the close may
-            // proceed — the same tolerance the sibling owner-release carries
-            // (#13856 R1-1). Every other refusal is unproven and parks
-            // honestly below.
-            if (
-              cause instanceof HostedWorkspaceBrokerRejection &&
-              cause.status === 404 &&
-              cause.code === 'runtime_session_not_found'
-            ) {
+      if (session.lifecycleProtocolVersion !== 2) {
+        await session.hooks?.close();
+        // Deferred until the close is known terminal: a Hook fence refusal
+        // above keeps the Session attached and retryable, and its wake pump
+        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+        // wake turn can start meanwhile; pending notifications settle below.
+        session.monitorWake?.close();
+        // A lease a recovery load acquired must go back with the Session, or
+        // the Workspace stays pinned after every later route is gone.
+        await releaseLeaseNow(session);
+        // #13856: drain every Runtime a turn left held, ahead of the loop
+        // stops and the publisher close. The drain's stops land their
+        // finalize through the still-open publisher — the maintenance
+        // answer rides the completion that carries the finalize — so the
+        // records project the requested stop before anything else settles
+        // them. A drain that cannot prove a stop fails the close honestly
+        // below: the Session stays reopenable and nothing claims settled.
+        let heldDrainFailed: unknown = null;
+        if (brokerOptions) {
+          for (const heldTurn of [...session.heldRuntimeTurns]) {
+            try {
+              await new HostedWorkspaceBroker(
+                brokerOptions,
+                session.managed.authority.sessionHeader.sessionKey,
+                hostedRuntimeSessionId(heldTurn),
+              ).release({ drain: true });
               session.heldRuntimeTurns.delete(heldTurn);
-              continue;
+            } catch (cause) {
+              // A "not found" answer means nothing remains to stop: the Runtime
+              // is already gone, so the turn owes nothing and the close may
+              // proceed — the same tolerance the sibling owner-release carries
+              // (#13856 R1-1). Every other refusal is unproven and parks
+              // honestly below.
+              if (
+                cause instanceof HostedWorkspaceBrokerRejection &&
+                cause.status === 404 &&
+                cause.code === 'runtime_session_not_found'
+              ) {
+                session.heldRuntimeTurns.delete(heldTurn);
+                continue;
+              }
+              heldDrainFailed ??= cause;
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,
+              );
             }
-            heldDrainFailed ??= cause;
-            writeStderrLineSafe(
-              `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,
-            );
           }
         }
-      }
-      // A registered observation loop outlives its turn: only the Session
-      // close ends it. Stop every live loop here, ahead of the publisher
-      // close and the log close, so its settle write can still reach the
-      // journal. A Session whose own settlement already failed (blocked)
-      // never proved to the Runtime that anything stopped: claiming
-      // `stop_requested` there would display an unconfirmed task as
-      // settled, so the record parks on the runtime_lost line instead —
-      // the loop ends, and the record keeps an honest rebuild path. A
-      // failed held-Runtime drain is the same unproven shape.
-      const stopSettle =
-        session.blocked || heldDrainFailed !== null
-          ? 'runtime_lost'
-          : 'stop_requested';
-      for (const loop of session.shell?.monitorLoops?.values() ?? [])
-        await loop.stop(stopSettle);
-      for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
-        await loop.stop(stopSettle);
-      if (heldDrainFailed !== null) throw heldDrainFailed;
-      // The drains above stopped the Session's background Shells and
-      // watches, and their exits settled through this publisher; it
-      // closes last.
-      await session.shell?.publisher?.close();
-      await session.backgroundLane?.publisher?.close();
-      const mcpLease = session.runtimeLeaseHeld;
-      await session.mcp?.close();
-      if (
-        session.mcp &&
-        mcpLease !== undefined &&
-        mcpLease.runtimeSessionId !==
-          hostedRuntimeSessionId(mcpLease.promptId) &&
-        session.runtimeLeaseHeld === mcpLease
-      )
-        session.runtimeLeaseHeld = undefined;
-      // No monitor, channel or automation notification may park the
-      // Session: every pending one settles cancelled here, model-free,
-      // before the log closes; a run whose input settled that way ends
-      // cancelled with an execution proven not to have started.
-      if (
-        session.monitors ||
-        session.childAgents ||
-        session.automations ||
-        session.channels
-      ) {
-        await settlePendingMonitorInputs({
-          authority: session.managed.authority,
-          sink: session.managed.sink,
-          sessionId: req.params['id'],
-          cwd: session.cwd,
-          sources: [
-            ...(session.monitors ? ['monitor'] : []),
-            // #13803: child notifications of either child Session kind.
-            ...(session.childAgents ? [...CHILD_NOTIFICATION_SOURCES] : []),
-            ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
-            ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
-            ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
-          ],
-        });
-        // A refused settle revision never blocks the close: the next open
-        // reconciles it again from the same committed facts.
-        await session.automations
-          ?.reconcileRuns()
-          .catch((cause: unknown) =>
-            writeStderrLineSafe(
-              `qwen serve: Hosted automation runs of session ${req.params['id']} could not be settled on close: ${String(cause)}`,
-            ),
-          );
+        // A registered observation loop outlives its turn: only the Session
+        // close ends it. Stop every live loop here, ahead of the publisher
+        // close and the log close, so its settle write can still reach the
+        // journal. A Session whose own settlement already failed (blocked)
+        // never proved to the Runtime that anything stopped: claiming
+        // `stop_requested` there would display an unconfirmed task as
+        // settled, so the record parks on the runtime_lost line instead —
+        // the loop ends, and the record keeps an honest rebuild path. A
+        // failed held-Runtime drain is the same unproven shape.
+        const stopSettle =
+          session.blocked || heldDrainFailed !== null
+            ? 'runtime_lost'
+            : 'stop_requested';
+        for (const loop of session.shell?.monitorLoops?.values() ?? [])
+          await loop.stop(stopSettle);
+        for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
+          await loop.stop(stopSettle);
+        if (heldDrainFailed !== null) throw heldDrainFailed;
+        // The drains above stopped the Session's background Shells and
+        // watches, and their exits settled through this publisher; it
+        // closes last.
+        await session.shell?.publisher?.close();
+        await session.backgroundLane?.publisher?.close();
+        const mcpLease = session.runtimeLeaseHeld;
+        await session.mcp?.close();
+        if (
+          session.mcp &&
+          mcpLease !== undefined &&
+          mcpLease.runtimeSessionId !==
+            hostedRuntimeSessionId(mcpLease.promptId) &&
+          session.runtimeLeaseHeld === mcpLease
+        )
+          session.runtimeLeaseHeld = undefined;
+        // No monitor, channel or automation notification may park the
+        // Session: every pending one settles cancelled here, model-free,
+        // before the log closes; a run whose input settled that way ends
+        // cancelled with an execution proven not to have started.
+        if (
+          session.monitors ||
+          session.childAgents ||
+          session.automations ||
+          session.channels
+        ) {
+          await settlePendingMonitorInputs({
+            authority: session.managed.authority,
+            sink: session.managed.sink,
+            sessionId: req.params['id'],
+            cwd: session.cwd,
+            sources: [
+              ...(session.monitors ? ['monitor'] : []),
+              // #13803: child notifications of either child Session kind.
+              ...(session.childAgents ? [...CHILD_NOTIFICATION_SOURCES] : []),
+              ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
+              ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
+              ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+            ],
+          });
+          // A refused settle revision never blocks the close: the next open
+          // reconciles it again from the same committed facts.
+          await session.automations
+            ?.reconcileRuns()
+            .catch((cause: unknown) =>
+              writeStderrLineSafe(
+                `qwen serve: Hosted automation runs of session ${req.params['id']} could not be settled on close: ${String(cause)}`,
+              ),
+            );
+        }
       }
       await session.managed.close(
         session.lifecycle ? { releaseActivation: false } : undefined,

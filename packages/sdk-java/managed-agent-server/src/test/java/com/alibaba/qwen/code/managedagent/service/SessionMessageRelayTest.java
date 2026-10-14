@@ -177,7 +177,7 @@ class SessionMessageRelayTest {
                                 "resource-message"));
         when(records.sessionStatus(TENANT, PARENT)).thenReturn("ACTIVE");
         when(records.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
-        when(records.readResourceBytes(TENANT, "resource-content"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-content"))
                 .thenReturn(CONTENT);
         body("to_child", PARENT, null);
         childRun("running", CHILD);
@@ -198,7 +198,8 @@ class SessionMessageRelayTest {
     }
 
     private void body(String route, String sender, String target) {
-        when(records.readResource(TENANT, "resource-message")).thenReturn(
+        when(records.readResourceBytes(TENANT, sender, "resource-content")).thenReturn(CONTENT);
+        when(records.readResource(TENANT, sender, "resource-message")).thenReturn(
                 "{\"direction\":\"outbound\",\"messageId\":\"" + MESSAGE
                         + "\",\"route\":\"" + route
                         + "\",\"childRunId\":\"run-1\",\"senderSessionId\":\""
@@ -619,7 +620,7 @@ class SessionMessageRelayTest {
     private void commandBody(String kind, Object target) {
         String targetJson = target == null ? "null"
                 : "\"" + target + "\"";
-        when(records.readResource(TENANT, "resource-message")).thenReturn(
+        when(records.readResource(TENANT, PARENT, "resource-message")).thenReturn(
                 "{\"direction\":\"outbound\",\"route\":\"to_parent\","
                         + "\"childRunId\":\"run-1\",\"kind\":\"" + kind
                         + "\",\"commandId\":\"" + MESSAGE
@@ -641,7 +642,7 @@ class SessionMessageRelayTest {
         commandBody("board_write", null);
         when(store.lineage(TENANT, PARENT))
                 .thenReturn(new Lineage(CHILD, "run-1"));
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.reply = Map.of("outcome", "answered", "text", "done");
         relay.scan();
@@ -672,7 +673,7 @@ class SessionMessageRelayTest {
     void rejectsACommandItsLeaderRefusesForGood() {
         pending.set(commandPending("accepting"));
         commandBody("board_write", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "session_command_refused";
@@ -687,7 +688,7 @@ class SessionMessageRelayTest {
     void defersABlockedLeaderWithoutSpendingAnAttempt() {
         pending.set(commandPending("accepting"));
         commandBody("board_read", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "hosted_turn_recovery_required";
@@ -701,7 +702,7 @@ class SessionMessageRelayTest {
     void defersAClosingLeaderWithoutSpendingAnAttempt() {
         pending.set(commandPending("accepting"));
         commandBody("board_read", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "hosted_session_closing";
@@ -716,7 +717,7 @@ class SessionMessageRelayTest {
     void defersACommandWhoseSenderHasNotAttachedYet() {
         pending.set(commandPending("accepting"));
         commandBody("board_read", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "session_command_blocked";
@@ -748,7 +749,7 @@ class SessionMessageRelayTest {
     void classifiesAnAlreadyUnknownCommandWithoutExecutingItAgain() {
         pending.set(commandPending("unknown"));
         commandBody("board_write", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         relay.scan();
         assertThat(harness.calls).isEmpty();
@@ -761,7 +762,7 @@ class SessionMessageRelayTest {
     void classifiesAnAlreadyCancelledCommandWithoutExecutingIt() {
         pending.set(commandPending("cancelled"));
         commandBody("board_write", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         relay.scan();
         assertThat(harness.calls).isEmpty();
@@ -800,10 +801,10 @@ class SessionMessageRelayTest {
                                         "accepting", "resource-message")
                                 : new SessionMessageRelayStore.CurrentRecord(
                                         "consumed", "resource-receipt"));
-        when(records.readResource(TENANT, "resource-receipt")).thenReturn(
+        when(records.readResource(TENANT, CHILD, "resource-receipt")).thenReturn(
                 "{\"direction\":\"inbound\",\"replyRef\":{\"resourceId\":"
                         + "\"resource-reply\"}}");
-        when(records.readResource(TENANT, "resource-reply")).thenReturn(
+        when(records.readResource(TENANT, CHILD, "resource-reply")).thenReturn(
                 "{\"outcome\":\"answered\",\"text\":\"says\"}");
         relay.scan();
         assertThat(kinds()).containsExactly("answered");

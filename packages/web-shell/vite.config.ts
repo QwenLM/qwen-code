@@ -127,6 +127,8 @@ function configureDevelopmentMiddleware(
 
 export default defineConfig(({ command }) => ({
   root: 'client',
+  // Worker-only imports otherwise trigger a dev-page reload on first preview.
+  optimizeDeps: { include: ['exceljs', 'ssf'] },
   plugins: [
     react(),
     tailwindcss(),

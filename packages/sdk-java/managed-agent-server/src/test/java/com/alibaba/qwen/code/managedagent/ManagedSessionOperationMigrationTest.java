@@ -1,124 +1,170 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
 
-import com.alibaba.qwen.code.managedagent.LegacyLifecycleCommands.Sessions;
-import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import org.flywaydb.core.Flyway;
-import org.flywaydb.core.api.MigrationVersion;
+
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
-/**
- * Upgrades an archive and a delete that waited for a retry before V17 on H2
- * in MySQL mode and finishes them; ManagedAgentMySqlIT runs the same upgrade
- * on MySQL.
- */
+import java.time.Clock;
+import java.time.Duration;
+import java.util.UUID;
+
+/** Fresh lifecycle admissions retain request identity across retries and claims. */
 class ManagedSessionOperationMigrationTest {
-    private static final String TENANT = "legacy-tenant";
-
     @Test
-    void finishesLifecycleCommandsThatWaitedBeforeTheUpgrade() {
-        JdbcDataSource dataSource = new JdbcDataSource();
-        dataSource.setURL("jdbc:h2:mem:session-operation-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration")
-                .target(MigrationVersion.fromVersion("15")).load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        Sessions sessions = LegacyLifecycleCommands.insert(jdbc, TENANT);
-
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-
-        List<String> operations = LegacyLifecycleCommands.assertMigrated(
-                jdbc, TENANT, sessions);
-        FixtureHarness harness = new FixtureHarness();
-        ManagedAgentProperties properties = new ManagedAgentProperties();
-        ManagedWorkspaceRegistry registry = new ManagedWorkspaceRegistry(jdbc);
-        ManagedAgentStore store = new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), ignored -> {
-                }, registry, properties);
-        RequestDigests digests = new RequestDigests();
-        try (ExecutorService executor =
-                Executors.newVirtualThreadPerTaskExecutor()) {
-            SessionLifecycleCoordinator coordinator =
-                    new SessionLifecycleCoordinator(store,
-                            new ManagedSessionStore(jdbc), harness,
-                            new DrainedRuntime(), new ChildResultRelayStore(jdbc),
-                            new ObjectMapper(),
-                            new ChildLifecycleAdmissions(store, digests,
-                                    new DrainedRuntime()),
-                            org.mockito.Mockito.mock(
-                                    org.springframework.beans.factory.ObjectProvider.class),
-                            executor, Clock.systemUTC(), properties);
-            SessionLifecycleService lifecycle = new SessionLifecycleService(
-                    store, new ManagedAgentService(store, digests, null,
-                            harness, registry), digests, coordinator);
-
-            // A retry of the original key replays the migrated operation.
-            PublicCommandOperation archive = lifecycle.admitPublic(TENANT,
-                    null, "archive", sessions.archiving(),
-                    OperationKind.ARCHIVE);
-            assertThat(archive.id()).isEqualTo(operations.get(0));
-            assertThat(archive.replayed()).isTrue();
-            // The worker finds the other one on its own.
-            coordinator.recoverOperations();
-            await().atMost(Duration.ofSeconds(5)).until(() ->
-                    "ARCHIVED".equals(store.requireSession(TENANT,
-                            sessions.archiving()).status())
-                            && "DELETED".equals(store.requireSession(TENANT,
-                                    sessions.deleting()).status()));
-            assertThat(((PublicCommandOperation) lifecycle.getPublicOperation(
-                    TENANT, null, sessions.archiving(), archive.id()))
-                    .admissionStage()).isEqualTo("harness_confirmed");
-            assertThat(((PublicCommandOperation) lifecycle.getPublicOperation(
-                    TENANT, null, sessions.deleting(), operations.get(1)))
-                    .admissionStage()).isEqualTo("java_durable");
-            // The archive was admitted on an active Session, so it closes it
-            // as archive did before; the delete of an archived one does not.
-            assertThat(harness.closeCount()).isEqualTo(1);
-        }
-    }
-
-    private static final class DrainedRuntime implements RuntimeWarmer {
-        @Override
-        public boolean isEnabled() {
-            return false;
-        }
-
-        @Override
-        public CompletionStage<Void> warm(String sessionId) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public CompletionStage<Void> drain(String sessionId) {
-            return CompletableFuture.completedFuture(null);
-        }
+    void completesFreshLifecycleOperationsAndReplaysTheirOriginalKeys() {
+        var source = new JdbcDataSource();
+        source.setURL(
+                "jdbc:h2:mem:lifecycle-baseline-"
+                        + UUID.randomUUID()
+                        + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        ManagedSchema.initialize(source);
+        var jdbc = new JdbcTemplate(source);
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(source));
+        var store =
+                new ManagedAgentStore(
+                        jdbc,
+                        new ObjectMapper(),
+                        Clock.systemUTC(),
+                        ignored -> {},
+                        new ManagedWorkspaceRegistry(jdbc),
+                        new ManagedAgentProperties());
+        String session =
+                tx.execute(
+                        status ->
+                                store.insertSessionCommand(
+                                                "tenant",
+                                                null,
+                                                "CREATE_SESSION",
+                                                "create",
+                                                "digest-create",
+                                                "qwen-code",
+                                                null,
+                                                "title",
+                                                java.util.List.of(),
+                                                null)
+                                        .sessionId());
+        var close =
+                tx.execute(
+                        status ->
+                                store.beginOperation(
+                                        "tenant",
+                                        session,
+                                        OperationKind.CLOSE,
+                                        "",
+                                        "close",
+                                        "digest-close"));
+        var retry =
+                tx.execute(
+                        status ->
+                                store.beginOperation(
+                                        "tenant",
+                                        session,
+                                        OperationKind.CLOSE,
+                                        "",
+                                        "close",
+                                        "digest-close"));
+        assertThat(retry.replayed()).isTrue();
+        assertThat(retry.operation().operationId()).isEqualTo(close.operation().operationId());
+        var claim =
+                tx.execute(
+                        status ->
+                                store.claimOperation(
+                                                "tenant",
+                                                session,
+                                                close.operation().operationId(),
+                                                "worker",
+                                                Duration.ofSeconds(30))
+                                        .orElseThrow());
+        assertThat(
+                        tx.<Boolean>execute(
+                                status ->
+                                        store.completeOperation(
+                                                "tenant",
+                                                session,
+                                                claim.operationId(),
+                                                "worker",
+                                                claim.claimGeneration(),
+                                                true)))
+                .isTrue();
+        assertThat(store.requireSession("tenant", session).status()).isEqualTo("CLOSED");
+        var archive =
+                tx.execute(
+                        status ->
+                                store.beginOperation(
+                                        "tenant",
+                                        session,
+                                        OperationKind.ARCHIVE,
+                                        "",
+                                        "archive",
+                                        "digest-archive"));
+        assertThat(archive.operation().state()).isEqualTo("COMPLETED");
+        assertThat(store.requireSession("tenant", session).status()).isEqualTo("ARCHIVED");
+        assertThat(
+                        tx.execute(
+                                        status ->
+                                                store.beginOperation(
+                                                        "tenant",
+                                                        session,
+                                                        OperationKind.ARCHIVE,
+                                                        "",
+                                                        "archive",
+                                                        "digest-archive"))
+                                .replayed())
+                .isTrue();
+        var delete =
+                tx.execute(
+                        status ->
+                                store.beginOperation(
+                                        "tenant",
+                                        session,
+                                        OperationKind.DELETE,
+                                        "",
+                                        "delete",
+                                        "digest-delete"));
+        var deleting =
+                tx.execute(
+                        status ->
+                                store.claimOperation(
+                                                "tenant",
+                                                session,
+                                                delete.operation().operationId(),
+                                                "worker",
+                                                Duration.ofSeconds(30))
+                                        .orElseThrow());
+        assertThat(
+                        tx.<Boolean>execute(
+                                status ->
+                                        store.completeOperation(
+                                                "tenant",
+                                                session,
+                                                deleting.operationId(),
+                                                "worker",
+                                                deleting.claimGeneration(),
+                                                false)))
+                .isTrue();
+        assertThat(store.requireSession("tenant", session).status()).isEqualTo("DELETED");
+        assertThat(store.findOperation("tenant", session, delete.operation().operationId()))
+                .hasValueSatisfying(
+                        operation -> {
+                            assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+                            assertThat(operation.sessionStatusBefore()).isEqualTo("ARCHIVED");
+                        });
+        assertThat(
+                        jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                                    + " ('CLOSE','ARCHIVE','DELETE')",
+                                Integer.class))
+                .isEqualTo(3);
     }
 }
