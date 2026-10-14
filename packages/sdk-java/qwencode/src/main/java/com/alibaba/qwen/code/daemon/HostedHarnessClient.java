@@ -57,7 +57,8 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
             Set.of("known", "unknown");
     private static final Set<String> RUNTIME_RECOVERY_PHASES =
-            Set.of("await_runtime", "await_agent", "results_ready");
+            Set.of("await_runtime", "await_agent", "await_command",
+                    "results_ready");
     private static final Set<String> RUNTIME_EXECUTION_STATES =
             Set.of("prepared", "executing", "cancel_requested", "settled");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
@@ -397,11 +398,13 @@ public final class HostedHarnessClient implements AutoCloseable {
     /**
      * H4d-b: one session message operation onto the Session's journal (the
      * message relay's verbs). The Hosted side commits through its funnel
-     * and answers 202 once settled; a non-2xx answer surfaces as a
+     * and answers 202 once settled, carrying the settled body — H4e-b3's
+     * command verbs answer it with the lead's reply document, which the
+     * relay copies back to the member. A non-2xx answer surfaces as a
      * {@link DaemonHttpException}, and anything ambiguous is an unknown
      * outcome for the caller to retry, never to guess at.
      */
-    public void runMessageOperation(HarnessSessionRef session,
+    public Map<String, Object> runMessageOperation(HarnessSessionRef session,
             Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
         String operation = "POST /session/:id/messages/operations";
@@ -425,6 +428,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                 throw new DaemonProtocolException(
                         "Hosted Harness settled a different message operation");
             }
+            return json;
         } catch (DaemonProtocolException e) {
             throw new MutationOutcomeUnknownException(operation, e);
         }
@@ -676,8 +680,18 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     public Map<String, Object> settleLifecycle(HarnessSessionRef session, Map<String, Object> request) {
         HarnessSessionRef ref = requireSessionRef(session);
-        if (capabilities.getLifecycleProtocolVersion() != 1) {
-            throw new DaemonProtocolException("Hosted lifecycle protocol 1 is required");
+        int version = request.containsKey("protocolVersion") ? JsonSupport.requiredInt(request, "protocolVersion", "lifecycle") : 1;
+        if (version != 1 && version != 2) {
+            throw new DaemonProtocolException("Unknown Hosted lifecycle protocol");
+        }
+        boolean v2 = version == 2;
+        if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
+            throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
+        }
+        if (v2 ? !capabilities.getLifecycleV2Profiles().contains(request.get("toolProfile"))
+                : capabilities.getLifecycleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted lifecycle capability is required");
         }
         String operation = "POST /session/:id/lifecycle";
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
@@ -685,7 +699,12 @@ public final class HostedHarnessClient implements AutoCloseable {
         requireMutationStatus(response, 200, operation);
         Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
         if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
-                || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))) {
+                || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))
+                || v2 && (!java.util.Objects.equals(request.get("phase"), receipt.get("phase"))
+                        || JsonSupport.requiredInt(receipt, "protocolVersion", operation) != 2
+                        || !java.util.Objects.equals(request.get("toolProfile"), receipt.get("toolProfile"))
+                        || !java.util.Objects.equals(JsonSupport.requiredObject(request, "authority", operation).get("operationId"),
+                                receipt.get("operationId")))) {
             throw new DaemonProtocolException("Hosted lifecycle receipt identity differs");
         }
         return receipt;
@@ -999,7 +1018,18 @@ public final class HostedHarnessClient implements AutoCloseable {
                         ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0,
                 hosted.containsKey("titleProtocolVersion")
                         ? JsonSupport.requiredInt(hosted, "titleProtocolVersion", "capabilities.hostedHarness") : 0,
-                hostedFeatures);
+                hostedFeatures, parseLifecycleV2Profiles(hosted));
+    }
+
+    private static List<String> parseLifecycleV2Profiles(Map<String, Object> hosted) {
+        if (!hosted.containsKey("lifecycleV2Profiles")) {
+            return List.of();
+        }
+        List<Object> values = JsonSupport.optionalList(hosted, "lifecycleV2Profiles");
+        if (values == null || values.stream().anyMatch(value -> !(value instanceof String))) {
+            throw new DaemonProtocolException("lifecycleV2Profiles must be a string array");
+        }
+        return values.stream().map(String.class::cast).distinct().collect(java.util.stream.Collectors.toList());
     }
 
     private HarnessSessionRef parseSession(String body,

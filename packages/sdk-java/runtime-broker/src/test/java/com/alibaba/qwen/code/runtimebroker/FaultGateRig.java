@@ -103,7 +103,7 @@ final class FaultGateRig implements AutoCloseable {
                 "-baseDir", root.resolve("db").toString()).start();
         dataSource = new DriverManagerDataSource(
                 jdbcUrl(database.getPort()), "sa", "");
-        JdbcRuntimeBrokerSchema.initialize(dataSource);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(dataSource);
         executions = new JdbcToolExecutionRepository(dataSource);
         bindings = new JdbcRuntimeBindingRepository(dataSource,
                 AesGcmSecretProtector.fromBase64("fault-gate", SECRET_KEY));

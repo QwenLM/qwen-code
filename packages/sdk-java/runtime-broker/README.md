@@ -50,8 +50,7 @@ the arbiter.
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
-Broker tables. The JDBC implementations use `javax.sql.DataSource` for
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 32-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
 database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`

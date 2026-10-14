@@ -74,6 +74,18 @@ it('checks instruction bytes and UTF-8 before returning the pinned section', asy
   expect(() =>
     parseHostedAgentDefinition({
       ...identity,
+      instructionsRef: { ...ref, kind: 'managed-tool-result-content' },
+    }),
+  ).toThrow('Invalid agent instructions reference.');
+  expect(() =>
+    parseHostedAgentDefinition({
+      ...identity,
+      instructionsRef: { ...ref, schemaVersion: 2 },
+    }),
+  ).toThrow('Invalid agent instructions reference.');
+  expect(() =>
+    parseHostedAgentDefinition({
+      ...identity,
       instructionsRef: { ...ref, byteLength: 65537 },
     }),
   ).toThrow();

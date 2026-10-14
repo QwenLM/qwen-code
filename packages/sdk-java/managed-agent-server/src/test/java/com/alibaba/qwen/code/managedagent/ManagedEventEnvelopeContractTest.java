@@ -5,11 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -51,6 +55,123 @@ class ManagedEventEnvelopeContractTest {
             assertEquals(expected.get("payloadRef").get("digest").textValue(),
                     envelope.payloadRef().digest(), id);
         }
+    }
+
+    @Test
+    void publicDerivationMatchesTheFrozenFixtures() throws IOException {
+        for (JsonNode fixture : fixtures().get("fromPublicEventCases")) {
+            String id = fixture.get("id").textValue();
+            ManagedEventEnvelope envelope = ManagedEventEnvelopes
+                    .fromPublicEventRow(fixture.get("row"),
+                            fixture.get("workspaceId").textValue());
+
+            assertEquals(ManagedEventEnvelopes.parse(fixture.get("envelope")),
+                    envelope, id);
+            assertEquals(fixture.get("envelope").get("payloadRef")
+                    .get("digest").textValue(),
+                    envelope.payloadRef().digest(), id);
+        }
+    }
+
+    /**
+     * The producer derives the row from the committed EventRecord, not from
+     * JSON: the row it builds — data through the store's mapper — must be the
+     * frozen row, so the producer's digest is the fixture's.
+     */
+    @Test
+    void publicRowFromACommittedRecordMatchesTheFrozenRow()
+            throws IOException {
+        for (JsonNode fixture : fixtures().get("fromPublicEventCases")) {
+            String id = fixture.get("id").textValue();
+            JsonNode row = fixture.get("row");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> data = JSON.convertValue(row.get("data"),
+                    Map.class);
+            EventRecord record = new EventRecord(
+                    row.get("tenantId").textValue(),
+                    row.get("sessionId").textValue(),
+                    row.get("sequence").longValue(),
+                    row.get("eventId").textValue(),
+                    row.get("turnId").isNull() ? null
+                            : row.get("turnId").textValue(),
+                    row.get("type").textValue(), data,
+                    row.get("terminal").booleanValue(), "source-key",
+                    row.get("createdAt").longValue());
+
+            ObjectNode built = ManagedEventEnvelopes.publicEventRow(record,
+                    JSON);
+
+            // Compared as JSON text re-read, so an int and a long node of the
+            // same value are the same row.
+            assertEquals(JSON.readTree(row.toString()),
+                    JSON.readTree(built.toString()), id);
+            assertEquals(fixture.get("envelope").get("payloadRef")
+                    .get("digest").textValue(),
+                    ManagedEventEnvelopes.fromPublicEventRow(built,
+                            fixture.get("workspaceId").textValue())
+                            .payloadRef().digest(), id);
+        }
+    }
+
+    @Test
+    void publicDerivationRefusesARowAnEnvelopeCannotName()
+            throws IOException {
+        ObjectNode row = (ObjectNode) fixtures().get("fromPublicEventCases")
+                .get(0).get("row");
+        List<ObjectNode> refused = List.of(
+                row.deepCopy().put("itemId", "item-1"),
+                withoutTurnId(row),
+                row.deepCopy().put("sequence", 0),
+                row.deepCopy().put("sequence", 1.5),
+                row.deepCopy().put("terminal", "false"),
+                row.deepCopy().put("type", "Turn.accepted"),
+                row.deepCopy().put("turnId", ""),
+                row.deepCopy().put("eventId", "evt\u0007"),
+                row.deepCopy().put("createdAt", -1));
+        for (ObjectNode variant : refused) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> ManagedEventEnvelopes.fromPublicEventRow(variant,
+                            "workspace-1"), variant.toString());
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedEventEnvelopes.fromPublicEventRow(row, ""));
+    }
+
+    /**
+     * The same depth line the TypeScript parse and derivation draw, built
+     * from the same fixture limit: {@code data} sits two levels inside the
+     * digested {@code [row]}, so a chain of maxJsonDepth - 1 objects is the
+     * deepest accepted.
+     */
+    @Test
+    void publicDerivationRefusesDataTooDeepToDigest() throws IOException {
+        JsonNode fixtures = fixtures();
+        int limit = fixtures.get("limits").get("maxJsonDepth").intValue();
+        ObjectNode row = (ObjectNode) fixtures.get("fromPublicEventCases")
+                .get(0).get("row");
+
+        ManagedEventEnvelopes.fromPublicEventRow(
+                row.deepCopy().set("data", nested(limit - 1)), "workspace-1");
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedEventEnvelopes.fromPublicEventRow(
+                        row.deepCopy().set("data", nested(limit)),
+                        "workspace-1"));
+    }
+
+    private static ObjectNode nested(int objects) {
+        ObjectNode value = JSON.createObjectNode();
+        for (int level = 1; level < objects; level++) {
+            ObjectNode outer = JSON.createObjectNode();
+            outer.set("a", value);
+            value = outer;
+        }
+        return value;
+    }
+
+    private static ObjectNode withoutTurnId(ObjectNode row) {
+        ObjectNode copy = row.deepCopy();
+        copy.remove("turnId");
+        return copy;
     }
 
     @Test

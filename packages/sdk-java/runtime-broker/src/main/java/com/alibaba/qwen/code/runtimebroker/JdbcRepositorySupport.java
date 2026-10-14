@@ -167,6 +167,11 @@ final class JdbcRepositorySupport {
         return false;
     }
 
+    static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
+        statement.setBytes(index, value == null ? null
+                : com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(value));
+    }
+
     static StoreFailureException failure(SQLException exception) {
         return new StoreFailureException(
                 "Runtime Broker database operation failed", exception);

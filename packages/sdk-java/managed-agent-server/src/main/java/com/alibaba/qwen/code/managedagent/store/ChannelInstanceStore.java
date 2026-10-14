@@ -43,7 +43,7 @@ public class ChannelInstanceStore {
     }
 
     public record ChannelClaim(String tenantId, String channelId,
-            String deliveryId, String sessionId, long claimedAt) {
+            String deliveryId, String sessionId, long claimedAt, long claimGeneration) {
     }
 
     /** One delivery record row the projection still shows as owed. */
@@ -74,7 +74,7 @@ public class ChannelInstanceStore {
     private static final RowMapper<ChannelClaim> CLAIM = (row, index) ->
             new ChannelClaim(row.getString("tenant_id"),
                     row.getString("channel_id"), row.getString("delivery_id"),
-                    row.getString("session_id"), row.getLong("claimed_at"));
+                    row.getString("session_id"), row.getLong("claimed_at"), row.getLong("claim_generation"));
 
     private final JdbcTemplate jdbc;
 
@@ -88,7 +88,7 @@ public class ChannelInstanceStore {
         Optional<ChannelInstance> existing = findInstance(candidate.tenantId(),
                 candidate.channelId());
         if (existing.isEmpty()) {
-            jdbc.update("INSERT INTO qwen_managed_channel_instance (tenant_id,"
+            jdbc.update("INSERT INTO ma_channel_instance (tenant_id,"
                             + " channel_id, platform, account_id,"
                             + " account_generation, state, actor_id,"
                             + " workspace_id, cwd_relative, policy_json,"
@@ -118,7 +118,7 @@ public class ChannelInstanceStore {
                     || !current.workspaceId().equals(candidate.workspaceId())
                     || !current.cwdRelative().equals(candidate.cwdRelative());
             if (ownershipMoves && jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM qwen_managed_channel_binding"
+                    "SELECT COUNT(*) FROM ma_channel_binding"
                             + " WHERE tenant_id = ? AND channel_id = ?",
                     Long.class, candidate.tenantId(),
                     candidate.channelId()) > 0) {
@@ -131,7 +131,7 @@ public class ChannelInstanceStore {
             // a racing bind committed between the pre-check and now makes
             // the subquery flatten the write to zero rows (R10 P2).
             if (ownershipMoves) {
-                int rows = jdbc.update("UPDATE qwen_managed_channel_instance"
+                int rows = jdbc.update("UPDATE ma_channel_instance"
                                 + " SET account_generation = ?, state = ?,"
                                 + " actor_id = ?, workspace_id = ?,"
                                 + " cwd_relative = ?, policy_json = ?,"
@@ -139,7 +139,7 @@ public class ChannelInstanceStore {
                                 + " WHERE tenant_id = ? AND channel_id = ?"
                                 + " AND account_generation <= ?"
                                 + " AND (SELECT COUNT(*) FROM"
-                                + " qwen_managed_channel_binding b"
+                                + " ma_channel_binding b"
                                 + " WHERE b.tenant_id = ?"
                                 + " AND b.channel_id = ?) = 0",
                         candidate.accountGeneration(), candidate.state(),
@@ -153,7 +153,7 @@ public class ChannelInstanceStore {
                             "channel_ownership_conflict");
                 }
             } else {
-                int rows = jdbc.update("UPDATE qwen_managed_channel_instance"
+                int rows = jdbc.update("UPDATE ma_channel_instance"
                                 + " SET account_generation = ?, state = ?,"
                                 + " actor_id = ?, workspace_id = ?,"
                                 + " cwd_relative = ?, policy_json = ?,"
@@ -177,7 +177,7 @@ public class ChannelInstanceStore {
 
     public Optional<ChannelInstance> setState(String tenantId,
             String channelId, String state) {
-        jdbc.update("UPDATE qwen_managed_channel_instance SET state = ?,"
+        jdbc.update("UPDATE ma_channel_instance SET state = ?,"
                         + " updated_at = ? WHERE tenant_id = ?"
                         + " AND channel_id = ?",
                 state, databaseNow(), tenantId, channelId);
@@ -186,7 +186,7 @@ public class ChannelInstanceStore {
 
     public Optional<ChannelInstance> findInstance(String tenantId,
             String channelId) {
-        return jdbc.query("SELECT * FROM qwen_managed_channel_instance"
+        return jdbc.query("SELECT * FROM ma_channel_instance"
                         + " WHERE tenant_id = ? AND channel_id = ?",
                 INSTANCE, tenantId, channelId).stream().findFirst();
     }
@@ -206,7 +206,7 @@ public class ChannelInstanceStore {
         }
         arguments.add(limit + 1);
         List<ChannelInstance> rows = jdbc.query(
-                "SELECT * FROM qwen_managed_channel_instance"
+                "SELECT * FROM ma_channel_instance"
                         + " WHERE tenant_id = ?" + cursor
                         + " ORDER BY created_at DESC, channel_id DESC LIMIT ?",
                 INSTANCE, arguments.toArray());
@@ -217,7 +217,7 @@ public class ChannelInstanceStore {
 
     public Optional<ChannelBinding> findBinding(String tenantId,
             String channelId, String routeId) {
-        return jdbc.query("SELECT * FROM qwen_managed_channel_binding"
+        return jdbc.query("SELECT * FROM ma_channel_binding"
                         + " WHERE tenant_id = ? AND channel_id = ?"
                         + " AND route_id = ?",
                 BINDING, tenantId, channelId, routeId).stream().findFirst();
@@ -225,7 +225,7 @@ public class ChannelInstanceStore {
 
     /** Inserts the binding, or keeps the first one a racing admission won. */
     public ChannelBinding bind(ChannelBinding candidate) {
-        jdbc.update("INSERT IGNORE INTO qwen_managed_channel_binding"
+        jdbc.update("INSERT IGNORE INTO ma_channel_binding"
                         + " (tenant_id, channel_id, route_id, session_id,"
                         + " scope_kind, sender_id, chat_id, thread_id,"
                         + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -247,15 +247,15 @@ public class ChannelInstanceStore {
             String channelId, int limit) {
         return jdbc.query("SELECT r.session_id, MIN(r.created_at) AS"
                         + " oldest_due"
-                        + " FROM qwen_managed_session_extension_record r"
-                        + " JOIN qwen_managed_channel_binding b"
+                        + " FROM ma_session_record r"
+                        + " JOIN ma_channel_binding b"
                         + " ON b.tenant_id = r.tenant_id"
                         + " AND b.session_id = r.session_id"
-                        + " JOIN managed_agent_session s"
+                        + " JOIN ma_session s"
                         + " ON s.tenant_id = r.tenant_id"
                         + " AND s.session_id = r.session_id"
-                        + " AND s.status = 'ACTIVE'"
-                        + " WHERE r.tenant_id = ? AND b.channel_id = ?"
+                        + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
+                        + " WHERE r.record_kind = 'DOMAIN' AND r.tenant_id = ? AND b.channel_id = ?"
                         + " AND r.domain = 'channel_delivery'"
                         + " AND r.delivery_state IN ('planned', 'partial')"
                         + " GROUP BY r.session_id"
@@ -268,8 +268,8 @@ public class ChannelInstanceStore {
     public Optional<DeliveryRecordState> findDeliveryRecord(String tenantId,
             String sessionId, String deliveryId) {
         return jdbc.query("SELECT delivery_state, record_resource_id"
-                        + " FROM qwen_managed_session_extension_record"
-                        + " WHERE session_scope_key = ?"
+                        + " FROM ma_session_record"
+                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND record_id = ?",
                 (row, index) -> new DeliveryRecordState(row.getString(1),
@@ -284,10 +284,11 @@ public class ChannelInstanceStore {
      */
     public List<PendingDelivery> findPendingDeliveries(String tenantId,
             String sessionId, int limit) {
+        // The ordering index can scan all completed deliveries before finding a due row.
         return jdbc.query("SELECT session_id, record_id, revision,"
                         + " delivery_state, record_resource_id"
-                        + " FROM qwen_managed_session_extension_record"
-                        + " WHERE session_scope_key = ?"
+                        + " FROM ma_session_record USE INDEX (ix_ma_record_session_delivery)"
+                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND delivery_state IN ('planned', 'partial')"
                         + " ORDER BY created_at, record_key LIMIT ?",
@@ -300,61 +301,102 @@ public class ChannelInstanceStore {
     }
 
     /** One inline resource's text, or null when it is not inline-held. */
-    public String readResource(String tenantId, String resourceId) {
+    public String readResource(String tenantId, String sessionId, String resourceId) {
         List<byte[]> rows = jdbc.query(
-                "SELECT inline_bytes FROM qwen_managed_session_resource"
-                        + " WHERE tenant_id = ? AND resource_id = ?"
+                "SELECT inline_bytes FROM ma_resource"
+                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND storage_kind = 'MYSQL_INLINE'"
                         + " AND state = 'REFERENCED'",
-                (row, index) -> row.getBytes("inline_bytes"), tenantId,
-                resourceId);
+                (row, index) -> row.getBytes("inline_bytes"),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
         return rows.isEmpty() ? null
                 : new String(rows.getFirst(), StandardCharsets.UTF_8);
     }
 
     public ChannelClaim claim(String tenantId, String channelId,
             String deliveryId, String sessionId) {
-        jdbc.update("INSERT IGNORE INTO qwen_managed_channel_claim"
-                        + " (tenant_id, channel_id, delivery_id, session_id,"
-                        + " claimed_at) VALUES (?, ?, ?, ?, ?)",
-                tenantId, channelId, deliveryId, sessionId, databaseNow());
-        return findClaim(tenantId, channelId, deliveryId).orElseThrow();
+        long now = databaseNow();
+        jdbc.update("UPDATE ma_delivery SET source_session_id = ?, claimed_at = ?,"
+                        + " claim_generation = claim_generation + 1, updated_at = ?"
+                        + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
+                        + " AND channel_id = ? AND delivery_id = ? AND claimed_at IS NULL",
+                sessionId, now, now,
+                JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
+                tenantId, channelId, deliveryId);
+        ChannelClaim claim = findClaim(tenantId, channelId, deliveryId)
+                .orElseThrow(() -> new IllegalStateException("Channel delivery must exist before its claim"));
+        if (!sessionId.equals(claim.sessionId())) {
+            throw new IllegalStateException("Channel claim belongs to another Session");
+        }
+        return claim;
     }
 
-    /** A re-claim of a partial delivery restarts its lease. */
-    public void touchClaim(String tenantId, String channelId,
+    /** A re-claim of a partial delivery restarts its lease with a new fence. */
+    public ChannelClaim touchClaim(String tenantId, String channelId,
             String deliveryId) {
-        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
-                        + " WHERE tenant_id = ? AND channel_id = ?"
-                        + " AND delivery_id = ?",
-                databaseNow(), tenantId, channelId, deliveryId);
+        long now = databaseNow();
+        jdbc.update("UPDATE ma_delivery SET claimed_at = ?, claim_generation = claim_generation + 1,"
+                        + " reconcile_operation_id = NULL, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
+                        + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
+                now, now, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
+                tenantId, channelId, deliveryId);
+        return findClaim(tenantId, channelId, deliveryId).orElseThrow();
     }
 
     public Optional<ChannelClaim> findClaim(String tenantId, String channelId,
             String deliveryId) {
-        return jdbc.query("SELECT * FROM qwen_managed_channel_claim"
-                        + " WHERE tenant_id = ? AND channel_id = ?"
-                        + " AND delivery_id = ?",
-                CLAIM, tenantId, channelId, deliveryId).stream().findFirst();
+        return jdbc.query("SELECT tenant_id, channel_id, delivery_id, source_session_id AS session_id, claimed_at, claim_generation"
+                        + " FROM ma_delivery WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
+                        + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
+                CLAIM, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
+                tenantId, channelId, deliveryId).stream().findFirst();
     }
 
-    /** Claims older than {@code before} whose ledger row is still open. */
+    public static final String RECONCILE_OPERATION_PREFIX = "channel-reconcile:";
+
+    public static String reconciliationOperationId(ChannelClaim claim) {
+        return RECONCILE_OPERATION_PREFIX + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                claim.tenantId(), claim.channelId(), claim.deliveryId(), Long.toString(claim.claimGeneration()));
+    }
+
+    public boolean reserveReconciliation(ChannelClaim claim) {
+        return jdbc.update("UPDATE ma_delivery SET reconcile_operation_id = ? WHERE delivery_key = ?"
+                        + " AND delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ? AND delivery_id = ?"
+                        + " AND source_session_id = ? AND claimed_at = ? AND claim_generation = ?"
+                        + " AND transport_state IN ('planned','sending','partial')",
+                reconciliationOperationId(claim), JdbcChannelDeliveryRepository.deliveryKey(claim.tenantId(), claim.channelId(), claim.deliveryId()),
+                claim.tenantId(), claim.channelId(), claim.deliveryId(), claim.sessionId(), claim.claimedAt(), claim.claimGeneration()) == 1;
+    }
+
+    static void requireReconciliationFence(JdbcTemplate jdbc, String tenantId, String sessionId,
+            String deliveryId, String operationId) {
+        if (!operationId.startsWith(RECONCILE_OPERATION_PREFIX)) {
+            return;
+        }
+        List<ChannelClaim> claims = jdbc.query("SELECT tenant_id,channel_id,delivery_id,source_session_id AS session_id,"
+                        + " claimed_at,claim_generation FROM ma_delivery WHERE reconcile_operation_id = ?"
+                        + " AND delivery_kind = 'CHANNEL' FOR UPDATE", CLAIM, operationId);
+        if (claims.size() != 1 || !tenantId.equals(claims.getFirst().tenantId())
+                || !sessionId.equals(claims.getFirst().sessionId()) || !deliveryId.equals(claims.getFirst().deliveryId())
+                || !operationId.equals(reconciliationOperationId(claims.getFirst()))) {
+            throw new com.alibaba.qwen.code.managedagent.api.ApiException(org.springframework.http.HttpStatus.CONFLICT,
+                    "channel_claim_stale", "The channel delivery claim changed before reconciliation committed.");
+        }
+    }
+
+    /** Expired open CHANNEL rows, with the claim and transport authority in one row. */
     public List<ChannelClaim> findExpiredClaims(long before, int limit) {
-        return jdbc.query("SELECT c.* FROM qwen_managed_channel_claim c"
-                        + " JOIN qwen_managed_channel_delivery d"
-                        + " ON d.tenant_id = c.tenant_id"
-                        + " AND d.channel_instance_id = c.channel_id"
-                        + " AND d.delivery_id = c.delivery_id"
-                        + " WHERE c.claimed_at < ?"
-                        + " AND d.state IN ('planned', 'sending', 'partial')"
-                        + " ORDER BY c.claimed_at, c.delivery_id LIMIT ?",
+        return jdbc.query("SELECT tenant_id, channel_id, delivery_id, source_session_id AS session_id, claimed_at, claim_generation"
+                        + " FROM ma_delivery WHERE delivery_kind = 'CHANNEL' AND claimed_at < ?"
+                        + " AND transport_state IN ('planned', 'sending', 'partial')"
+                        + " ORDER BY claimed_at, delivery_id LIMIT ?",
                 CLAIM, before, limit);
     }
 
     public String sessionStatus(String tenantId, String sessionId) {
         List<String> rows = jdbc.query(
-                "SELECT status FROM managed_agent_session"
-                        + " WHERE tenant_id = ? AND session_id = ?",
+                "SELECT status FROM ma_session"
+                        + " WHERE tenant_id = ? AND session_id = ? AND session_kind = 'PUBLIC'",
                 (row, index) -> row.getString("status"), tenantId,
                 sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
