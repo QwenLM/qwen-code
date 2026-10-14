@@ -1899,9 +1899,12 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     title: string,
     sourcePrefix: string,
+    header = '',
   ): string[] {
     const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
-    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length;
+    const targetLength = Math.max(1, contentLimit - header.length);
+    const maxLength =
+      DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length - header.length;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
@@ -1909,7 +1912,7 @@ export class DingtalkChannel extends ChannelBase {
       Buffer.byteLength(
         JSON.stringify({
           title: `${title} (cont.)`,
-          text: sourcePrefix + chunk,
+          text: sourcePrefix + header + chunk,
         }),
         'utf8',
       ) <= 15_000;
@@ -1918,7 +1921,7 @@ export class DingtalkChannel extends ChannelBase {
         'DingTalk source label exceeds the proactive payload limit.',
       );
     }
-    return normalizeDingTalkMarkdown(text, contentLimit, maxLength).flatMap(
+    return normalizeDingTalkMarkdown(text, targetLength, maxLength).flatMap(
       (chunk) => {
         let budget = maxLength;
         let pieces = [chunk];
@@ -1927,11 +1930,11 @@ export class DingtalkChannel extends ChannelBase {
           budget = Math.floor(budget / 2);
           pieces = normalizeDingTalkMarkdown(
             chunk,
-            Math.min(contentLimit, budget),
+            Math.min(targetLength, budget),
             budget,
           );
         }
-        return pieces.map((piece) => sourcePrefix + piece);
+        return pieces.map((piece) => sourcePrefix + header + piece);
       },
     );
   }
@@ -2932,32 +2935,64 @@ export class DingtalkChannel extends ChannelBase {
               : '');
           plan.chunks[0] =
             prefix + replaceHeader(plan.chunks[0]!.slice(prefix.length));
+          const terminalHeader =
+            !output.text && plan.chunks[0]!.startsWith(prefix + header)
+              ? header
+              : '';
           if (
             replyPlan &&
             replyPlan.chunks[0]!.length > DINGTALK_MAX_CHUNK_LENGTH
           ) {
+            const mentionLength = replyPlan.atUserId
+              ? `@${replyPlan.atUserId}\n\n`.length
+              : 0;
             replyPlan.chunks.splice(
               0,
               1,
-              ...this.createReplyTextDelivery(
-                replyPlan.chunks[0]!.slice(prefix.length),
-                replyPlan.atUserId,
-                target.sourceLabel,
-              ).chunks,
+              ...normalizeDingTalkMarkdown(
+                replyPlan.chunks[0]!.slice(
+                  prefix.length + terminalHeader.length,
+                ),
+                Math.max(
+                  1,
+                  DINGTALK_CHUNK_LIMIT - prefix.length - terminalHeader.length,
+                ),
+                DINGTALK_MAX_CHUNK_LENGTH -
+                  prefix.length -
+                  terminalHeader.length,
+              ).map(
+                (chunk, index) =>
+                  (index === 0
+                    ? prefix + terminalHeader
+                    : prefix.slice(mentionLength)) + chunk,
+              ),
             );
           }
           if (proactivePlan) {
-            proactivePlan.chunks = proactivePlan.chunks.flatMap((chunk) =>
-              Buffer.byteLength(
-                JSON.stringify({ title: `${plan.title} (cont.)`, text: chunk }),
-                'utf8',
-              ) <= 15_000
-                ? [chunk]
-                : this.createProactiveTextChunks(
-                    chunk.slice(prefix.length),
-                    plan.title,
-                    prefix,
-                  ),
+            proactivePlan.chunks = proactivePlan.chunks.flatMap(
+              (chunk, index) =>
+                Buffer.byteLength(
+                  JSON.stringify({
+                    title: `${plan.title} (cont.)`,
+                    text: chunk,
+                  }),
+                  'utf8',
+                ) <= 15_000
+                  ? [chunk]
+                  : this.createProactiveTextChunks(
+                      chunk.slice(
+                        prefix.length +
+                          (index === 0 ? terminalHeader.length : 0),
+                      ),
+                      plan.title,
+                      prefix,
+                      index === 0 ? terminalHeader : '',
+                    ).map((piece, pieceIndex) =>
+                      index === 0 && pieceIndex > 0
+                        ? prefix +
+                          piece.slice(prefix.length + terminalHeader.length)
+                        : piece,
+                    ),
             );
           }
         }

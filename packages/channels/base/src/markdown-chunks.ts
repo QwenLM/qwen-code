@@ -80,6 +80,7 @@ function split(
       // At most two extra copies of the body length are needed for safe fences.
       const budget = Math.max(
         size('😀'),
+        size(String.fromCodePoint(value.codePointAt(0)!)),
         Math.floor(
           (Math.min(target, limit) - size(notice + '```text\n\n```')) / 3,
         ),

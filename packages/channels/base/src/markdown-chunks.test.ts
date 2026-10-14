@@ -225,6 +225,24 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
       ).toBe(text);
     }
   });
+  it('retains deeply nested list content when the depth fallback begins with a newline', () => {
+    const body = 'tail ' + 'y'.repeat(6000);
+    const text =
+      Array.from(
+        { length: 16 },
+        (_, i) => ' '.repeat(2 * i) + '- level' + i,
+      ).join('\n') +
+      '\n' +
+      ' '.repeat(32) +
+      body;
+    const parts = split(text);
+    expect(
+      parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join(''),
+    ).toContain(body);
+  });
   it.each(['> quoted body', '- item body', 'x'.repeat(3000)])(
     'keeps content after a gap that consumes the target',
     (body) => {

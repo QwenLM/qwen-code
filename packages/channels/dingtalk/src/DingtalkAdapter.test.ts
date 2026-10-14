@@ -13974,55 +13974,73 @@ describe('DingtalkChannel proactive send', () => {
     },
   );
 
-  it('rechecks serialized payload budgets after an unsent background header changes', async () => {
-    const channel = proactive(createChannel({ interactiveCards: undefined }));
-    const { sendCalls } = stubProactiveFetch(
-      (index) => new Response('{}', { status: index === 0 ? 429 : 200 }),
-    );
-    const deliver = (
-      channel as unknown as {
-        createBackgroundOutputDelivery(
-          sessionId: string,
-          target: { target: SessionTarget; sourceLabel: string },
-        ): BackgroundOutputDelivery;
-      }
-    ).createBackgroundOutputDelivery('synthetic-session', {
-      target: groupTarget,
-      sourceLabel: 'Worker one',
-    });
-    const value = 'x'.repeat(14_939);
-    const packet: BackgroundOutputPacket = {
-      kind: 'agent',
-      status: 'running',
-      text: `\`\`\`ts\n${value}\n\`\`\``,
-      partial: false,
-      turnComplete: false,
-    };
-    await expect(deliver(packet)).rejects.toThrow();
-    await expect(
-      deliver({ ...packet, status: 'completed', text: '', turnComplete: true }),
-    ).resolves.toBeDefined();
-    const retried = sendCalls().slice(1).map(msgParamOf);
-    expect(retried.length).toBeGreaterThan(1);
-    for (const message of retried) {
-      expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
-        15_000,
+  it.each([
+    ['Worker one', 14_939],
+    ['S'.repeat(3775), 11_142],
+  ])(
+    'rechecks serialized payload budgets after an unsent background header changes (%#)',
+    async (sourceLabel, length) => {
+      const channel = proactive(createChannel({ interactiveCards: undefined }));
+      const { sendCalls } = stubProactiveFetch(
+        (index) => new Response('{}', { status: index === 0 ? 429 : 200 }),
       );
-      expect(message.text.startsWith('Worker one\n\n')).toBe(true);
-    }
-    expect(
-      retried
-        .map((message) =>
-          [...message.text.matchAll(/x+/g)].map((run) => run[0]).join(''),
-        )
-        .join(''),
-    ).toBe(value);
-    expect(retried[0]!.text).toContain('✅ Background task completed');
-  });
+      const deliver = (
+        channel as unknown as {
+          createBackgroundOutputDelivery(
+            sessionId: string,
+            target: { target: SessionTarget; sourceLabel: string },
+          ): BackgroundOutputDelivery;
+        }
+      ).createBackgroundOutputDelivery('synthetic-session', {
+        target: groupTarget,
+        sourceLabel,
+      });
+      const value = 'x'.repeat(length);
+      const packet: BackgroundOutputPacket = {
+        kind: 'agent',
+        status: 'running',
+        text: `\`\`\`ts\n${value}\n\`\`\``,
+        partial: false,
+        turnComplete: false,
+      };
+      await expect(deliver(packet)).rejects.toThrow();
+      await expect(
+        deliver({
+          ...packet,
+          status: 'completed',
+          text: '',
+          turnComplete: true,
+        }),
+      ).resolves.toBeDefined();
+      const retried = sendCalls().slice(1).map(msgParamOf);
+      expect(retried.length).toBeGreaterThan(1);
+      for (const message of retried) {
+        expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
+          15_000,
+        );
+        expect(message.text.startsWith(sourceLabel + '\n\n')).toBe(true);
+      }
+      expect(
+        retried
+          .map((message) =>
+            [...message.text.matchAll(/x+/g)].map((run) => run[0]).join(''),
+          )
+          .join(''),
+      ).toBe(value);
+      expect(retried[0]!.text).toContain('✅ Background task completed');
+      for (const message of retried.slice(1)) {
+        expect(message.text).toMatch(/\n\n```ts\nx+\n```$/u);
+      }
+    },
+  );
 
-  it.each([undefined, 'synthetic-user'])(
-    'rechecks reply budgets after an unsent background header changes (%s)',
-    async (atUserId) => {
+  it.each([
+    [undefined, 'Worker 1'],
+    ['synthetic-user', 'Worker 1'],
+    [undefined, 'S'.repeat(3775)],
+  ] as const)(
+    'rechecks reply budgets after an unsent background header changes (%#)',
+    async (atUserId, sourceLabel) => {
       const channel = createChannel({
         interactiveCards: undefined,
         atSender: true,
@@ -14054,9 +14072,9 @@ describe('DingtalkChannel proactive send', () => {
         }
       ).createBackgroundOutputDelivery('synthetic-session', {
         target: { ...directTarget, chatId: 'synthetic-dm' },
-        sourceLabel: 'Worker 1',
+        sourceLabel,
       });
-      const prefix = `${atUserId ? `@${atUserId}\n\n` : ''}Worker 1\n\n`;
+      const prefix = `${atUserId ? `@${atUserId}\n\n` : ''}${sourceLabel}\n\n`;
       const value = 'x'.repeat(20_000 - prefix.length - 10);
       const packet: BackgroundOutputPacket = {
         kind: 'agent',
@@ -14076,11 +14094,14 @@ describe('DingtalkChannel proactive send', () => {
       expect(receipt?.turnComplete).toBe(true);
       const retried = messages.slice(1);
       expect(retried.length).toBeGreaterThan(1);
+      for (const message of retried.slice(1)) {
+        expect(message).toMatch(/\n\n```ts\nx+\n```$/u);
+      }
       expect(retried[0]).toContain('✅ Background task completed');
       expect(retried[0]!.startsWith(prefix)).toBe(true);
       for (const message of retried) {
         expect(message.length).toBeLessThanOrEqual(20_000);
-        expect(message).toContain('Worker 1\n\n');
+        expect(message).toContain(sourceLabel + '\n\n');
       }
       expect(
         retried.map((message) => message.match(/x+/g)?.join('') ?? '').join(''),
