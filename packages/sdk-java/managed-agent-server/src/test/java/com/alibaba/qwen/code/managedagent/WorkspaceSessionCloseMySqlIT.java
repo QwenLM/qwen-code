@@ -30,7 +30,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -58,11 +59,11 @@ class WorkspaceSessionCloseMySqlIT {
         }
         String user = required("mysql.user");
         String password = System.getProperty("mysql.password", "");
-        admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        admin = new ManagedSchemaJdbcTemplate(new DriverManagerDataSource(url, user, password));
         schema = "workspace_close_" + UUID.randomUUID().toString().replace("-", "");
         admin.execute("CREATE DATABASE " + schema);
         source = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-        jdbc = new JdbcTemplate(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
     }
 
@@ -73,6 +74,15 @@ class WorkspaceSessionCloseMySqlIT {
         }
     }
 
+    private void seedAction(String tenant, String session, String action, String state, String options) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
+                        + "domain,record_id,action_id,revision,action_version,state,options_json,created_at,first_sequence)"
+                        + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
+                scope, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, "ACTION", action),
+                tenant, session, action, action, state, options);
+    }
+
     @Test
     void approvalExpiryUsesDatabaseTimeAndRetainsItsHistory() {
         var store = store(Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
@@ -80,19 +90,17 @@ class WorkspaceSessionCloseMySqlIT {
         var session = create(store, tenant);
         var action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
         long now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).getTime();
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, action_id, session_id, state, options_json, created_at)"
-                + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, action, session,
-                "{\"expiresAt\":" + (now + 86_400_000) + "}");
+        seedAction(tenant, session, action, "requested", "{\"expiresAt\":" + (now + 86_400_000) + "}");
         assertCode(outcome(() -> transaction(() -> store.beginWorkspaceClose(tenant, session, OWNER,
                 ACTOR_DIGEST, "close", "digest", true))), "turn_active");
-        jdbc.update("UPDATE managed_agent_action SET options_json = ? WHERE tenant_id = ? AND action_id = ?",
+        jdbc.update("UPDATE ma_session_record SET options_json = ? WHERE record_kind = 'ACTION' AND tenant_id = ? AND action_id = ?",
                 "{\"expiresAt\":1}", tenant, action);
         var admitted = transaction(() -> store.beginWorkspaceClose(tenant, session, OWNER,
                 ACTOR_DIGEST, "close", "digest", true));
         assertThat(admitted.operation().state()).isEqualTo("PENDING");
-        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ?"
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo("CLOSING");
-        assertThat(jdbc.queryForObject("SELECT state FROM managed_agent_action WHERE tenant_id = ? AND action_id = ?",
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record WHERE record_kind = 'ACTION' AND tenant_id = ? AND action_id = ?",
                 String.class, tenant, action)).isEqualTo("requested");
     }
 
@@ -118,7 +126,7 @@ class WorkspaceSessionCloseMySqlIT {
             });
             assertCode(queued.get().get(5, TimeUnit.SECONDS), "managed_session_not_writable");
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head WHERE tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE tenant_id = ?",
                 Integer.class, tenant)).isZero();
 
         var another = create(first, tenant);
@@ -142,8 +150,7 @@ class WorkspaceSessionCloseMySqlIT {
         var tenant = "mysql-close-admission-" + UUID.randomUUID();
         var session = create(first, tenant);
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                + " VALUES (?, ?, ?, 'cancelled', '{}', 0)", tenant, session, action);
+        seedAction(tenant, session, action, "cancelled", "{}");
         try (var pool = Executors.newFixedThreadPool(2)) {
             var started = new CountDownLatch(2);
             var turns = new java.util.concurrent.atomic.AtomicReference<Future<Object>>();
@@ -169,8 +176,8 @@ class WorkspaceSessionCloseMySqlIT {
             assertCode(turns.get().get(5, TimeUnit.SECONDS), "session_not_active");
             assertCode(responses.get().get(5, TimeUnit.SECONDS), "session_inactive");
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ?", Integer.class, tenant)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND operation_kind = 'ACTION_RESPONSE'",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND operation_kind = 'ACTION_RESPONSE'",
                 Integer.class, tenant)).isZero();
     }
 
@@ -185,7 +192,7 @@ class WorkspaceSessionCloseMySqlIT {
         String id = admitted.operation().operationId();
         var claimed = transaction(() -> first.claimOperation(tenant, session, id, "first", Duration.ofMinutes(1))).orElseThrow();
         assertThat(transaction(() -> second.claimOperation(tenant, session, id, "second", Duration.ofMinutes(1)))).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET lease_until = FLOOR(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000) - 1000"
+        jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6))"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", tenant, session, id);
         assertThat(transaction(() -> first.renewLifecycleOperation(tenant, session, id, "first", claimed.claimGeneration(), Duration.ofMinutes(1)))).isFalse();
         assertThat(transaction(() -> first.completeOperation(tenant, session, id, "first", claimed.claimGeneration(), true))).isFalse();
@@ -196,7 +203,7 @@ class WorkspaceSessionCloseMySqlIT {
         assertThat(transaction(() -> second.completeOperation(tenant, session, id, "second", takeover.claimGeneration(), true))).isTrue();
         assertThat(first.requireSession(tenant, session).status()).isEqualTo("CLOSED");
         assertThat(first.findOperation(tenant, session, id).orElseThrow().receiptId()).startsWith("rcpt_");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event WHERE tenant_id = ? AND event_type = 'session.closed'",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND event_type = 'session.closed'",
                 Integer.class, tenant)).isEqualTo(1);
     }
 
@@ -204,14 +211,14 @@ class WorkspaceSessionCloseMySqlIT {
     void closeWriterCheckWaitsForAnUncommittedRenewalBeforeEvaluatingExpiry() throws Exception {
         var first = store(Clock.systemUTC());
         var journal = new ManagedSessionStore(jdbc);
-        var otherJournal = new ManagedSessionStore(new JdbcTemplate(source));
+        var otherJournal = new ManagedSessionStore(new ManagedSchemaJdbcTemplate(source));
         var tenant = "mysql-close-renew-" + UUID.randomUUID();
         var session = create(first, tenant);
         long generation = transaction(() -> journal.acquireWriter(tenant, session, TOKEN,
                 new AcquireWriterRequest("workspace", "original", 60_000L))).writerGeneration();
         transaction(() -> first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true));
         assertThat(first.requireSession(tenant, session).status()).isEqualTo("CLOSING");
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until ="
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until ="
                 + " TIMESTAMPADD(MICROSECOND, 750000, CURRENT_TIMESTAMP(6)) WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         var renewed = new CountDownLatch(1);
@@ -233,12 +240,12 @@ class WorkspaceSessionCloseMySqlIT {
                 assertThat(renewed.await(5, TimeUnit.SECONDS)).isTrue();
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
                 while (Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                        + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                        + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                         Boolean.class, tenant, session)) && System.nanoTime() < deadline) {
                     Thread.sleep(20);
                 }
                 assertThat(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                        + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                        + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                         Boolean.class, tenant, session)).isFalse();
                 var checked = new CountDownLatch(1);
                 var live = pool.submit(() -> {
@@ -263,18 +270,18 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     private ManagedAgentStore store(Clock clock) {
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        ManagedSchema.initialize(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         return new ManagedAgentStore(jdbc, mapper, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
     }
 
     private String create(ManagedAgentStore store, String tenant) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_registry WHERE tenant_id = ?", Integer.class, tenant) == 0) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?", Integer.class, tenant) == 0) {
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
         }
         return transaction(() -> store.insertWorkspaceSessionCommand(tenant, OWNER, UUID.randomUUID().toString(),
