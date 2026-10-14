@@ -93,6 +93,12 @@ describe('ArtifactTool', () => {
     expect(tool.description).not.toContain('and opens it in the browser');
   });
 
+  it('prefers itself over record_artifact for published HTML', () => {
+    expect(tool.description).toContain(
+      'Use this tool, not record_artifact, for published interactive HTML artifacts.',
+    );
+  });
+
   it('publishes a fragment, wraps it, and opens the url', async () => {
     const file = await writeFragment('page.html', '<h1>Report</h1>');
     const res = await tool
