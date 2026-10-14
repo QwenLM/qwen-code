@@ -392,13 +392,14 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
         WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId, request.workspaceId());
-        boolean createdRoot = ensureSessionRoot(tenantId, sessionId);
+        boolean createdRoot = insertSessionRoot(tenantId, sessionId);
         // A new CONTROL root cannot be CSI-backed. Probing the empty CSI index
         // would gap-lock other tenants' first inserts under REPEATABLE READ.
         var csiOriginal = createdRoot ? null : lockCsiOriginal(tenantId, sessionId);
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
+        ensureSessionRoot(tenantId, sessionId);
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
@@ -2691,7 +2692,7 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    private boolean ensureSessionRoot(String tenantId, String sessionId) {
+    private boolean insertSessionRoot(String tenantId, String sessionId) {
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
@@ -2706,6 +2707,14 @@ public class ManagedSessionStore {
                 sessionScopeKey(tenantId, sessionId),
                 now,
                 now);
+        return inserted == 1;
+    }
+
+    private void ensureSessionRoot(String tenantId, String sessionId) {
+        insertSessionRoot(tenantId, sessionId);
+        long now = databaseEpochMillis(databaseNow());
+        String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
+        String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
                         + " WHERE tenant_id = ? AND session_id = ? AND session_scope_key IS NULL",
                 tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
@@ -2715,7 +2724,6 @@ public class ManagedSessionStore {
                 tenantId,
                 sessionId,
                 now);
-        return inserted == 1;
     }
 
     public static String sessionScopeKey(String tenantId, String sessionId) {
