@@ -67,6 +67,25 @@ import {
   isSessionMessageSuccessor,
   parseSessionMessage,
 } from './managed-session-message-record.js';
+import {
+  isSessionCommandStart,
+  isSessionCommandSuccessor,
+  parseSessionCommand,
+} from './managed-session-command-record.js';
+import {
+  isTeamMessageStart,
+  isTeamMessageSuccessor,
+  isTeamPlanStart,
+  isTeamPlanSuccessor,
+  isTeamStateStart,
+  isTeamStateSuccessor,
+  isTeamTaskStart,
+  isTeamTaskSuccessor,
+  parseTeamMessage,
+  parseTeamPlan,
+  parseTeamState,
+  parseTeamTask,
+} from './managed-team-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -265,6 +284,51 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isStart: isSessionMessageStart,
     isSuccessor: isSessionMessageSuccessor,
   }),
+  session_command: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionCommand(value);
+      return { record, recordId: record.commandId, run: record.run };
+    },
+    isStart: isSessionCommandStart,
+    isSuccessor: isSessionCommandSuccessor,
+  }),
+  team_state: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamState(value);
+      return { record, recordId: record.teamId, run: record.run };
+    },
+    isStart: isTeamStateStart,
+    isSuccessor: isTeamStateSuccessor,
+  }),
+  team_task: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamTask(value);
+      return { record, recordId: record.taskId, run: record.run };
+    },
+    isStart: isTeamTaskStart,
+    isSuccessor: isTeamTaskSuccessor,
+  }),
+  team_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isTeamMessageStart,
+    isSuccessor: isTeamMessageSuccessor,
+  }),
+  team_plan: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamPlan(value);
+      return { record, recordId: record.requestId, run: record.run };
+    },
+    isStart: isTeamPlanStart,
+    isSuccessor: isTeamPlanSuccessor,
+  }),
 });
 
 // An envelope domain's commits predates any body a later slice could
@@ -298,6 +362,16 @@ export function managedExtensionRecordKey(
 
 export function managedTaskId(recordKey: string): string {
   return `task_${recordKey}`;
+}
+
+/** The task ID of one child run: what its launch answers and `send_message` takes. */
+export function managedChildTaskId(
+  sessionId: string,
+  childRunId: string,
+): string {
+  return managedTaskId(
+    managedExtensionRecordKey(sessionId, 'child_run', childRunId),
+  );
 }
 
 /** The part of `SessionTaskView` that the record revisions determine. */

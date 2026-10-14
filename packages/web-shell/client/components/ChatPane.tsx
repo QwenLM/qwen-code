@@ -681,6 +681,9 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canSendMidTurnNow =
+    connection.capabilities?.features.includes('session_mid_turn_send_now') ===
+    true;
   const canInjectMidTurnMedia =
     connection.capabilities?.features.includes('session_attachments') === true;
   const {
@@ -689,6 +692,7 @@ export function ChatPane({
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -1780,6 +1784,7 @@ export function ChatPane({
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
+              showBrowserNotifications
               disabled={isExitPlanApproval && modeControlsBusy}
               planExecutionMode={connection.planExecutionMode}
               request={pendingToolApproval}
@@ -1868,7 +1873,9 @@ export function ChatPane({
                   streamingState !== 'idle' || sessionHasActivePrompt
                 }
                 onDelete={removeQueuedPrompt}
+                canSendMidTurnNow={canSendMidTurnNow}
                 onInsert={insertQueuedPrompt}
+                onSendNow={sendQueuedPromptNow}
                 onEdit={editQueuedPrompt}
                 onImagePreview={handleImagePreview}
                 onAttachmentPreview={handleAttachmentPreview}

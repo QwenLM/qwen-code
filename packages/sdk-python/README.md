@@ -147,7 +147,9 @@ Common fields:
 - `env`: extra environment variables passed to the CLI process
 - `system_prompt` / `append_system_prompt`: override or extend the system
   prompt
-- `core_tools`, `exclude_tools`, `allowed_tools`: constrain tool availability
+- `core_tools`: a non-empty allowlist of core tools. An omitted or empty list is treated as unspecified; `core_tools=[]` does not disable tools. MCP and other non-core tools have separate registration and permission rules.
+- `exclude_tools`: exclude named tools explicitly.
+- `allowed_tools`: bypass approval for matching tools; this is not a tool-registration allowlist.
 - `timeout`: seconds for control requests, permission callbacks, and stream
   close waits
 
