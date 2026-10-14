@@ -434,7 +434,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('local-control-address', {
         type: 'string',
         description:
-          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice. Naming an address outside RFC 1918/3927 space, or one on a VPN/tunnel interface (e.g. phone and laptop on the same corporate VPN), is accepted as an explicit opt-in; out-of-private-space picks are logged with a warning.',
       })
       .option('join', {
         type: 'string',

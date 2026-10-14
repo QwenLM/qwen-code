@@ -14,7 +14,11 @@ import { sleepInhibitor } from '@qwen-code/qwen-code-core';
 import type { MutableOriginAllowlist } from '../auth.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
-import { selectLanAddress, type LanCandidate } from './lan-interfaces.js';
+import {
+  isLanIpv4,
+  selectLanAddress,
+  type LanCandidate,
+} from './lan-interfaces.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
@@ -167,6 +171,16 @@ export class LocalControlService {
     if (this.active) return this.status();
 
     const selected = selectLanAddress(options.address);
+    // A selected address outside RFC 1918/3927 can only have come from the
+    // explicit opt-in (#14136): automatic candidates are pre-filtered by
+    // isLanIpv4. Surface it loudly rather than letting the pairing look
+    // routine.
+    if (!isLanIpv4(selected.address)) {
+      writeStderrLine(
+        `qwen serve: WARNING: Local Control address ${selected.address} is outside RFC 1918 private / RFC 3927 link-local space. ` +
+          'It was accepted only because it was named explicitly — advertise it only on a network you trust.',
+      );
+    }
     const port = this.#deps.getPort();
     const authority = `${selected.address}:${port}`;
     const token = mintPairingToken();

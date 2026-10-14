@@ -30,6 +30,13 @@ vi.mock('./lan-interfaces.js', async (importOriginal) => ({
   })),
 }));
 
+// The mock above selects a loopback address, which trips the out-of-private-
+// space warning on every enable; keep the warning out of the test output.
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/stdioHelpers.js')>()),
+  writeStderrLine: vi.fn(),
+}));
+
 async function unusedPort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

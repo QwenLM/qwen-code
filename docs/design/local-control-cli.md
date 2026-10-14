@@ -25,7 +25,7 @@ The mode rejects a non-default `--hostname` and `--no-web` instead of silently c
 - Local Control adds the advertised LAN origin to the daemon-wide origin allowlist (`--allow-origin` patterns remain in effect on both listeners while the session is active); every protected LAN route still requires the pairing token.
 - The token stays in the URL fragment, so browsers do not send it in HTTP requests, access logs, or referrers before the Web Shell stores it.
 - Existing bearer authentication, timing-safe comparison, and non-loopback boot checks remain the enforcement boundary.
-- Only private/link-local IPv4 interface addresses are advertised. Multiple interfaces surface an explicit choice rather than guessing which network is correct.
+- Only private/link-local IPv4 interface addresses are advertised automatically. Multiple interfaces surface an explicit choice rather than guessing which network is correct. An operator can explicitly opt in to an address outside those ranges — or one on a VPN/tunnel interface, e.g. phone and laptop on the same corporate VPN — by naming it with `--local-control-address`; acceptance requires the host to actually have the address, and out-of-private-space picks are logged with a loud warning.
 
 ## Desktop behavior
 
