@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,22 +40,21 @@ class ManagedAgentStoreChildCreationFenceTest {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:creation-fence-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(source)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = new ManagedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {
                 }, new ManagedWorkspaceRegistry(jdbc), properties);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES ('tenant', 'workspace', 1, 'storage',"
                         + " 'Workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 "owner".getBytes(StandardCharsets.UTF_8));
@@ -74,13 +73,13 @@ class ManagedAgentStoreChildCreationFenceTest {
         // idempotent admission derives — so keeping the fence on exactly
         // that key proves it evaluates the run's own row and not a
         // physically-near but unrelated record.
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_record"
+                        + " (record_kind, session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, created_at)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES ('DOMAIN', ?, ?, 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",
                 ManagedSessionStore.sessionScopeKey("tenant", parent),
@@ -107,8 +106,8 @@ class ManagedAgentStoreChildCreationFenceTest {
                 .isEqualTo("child_run_settled");
         // And no Session row was minted for it: the fence rolls the
         // whole transaction back, never a half-created child.
-        assertThat(jdbc.query("SELECT session_id FROM managed_agent_session"
-                        + " WHERE tenant_id = 'tenant' AND parent_child_run_id = 'run-settled'",
+        assertThat(jdbc.query("SELECT session_id FROM ma_session"
+                        + " WHERE tenant_id = X'74656e616e74' AND parent_child_run_id = X'72756e2d736574746c6564'",
                 (result, row) -> result.getString(1))).isEmpty();
     }
 

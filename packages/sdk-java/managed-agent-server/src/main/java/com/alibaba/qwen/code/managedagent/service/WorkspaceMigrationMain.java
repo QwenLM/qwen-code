@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceMigrationStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
@@ -22,7 +23,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -46,7 +46,7 @@ public final class WorkspaceMigrationMain {
         var request = new ObjectMapper().readTree(bytes);
         var source = new DriverManagerDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"),
                 present("W1_JDBC_PASSWORD"));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var properties = new ManagedAgentProperties();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
@@ -78,7 +78,7 @@ public final class WorkspaceMigrationMain {
                     var local = LocalProcessRuntimeProvisioner.durable(List.of("maintenance-never-starts-worker"),
                             stateDirectory, http, false);
                     var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, sessionId -> {
-                        var found = jdbc.query("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                        var found = jdbc.query("SELECT * FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                                 (row, index) -> ManagedAgentStore.readBinding(row),
                                 request.path("tenantId").asText(), sessionId);
                         if (found.size() != 1 || found.getFirst() == null) {

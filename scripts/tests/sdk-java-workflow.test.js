@@ -21,6 +21,28 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('builds native producer prerequisites before either Server test lane', () => {
+    const jobs = parse(workflow).jobs;
+    for (const name of ['mysql-integration', 'hosted-harness-mysql']) {
+      const steps = jobs[name].steps;
+      const install = steps.findIndex((s) =>
+        s.run?.includes('corepack pnpm install --frozen-lockfile'),
+      );
+      const verify = steps.findIndex(
+        (s) =>
+          (s['working-directory'] ===
+            'packages/sdk-java/managed-agent-server' ||
+            s.run?.includes(
+              '-f packages/sdk-java/managed-agent-server/pom.xml',
+            )) &&
+          s.run?.includes('clean verify'),
+      );
+      expect(install, name).toBeGreaterThan(-1);
+      expect(verify, name).toBeGreaterThan(install);
+      expect(steps[install].run, name).not.toContain('--ignore-scripts');
+    }
+  });
+
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
     for (const fragment of [
@@ -49,9 +71,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 1200 9');
+    expect(block).toContain('flock --wait 2400 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 20 minutes',
+      '::error::sdk-java host lock not acquired within 40 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -150,7 +172,7 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
-  it('scans every sdk-java module that owns a db/migration directory', () => {
+  it('scans every sdk-java module that owns a registered migration directory', () => {
     // The guard's premise is the shared classpath:db/migration namespace —
     // managed-agent-server depends on runtime-broker, so one invocation must
     // name every module that owns a migration sequence. Derive the
@@ -161,11 +183,10 @@ describe('SDK Java Flyway migration version guard', () => {
       withFileTypes: true,
     })) {
       if (!entry.isDirectory()) continue;
-      for (const location of [
-        'src/main/resources/db/migration',
-        'src/main/java/db/migration',
-      ]) {
-        if (existsSync(join('packages/sdk-java', entry.name, location))) {
+      for (const location of LOCATIONS) {
+        if (
+          existsSync(join('packages/sdk-java', entry.name, ...location.dir))
+        ) {
           owners.add(`packages/sdk-java/${entry.name}`);
         }
       }
@@ -414,10 +435,10 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ).toBeGreaterThanOrEqual(mavenSteps.length * 2400 + 14 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured locked work (~5 minutes on
-    // the Java 21 leg of run 37743332082) — this job's holds now consume
-    // part of that wait budget, and nothing else asserts the headroom.
+    // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
+    // now consume part of that wait budget.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      1200 + 5 * 60,
+      2400 + 10 * 60,
     );
   });
 
