@@ -11,7 +11,10 @@ import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFra
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
-import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import {
+  SubagentDetailsProvider,
+  type OpenSubagentDetails,
+} from '../../subagentDetailsContext';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
@@ -131,7 +134,7 @@ function SubagentDetailContent({
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
@@ -394,7 +397,8 @@ export function SubagentDetail({
         onArtifactsChange={onArtifactsChange}
         onOpenSubagent={
           onOpenSubagent
-            ? (tool) => onOpenSubagent(tool, sessionId, workspaceCwd)
+            ? (tool, parentSessionId) =>
+                onOpenSubagent(tool, parentSessionId ?? sessionId, workspaceCwd)
             : undefined
         }
         onError={onError}

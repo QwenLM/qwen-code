@@ -23,6 +23,7 @@ import {
   type EventBusSubscriberDiagnostic,
 } from '@qwen-code/acp-bridge/eventBus';
 import { createTranscriptMessageUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { replayTranscriptRecordPage } from '../acp-integration/session/history-replay-page.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
@@ -750,8 +751,17 @@ export class VirtualSubagentSessions {
       toolUseId?: string;
     }) => boolean,
   ): Promise<ResolvedAgentTask | undefined> {
-    const status = await runtime.bridge.getSessionTasksStatus(parentSessionId);
-    const task = status.tasks.find(
+    const status = await runtime.bridge
+      .getSessionTasksStatus(parentSessionId)
+      .catch((error: unknown) => {
+        if (
+          error instanceof SessionNotFoundError &&
+          error.code === 'session_not_found'
+        )
+          return undefined;
+        throw error;
+      });
+    const task = status?.tasks.find(
       (candidate) =>
         candidate.kind === 'agent' &&
         typeof candidate.outputFile === 'string' &&

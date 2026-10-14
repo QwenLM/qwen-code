@@ -1476,6 +1476,7 @@ it.each([true, false])(
   (embedded) => {
     const onOpenSubagent = vi.fn();
     const task = workflowTask({
+      parentSessionId: 'original-chat-a',
       dispatches: [
         {
           id: 'dispatch-detail',
@@ -1506,6 +1507,7 @@ it.each([true, false])(
     act(() => node!.click());
     expect(onOpenSubagent).toHaveBeenCalledWith(
       expect.objectContaining({ callId: 'workflow-agent-detail' }),
+      'original-chat-a',
     );
   },
 );

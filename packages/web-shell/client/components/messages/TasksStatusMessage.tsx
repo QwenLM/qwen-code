@@ -26,6 +26,7 @@ import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { PlanExecutionView } from './PlanExecutionView';
+import type { OpenSubagentDetails } from '../../subagentDetailsContext';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import {
   localizeAgentTypeName,
@@ -376,7 +377,7 @@ export function TasksStatusMessage({
   onClose?: () => void;
   planTodos?: readonly TodoItem[];
   agentTools?: readonly ACPToolCall[];
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
@@ -1479,7 +1480,7 @@ function TaskDetail({
   onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   t: ReturnType<typeof useI18n>['t'];
   hideHeader?: boolean;
   busy?: boolean;

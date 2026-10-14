@@ -10,7 +10,7 @@ import {
   replayCompleteEvent,
 } from './utils/mockDaemon';
 test.use({ viewport: { width: 1600, height: 1000 } });
-for (const surface of ['inline', 'workflows'] as const) {
+for (const surface of ['inline', 'workflows', 'history'] as const) {
   test(`workflow dispatch opens actual Agent detail from ${surface}`, async ({
     page,
   }, testInfo) => {
@@ -59,6 +59,19 @@ for (const surface of ['inline', 'workflows'] as const) {
       pendingApprovalCount: 0,
       pendingApprovals: [],
     };
+    const historicalParent = 'original-chat-a';
+    if (surface === 'history') {
+      task.parentSessionId = historicalParent;
+      task.isHistorical = true;
+      task.status = 'completed';
+      task.endTime = now;
+      task.agentsCompleted = 2;
+      task.dispatches = task.dispatches.map((dispatch) => ({
+        ...dispatch,
+        status: dispatch.subagentId ? 'completed' : 'cancelled',
+        endedAt: now,
+      }));
+    }
     const scenario = createWebShellDaemonScenario({
       supportedCommands: { workflowsEnabled: true, savedWorkflows: [] },
       workflowTasks: [task],
@@ -117,19 +130,36 @@ for (const surface of ['inline', 'workflows'] as const) {
         );
       };
     });
+    const expectedParent =
+      surface === 'history' ? historicalParent : scenario.sessionId;
     const refs: string[] = [];
+    const childLoadBodies: unknown[] = [];
     await page.route('**/session/**/subagents/*', async (route) => {
       const path = new URL(route.request().url()).pathname;
       refs.push(path);
+      if (!path.startsWith(`/session/${expectedParent}/subagents/`)) {
+        await route.fulfill({
+          status: 404,
+          json: {
+            error: 'subagent_not_found',
+            message: 'Child does not belong to this parent',
+          },
+        });
+        return;
+      }
       const id = path.split('/').pop();
       await route.fulfill({
         json: {
           sessionId: `child-${id}`,
-          status: id === 'agent-modern' ? 'completed' : 'running',
+          status:
+            surface === 'history' || id === 'agent-modern'
+              ? 'completed'
+              : 'running',
         },
       });
     });
     await page.route('**/session/child-*/load', async (route) => {
+      childLoadBodies.push(route.request().postDataJSON());
       const id = new URL(route.request().url()).pathname.split('/')[2];
       await route.fulfill({
         json: {
@@ -172,12 +202,16 @@ for (const surface of ['inline', 'workflows'] as const) {
       replayCompleteEvent({ sessionId: scenario.sessionId, replayedCount: 3 }),
     );
     const node = page.locator('[data-workflow-dispatch="lvshi"]');
-    if (surface === 'workflows') {
+    if (surface !== 'inline') {
       await page
         .getByRole('button', { name: 'Workflows', exact: true })
         .first()
         .click();
-      await page.getByRole('tab', { name: /Running/ }).click();
+      await page
+        .getByRole('tab', {
+          name: surface === 'history' ? /History/ : /Running/,
+        })
+        .click();
       await page
         .getByRole('tabpanel')
         .getByRole('button', { expanded: false })
@@ -195,6 +229,9 @@ for (const surface of ['inline', 'workflows'] as const) {
       page.getByRole('tab', { name: 'poet:lvshi', exact: true }),
     ).toHaveCount(0);
     await node.click();
+    await expect
+      .poll(() => refs[0])
+      .toBe(`/session/${expectedParent}/subagents/agent-lvshi`);
     await expect(
       page.getByText(
         'I am checking the meter and autumn imagery for child-agent-lvshi.',
@@ -207,38 +244,42 @@ for (const surface of ['inline', 'workflows'] as const) {
     await expect(
       panel.getByRole('button', { name: 'Stop', exact: true }),
     ).toHaveCount(0);
-    expect(refs[0]).toContain(
-      `/session/${scenario.sessionId}/subagents/agent-lvshi`,
-    );
-    const streamedText =
-      'The next line now has the correct seven-syllable meter.';
-    await expect
-      .poll(() =>
-        page.evaluate(() =>
+    expect(childLoadBodies[0]).toMatchObject({ cwd: scenario.workspaceCwd });
+    if (surface !== 'history') {
+      const streamedText =
+        'The next line now has the correct seven-syllable meter.';
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            (
+              window as unknown as { workflowHasChild: (id: string) => boolean }
+            ).workflowHasChild('child-agent-lvshi'),
+          ),
+        )
+        .toBe(true);
+      await page.evaluate(
+        ({ sessionId, event }) => {
           (
-            window as unknown as { workflowHasChild: (id: string) => boolean }
-          ).workflowHasChild('child-agent-lvshi'),
-        ),
-      )
-      .toBe(true);
-    await page.evaluate(
-      ({ sessionId, event }) => {
-        (
-          window as unknown as {
-            workflowSendChild: (id: string, event: unknown) => void;
-          }
-        ).workflowSendChild(sessionId, event);
-      },
-      {
-        sessionId: 'child-agent-lvshi',
-        event: assistantTextEvent(` ${streamedText}`, {
-          id: 4,
+            window as unknown as {
+              workflowSendChild: (id: string, event: unknown) => void;
+            }
+          ).workflowSendChild(sessionId, event);
+        },
+        {
           sessionId: 'child-agent-lvshi',
-        }),
-      },
-    );
-    await expect(panel.getByText(streamedText, { exact: false })).toBeVisible();
-    await expect(page.getByText(streamedText, { exact: false })).toHaveCount(1);
+          event: assistantTextEvent(` ${streamedText}`, {
+            id: 4,
+            sessionId: 'child-agent-lvshi',
+          }),
+        },
+      );
+      await expect(
+        panel.getByText(streamedText, { exact: false }),
+      ).toBeVisible();
+      await expect(page.getByText(streamedText, { exact: false })).toHaveCount(
+        1,
+      );
+    }
     await page.screenshot({
       path: testInfo.outputPath(`workflow-agent-${surface}.png`),
       animations: 'disabled',

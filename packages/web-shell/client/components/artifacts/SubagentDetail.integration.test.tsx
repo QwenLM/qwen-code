@@ -45,7 +45,9 @@ const {
     current: undefined as Record<string, unknown> | undefined,
   },
   latestOpenSubagent: {
-    current: undefined as ((tool: ACPToolCall) => void) | undefined,
+    current: undefined as
+      | ((tool: ACPToolCall, parentSessionId?: string) => void)
+      | undefined,
   },
   messages: [
     {
@@ -315,6 +317,12 @@ it('opens a nested subagent within the parent session scope', async () => {
   expect(onOpenSubagent).toHaveBeenCalledWith(
     nestedTool,
     'parent-session',
+    '/work/project',
+  );
+  act(() => latestOpenSubagent.current?.(nestedTool, 'original-chat-a'));
+  expect(onOpenSubagent).toHaveBeenLastCalledWith(
+    nestedTool,
+    'original-chat-a',
     '/work/project',
   );
 });

@@ -31,6 +31,7 @@ function workflowTask(
   return {
     kind: 'workflow',
     id: 'wf-1',
+    parentSessionId: 'workflow-parent',
     label: 'review-and-fix',
     description: 'Review and fix',
     status: 'running',
@@ -819,6 +820,7 @@ describe('workflow agent details', () => {
           prompt: 'Review behavior regressions',
         },
       }),
+      'workflow-parent',
     );
   });
 
@@ -836,6 +838,7 @@ describe('workflow agent details', () => {
           endTime: 2_000,
           rawOutput: { type: 'task_execution', workflowRunId: 'wf-1', status },
         }),
+        'workflow-parent',
       );
     },
   );
@@ -861,7 +864,28 @@ describe('workflow agent details', () => {
     act(() => node('dispatch-2').click());
     expect(onOpen).toHaveBeenCalledWith(
       expect.objectContaining({ callId: 'rerun-agent' }),
+      'workflow-parent',
     );
+  });
+
+  it('opens historical executions with their original parent session', () => {
+    const { onOpen, node } = mount(
+      workflowTask({ isHistorical: true, parentSessionId: 'original-chat-a' }),
+    );
+    act(() => node('dispatch-2').click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'correctness-agent-1' }),
+      'original-chat-a',
+    );
+  });
+
+  it('does not guess the owner of legacy historical executions', () => {
+    const { onOpen, node } = mount(
+      workflowTask({ isHistorical: true, parentSessionId: undefined }),
+    );
+    act(() => node('dispatch-2').click());
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(node('dispatch-2').getAttribute('aria-pressed')).toBe('true');
   });
 
   it('does not open agent tabs from document exports', () => {

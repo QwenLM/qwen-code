@@ -13,6 +13,7 @@ import {
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 import {
   createVirtualSubagentSessionId,
@@ -22,6 +23,25 @@ import {
 } from './virtual-subagent-sessions.js';
 
 const tempDirs: string[] = [];
+
+it.each([
+  new Error('bridge disconnected'),
+  new SessionNotFoundError('parent', undefined, 'session_closing'),
+])(
+  'does not read persisted detail when the live parent fails with %s',
+  async (error) => {
+    const runtime = {
+      bridge: {
+        getSessionTasksStatus: async () => {
+          throw error;
+        },
+      },
+    } as unknown as WorkspaceRuntime;
+    await expect(
+      new VirtualSubagentSessions().resolve(runtime, 'parent', 'agent'),
+    ).rejects.toBe(error);
+  },
+);
 
 it.each(['running', 'paused'])(
   'keeps a terminal task status over non-terminal %s metrics',
@@ -1000,77 +1020,87 @@ describe('VirtualSubagentSessions', () => {
   });
 });
 
-it('resolves a workflow dispatch by persisted agent identity without an Agent tool call', async () => {
-  const runtimeDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'qwen-workflow-detail-'),
-  );
-  tempDirs.push(runtimeDir);
-  const workspaceCwd = path.join(runtimeDir, 'workspace');
-  const projectDir = Storage.runWithRuntimeBaseDir(
-    runtimeDir,
-    workspaceCwd,
-    () => new Storage(workspaceCwd).getProjectDir(),
-  );
-  const parentSessionId = 'workflow-parent';
-  const agentId = 'workflow-agent-1234';
-  const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
-  await fs.mkdir(sessionDir, { recursive: true });
-  const outputFile = path.join(sessionDir, `agent-${agentId}.jsonl`);
-  await fs.writeFile(
-    outputFile,
-    `${JSON.stringify({ ...record('prompt', null, 'user', 'Inspect workflow activity'), sessionId: parentSessionId })}\n`,
-  );
-  const metaPath = outputFile.replace(/\.jsonl$/, '.meta.json');
-  const meta = {
-    agentId,
-    agentType: 'reviewer',
-    description: 'Inspect workflow activity',
-    parentSessionId,
-    parentAgentId: null,
-    createdAt: new Date(1_000).toISOString(),
-    status: 'running',
-    isBackgrounded: false,
-  };
-  await fs.writeFile(metaPath, JSON.stringify(meta));
-  const runtime = {
-    workspaceId: 'workflow-workspace',
-    workspaceCwd,
-    sessionRuntimeBaseDir: runtimeDir,
-    env: {
-      mode: 'runtime-overlay',
-      overlayKeys: ['QWEN_RUNTIME_DIR'],
-      effectiveEnv: { QWEN_RUNTIME_DIR: runtimeDir },
-    },
-    bridge: {
-      getSessionTasksStatus: async () => ({
-        v: 1,
-        sessionId: parentSessionId,
-        now: Date.now(),
-        tasks: [],
+it.each([false, true])(
+  'resolves a workflow dispatch by persisted identity with unloaded parent=%s',
+  async (unloaded) => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-workflow-detail-'),
+    );
+    tempDirs.push(runtimeDir);
+    const workspaceCwd = path.join(runtimeDir, 'workspace');
+    const projectDir = Storage.runWithRuntimeBaseDir(
+      runtimeDir,
+      workspaceCwd,
+      () => new Storage(workspaceCwd).getProjectDir(),
+    );
+    const parentSessionId = 'workflow-parent';
+    const agentId = 'workflow-agent-1234';
+    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
+    await fs.mkdir(sessionDir, { recursive: true });
+    const outputFile = path.join(sessionDir, `agent-${agentId}.jsonl`);
+    await fs.writeFile(
+      outputFile,
+      `${JSON.stringify({ ...record('prompt', null, 'user', 'Inspect workflow activity'), sessionId: parentSessionId })}\n`,
+    );
+    const metaPath = outputFile.replace(/\.jsonl$/, '.meta.json');
+    const meta = {
+      agentId,
+      agentType: 'reviewer',
+      description: 'Inspect workflow activity',
+      parentSessionId,
+      parentAgentId: null,
+      createdAt: new Date(1_000).toISOString(),
+      status: 'running',
+      isBackgrounded: false,
+    };
+    await fs.writeFile(metaPath, JSON.stringify(meta));
+    const runtime = {
+      workspaceId: 'workflow-workspace',
+      workspaceCwd,
+      sessionRuntimeBaseDir: runtimeDir,
+      env: {
+        mode: 'runtime-overlay',
+        overlayKeys: ['QWEN_RUNTIME_DIR'],
+        effectiveEnv: { QWEN_RUNTIME_DIR: runtimeDir },
+      },
+      bridge: {
+        getSessionTasksStatus: async () => {
+          if (unloaded) throw new SessionNotFoundError(parentSessionId);
+          return {
+            v: 1,
+            sessionId: parentSessionId,
+            now: Date.now(),
+            tasks: [],
+          };
+        },
+      },
+    } as unknown as WorkspaceRuntime;
+    const sessions = new VirtualSubagentSessions();
+    const running = await sessions.resolve(runtime, parentSessionId, agentId);
+    expect(running).toMatchObject({ taskId: agentId, status: 'running' });
+    expect(parseVirtualSubagentSessionId(running!.sessionId)).toEqual({
+      parentSessionId,
+      agentId,
+    });
+    expect(
+      await sessions.resolve(runtime, 'another-parent', agentId),
+    ).toBeUndefined();
+    const loaded = await sessions.load(runtime, running!.sessionId);
+    expect(JSON.stringify(loaded)).toContain('Inspect workflow activity');
+    await fs.writeFile(
+      metaPath,
+      JSON.stringify({
+        ...meta,
+        status: 'completed',
+        lastUpdatedAt: new Date(2_000).toISOString(),
       }),
-    },
-  } as unknown as WorkspaceRuntime;
-  const sessions = new VirtualSubagentSessions();
-  const running = await sessions.resolve(runtime, parentSessionId, agentId);
-  expect(running).toMatchObject({ taskId: agentId, status: 'running' });
-  expect(parseVirtualSubagentSessionId(running!.sessionId)).toEqual({
-    parentSessionId,
-    agentId,
-  });
-  expect(
-    await sessions.resolve(runtime, 'another-parent', agentId),
-  ).toBeUndefined();
-  const loaded = await sessions.load(runtime, running!.sessionId);
-  expect(JSON.stringify(loaded)).toContain('Inspect workflow activity');
-  await fs.writeFile(
-    metaPath,
-    JSON.stringify({
-      ...meta,
+    );
+    expect(
+      await sessions.resolve(runtime, parentSessionId, agentId),
+    ).toMatchObject({
+      taskId: agentId,
       status: 'completed',
-      lastUpdatedAt: new Date(2_000).toISOString(),
-    }),
-  );
-  expect(
-    await sessions.resolve(runtime, parentSessionId, agentId),
-  ).toMatchObject({ taskId: agentId, status: 'completed', durationMs: 1_000 });
-});
+      durationMs: 1_000,
+    });
+  },
+);
