@@ -21,7 +21,7 @@ import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -43,8 +43,8 @@ class WorkspaceRecoveryStoreTest {
     @BeforeEach
     void setUp() throws Exception {
         var source = recoveryDataSource();
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         root = Files.createDirectory(temporary.resolve("source")).toRealPath();
         bundle = Files.createDirectory(temporary.resolve("bundle")).toRealPath();
@@ -57,15 +57,14 @@ class WorkspaceRecoveryStoreTest {
         sessions = new ManagedAgentStore(jdbc, WorkspaceRecoveryStore.JSON, Clock.systemUTC(), ignored -> { },
                 new ManagedWorkspaceRegistry(jdbc), properties);
         for (String workspace : List.of("workspace-a", "workspace-b")) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES ('tenant', ?, 1, 'storage',"
                     + " 'Test', ?, ?, 'ACTIVE')", workspace, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES ('tenant', ?, ?, 'OPERATOR')", workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         String fence = UUID.randomUUID().toString();
-        guard.fence("tenant", "storage", 1, fence);
         request = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
                 .put("operationId", UUID.randomUUID().toString()).put("tenantId", "tenant").put("storageId", "storage")
                 .put("fenceOperationId", fence).put("mountRevision", 1).put("sourceRoot", root.toString())
@@ -83,12 +82,182 @@ class WorkspaceRecoveryStoreTest {
     }
 
     @Test
+    void registrationRejectsExistingPhysicalDeleteIntentAndRollsBackItsProtection() {
+        String session = session("workspace-a");
+        deletingCapture(session);
+        assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work", Long.class)).isZero();
+    }
+
+    @Test
+    void registrationRejectsAPrivateClosureResourceDeleteIntent() {
+        String session = session("workspace-a");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        String key = ManagedSessionStore.resourceKey(scope, "checkpoint");
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
+                + " schema_version, byte_length, sha256, storage_kind, inline_bytes, state, deletion_operation_key, created_at)"
+                + " VALUES (?, ?, 'tenant', 'private-key', ?, 'checkpoint', 'managed-checkpoint', 1, 0, ?, 'MYSQL_INLINE', ?, 'REFERENCED', ?, CURRENT_TIMESTAMP(6))",
+                key, scope, session, WorkspaceRecoveryStore.hash(new byte[0]), new byte[0], WorkspaceOperations.hash("gc"));
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, created_at)"
+                + " VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'private-key', ?, 'checkpoint', 1, CURRENT_TIMESTAMP(6))", scope, scope, key, session);
+        assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Long.class)).isZero();
+    }
+
+    @Test
+    void registrationReadsDeleteIntentAfterWaitingForTheSessionRoot() throws Exception {
+        String session = session("workspace-a");
+        fence();
+        var reached = new java.util.concurrent.CountDownLatch(1);
+        var observed = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override public <T> List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper, Object... args) {
+                if (sql.startsWith("SELECT s.*") && sql.endsWith("FOR UPDATE")) {
+                    reached.countDown();
+                }
+                return super.query(sql, mapper, args);
+            }
+        };
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var future = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>>();
+            new TransactionTemplate(manager).executeWithoutResult(status -> {
+                jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE", "tenant", session);
+                future.set(pool.submit(() -> new WorkspaceRecoveryStore(observed, manager, guard, null, "capture", request.toString().getBytes(StandardCharsets.UTF_8))));
+                try {
+                    assertThat(reached.await(5, TimeUnit.SECONDS)).isTrue();
+                    assertThatThrownBy(() -> future.get().get(100, TimeUnit.MILLISECONDS)).isInstanceOf(java.util.concurrent.TimeoutException.class);
+                } catch (InterruptedException error) {
+                    throw new AssertionError(error);
+                }
+                deletingCapture(session);
+            });
+            assertThatThrownBy(() -> future.get().get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(IllegalStateException.class)
+                    .hasRootCauseMessage("Workspace recovery: source_drift");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work", Long.class)).isZero();
+    }
+
+    private void deletingCapture(String session) {
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id, execution_key,"
+                + " capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes, retention_state)"
+                + " VALUES (?, ?, 'tenant', 'workspace-a', ?, 'pub', ?, 'capture', '{}', ?, ?, 'FENCED', 1, 1, 1, 'DELETING')",
+                ToolPublicationDataStore.scope("tenant", "workspace-a", session), WorkspaceOperations.hash("tenant"), session,
+                WorkspaceOperations.hash("execution"), WorkspaceOperations.hash("binding"), WorkspaceOperations.hash("token"));
+    }
+
+    @Test
+    void completedGcRetirementExportsItsAuthorityAndVerifiesWithoutResettingCounters() throws Exception {
+        String session = committedAndRetiredSession();
+        var before = jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
+                + " FROM ma_session_head WHERE session_id = ? AND head_kind = 'MANAGED_SESSION'", session);
+        var properties = new ManagedAgentProperties();
+        properties.getToolPublication().setGcEnabled(true);
+        properties.getToolPublication().setDeletionGrace(java.time.Duration.ZERO);
+        var collector = new SessionResourceCollectionCollector(jdbc, manager, properties);
+        for (int page = 0; page < 20 && collector.runOnce(); page++) {}
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Long.class)).isZero();
+        var streamBefore = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version"
+                + " FROM ma_event_stream WHERE session_id = ? AND stream_kind = 'SESSION'", session);
+        var capture = capture();
+        JsonNode exported = call(capture, "sessions").path("sessions").get(0).path("source");
+        assertThat(exported.path("head").isNull()).isTrue();
+        assertThat(exported.path("retiredHead").path("journalRevision").asLong()).isEqualTo(1);
+        assertThat(exported.path("retiredHead").path("compactedThroughRevision").asLong()).isEqualTo(1);
+        assertThat(exported.path("retiredHead").path("writerGeneration").asLong()).isEqualTo(((Number) before.get("writer_generation")).longValue());
+        capture.call("sessionComplete", object().put("sessionId", session).set("summary", object()));
+        Path path = Files.createDirectories(bundle.resolve(".w1-recovery")).resolve("manifest.json");
+        Files.writeString(path, manifest(capture).toString());
+        String manifestDigest = WorkspaceRecoveryStore.hash(Files.readAllBytes(path));
+        var params = object().put("manifestDigest", manifestDigest);
+        params.set("result", object().put("contentVerified", true).put("activation", false));
+        capture.call("finish", params);
+        request.put("captureOperationId", request.path("operationId").asText()).put("operationId", UUID.randomUUID().toString());
+        var verification = store("verify");
+        assertThat(call(verification, "sessions").path("sessions").get(0).path("source")).isEqualTo(exported);
+        verification.call("sessionComplete", object().put("sessionId", session).set("summary", object()));
+        verification.call("finish", params);
+        assertThat(verification.inspect().path("state").asText()).isEqualTo("VERIFIED");
+        guard.restoreOriginal("tenant", "storage", request.path("mountRevision").asLong(), request.path("fenceOperationId").asText());
+        assertThat(jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
+                + " FROM ma_session_head WHERE session_id = ? AND head_kind = 'MANAGED_SESSION'", session)).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE session_id = ?", String.class, session)).isEqualTo("DELETED");
+        assertThat(jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version"
+                + " FROM ma_event_stream WHERE session_id = ? AND stream_kind = 'SESSION'", session)).isEqualTo(streamBefore);
+    }
+
+    @Test
+    void partialOrUnknownGcCannotBePresentedAsACollectedRetirement() {
+        String session = committedAndRetiredSession();
+        jdbc.update("UPDATE ma_session_head SET compacted_through_revision = journal_revision WHERE session_id = ?", session);
+        assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        String id = "session-resources-" + scope;
+        String key = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.SESSION_RESOURCE_GC, scope, scope, id);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_key, request_digest, request_json, phase, state, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'SESSION_RESOURCE_GC', ?, 'tenant', ?, 'SESSION', ?, 'digest', '{}', 'COLLECTING', 'UNKNOWN', 1, 1)",
+                key, scope, scope, id, session, scope);
+        assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
+        jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED' WHERE operation_key = ?", key);
+        jdbc.update("UPDATE ma_session_head SET journal_revision = journal_revision + 1 WHERE session_id = ?", session);
+        assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Long.class)).isZero();
+    }
+
+    private String committedAndRetiredSession() {
+        String session = session("workspace-a");
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = NULL WHERE tenant_id = ?", "tenant");
+        long revision = request.path("mountRevision").asLong();
+        if ("FENCED".equals(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class))) {
+            guard.restoreOriginal("tenant", "storage", revision, request.path("fenceOperationId").asText());
+            revision++;
+            request.put("mountRevision", revision);
+        }
+        long committedRevision = revision;
+        var journal = new ManagedSessionStore(jdbc);
+        String token = "a".repeat(64);
+        String records = "{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n";
+        byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
+        var tx = new TransactionTemplate(manager);
+        tx.execute(status -> journal.acquireWriter("tenant", session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-a", "original", 30_000L)));
+        tx.execute(status -> journal.commit("tenant", session, token, new ManagedSessionStoreModels.CommitTransactionRequest(
+                "workspace-a", "original", 1, 0, 0, "genesis", "session.create", "genesis-command", WorkspaceRecoveryStore.hash(bytes),
+                0, 0, 0, null, null, null, 0, null, 2, java.util.Base64.getEncoder().encodeToString(bytes), WorkspaceRecoveryStore.hash(bytes), List.of())));
+        tx.execute(status -> journal.sealWriter("tenant", session, token, new ManagedSessionStoreModels.SealWriterRequest("workspace-a", "original", 1)));
+        guard.fence("tenant", "storage", committedRevision, request.path("fenceOperationId").asText());
+        retireSession(session);
+        return session;
+    }
+
+    @Test
+    void recoveryAdmissionIgnoresOtherOperationKindsButBlocksUnresolvedSessionEffects() {
+        String session = session("workspace-a");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_key, request_digest, request_json, state, phase, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'OBJECT_PUT', 'original-put', 'tenant', ?, 'RESOURCE', ?, 'digest', '{}', 'RETURNED', 'PUT', 1, 1)",
+                WorkspaceOperations.hash("put"), scope, scope, session, WorkspaceOperations.hash("object"));
+        assertThat(WorkspaceRecoveryStore.currentSource(jdbc, "tenant", "storage", session, false).path("sessionId").asText())
+                .isEqualTo(session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_key, request_digest, request_json, state, phase, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'CLOSE', 'original-close', 'tenant', ?, 'SESSION', ?, 'digest', '{}', 'UNKNOWN', 'UNKNOWN', 1, 1)",
+                WorkspaceOperations.hash("close"), scope, scope, session, WorkspaceOperations.hash(session));
+        assertThatThrownBy(() -> WorkspaceRecoveryStore.currentSource(jdbc, "tenant", "storage", session, false))
+                .hasMessageContaining("source_drift");
+    }
+
+    @Test
     void pinsRetainedRetirementWithoutReopeningItsCheckpointOrWriter() {
         String session = session("workspace-a");
         head(session);
         String operation = retireSession(session);
-        var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session);
-        var retirement = jdbc.queryForMap("SELECT * FROM qwen_output_session_retirement WHERE session_id = ?", session);
+        var before = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session);
+        var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session);
         JsonNode source = call(capture(), "sessions").path("sessions").get(0).path("source");
         assertThat(source.path("retirement").path("operationId").asText()).isEqualTo(operation);
         assertThat(source.path("retirement").path("tenantId").asText()).isEqualTo("tenant");
@@ -98,8 +267,8 @@ class WorkspaceRecoveryStoreTest {
         assertThat(source.path("retirement").path("recoveryProtected").asBoolean()).isFalse();
         assertThat(source.path("head").path("latestCheckpointResourceId").isNull()).isTrue();
         assertThat(source.path("head").path("writerId").isNull()).isTrue();
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session)).isEqualTo(before);
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_output_session_retirement WHERE session_id = ?", session)).isEqualTo(retirement);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session)).isEqualTo(retirement);
     }
 
     @Test
@@ -108,7 +277,7 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         retireSession(session);
         var capture = capture();
-        jdbc.update("UPDATE qwen_output_session_retirement SET retired_at = retired_at + 1 WHERE session_id = ?", session);
+        jdbc.update("UPDATE ma_session SET retired_at = retired_at + 1 WHERE session_id = ?", session);
         assertThatThrownBy(() -> capture.call("sessionComplete", object().put("sessionId", session).set("summary", object())))
                 .hasMessageContaining("source_drift");
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
@@ -121,10 +290,11 @@ class WorkspaceRecoveryStoreTest {
         byte[] bytes = "{\"proof\":true}".getBytes(StandardCharsets.UTF_8);
         String digest = WorkspaceRecoveryStore.hash(bytes);
         // The shape the stream-capture collector leaves: identity kept, state COLLECTED, bytes NULL.
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                + " state, created_at) VALUES (?, 'tenant', 'private-key', ?, 'resource', 'managed-definition', 1, ?, ?,"
+                + " state, created_at) VALUES (?, ?, 'tenant', 'private-key', ?, 'resource', 'managed-definition', 1, ?, ?,"
                 + " 'MYSQL_INLINE', NULL, 'command', 'COLLECTED', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
                 ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, digest);
         var capture = capture();
         ObjectNode params = object().put("sessionId", session);
@@ -141,18 +311,18 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         // The shape the publication collector leaves: the publication stays REFERENCED while
         // the object row is state COLLECTED with its bytes permanently freed.
-        String scope = WorkspaceRecoveryStore.hash(WorkspaceRecoveryStore.JSON.createArrayNode()
-                .add("tenant").add("private-key").add(session).toString());
-        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        String sessionScope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        String scope = ToolPublicationDataStore.scope("tenant", "private-key", session);
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
                 + " receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'private-key', ?, 'pub-1', ?,"
                 + " 'capture-1', '{}', ?, ?, 'FENCED', 0, 0, 0, 'REFERENCED', TRUE, TRUE, 1, 1)",
                 scope, WorkspaceRecoveryStore.hash("tenant"), session, scope, scope, scope);
-        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
-                + " resource_kind, byte_length, sha256, inline_bytes, state, operation_id, created_at)"
-                + " VALUES (?, 'pub-1', 'terminal', 'resource-1', 'managed-tool-terminal', 64, ?, NULL,"
-                + " 'COLLECTED', 'op-1', CURRENT_TIMESTAMP(6))", scope, "a".repeat(64));
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, scope_key, publication_id, slot_key, resource_id,"
+                + " kind, byte_length, sha256, inline_bytes, capture_state, operation_id, tenant_id, workspace_id, session_id, schema_version, storage_kind, state, created_at)"
+                + " VALUES (?, ?, ?, 'pub-1', 'terminal', 'resource-1', 'managed-tool-terminal', 64, ?, NULL,"
+                + " 'COLLECTED', 'op-1', 'tenant', 'private-key', ?, 1, 'MYSQL_INLINE', 'COLLECTED', CURRENT_TIMESTAMP(6))", ManagedSessionStore.resourceKey(sessionScope, "resource-1"), sessionScope, scope, "a".repeat(64), session);
         var capture = capture();
         assertThatThrownBy(() -> capture.call("publicationObject",
                 object().put("sessionId", session).put("publicationId", "pub-1").put("slotKey", "terminal")))
@@ -165,10 +335,11 @@ class WorkspaceRecoveryStoreTest {
     void registrationRetriesATransientLockWait() {
         String session = session("workspace-a");
         head(session);
-        var contended = new JdbcTemplate(jdbc.getDataSource()) {
+        fence();
+        var contended = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             private boolean tripped;
             @Override public int update(String sql, Object... args) {
-                if (!tripped && sql.startsWith("INSERT INTO managed_workspace_recovery_operation")) {
+                if (!tripped && sql.startsWith("INSERT INTO ma_operation (operation_key, scope_key")) {
                     tripped = true;
                     throw new org.springframework.dao.CannotAcquireLockException("injected lock wait");
                 }
@@ -178,15 +349,16 @@ class WorkspaceRecoveryStoreTest {
         var store = new WorkspaceRecoveryStore(contended, manager, guard, null, "capture",
                 request.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(store.inspect().path("state").asText()).isEqualTo("CAPTURING");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_session WHERE session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE work_kind = 'SESSION' AND session_id = ?",
                 Long.class, session)).isOne();
     }
 
     @Test
     void registrationExhaustsItsRetriesOnPersistentLockWaits() {
-        var contended = new JdbcTemplate(jdbc.getDataSource()) {
+        fence();
+        var contended = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public int update(String sql, Object... args) {
-                if (sql.startsWith("INSERT INTO managed_workspace_recovery_operation")) {
+                if (sql.startsWith("INSERT INTO ma_operation (operation_key, scope_key")) {
                     throw new org.springframework.dao.CannotAcquireLockException("injected lock wait");
                 }
                 return super.update(sql, args);
@@ -195,7 +367,7 @@ class WorkspaceRecoveryStoreTest {
         assertThatThrownBy(() -> new WorkspaceRecoveryStore(contended, manager, guard, null, "capture",
                 request.toString().getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(org.springframework.dao.CannotAcquireLockException.class);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Long.class)).isZero();
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -205,16 +377,16 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         retireSession(session);
         switch (damage) {
-            case "owner" -> jdbc.update("UPDATE qwen_output_session_retirement SET tenant_id = 'foreign' WHERE session_id = ?", session);
-            case "generation" -> jdbc.update("UPDATE qwen_output_session_retirement SET generation = 2 WHERE session_id = ?", session);
-            case "protected" -> jdbc.update("UPDATE qwen_output_session_retirement SET recovery_protected = TRUE WHERE session_id = ?", session);
-            case "operation" -> jdbc.update("UPDATE managed_agent_operation SET delivery_state = 'PENDING' WHERE session_id = ?", session);
-            case "public" -> jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED' WHERE session_id = ?", session);
-            case "head" -> jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = 'retained' WHERE session_id = ?", session);
+            case "owner" -> jdbc.update("UPDATE ma_session_head SET tenant_id = X'666f726569676e' WHERE session_id = ?", session);
+            case "generation" -> jdbc.update("UPDATE ma_session SET retirement_generation = 2 WHERE session_id = ?", session);
+            case "protected" -> jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE session_id = ?", session);
+            case "operation" -> jdbc.update("UPDATE ma_operation SET delivery_state = 'PENDING' WHERE session_id = ?", session);
+            case "public" -> jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE session_id = ?", session);
+            case "head" -> jdbc.update("UPDATE ma_session_head SET latest_checkpoint_resource_id = X'72657461696e6564' WHERE session_id = ?", session);
             default -> throw new AssertionError(damage);
         }
         assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Integer.class)).isZero();
     }
 
     @Test
@@ -252,7 +424,7 @@ class WorkspaceRecoveryStoreTest {
         // The pinned Session carries non-empty agent instructions published
         // through the production publisher; W1 must read them back.
         head(pinned);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET workspace_id = 'workspace-b'"
+        jdbc.update("UPDATE ma_session_head SET workspace_id = X'776f726b73706163652d62'"
                 + " WHERE session_id = ?", pinned);
         var instructions = new ManagedSessionStore(jdbc).publishAgentInstructions(
                 "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
@@ -341,7 +513,7 @@ class WorkspaceRecoveryStoreTest {
     void leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones() {
         String session = session("workspace-a");
         head(session);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE',"
+        jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE',"
                 + " writer_lease_until = '2000-01-01 00:00:00.123456'");
         var capture = capture();
         JsonNode source = call(capture, "sessions").path("sessions").get(0).path("source");
@@ -351,13 +523,13 @@ class WorkspaceRecoveryStoreTest {
         done.set("summary", object());
         for (String zone : List.of("LOCAL", "UTC", "+08:00", "Asia/Shanghai")) {
             DataSource dataSource = recoveryDataSource(zone);
-            var resumed = new WorkspaceRecoveryStore(new JdbcTemplate(dataSource),
+            var resumed = new WorkspaceRecoveryStore(new ManagedSchemaJdbcTemplate(dataSource),
                     new DataSourceTransactionManager(dataSource), guard, null, "capture",
                     request.toString().getBytes(StandardCharsets.UTF_8));
             assertThat(resumed.call("sessionComplete", done).path("complete").asBoolean()).isTrue();
             assertThat(call(resumed, "sessions").path("sessions").get(0).path("source")).isEqualTo(source);
         }
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = '2000-01-01 00:00:00.123457'");
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = '2000-01-01 00:00:00.123457'");
         assertThatThrownBy(() -> capture.call("sessionComplete", done)).hasMessageContaining("source_drift");
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
     }
@@ -373,7 +545,7 @@ class WorkspaceRecoveryStoreTest {
         ObjectNode ref = object().put("resourceId", "id").put("kind", "managed-definition")
                 .put("schemaVersion", 4294967297L).put("byteLength", 0).put("digest", "a".repeat(64));
         assertThatThrownBy(() -> WorkspaceRecoveryReader.validateRef(ref)).hasMessageContaining("invalid_resource_reference");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Integer.class)).isZero();
     }
 
     @Test
@@ -394,8 +566,8 @@ class WorkspaceRecoveryStoreTest {
     void pinsAllSharedStorageMembershipAndRetriesDerivedWorkWithoutMutatingAuthority() {
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < 35; i++) ids.add(session(i % 2 == 0 ? "workspace-a" : "workspace-b"));
-        jdbc.update("UPDATE managed_agent_session SET status = 'ARCHIVED' WHERE session_id = ?", ids.getFirst());
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 1 WHERE session_id = ?", ids.getLast());
+        jdbc.update("UPDATE ma_session SET status = 'ARCHIVED' WHERE session_id = ?", ids.getFirst());
+        jdbc.update("UPDATE ma_session SET status = 'DELETED', deleted_at = 1 WHERE session_id = ?", ids.getLast());
         var before = sessionRows();
         var capture = capture();
         assertThat(call(capture, "context").path("sessionCount").asInt()).isEqualTo(35);
@@ -418,7 +590,7 @@ class WorkspaceRecoveryStoreTest {
         capture().call("asset", asset);
         assertThat(call(capture, "assetPage").path("assets")).hasSize(1);
         assertThat(sessionRows()).isEqualTo(before);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head", Integer.class)).isZero();
         assertThatThrownBy(() -> capture.call("asset", object().put("key", key).set("metadata", object().put("type", "changed"))))
                 .hasMessageContaining("asset_conflict");
         request.put("nodeExecutable", "/different/node");
@@ -429,7 +601,7 @@ class WorkspaceRecoveryStoreTest {
     void sourceDriftInvalidatesOutsideTheFailedDerivedTransaction() {
         String session = session("workspace-a");
         var capture = capture();
-        jdbc.update("UPDATE managed_agent_session SET version = version + 1 WHERE session_id = ?", session);
+        jdbc.update("UPDATE ma_session SET version = version + 1 WHERE session_id = ?", session);
         assertThatThrownBy(() -> capture.call("sessionComplete", object().put("sessionId", session).set("summary", object())))
                 .hasMessageContaining("source_drift");
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
@@ -437,9 +609,9 @@ class WorkspaceRecoveryStoreTest {
         capture.call("invalidate", object().put("code", "source_drift"));
         capture.call("failure", object().put("code", "bundle_io_failed"));
         assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
-        assertThat(jdbc.queryForObject("SELECT state FROM managed_workspace_recovery_session WHERE session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation_work WHERE work_kind = 'SESSION' AND session_id = ?",
                 String.class, session)).isEqualTo("PENDING");
-        assertThat(jdbc.queryForObject("SELECT mount_state FROM managed_workspace_execution_lease", String.class)).isEqualTo("FENCED");
+        assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class)).isEqualTo("FENCED");
     }
 
     @Test
@@ -448,14 +620,16 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         byte[] bytes = "{\"proof\":true}".getBytes(StandardCharsets.UTF_8);
         String digest = WorkspaceRecoveryStore.hash(bytes);
-        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                + " state, created_at) VALUES (?, 'tenant', 'private-key', ?, 'resource', 'managed-definition', 1, ?, ?,"
+                + " state, created_at) VALUES (?, ?, 'tenant', 'private-key', ?, 'resource', 'managed-definition', 1, ?, ?,"
                 + " 'MYSQL_INLINE', ?, 'command', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
                 ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, digest, bytes);
-        jdbc.update("INSERT INTO qwen_managed_session_resource_ref (session_scope_key, tenant_id, workspace_id, session_id,"
-                + " journal_revision, resource_id, created_at) VALUES (?, 'tenant', 'private-key', ?, 1, 'resource', CURRENT_TIMESTAMP(6))",
-                ManagedSessionStore.sessionScopeKey("tenant", session), session);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                + " journal_revision, resource_id, created_at) VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'private-key', ?, 1, 'resource', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.sessionScopeKey("tenant", session), ManagedSessionStore.sessionScopeKey("tenant", session),
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("tenant", session), "resource"), session);
         var capture = capture();
         JsonNode source = call(capture, "sessions").path("sessions").get(0).path("source");
         assertThat(source.path("head").path("workspaceId").asText()).isEqualTo("private-key");
@@ -465,7 +639,7 @@ class WorkspaceRecoveryStoreTest {
                 .put("byteLength", bytes.length).put("digest", digest);
         ObjectNode params = object().put("sessionId", session);
         params.set("ref", ref);
-        var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head");
+        var before = jdbc.queryForMap("SELECT * FROM ma_session_head");
         assertThat(capture.call("resource", params).path("bytesBase64").asText())
                 .isEqualTo(java.util.Base64.getEncoder().encodeToString(bytes));
         capture.call("enqueueRef", params);
@@ -476,19 +650,19 @@ class WorkspaceRecoveryStoreTest {
         assertThat(capture.call("nextRef", object().put("sessionId", session)).isNull()).isTrue();
         ref.put("digest", "f".repeat(64));
         assertThatThrownBy(() -> capture.call("enqueueRef", params)).hasMessageContaining("reference_conflict");
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head")).isEqualTo(before);
-        assertThat(jdbc.queryForObject("SELECT last_verified_at FROM qwen_managed_session_resource", java.sql.Timestamp.class)).isNull();
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head")).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT last_verified_at FROM ma_resource", java.sql.Timestamp.class)).isNull();
     }
 
     @Test
     void liveWriterAndPendingTurnPreventCapturingEvenUnderAStorageFence() {
         String session = session("workspace-a");
         head(session);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE', writer_lease_until = '2999-01-01 00:00:00'");
+        jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE', writer_lease_until = '2999-01-01 00:00:00'");
         assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Integer.class)).isZero();
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'SEALED'");
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest,"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_RECOVERY'", Integer.class)).isZero();
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest,"
                 + " status, created_at, updated_at) VALUES ('tenant', ?, 'turn', ?, '[]', 'sha256:x', 'ACCEPTED', 1, 1)",
                 session, UUID.randomUUID().toString());
         assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
@@ -552,13 +726,18 @@ class WorkspaceRecoveryStoreTest {
                 .isEqualTo("INVALIDATED");
         assertThat(capture().inspect().path("state").asText()).isEqualTo("INVALIDATED");
         assertThatThrownBy(() -> call(capture, "context")).hasMessageContaining("source_drift");
-        assertThat(jdbc.queryForObject("SELECT mount_state FROM managed_workspace_execution_lease", String.class)).isEqualTo("FENCED");
+        assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class)).isEqualTo("FENCED");
     }
 
     @Test
     void lateMembershipPreventsSealingTheOriginalCut() throws Exception {
         var capture = capture();
-        session("workspace-b");
+        assertThatThrownBy(() -> session("workspace-b")).isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, workspace_id, workspace_generation, workspace_storage_id,"
+                + " cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, creator_actor_key, owner_actor_key, created_at, updated_at)"
+                + " VALUES ('tenant', ?, 'qwen-code', 'workspace-b', 1, 'storage', '.', ?, 1, ?, ?, ?, ?, 1, 1)", UUID.randomUUID().toString(),
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF,
+                "actor".getBytes(StandardCharsets.UTF_8), "actor".getBytes(StandardCharsets.UTF_8));
         Path manifest = Files.createDirectories(bundle.resolve(".w1-recovery")).resolve("manifest.json");
         Files.writeString(manifest, manifest(capture).toString());
         ObjectNode params = object().put("manifestDigest", WorkspaceRecoveryStore.hash(Files.readAllBytes(manifest)));
@@ -576,10 +755,10 @@ class WorkspaceRecoveryStoreTest {
         ObjectNode params = object().put("manifestDigest", WorkspaceRecoveryStore.hash(Files.readAllBytes(manifest)));
         params.set("result", object().put("contentVerified", true).put("activation", false));
         try (var executor = Executors.newSingleThreadExecutor()) {
-            var racingJdbc = new JdbcTemplate(jdbc.getDataSource()) {
+            var racingJdbc = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
                 @Override
-                public int update(String sql, Object... args) {
-                    if (sql.startsWith("UPDATE managed_workspace_recovery_operation SET state = ?, manifest_digest")) {
+                public <T> java.util.List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper, Object... args) {
+                    if (sql.startsWith("SELECT * FROM ma_operation WHERE operation_key = ?") && sql.endsWith("FOR UPDATE")) {
                         try {
                             executor.submit(() -> original.call("invalidate", object().put("code", "source_drift")))
                                     .get(5, TimeUnit.SECONDS);
@@ -587,7 +766,7 @@ class WorkspaceRecoveryStoreTest {
                             throw new AssertionError(error);
                         }
                     }
-                    return super.update(sql, args);
+                    return super.query(sql, mapper, args);
                 }
             };
             var finishing = new WorkspaceRecoveryStore(racingJdbc, manager, guard, null, "capture",
@@ -620,25 +799,27 @@ class WorkspaceRecoveryStoreTest {
     }
 
     private void head(String session) {
-        jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id, workspace_id, session_id, storage_version,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, head_kind, harness_session_id, tenant_id, workspace_id, session_id, storage_version,"
                 + " state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision,"
                 + " committed_sequence, last_commit_digest, activation_epoch, compacted_through_revision, recovery_status,"
-                + " created_at, updated_at) VALUES ('tenant', 'private-key', ?, 1, 'SEALED', 1, 'original',"
+                + " created_at, updated_at) VALUES (?, ?, 'MANAGED_SESSION', ?, 'tenant', 'private-key', ?, 1, 'SEALED', 1, 'original',"
                 + " '2000-01-01 00:00:00', ?, 1, 1, ?, 1, 0, 'READY', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
-                session, "a".repeat(64), "b".repeat(64));
+                WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash(session), session, session, "a".repeat(64), "b".repeat(64));
     }
 
     private String retireSession(String session) {
         String operation = UUID.randomUUID().toString();
-        // Exercise retained DELETE completion from an admitted closed Session.
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = ?", session);
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
-                + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
-                + " session_status_before, lease_owner, lease_until, claim_generation, available_at, created_at,"
-                + " updated_at)"
-                + " VALUES ('tenant', ?, ?, 'DELETE', '', 'delete', 'digest', 'RUNNING', 'JAVA_DURABLE',"
-                + " 'LEASED', 'CLOSED', 'worker', 32503680000000, 1, 0, 0, 0)", session, operation);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = 'retained' WHERE session_id = ?", session);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        jdbc.update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = ?", session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, tenant_id, session_id,"
+                + " operation_id, operation_kind, actor_digest, idempotency_key, request_digest, request_json, state, phase,"
+                + " admission_stage, delivery_state, session_status_before, claim_owner, claim_until, claim_generation, available_at, created_at, updated_at)"
+                + " VALUES (?, ?, ?, 'SESSION', ?, 'tenant', ?, ?, 'DELETE', '', 'delete', 'digest', '{}', 'RUNNING', 'LEASED',"
+                + " 'JAVA_DURABLE', 'LEASED', 'CLOSED', 'worker', TIMESTAMPADD(SECOND, 60, CURRENT_TIMESTAMP(6)), 1, 0, 0, 0)",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.DELETE,
+                        scope, WorkspaceOperations.hash(session), operation), scope, scope, WorkspaceOperations.hash(session), session, operation);
+        jdbc.update("UPDATE ma_session_head SET latest_checkpoint_resource_id = X'72657461696e6564' WHERE session_id = ?", session);
         assertThat(new TransactionTemplate(manager).<Boolean>execute(status ->
                 sessions.completeOperation("tenant", session, operation, "worker", 1, false))).isTrue();
         return operation;
@@ -648,7 +829,16 @@ class WorkspaceRecoveryStoreTest {
         return store("capture");
     }
 
+    private void fence() {
+        if ("READY".equals(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class))) {
+            guard.fence("tenant", "storage", request.path("mountRevision").asLong(), request.path("fenceOperationId").asText());
+        }
+    }
+
     private WorkspaceRecoveryStore store(String mode) {
+        if ("capture".equals(mode)) {
+            fence();
+        }
         return new WorkspaceRecoveryStore(jdbc, manager, guard, null, mode, request.toString().getBytes(StandardCharsets.UTF_8));
     }
 
@@ -663,7 +853,7 @@ class WorkspaceRecoveryStoreTest {
     // byte[] columns (creator_actor_key) compare by reference in a Map;
     // hex them so the immutability assertion compares content.
     private List<Map<String, Object>> sessionRows() {
-        return jdbc.queryForList("SELECT * FROM managed_agent_session"
+        return jdbc.queryForList("SELECT * FROM ma_session"
                         + " ORDER BY session_id").stream()
                 .map(row -> {
                     Map<String, Object> copy = new LinkedHashMap<>(row);
