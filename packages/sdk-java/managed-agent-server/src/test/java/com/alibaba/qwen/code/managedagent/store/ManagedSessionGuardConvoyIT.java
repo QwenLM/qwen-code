@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.InputStream;
@@ -35,7 +36,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -70,7 +70,7 @@ class ManagedSessionGuardConvoyIT {
         schema = "gc_" + UUID.randomUUID().toString().replace("-", "");
         admin.execute("CREATE DATABASE " + schema);
         source = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        ManagedSchema.initialize(source);
     }
 
     @AfterEach
@@ -100,7 +100,7 @@ class ManagedSessionGuardConvoyIT {
         pool.setMaxWait(3_000L);
         String token = "w".repeat(32);
         try {
-            var jdbc = new JdbcTemplate(pool);
+            var jdbc = new ManagedSchemaJdbcTemplate(pool);
             var manager = new DataSourceTransactionManager(pool);
             var transactions = new TransactionTemplate(manager);
             var store = new ManagedSessionStore(jdbc);
@@ -131,7 +131,7 @@ class ManagedSessionGuardConvoyIT {
 
     @Test
     void heldTenantGuardsDoNotWedgeUnrelatedSessions() throws Exception {
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var transactions = new TransactionTemplate(manager);
         var store = new ManagedSessionStore(jdbc);
@@ -144,8 +144,9 @@ class ManagedSessionGuardConvoyIT {
                 new AcquireWriterRequest(workspace, "writer-blocked", 60_000L)));
         var journalWriter = transactions.execute(ignored ->
                 new ExtensionRecordJournal(store, tenant, workspace, "committer").open());
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = 'BLOCKED_RESOURCE',"
-                + " recovery_detail_code = 'a2-witness' WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_session_head SET recovery_status = 'BLOCKED_RESOURCE',"
+                + " recovery_detail_code = 'a2-witness' WHERE tenant_id = ? AND session_id = ?"
+                + " AND head_kind = 'MANAGED_SESSION'",
                 tenant, "blocked");
 
         var holdTx = manager.getTransaction(new DefaultTransactionDefinition());
@@ -246,7 +247,7 @@ class ManagedSessionGuardConvoyIT {
                 new AcquireWriterRequest(workspace, "writer-late", 60_000L)));
         // And the blocked neighbour reports its own blocked state unchanged.
         assertThat(jdbc.queryForObject("SELECT CONCAT(recovery_status, ':', recovery_detail_code) FROM"
-                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                + " ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                 String.class, tenant, "blocked")).isEqualTo("BLOCKED_RESOURCE:a2-witness");
     }
 
@@ -267,7 +268,7 @@ class ManagedSessionGuardConvoyIT {
      */
     @Test
     void duplicateCommitReplaysOnceTheWinnerReleasesItsGuards() throws Exception {
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var transactions = new TransactionTemplate(manager);
         var store = new ManagedSessionStore(jdbc);
@@ -294,7 +295,7 @@ class ManagedSessionGuardConvoyIT {
             try (var pool = Executors.newSingleThreadExecutor()) {
                 var retry = pool.submit(() ->
                         transactions.execute(ignored -> journalWriter.commit(request)));
-                awaitWaitingLock(jdbc, "qwen_runtime_placement_guard");
+                awaitWaitingLock(jdbc, "ma_tenant_guard");
                 manager.commit(winner);
                 var second = retry.get(30, TimeUnit.SECONDS);
                 assertThat(second.replayed()).isTrue();
@@ -305,7 +306,7 @@ class ManagedSessionGuardConvoyIT {
                 manager.rollback(winner);
             }
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ? AND operation = 'commitMcpRecord'",
                 Integer.class, tenant, "victim")).isOne();
     }
@@ -427,7 +428,7 @@ class ManagedSessionGuardConvoyIT {
      */
     @Test
     void writerAcquisitionOrdersPlacementBeforeTheDrainFence() throws Exception {
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var transactions = new TransactionTemplate(manager);
         var store = new ManagedSessionStore(jdbc);
@@ -446,15 +447,16 @@ class ManagedSessionGuardConvoyIT {
             var writer = pool.submit(() -> transactions.executeWithoutResult(ignored ->
                     store.acquireWriter(tenant, "victim", token,
                             new AcquireWriterRequest(workspace, "writer-victim", 60_000L))));
-            awaitWaitingLock(jdbc, "qwen_runtime_placement_guard");
+            awaitWaitingLock(jdbc, "ma_tenant_guard");
             // The begin path's drain insert must complete inside the same
             // transaction window: a drain-first writer order would have the
             // writer holding this gap and deadlock the pair.
-            jdbc.update("INSERT INTO qwen_runtime_harness_drain (tenant_key, harness_key,"
-                            + " tenant_id, harness_session_id) VALUES (?, ?, ?, ?)"
+            jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+                            + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
+                            + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))"
                             + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                    JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim");
+                    JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim");
             manager.rollback(lifecycle);
             assertThat(innodbDeadlocks(jdbc) - deadlocksBefore)
                     .as("no InnoDB deadlock must form between lifecycle placement and writer admission")
@@ -463,11 +465,12 @@ class ManagedSessionGuardConvoyIT {
         // A real lifecycle would commit the drain instead of rolling it
         // back; replay that final state explicitly.
         transactions.executeWithoutResult(ignored ->
-                jdbc.update("INSERT INTO qwen_runtime_harness_drain (tenant_key, harness_key,"
-                                + " tenant_id, harness_session_id) VALUES (?, ?, ?, ?)"
+                jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+                                + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
+                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))"
                                 + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
                         JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                        JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim"));
+                        JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim"));
         assertThatThrownBy(() -> transactions.executeWithoutResult(ignored ->
                 store.acquireWriter(tenant, "victim", token,
                         new AcquireWriterRequest(workspace, "writer-victim", 60_000L))))

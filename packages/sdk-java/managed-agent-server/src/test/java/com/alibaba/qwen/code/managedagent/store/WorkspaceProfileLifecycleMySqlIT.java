@@ -37,7 +37,7 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
         var f = fixture();
         var first = admit(f, WorkspaceToolProfiles.SHELL, StoreModels.OperationKind.CLOSE);
         f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(first));
-        f.jdbc.update("UPDATE managed_agent_operation SET lease_until = 0");
+        f.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '2000-01-01 00:00:00' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
         var start = new java.util.concurrent.CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
             var futures = java.util.stream.IntStream.range(0, 2).mapToObj(index -> executor.submit(() -> {
@@ -67,7 +67,7 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
         var operation = admit(f, WorkspaceToolProfiles.SHELL, StoreModels.OperationKind.DELETE);
         f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(operation));
-        f.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?",
+        f.jdbc.update("UPDATE ma_session_head SET writer_lease_until = ?",
                 java.sql.Timestamp.from(java.time.Instant.parse("2000-01-01T00:00:00Z")));
         var start = new java.util.concurrent.CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
@@ -93,7 +93,7 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
                 if (grant != null) winners.add(grant);
             }
             org.assertj.core.api.Assertions.assertThat(winners).hasSize(1);
-            org.assertj.core.api.Assertions.assertThat(f.jdbc.queryForObject("SELECT writer_generation FROM qwen_managed_session_journal_head", Long.class))
+            org.assertj.core.api.Assertions.assertThat(f.jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
                     .isEqualTo(winners.getFirst().writerGeneration());
             org.assertj.core.api.Assertions.assertThat(journal.hasLiveWriter("tenant", f.session)).isTrue();
         }

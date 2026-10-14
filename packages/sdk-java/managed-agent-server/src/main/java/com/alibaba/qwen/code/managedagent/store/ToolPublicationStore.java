@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
 import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
@@ -236,20 +238,20 @@ public final class ToolPublicationStore {
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
-        var head = jdbc.queryForMap("SELECT workspace_id, state, storage_version, writer_id, writer_generation,"
+        var head = jdbc.query("SELECT workspace_id, state, storage_version, writer_id, writer_generation,"
                         + " CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
                         + " recovery_status, activation_epoch, journal_revision,"
                         + " activation_id, activation_phase, activation_event_epoch, activation_expires_at,"
                         + " activation_head_revision"
-                        + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
-                row.tenant(), row.session());
+                        + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session()).getFirst();
         require(((Number) head.get("storage_version")).intValue() >= 1
                 && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
                 "Managed Session storage version is unsupported.");
-        var current = jdbc.queryForMap("SELECT token_hash, state, expires_at, binding_digest, binding_json,"
+        var current = jdbc.query("SELECT token_hash, state, expires_at, binding_digest, binding_json,"
                 + " tenant_id, workspace_id, session_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
-                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
-                scope, publicationId);
+                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                scope, publicationId).getFirst();
         long nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         require(((Number) current.get("quarantined")).intValue() == 0, "Publication is quarantined");
         if (access != Access.SETTLE) {
@@ -304,8 +306,8 @@ public final class ToolPublicationStore {
         }
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         Integer writerLive = jdbc.queryForObject("SELECT CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6)"
-                + " THEN 1 ELSE 0 END FROM qwen_managed_session_journal_head"
-                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, row.tenant(), row.session());
+                + " THEN 1 ELSE 0 END FROM ma_session_head"
+                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
         if (writerLive == null || writerLive != 1) {
             require(false, "Original Session or activation expired");
         }
@@ -335,7 +337,7 @@ public final class ToolPublicationStore {
         JsonNode found = null;
         for (long revision = journalRevision; revision > 0 && found == null; revision--) {
             // The locking head read can see a newer revision than this transaction's snapshot.
-            byte[] record = jdbc.queryForObject("SELECT record_bytes FROM qwen_managed_session_journal_tx"
+            byte[] record = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ? FOR UPDATE",
                     byte[].class, tenant, session, revision);
             String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
@@ -404,14 +406,14 @@ public final class ToolPublicationStore {
                 journalRevision)) {
             return;
         }
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        jdbc.update("UPDATE ma_session_head SET"
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
-                        + " activation_head_revision = ? WHERE tenant_id = ?"
+                        + " activation_head_revision = ? WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
                 activationId, phase, epoch, expiresAt, journalRevision,
-                tenant, session);
+                ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, session);
     }
 
     private JsonNode applyLocked(JsonNode request, String writerToken, String tokenHash) {
@@ -419,7 +421,7 @@ public final class ToolPublicationStore {
         String tenant = text(key, "tenantId");
         String workspace = text(key, "workspaceId");
         String session = text(key, "sessionId");
-        String tenantKey = hash(tenant);
+        String tenantKey = ManagedSchemaKeys.key(tenant);
         String scope = hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
         JsonNode candidate = request.get("binding");
         String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
@@ -435,7 +437,7 @@ public final class ToolPublicationStore {
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
                 text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken);
         String operation = text(request, "operation");
-        List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication"
+        List<Row> rows = jdbc.query("SELECT * FROM ma_output_capture"
                         + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"),
@@ -466,25 +468,25 @@ public final class ToolPublicationStore {
             require(bytes <= capacity.executionBytes(), "Execution capture capacity exceeded");
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
-            jdbc.update("UPDATE qwen_tool_publication SET state = 'FENCED', expires_at = NULL,"
+            jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
                     + " capture_held_bytes = capture_used_bytes, producer_held_bytes = producer_used_bytes,"
                     + " admission_held_bytes = CASE WHEN producer_phase IN ('FINISHED', 'REFERENCED')"
                     + " THEN admission_held_bytes ELSE admission_used_bytes END"
                     + " WHERE tenant_key = ? AND state = 'OPEN' AND expires_at <= ?", tenantKey, writer.now());
-            var totals = jdbc.queryForMap("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
+            var totals = jdbc.query("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
                     + " + admission_held_bytes), 0) AS reserved,"
                     + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND producer_phase IN ('OPEN', 'FINISHING')"
                     + " THEN 1 ELSE 0 END), 0) AS captures"
-                    + " FROM qwen_tool_publication WHERE tenant_key = ? AND state <> 'NOT_STARTED'", tenantKey);
+                    + " FROM ma_output_capture WHERE tenant_key = ? AND state <> 'NOT_STARTED'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenantKey).getFirst();
             long reserved = ((Number) totals.get("reserved")).longValue();
             long count = ((Number) totals.get("captures")).longValue();
             Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
-                    + " + admission_held_bytes), 0) FROM qwen_tool_publication"
+                    + " + admission_held_bytes), 0) FROM ma_output_capture"
                     + " WHERE scope_key = ? AND state <> 'NOT_STARTED'", Long.class, scope);
             require(reserved <= capacity.tenantBytes() - allocation
                     && sessionReserved <= capacity.sessionBytes() - allocation
                     && count < capacity.activeCaptures(), "Publication capacity exhausted");
-            jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                             + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
                             + " token_hash, state, expires_at, capture_bytes, producer_bytes, admission_bytes,"
                             + " capture_held_bytes, producer_held_bytes, admission_held_bytes, write_evidence)"
@@ -504,7 +506,7 @@ public final class ToolPublicationStore {
                     && owner.get("writerGeneration").longValue() == binding.get("writerGeneration").longValue(),
                     "Original writer is fenced");
             long expires = requireEvidence(binding, writerToken, writer, false);
-            jdbc.update("UPDATE qwen_tool_publication SET expires_at = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET expires_at = ? WHERE scope_key = ? AND publication_id = ?",
                     expires, scope, id);
             return grant(id, row.withState("OPEN", expires));
         }
@@ -514,19 +516,19 @@ public final class ToolPublicationStore {
             require(execution.isSettled() && ("not_started".equals(execution.getExecutionStatus())
                     || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0),
                     "Execution has no authoritative not-started proof");
-            Long published = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
+            Long published = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource"
                     + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
-            Long attempted = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_operation"
+            Long attempted = jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
                     + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
             require(published == 0 && attempted == 0 && "OPEN".equals(jdbc.queryForObject(
-                    "SELECT producer_phase FROM qwen_tool_publication WHERE scope_key = ?"
+                    "SELECT producer_phase FROM ma_output_capture WHERE scope_key = ?"
                             + " AND publication_id = ?", String.class, scope, id)),
                     "Publication has accepted producer work");
             state = "NOT_STARTED";
         } else if ("NOT_STARTED".equals(row.state())) {
             state = row.state();
         }
-        jdbc.update("UPDATE qwen_tool_publication SET state = ?, expires_at = NULL,"
+        jdbc.update("UPDATE ma_output_capture SET state = ?, expires_at = NULL,"
                 + " capture_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_used_bytes END,"
                 + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE producer_used_bytes END,"
                 + " admission_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0"
@@ -659,7 +661,7 @@ public final class ToolPublicationStore {
         String tenant = text(key, "tenantId");
         String session = text(key, "sessionId");
         List<Long> revisions = jdbc.queryForList(
-                "SELECT journal_revision FROM qwen_managed_session_journal_tx"
+                "SELECT journal_revision FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND first_sequence <= ? AND last_sequence >= ?"
                         + " AND journal_revision <= ?",
@@ -686,7 +688,7 @@ public final class ToolPublicationStore {
         // and sane (the byte-length tripwire); the same proof here is one
         // indexed count with the same bounds.
         Long above = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_session_journal_tx WHERE tenant_id = ?"
+                        + " ma_session_journal_tx WHERE tenant_id = ?"
                         + " AND session_id = ? AND journal_revision > ?"
                         + " AND journal_revision <= ?"
                         + " AND byte_length >= 1 AND byte_length <= ?",
@@ -867,7 +869,7 @@ public final class ToolPublicationStore {
     }
 
     private Row findPublicationRow(String scope, String publicationId) {
-        List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
+        List<Row> rows = jdbc.query("SELECT * FROM ma_output_capture WHERE scope_key = ?"
                         + " AND publication_id = ?",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"), r.getString("binding_digest"),
@@ -924,8 +926,8 @@ public final class ToolPublicationStore {
                 "Broker execution identity conflicts");
         if (bindings instanceof JdbcRuntimeBindingRepository nativeBindings
                 && nativeBindings.usesDataSource(jdbc.getDataSource())) {
-            var rows = jdbc.queryForList("SELECT binding_id, tenant_id, workspace_id, runtime_generation,"
-                    + " provisioner_kind FROM qwen_runtime_binding WHERE binding_id = ?", runtime.getBindingId());
+            var rows = jdbc.query("SELECT binding_id, tenant_id, workspace_id, runtime_generation,"
+                    + " provisioner_kind FROM ma_runtime_binding WHERE binding_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), runtime.getBindingId());
             require(rows.size() == 1, "Original Runtime binding is missing");
             var row = rows.getFirst();
             require(runtime.getBindingId().equals(row.get("binding_id"))
@@ -994,10 +996,10 @@ public final class ToolPublicationStore {
         }, savedResult);
         require(sameResult, "Original settled Broker result conflicts with terminal result");
         JsonNode terminal = finished.path("terminal");
-        var publication = jdbc.queryForMap("SELECT producer_phase, finish_operation_id, finish_digest,"
+        var publication = jdbc.query("SELECT producer_phase, finish_operation_id, finish_digest,"
                 + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
-                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
-                scope, publicationId);
+                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                scope, publicationId).getFirst();
         require(("FINISHED".equals(publication.get("producer_phase"))
                 || "REFERENCED".equals(publication.get("producer_phase")))
                 && ((Number) publication.get("quarantined")).intValue() == 0
@@ -1005,9 +1007,9 @@ public final class ToolPublicationStore {
                 && text(terminal, "resourceId").equals(publication.get("terminal_resource_id"))
                 && text(terminal, "digest").equals(publication.get("finish_digest")),
                 "Original finished publication changed");
-        var operation = jdbc.queryForMap("SELECT scope_key, publication_id, operation_id, state, slot_key, request_digest"
-                + " FROM qwen_tool_publication_operation WHERE scope_key = ? AND publication_id = ?"
-                + " AND operation_id = ? FOR UPDATE", scope, publicationId, text(finished, "finishOperationId"));
+        var operation = jdbc.query("SELECT scope_key, publication_id, operation_id, state, slot_key, request_digest"
+                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ?"
+                + " AND operation_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId, text(finished, "finishOperationId")).getFirst();
         require("SUCCEEDED".equals(operation.get("state")) && "terminal".equals(operation.get("slot_key"))
                 && (!acknowledgement || scope.equals(operation.get("scope_key"))
                         && publicationId.equals(operation.get("publication_id"))
@@ -1015,9 +1017,9 @@ public final class ToolPublicationStore {
                 && hash(JSON.createArrayNode().add("terminal").add(terminal.path("byteLength").longValue())
                         .add(text(terminal, "digest")).toString()).equals(operation.get("request_digest")),
                 "Original finish operation changed");
-        var object = jdbc.queryForMap("SELECT scope_key, publication_id, resource_id, resource_kind, byte_length, sha256, state, operation_id"
-                + " FROM qwen_tool_publication_object WHERE scope_key = ? AND publication_id = ?"
-                + " AND slot_key = 'terminal' FOR UPDATE", scope, publicationId);
+        var object = jdbc.query("SELECT scope_key, publication_id, resource_id, kind AS resource_kind, byte_length, sha256, capture_state AS state, operation_id"
+                + " FROM ma_resource WHERE scope_key = ? AND publication_id = ?"
+                + " AND slot_key = X'7465726d696e616c' FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
         require("VERIFIED".equals(object.get("state"))
                 && (!acknowledgement || scope.equals(object.get("scope_key"))
                         && publicationId.equals(object.get("publication_id")))
