@@ -28,6 +28,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { peerMessagingOffReason } from '../ipc/peer-messaging-guidance.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
@@ -106,12 +107,6 @@ class SendMessageInvocation extends BaseToolInvocation<
    * claiming a lookup that never happened.
    */
   private peerMessagingOff = false;
-
-  private peerMessagingOffReason(): string {
-    if (this.config.isSafeMode?.())
-      return '--safe-mode (or QWEN_CODE_SAFE_MODE) disables peer messaging, and agents.crossSessionMessaging may also be off';
-    return 'no peer inbox is bound in this session';
-  }
 
   /**
    * Try to deliver to another Qwen Code session on this machine.
@@ -479,7 +474,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not active in this session (${this.peerMessagingOffReason()}), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session peer lookup is unavailable in this session (${peerMessagingOffReason(this.config)}), so "${to}" could not be checked as another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           (rosterReachable(this.config)
@@ -512,7 +507,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         // that the name it wants could belong to a session this setting
         // is hiding.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not active in this session (${this.peerMessagingOffReason()}), so another session could not have taken that name either.`
+          ? ` Cross-session peer lookup is unavailable in this session (${peerMessagingOffReason(this.config)}), so another session with that name could not be checked.`
           : ` No reachable session has that name either${
               rosterReachable(this.config)
                 ? '; use list_agents to see who is reachable.'

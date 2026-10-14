@@ -14,7 +14,7 @@ vi.mock('../ipc/peer-send.js', () => ({
   sendToPeer: vi.fn(async () => ({ kind: 'disabled' })),
 }));
 
-const settingExplanation = 'no peer inbox is bound in this session';
+const settingExplanation = 'this session publishes no peer inbox address';
 
 function makeConfig(mode: string, hasTeam: boolean): Config {
   return {
@@ -67,6 +67,7 @@ describe.each([false, true])(
         'agents.crossSessionMessaging is off',
       );
       expect(result.llmContent).not.toContain('inbox did not start');
+      expect(result.llmContent).not.toContain('no peer inbox is bound');
       expect(result.llmContent).not.toContain('--safe-mode');
       expect(result.llmContent).not.toContain('--bare');
     });

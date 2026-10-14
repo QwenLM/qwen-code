@@ -850,7 +850,7 @@ To disable peer discovery and messaging, turn it off in
 { "agents": { "crossSessionMessaging": false } }
 ```
 
-An interactive Ink session with peer messaging disabled can still appear in
+An interactive session with peer messaging disabled can still appear in
 `qwen sessions ps`, but has no `ipcPath` and is not a reachable peer in
 `list_agents`. The OpenTUI interface does not bind a peer inbox either;
 enabling the setting alone does not make it messageable.
