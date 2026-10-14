@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { resolveModOptions } from './options.js';
+import { resolveModOptions, resolveModToolDialect } from './options.js';
 
 const field = (type: string, extra = {}) => ({
   type,
@@ -15,6 +15,60 @@ const field = (type: string, extra = {}) => ({
 });
 const resolve = (schema: unknown, options: unknown = {}) =>
   resolveModOptions(schema, [{ example: { options } }], 'example');
+
+describe('Mod tool dialect settings', () => {
+  it('defaults to native independently of userConfig and does not consume an option named toolDialect', () => {
+    expect(resolveModToolDialect([], 'example')).toBe('native');
+    expect(
+      resolveModToolDialect(
+        [{ example: { options: { toolDialect: 'claude' } } }],
+        'example',
+      ),
+    ).toBe('native');
+    expect(
+      resolveModToolDialect(
+        [{ example: { toolDialect: 'claude' } }],
+        'example',
+      ),
+    ).toBe('claude');
+  });
+
+  it('uses the same inline aliases, marketplace identity and operator precedence as options', () => {
+    const scopes = [
+      { example: { toolDialect: 'native' } },
+      {
+        example: { toolDialect: 'native' },
+        'example@inline': { toolDialect: 'claude' },
+      },
+      {
+        example: { toolDialect: 'native' },
+        'example@market': { toolDialect: 'claude' },
+      },
+    ];
+    expect(resolveModToolDialect(scopes.slice(0, 2), 'example')).toBe('claude');
+    expect(resolveModToolDialect(scopes, 'example')).toBe('native');
+    expect(resolveModToolDialect(scopes, 'example', 'market')).toBe('claude');
+    expect(resolveModToolDialect(scopes, 'example', 'other')).toBe('native');
+  });
+
+  it.each([null, '', 'Claude', true, [], { native: true }])(
+    'rejects unsupported dialect %j without echoing it',
+    (toolDialect) => {
+      expect(() =>
+        resolveModToolDialect([{ example: { toolDialect } }], 'example'),
+      ).toThrow('Invalid Mod toolDialect: expected native or claude.');
+    },
+  );
+
+  it.each([null, [], { example: null }, { example: 'claude' }])(
+    'rejects malformed plugin settings %j even without declared options',
+    (scope) => {
+      expect(() => resolveModToolDialect([scope], 'example')).toThrow(
+        /Invalid Mod pluginConfigs/,
+      );
+    },
+  );
+});
 
 describe('Mod userConfig', () => {
   it('matches default, empty, enum fallback and unknown-key behavior', () => {

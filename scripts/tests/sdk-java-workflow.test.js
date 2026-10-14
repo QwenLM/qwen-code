@@ -21,6 +21,28 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('builds native producer prerequisites before either Server test lane', () => {
+    const jobs = parse(workflow).jobs;
+    for (const name of ['mysql-integration', 'hosted-harness-mysql']) {
+      const steps = jobs[name].steps;
+      const install = steps.findIndex((s) =>
+        s.run?.includes('corepack pnpm install --frozen-lockfile'),
+      );
+      const verify = steps.findIndex(
+        (s) =>
+          (s['working-directory'] ===
+            'packages/sdk-java/managed-agent-server' ||
+            s.run?.includes(
+              '-f packages/sdk-java/managed-agent-server/pom.xml',
+            )) &&
+          s.run?.includes('clean verify'),
+      );
+      expect(install, name).toBeGreaterThan(-1);
+      expect(verify, name).toBeGreaterThan(install);
+      expect(steps[install].run, name).not.toContain('--ignore-scripts');
+    }
+  });
+
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
     for (const fragment of [

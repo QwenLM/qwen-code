@@ -831,16 +831,17 @@ public final class WorkspaceRecoveryStore {
         }
     }
 
+    // The deepest cause is not the verdict: a structural refusal keeps its
+    // service code even when the discarded I/O cause sits deeper in the chain.
     public static String errorCode(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        if (current instanceof RecoveryFailure failure) {
-            return failure.code;
-        }
-        if (current instanceof RuntimeBrokerException failure) {
-            return failure.getCode();
+        for (Throwable current = error; current != null && current != current.getCause();
+                current = current.getCause()) {
+            if (current instanceof RecoveryFailure failure) {
+                return failure.code;
+            }
+            if (current instanceof RuntimeBrokerException failure) {
+                return failure.getCode();
+            }
         }
         return "migration_failed";
     }

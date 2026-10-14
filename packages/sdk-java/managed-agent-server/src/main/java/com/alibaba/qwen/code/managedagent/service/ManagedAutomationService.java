@@ -153,7 +153,7 @@ public class ManagedAutomationService {
         // from here on, so a lost answer or a concurrent request under
         // the same key meets this binding instead of committing twice. A
         // claim already held by the identical request is its own redrive.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(session.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, scheduleId, ""),
                 clock.get());
         if (!claimed) {
@@ -203,7 +203,7 @@ public class ManagedAutomationService {
         requireEnabled();
         // Claim before the relay, as create does: the row binds this
         // request before its side effect, and only this digest settles it.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(session.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, automationId, ""),
                 clock.get());
         if (!claimed) {
@@ -255,7 +255,7 @@ public class ManagedAutomationService {
         requireEnabled();
         // The same pre-relay claim create uses: a late or re-driven
         // request meets the binding, and only the owner settles it.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(row.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, automationId, ""),
                 clock.get());
         if (!claimed) {

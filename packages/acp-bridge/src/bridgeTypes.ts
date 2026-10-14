@@ -1258,6 +1258,8 @@ export interface SessionMetadataUpdate {
 
 export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
+  /** Explicit client close cancels active work as user intent. */
+  cancelReason?: 'user';
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
   /**
@@ -1524,6 +1526,22 @@ export interface TodoStopGuardQueueReleasedRequest {
 
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
+export const PROMPT_CANCEL_REASON_META_KEY = 'qwen.cancelReason';
+export const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+export const INTERRUPTED_PROMPT_ABORT_REASON = 'qwen:prompt-interrupted';
+
+export function getPromptCancelAbortReason(meta: unknown): string {
+  if (
+    typeof meta !== 'object' ||
+    meta === null ||
+    !(PROMPT_CANCEL_REASON_META_KEY in meta)
+  ) {
+    return USER_CANCEL_ABORT_REASON;
+  }
+  return meta[PROMPT_CANCEL_REASON_META_KEY] === 'user'
+    ? USER_CANCEL_ABORT_REASON
+    : INTERRUPTED_PROMPT_ABORT_REASON;
+}
 
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
@@ -1608,6 +1626,13 @@ export interface PendingPromptEntry {
   terminalPublished?: boolean;
   /** Cancellation handshake; duplicate callers await rather than resend it. */
   cancelForwardInitial?: Promise<void>;
+  cancelForwardReason?: 'user' | 'interrupted';
+  /**
+   * Set when an explicit user cancel lands on an already-aborted prompt
+   * before dispatch; the immutable abort reason then still names the first
+   * cancel, so the post-dispatch forward reads this instead.
+   */
+  userCancelRequested?: true;
   /** Full cancellation handshake, used to fence the next FIFO dispatch. */
   cancelForwardDrain?: Promise<void>;
   /** Releases the cancellation fence when the prompt deadline expires. */
