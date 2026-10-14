@@ -683,8 +683,10 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('disable-mcp-server', {
           ...DEFAULT_COMMAND_OPTIONS['disable-mcp-server'],
           string: true,
-          // One name per occurrence, so a trailing positional prompt is not
-          // swallowed as another server name.
+          // One name per occurrence (comma-separate or repeat the flag for
+          // several), so a trailing positional prompt is not swallowed as
+          // another server name. Deliberately limited to this flag: the other
+          // array options keep their variadic parsing.
           nargs: 1,
           coerce: (disabledServerNames: string[]) =>
             // Handle comma-separated values
@@ -2212,7 +2214,7 @@ export async function loadCliConfig(
   // the first branch wins and leaves the set undefined. Precedence is
   // allow-then-deny — a server named by both flags ends up disabled. The
   // names are also kept on `Config` so the settings hot-reload and ACP
-  // workspace reload re-apply them.
+  // workspace reloads re-apply them.
   const cliExcludedMcpServerNames = argv.disableMcpServer
     ? [...new Set(argv.disableMcpServer.map((n) => n.trim()).filter(Boolean))]
     : undefined;

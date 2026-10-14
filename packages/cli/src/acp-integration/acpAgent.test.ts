@@ -32749,10 +32749,10 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
         getRuntimeMcpServers: vi.fn().mockReturnValue({}),
         getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
-        getCliExcludedMcpServerNames: vi.fn().mockReturnValue(undefined),
+        getCliExcludedMcpServerNames: vi.fn().mockReturnValue(['bridge']),
         getApprovalMode: vi.fn().mockReturnValue('default'),
         getBareMode: vi.fn().mockReturnValue(false),
-        isSafeMode: vi.fn().mockReturnValue(false),
+        isSafeMode: vi.fn().mockReturnValue(safeMode),
         setExcludedMcpServers: vi.fn(),
         setAllowedMcpServers: vi.fn(),
         setPendingMcpServers: vi.fn(),
@@ -32794,6 +32794,12 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
       await vi.waitFor(() =>
         expect(mockConfig.setExcludedMcpServers).toHaveBeenCalledWith(
+          expectedExcluded,
+        ),
+      );
+      // Every live Config reads its own startup exclusions, not just `this.config`.
+      await vi.waitFor(() =>
+        expect(discoveryConfig.setExcludedMcpServers).toHaveBeenCalledWith(
           expectedExcluded,
         ),
       );

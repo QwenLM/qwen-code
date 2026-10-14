@@ -520,6 +520,64 @@ describe('registerMcpHotReload', () => {
     expect(fc.reinitializeMcpServers).not.toHaveBeenCalled();
   });
 
+  it('a name in both mcp.excluded and --disable-mcp-server is de-duplicated and does not reconcile', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: { excluded: ['a'] },
+      bootExcluded: ['a'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' } };
+    merged.mcp = { excluded: ['a'] };
+    await listener([]);
+
+    expect(fc.setExcludedMcpServers).not.toHaveBeenCalled();
+    expect(fc.reinitializeMcpServers).not.toHaveBeenCalled();
+  });
+
+  it('does NOT emit McpPendingApprovalChanged for a gated server the --disable-mcp-server flag excludes', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { excluded: ['g'] },
+      bootExcluded: ['g'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.McpPendingApprovalChanged, spy);
+    try {
+      merged.mcpServers = { g: { command: 'g', scope: 'workspace' } };
+      await listener([]);
+
+      expect(fc.setExcludedMcpServers).toHaveBeenCalledWith(['g']);
+      expect(fc.setPendingMcpServers).toHaveBeenCalledWith(['g']);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
+    }
+  });
+
+  it('still emits McpPendingApprovalChanged for a gated server the flag does not exclude', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { excluded: ['other'] },
+      bootExcluded: ['other'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.McpPendingApprovalChanged, spy);
+    try {
+      merged.mcpServers = { g: { command: 'g', scope: 'workspace' } };
+      await listener([]);
+
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
+    }
+  });
+
   it('emits McpPendingApprovalChanged when a gated server becomes newly pending', async () => {
     const fc = makeFakeConfig(cwd, { settingsMcp: {}, gating: {} });
     registerMcpHotReload(watcher, settings, fc.config, undefined);

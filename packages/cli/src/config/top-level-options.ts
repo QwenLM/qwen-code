@@ -282,7 +282,7 @@ export const DEFAULT_COMMAND_OPTIONS = {
   'disable-mcp-server': {
     type: 'array' as const,
     description:
-      'Disable a specific MCP server for this run (can be used multiple times; glob patterns such as "*puppeteer*" are supported)',
+      'Disable one or more MCP servers for this run (comma-separated, or repeat the flag; glob patterns such as "*puppeteer*" are supported)',
   },
   'mcp-config': {
     type: 'string' as const,
