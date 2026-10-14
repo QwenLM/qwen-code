@@ -526,6 +526,17 @@ describe('evaluateWebSearchGate', () => {
       models: [dsModel({ baseUrl: 'https://gw.some-team.alibaba-inc.com/v1' })],
     });
   });
+
+  it('accepts the QwenCloud pay-as-you-go and Token Plan MaaS endpoints', () => {
+    for (const baseUrl of [
+      'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      'https://maas.qwencloudapi.com/compatible-mode/v1',
+      'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
+    ]) {
+      passedFor({ models: [dsModel({ baseUrl })] });
+    }
+  });
 });
 
 describe('evaluateWebSearchGate auto derivation', () => {

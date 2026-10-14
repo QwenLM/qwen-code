@@ -13,6 +13,8 @@ import {
 } from '../../presets/qwencloud-standard.js';
 import { tokenPlanProvider } from '../../presets/alibaba-token-plan.js';
 import { alibabaStandardProvider } from '../../presets/alibaba-standard.js';
+import { codingPlanProvider } from '../../presets/alibaba-coding-plan.js';
+import { ALL_PROVIDERS, QWENCLOUD_PROVIDERS } from '../../all-providers.js';
 import {
   buildInstallPlan,
   getDefaultModelIds,
@@ -59,9 +61,12 @@ describe('qwencloudStandardProvider', () => {
     ]);
   });
 
-  it('does not offer Coding Plan', () => {
-    expect(qwencloudStandardProvider.id).not.toContain('coding');
-    expect(qwencloudStandardProvider.label).not.toMatch(/coding/i);
+  it('is registered, and the qwencloud group excludes Coding Plan', () => {
+    expect(ALL_PROVIDERS).toContain(qwencloudStandardProvider);
+    expect(QWENCLOUD_PROVIDERS).toContain(qwencloudStandardProvider);
+    // Coding Plan is an Alibaba ModelStudio product, never a QwenCloud
+    // access method, and the sub-menu is built from this filtered group.
+    expect(QWENCLOUD_PROVIDERS).not.toContain(codingPlanProvider);
   });
 
   it('seeds the platform model catalog', () => {

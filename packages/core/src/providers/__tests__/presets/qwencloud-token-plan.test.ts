@@ -12,6 +12,7 @@ import {
   QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL,
 } from '../../presets/qwencloud-token-plan.js';
 import { tokenPlanProvider } from '../../presets/alibaba-token-plan.js';
+import { ALL_PROVIDERS, QWENCLOUD_PROVIDERS } from '../../all-providers.js';
 import {
   buildInstallPlan,
   providerMatchesCredentials,
@@ -121,6 +122,11 @@ describe('qwencloudTokenPlanProvider', () => {
         baseUrl: QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL,
       }),
     ).toBe(true);
+  });
+
+  it('is registered in the qwencloud access-method group', () => {
+    expect(ALL_PROVIDERS).toContain(qwencloudTokenPlanProvider);
+    expect(QWENCLOUD_PROVIDERS).toContain(qwencloudTokenPlanProvider);
   });
 
   it('declares the built-in web search backend', () => {
