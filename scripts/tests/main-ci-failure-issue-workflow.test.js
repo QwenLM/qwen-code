@@ -33,7 +33,10 @@ describe('main CI failure issue workflow', () => {
       'Qwen Code CI': 'ci',
       'Desktop Checks': 'desktop-packaging-check',
     };
-    expect(yml.on.workflow_run.workflows).toEqual(Object.keys(watchedFiles));
+    // workflow_run matches the list as a set, so its order is not pinned.
+    expect([...yml.on.workflow_run.workflows].sort()).toEqual(
+      Object.keys(watchedFiles).sort(),
+    );
     // workflow_run.workflows matches the watched workflow's name: key, so a
     // watch entry is live only while its file still carries that name —
     // renaming one silently unhooks the suite's failure issues, and nothing
@@ -68,15 +71,18 @@ describe('main CI failure issue workflow', () => {
     // red run of any of them files an issue here. A pull-request run of a
     // watched workflow must never open an issue — that is
     // contributor-triggered, and the branch filter plus this clause are what
-    // keep it out. Pin the clause's three load-bearing spans — the unscoped
-    // push arm, the schedule arm's connective, and its name set — so a
-    // connective or scope mutation in any of them fails here.
-    expect(workflow).toContain("(github.event.workflow_run.event == 'push' ||");
-    expect(workflow).toContain(
-      "github.event.workflow_run.event == 'schedule' &&",
-    );
-    expect(workflow).toContain(
-      'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow_run.name)',
+    // keep it out. Pin the whole condition, folded to one line: #14205
+    // wrapped it across lines, and pinning its spans one by one let an
+    // appended `|| true` admit every event — pull requests included — while
+    // each span still matched. Only an exact pin fails on a connective or
+    // scope mutation anywhere in it.
+    expect(oneLine(String(jobs.analyze.if))).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && " +
+        "github.event.workflow_run.conclusion == 'failure' && " +
+        "github.event.workflow_run.head_branch == 'main' && " +
+        "(github.event.workflow_run.event == 'push' || " +
+        "(github.event.workflow_run.event == 'schedule' && " +
+        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow_run.name))) }}',
     );
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
