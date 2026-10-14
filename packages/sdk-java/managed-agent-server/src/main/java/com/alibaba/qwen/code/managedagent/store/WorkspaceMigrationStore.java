@@ -36,6 +36,9 @@ public final class WorkspaceMigrationStore {
     private final String tenant;
     private final String storage;
 
+    private final WorkspaceOperations operations;
+    private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.STORAGE_MIGRATION;
+
     public WorkspaceMigrationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             WorkspaceStorageGuard guard, RuntimeBindingRepository bindings, byte[] bytes, boolean create) {
         this.jdbc = jdbc;
@@ -49,6 +52,7 @@ public final class WorkspaceMigrationStore {
         id = uuid(request, "migrationOperationId");
         tenant = text(request, "tenantId");
         storage = text(request, "storageId");
+        operations = new WorkspaceOperations(jdbc, tenant);
         check(tenant.length() <= 128 && storage.length() <= 256, "invalid_request");
         var existing = row(false);
         if (existing != null) {
@@ -97,6 +101,7 @@ public final class WorkspaceMigrationStore {
         check(source.root().equals(text(request, "sourceRoot")), "migration_identity_conflict");
         transaction.executeWithoutResult(status -> {
             lockAuthority();
+            guard.migrationSource(tenant, storage, revision, fence);
             requireIdle();
             requireFilesProfiles();
             var raced = row(true);
@@ -106,12 +111,17 @@ public final class WorkspaceMigrationStore {
             }
             String owner = WorkspaceMigrationAdmission.owner(jdbc, tenant, storage);
             check(owner == null || owner.equals(id), "migration_conflict");
-            jdbc.update("INSERT INTO managed_workspace_migration (operation_id, tenant_id, storage_id, request_digest,"
-                    + " request_json, state, source_registration_json, target_registration_id) VALUES (?, ?, ?, ?, ?, 'RETIRING', ?, ?)",
-                    id, tenant, storage, hash(bytes), request.toString(), JSON.valueToTree(source).toString(), UUID.randomUUID().toString());
-            jdbc.update("INSERT INTO qwen_runtime_storage_fence (tenant_key, storage_key, tenant_id, storage_id, operation_id)"
-                    + " VALUES (?, ?, ?, ?, ?)", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                    JdbcRuntimeBindingRepository.storageFenceKey(storage), tenant, storage, id);
+            operations.create(KIND, id, WorkspaceOperations.values("storage_id", storage, "request_digest", hash(bytes),
+                    "request_json", request.toString(), "state", "RETIRING",
+                    "source_registration_json", JSON.valueToTree(source).toString(),
+                    "target_registration_id", UUID.randomUUID().toString()));
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
+                    + " VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE"
+                    + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
+                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                    JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(storage),
+                    tenant, storage, id);
+            requireOwner();
         });
     }
 
@@ -153,9 +163,8 @@ public final class WorkspaceMigrationStore {
             requireOwner();
             requireIdle();
             assertRetired();
-            check(jdbc.update("UPDATE managed_workspace_migration SET state = 'RETIRED', last_error_code = NULL,"
-                    + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state = 'RETIRING'", id) == 1,
-                    "migration_not_writable");
+            check("RETIRING".equals(requireRow(true).get("state")), "migration_not_writable");
+            operations.update(KIND, id, WorkspaceOperations.values("state", "RETIRED", "last_error_code", null));
         });
     }
 
@@ -182,19 +191,18 @@ public final class WorkspaceMigrationStore {
                     && JSON.valueToTree(history).equals(parse((String) saved.get("history_identity_json"))), "source_drift");
         }
         String previousAttempt = (String) saved.get("verify_operation_id");
-        var previous = previousAttempt == null ? List.<Map<String, Object>>of() : jdbc.queryForList(
-                "SELECT state FROM managed_workspace_recovery_operation WHERE operation_id = ?", previousAttempt);
-        String attempt = !previous.isEmpty() && "VERIFYING".equals(previous.getFirst().get("state"))
+        var previous = previousAttempt == null ? null
+                : operations.find(WorkspaceOperations.Kind.WORKSPACE_RECOVERY, previousAttempt, false);
+        String attempt = previous != null && "VERIFYING".equals(previous.get("state"))
                 ? previousAttempt : UUID.randomUUID().toString();
         transaction.executeWithoutResult(status -> {
             lockAuthority();
             requireOwner();
             var current = requireRow(true);
             check(current.get("state").equals(saved.get("state")), "migration_not_writable");
-            jdbc.update("UPDATE managed_workspace_migration SET target_identity_json = ?, history_identity_json = ?,"
-                    + " verify_operation_id = ?, state = ?, last_error_code = NULL, updated_at = CURRENT_TIMESTAMP(6)"
-                    + " WHERE operation_id = ?", JSON.valueToTree(target).toString(), JSON.valueToTree(history).toString(),
-                    attempt, promote ? "PREPARED" : "PREPARING", id);
+            operations.update(KIND, id, WorkspaceOperations.values("target_identity_json", JSON.valueToTree(target).toString(),
+                    "history_identity_json", JSON.valueToTree(history).toString(), "verify_operation_id", attempt,
+                    "state", promote ? "PREPARED" : "PREPARING", "last_error_code", null));
         });
         ObjectNode verifyRequest = ((ObjectNode) request).deepCopy();
         verifyRequest.remove(List.of("migrationOperationId", "targetRoot", "stateDirectory"));
@@ -205,9 +213,8 @@ public final class WorkspaceMigrationStore {
         String temporary = WorkspaceStorageGuard.migrationTemporary(path("targetRoot"), id).getFileName().toString();
         String assetKey = hash(JSON.valueToTree(List.of("qwen-workspace-recovery-asset-v1", "entry", "workspace/" + temporary))
                 .toString());
-        check(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_work WHERE operation_id = ?"
-                + " AND work_kind = 'ASSET' AND work_key = ?", Long.class, text(request, "captureOperationId"), assetKey) == 0,
-                "migration_marker_conflict");
+        check(operations.findWork(WorkspaceOperations.Kind.WORKSPACE_RECOVERY,
+                text(request, "captureOperationId"), "RESOURCE", assetKey, false) == null, "migration_marker_conflict");
         guard.discardMigrationTemporary(path("targetRoot"), marker, id);
         var workerFailure = new AtomicReference<String>();
         try {
@@ -253,9 +260,8 @@ public final class WorkspaceMigrationStore {
                 guard.promoteMigration(source, target, (String) saved.get("target_registration_id"), id);
                 clearFence();
             }
-            check(jdbc.update("UPDATE managed_workspace_migration SET state = ?, result_json = ?, last_error_code = NULL,"
-                    + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND verify_operation_id = ?",
-                    promote ? "COMPLETED" : "PREPARED", result.toString(), id, attempt) == 1, "migration_not_writable");
+            operations.update(KIND, id, WorkspaceOperations.values("state", promote ? "COMPLETED" : "PREPARED",
+                    "result_json", result.toString(), "last_error_code", null));
         });
     }
 
@@ -272,28 +278,31 @@ public final class WorkspaceMigrationStore {
             assertRetired();
             guard.recoveryRegistration(tenant, storage, positive(request, "mountRevision"), text(request, "fenceOperationId"));
             clearFence();
-            jdbc.update("UPDATE managed_workspace_migration SET state = 'ABORTED', updated_at = CURRENT_TIMESTAMP(6)"
-                    + " WHERE operation_id = ?", id);
+            operations.update(KIND, id, WorkspaceOperations.values("state", "ABORTED"));
         });
     }
 
     public void failed(String code) {
         String stable = code.matches("[a-z0-9_]{1,64}") ? code : "migration_failed";
-        jdbc.update("UPDATE managed_workspace_migration SET last_error_code = ?, state = CASE WHEN"
-                + " ? IN ('source_drift', 'resource_collected') THEN 'INVALIDATED' ELSE state END,"
-                + " updated_at = CURRENT_TIMESTAMP(6)"
-                + " WHERE operation_id = ? AND state NOT IN ('COMPLETED', 'ABORTED')", stable, stable, id);
+        transaction.executeWithoutResult(status -> {
+            var current = row(true);
+            if (current != null && !Set.of("COMPLETED", "ABORTED").contains(current.get("state"))) {
+                operations.update(KIND, id, WorkspaceOperations.values("last_error_code", stable,
+                        "state", Set.of("source_drift", "resource_collected").contains(stable)
+                                ? "INVALIDATED" : current.get("state")));
+            }
+        });
     }
 
     private void requireFilesProfiles() {
         String after = "";
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         while (true) {
-            var page = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
+            var page = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                     + " AND workspace_storage_id = ? AND session_id > ? ORDER BY session_id LIMIT 32",
                     String.class, tenant, storage, after);
             for (String session : page) {
-                jdbc.query("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                         (row, index) -> ManagedAgentStore.readBinding(row), tenant, session);
                 JsonNode source = WorkspaceRecoveryStore.currentSource(jdbc, tenant, storage, session, true);
                 after = session;
@@ -325,38 +334,38 @@ public final class WorkspaceMigrationStore {
     }
 
     private void requireIdle() {
-        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_agent_turn t"
+        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_turn t"
                 + " ON t.tenant_id = s.tenant_id AND t.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')") == 0,
                 "migration_work_unsettled");
-        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_agent_operation o"
-                + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND o.state NOT IN ('COMPLETED', 'FAILED')") == 0,
+        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation o"
+                + " ON o.session_scope_key = s.session_scope_key AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')") == 0,
                 "migration_work_unsettled");
-        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_agent_command c"
+        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_request_receipt c"
                 + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND c.command_status = 'PENDING'") == 0,
+                + " AND s.workspace_storage_id = ? AND c.namespace = 'SESSION_COMMAND' AND c.state = 'PENDING'") == 0,
                 "migration_work_unsettled");
-        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_session_rename_delivery r"
-                + " ON r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND r.delivery_state <> 'COMPLETED'") == 0,
+        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation r"
+                + " ON r.session_scope_key = s.session_scope_key AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state <> 'COMPLETED'") == 0,
                 "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage
         // moves. A conflicted one keeps only refs, which move with it.
-        check(count("SELECT COUNT(*) FROM qwen_managed_child_workspace WHERE tenant_id = ?"
-                + " AND storage_id = ? AND state NOT IN ('merged', 'discarded', 'failed', 'conflicted')") == 0,
+        check(count("SELECT COUNT(*) FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT' AND tenant_id = ?"
+                + " AND storage_id = ? AND child_state NOT IN ('merged', 'discarded', 'failed', 'conflicted')") == 0,
                 "migration_work_unsettled");
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> Math.addExact(Math.multiplyExact(row.getLong(1), 1000), row.getLong(2) / 1000));
         String after = "";
         while (true) {
-            var sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
+            var sessions = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                     + " AND workspace_storage_id = ? AND session_id > ? ORDER BY session_id LIMIT 32", String.class,
                     tenant, storage, after);
             for (String session : sessions) {
-                for (String options : jdbc.queryForList("SELECT options_json FROM managed_agent_action"
-                        + " WHERE tenant_id = ? AND session_id = ? AND state = 'requested'", String.class, tenant, session)) {
+                for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_kind = 'ACTION' AND state = 'requested'", String.class, tenant, session)) {
                     check(parse(options).path("expiresAt").asLong(Long.MAX_VALUE) <= now, "migration_work_unsettled");
                 }
                 after = session;
@@ -365,8 +374,8 @@ public final class WorkspaceMigrationStore {
                 break;
             }
         }
-        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN qwen_managed_session_journal_head h"
-                + " ON h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ?"
+        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_session_head h"
+                + " ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND h.state = 'ACTIVE'"
                 + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until > CURRENT_TIMESTAMP(6))") == 0,
                 "migration_writer_active");
@@ -383,10 +392,10 @@ public final class WorkspaceMigrationStore {
             for (RuntimeBindingRecord binding : page) {
                 check(binding.getState() == RuntimeBindingRecord.State.RELEASED
                         && (binding.getDrainReceipt() != null || binding.hasStoppedWriters()), "migration_stop_unverified");
-                check(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session WHERE binding_id = ?"
+                check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                         + " AND runtime_generation = ? AND session_state NOT IN ('RELEASED', 'FAILED')", Long.class,
                         binding.getBindingId(), binding.getGeneration()) == 0, "migration_work_unsettled");
-                check(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id = ?"
+                check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id = ?"
                         + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')", Long.class,
                         binding.getBindingId(), binding.getGeneration()) == 0, "migration_work_unsettled");
                 cursor = binding.getBindingId();
@@ -407,8 +416,8 @@ public final class WorkspaceMigrationStore {
     }
 
     private void clearFence() {
-        check(jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_key = ? AND storage_key = ?"
-                + " AND operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+        check(jdbc.update("UPDATE ma_storage SET fence_operation_id = NULL WHERE tenant_key = ? AND storage_key = ?"
+                + " AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
                 JdbcRuntimeBindingRepository.storageFenceKey(storage), id) == 1, "migration_conflict");
     }
 
@@ -419,9 +428,7 @@ public final class WorkspaceMigrationStore {
     }
 
     private Map<String, Object> row(boolean lock) {
-        var rows = jdbc.queryForList("SELECT * FROM managed_workspace_migration WHERE operation_id = ?"
-                + (lock ? " FOR UPDATE" : ""), id);
-        return rows.isEmpty() ? null : rows.getFirst();
+        return operations.find(KIND, id, lock);
     }
 
     private WorkspaceStorageGuard.RecoveryRegistration source(Map<String, Object> row) {
