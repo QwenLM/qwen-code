@@ -20,7 +20,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.dao.PessimisticLockingFailureException;
-import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -39,6 +38,8 @@ public final class WorkspaceRecoveryStore {
     private final String tenant;
     private final String storage;
     private boolean lockSources;
+    private WorkspaceOperations operations;
+    private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.WORKSPACE_RECOVERY;
 
     public WorkspaceRecoveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             WorkspaceStorageGuard guard, ToolPublicationObjectStore objects, String mode, byte[] requestBytes) {
@@ -54,6 +55,7 @@ public final class WorkspaceRecoveryStore {
         id = uuid(request, "operationId");
         tenant = text(request, "tenantId");
         storage = text(request, "storageId");
+        operations = new WorkspaceOperations(jdbc, tenant);
         check(tenant.length() <= 128 && storage.length() <= 256, "invalid_request");
         if ("inspect".equals(mode)) {
             return;
@@ -103,25 +105,45 @@ public final class WorkspaceRecoveryStore {
                 check(original.path(field).equals(request.path(field)), "operation_conflict");
             }
             registration = parse((String) capture.get("registration_json"));
+            try {
+                guard.verifyCapturedRegistration(JSON.treeToValue(registration, WorkspaceStorageGuard.RecoveryRegistration.class));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                throw failure("source_drift");
+            }
         } else {
             registration = currentRegistration();
         }
-        jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
-                + " mode, capture_operation_id, request_digest, request_json, registration_json, source_digest,"
-                + " session_count, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,"
-                + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", id, tenant, storage, mode,
-                capture == null ? null : capture.get("operation_id"), requestDigest, request.toString(),
-                registration.toString(), hash(new byte[0]), "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
+        operations.create(KIND, id, WorkspaceOperations.values("storage_id", storage, "mode", mode,
+                "capture_operation_id", capture == null ? null : capture.get("operation_id"),
+                "request_digest", requestDigest, "request_json", request.toString(),
+                "registration_json", registration.toString(), "source_digest", hash(new byte[0]),
+                "session_count", 0L, "state", "capture".equals(mode) ? "CAPTURING" : "VERIFYING"));
         if (capture != null) {
-            jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
-                    + " source_json, state) SELECT ?, session_id, source_digest, source_json, 'PENDING'"
-                    + " FROM managed_workspace_recovery_session WHERE operation_id = ?", id, capture.get("operation_id"));
-            jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
-                    + " WHERE operation_id = ?", capture.get("source_digest"), capture.get("session_count"), id);
+            String after = "";
+            while (true) {
+                List<Map<String, Object>> page = sessionRows((String) capture.get("operation_id"), after, PAGE);
+                for (Map<String, Object> source : page) {
+                    String session = (String) source.get("session_id");
+                    check(currentSource(jdbc, tenant, storage, session, true).toString().equals(source.get("source_json")), "source_drift");
+                    operations.insertWork(KIND, id, "SESSION", hash(session), session, session,
+                            WorkspaceOperations.values("source_digest", source.get("source_digest"),
+                                    "source_json", source.get("source_json")), "PENDING");
+                    after = session;
+                }
+                if (page.size() < PAGE) {
+                    break;
+                }
+            }
+            operations.update(KIND, id, WorkspaceOperations.values("source_digest", capture.get("source_digest"),
+                    "session_count", capture.get("session_count")));
         } else {
-            SourceCut cut = scanSources(true);
-            jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
-                    + " WHERE operation_id = ?", cut.digest(), cut.count(), id);
+            lockSources = true;
+            try {
+                SourceCut cut = scanSources(true);
+                operations.update(KIND, id, WorkspaceOperations.values("source_digest", cut.digest(), "session_count", cut.count()));
+            } finally {
+                lockSources = false;
+            }
         }
     }
 
@@ -185,19 +207,29 @@ public final class WorkspaceRecoveryStore {
     }
 
     private void invalidate(String code) {
-        jdbc.update("UPDATE managed_workspace_recovery_operation SET state = 'INVALIDATED', last_error_code = ?,"
-                + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state = 'CAPTURING'", code, id);
+        transactions.executeWithoutResult(status -> {
+            Map<String, Object> current = operation(id);
+            if (current != null && "CAPTURING".equals(current.get("state"))) {
+                operations.update(KIND, id, WorkspaceOperations.values("state", "INVALIDATED", "last_error_code", code));
+            }
+        });
     }
 
     private void recordFailure(String code) {
         check(code.matches("[a-z0-9_]{1,64}"), "invalid_error_code");
-        jdbc.update("UPDATE managed_workspace_recovery_operation SET last_error_code = ?, updated_at = CURRENT_TIMESTAMP(6)"
-                + " WHERE operation_id = ? AND state IN ('CAPTURING', 'VERIFYING')", code, id);
+        transactions.executeWithoutResult(status -> {
+            Map<String, Object> current = operation(id);
+            if (current != null && Set.of("CAPTURING", "VERIFYING").contains(current.get("state"))) {
+                operations.update(KIND, id, WorkspaceOperations.values("last_error_code", code));
+            }
+        });
     }
 
     void workerFailed() {
-        jdbc.update("UPDATE managed_workspace_recovery_operation SET last_error_code = COALESCE(last_error_code, 'worker_failed'),"
-                + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state IN ('CAPTURING', 'VERIFYING')", id);
+        Map<String, Object> current = operation(id);
+        if (current != null && current.get("last_error_code") == null) {
+            recordFailure("worker_failed");
+        }
     }
 
     public JsonNode inspect() {
@@ -205,12 +237,9 @@ public final class WorkspaceRecoveryStore {
         ObjectNode result = JSON.createObjectNode().put("operationId", id).put("state", (String) row.get("state"));
         result.put("sourceDigest", (String) row.get("source_digest"))
                 .put("sessionCount", ((Number) row.get("session_count")).longValue())
-                .put("completedSessions", count("SELECT COUNT(*) FROM managed_workspace_recovery_session"
-                        + " WHERE operation_id = ? AND state = 'COMPLETE'", id))
-                .put("pendingReferences", count("SELECT COUNT(*) FROM managed_workspace_recovery_work"
-                        + " WHERE operation_id = ? AND work_kind = 'REF' AND state = 'PENDING'", id))
-                .put("assets", count("SELECT COUNT(*) FROM managed_workspace_recovery_work"
-                        + " WHERE operation_id = ? AND work_kind = 'ASSET'", id));
+                .put("completedSessions", workCount(id, "SESSION", "state = 'COMPLETE'"))
+                .put("pendingReferences", workCount(id, "RECOVERY_EVIDENCE", "state = 'PENDING'"))
+                .put("assets", workCount(id, "RESOURCE", "1 = 1"));
         JsonNode page = sessions(request.path("afterSessionId").asText(""));
         result.set("sessions", page.path("sessions"));
         result.set("nextSessionId", page.path("nextSessionId"));
@@ -242,9 +271,7 @@ public final class WorkspaceRecoveryStore {
     }
 
     private JsonNode sessions(String after) {
-        var rows = jdbc.queryForList("SELECT session_id, source_digest, source_json"
-                + " FROM managed_workspace_recovery_session WHERE operation_id = ? AND session_id > ?"
-                + " ORDER BY session_id LIMIT ?", id, after, PAGE + 1);
+        var rows = sessionRows(id, after, PAGE + 1);
         ObjectNode page = JSON.createObjectNode();
         ArrayNode values = page.putArray("sessions");
         for (var row : rows.subList(0, Math.min(PAGE, rows.size()))) {
@@ -274,16 +301,16 @@ public final class WorkspaceRecoveryStore {
             } else {
                 insertWork("REF", key, session, ref, "PENDING");
             }
-            String state = jdbc.queryForObject("SELECT state FROM managed_workspace_recovery_work"
-                    + " WHERE operation_id = ? AND work_kind = 'REF' AND key_hash = ?", String.class, id, hash(key));
+            String state = (String) operations.findWork(KIND, id, "RECOVERY_EVIDENCE", hash(key), false).get("state");
             return JSON.createObjectNode().put("complete", "COMPLETE".equals(state));
         });
     }
 
     private JsonNode nextRef(String session) {
         pinned(session);
-        var rows = jdbc.queryForList("SELECT metadata_json FROM managed_workspace_recovery_work WHERE operation_id = ?"
-                + " AND work_kind = 'REF' AND session_id = ? AND state = 'PENDING' ORDER BY key_hash LIMIT 1", id, session);
+        var rows = jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ?"
+                + " AND work_kind = 'RECOVERY_EVIDENCE' AND session_id = ? AND state = 'PENDING' ORDER BY target_key LIMIT 1",
+                (row, index) -> WorkspaceOperations.work(row), operations.key(KIND, id), session);
         return rows.isEmpty() ? JSON.nullNode() : parse((String) rows.getFirst().get("metadata_json"));
     }
 
@@ -296,8 +323,7 @@ public final class WorkspaceRecoveryStore {
             recheckSession(session);
             String key = session + ":" + text(ref, "resourceId");
             check(ref.equals(work(id, "REF", key)), "reference_conflict");
-            jdbc.update("UPDATE managed_workspace_recovery_work SET state = 'COMPLETE' WHERE operation_id = ?"
-                    + " AND work_kind = 'REF' AND key_hash = ?", id, hash(key));
+            operations.updateWork(KIND, id, "RECOVERY_EVIDENCE", hash(key), WorkspaceOperations.values("state", "COMPLETE"));
             return JSON.createObjectNode().put("complete", true);
         });
     }
@@ -335,9 +361,9 @@ public final class WorkspaceRecoveryStore {
     }
 
     private JsonNode assetPage(String after) {
-        var rows = jdbc.queryForList("SELECT work_key, metadata_json FROM managed_workspace_recovery_work"
-                + " WHERE operation_id = ? AND work_kind = 'ASSET' AND work_key > ? ORDER BY work_key LIMIT ?",
-                assetOperation(), after, PAGE + 1);
+        var rows = jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ?"
+                + " AND work_kind = 'RESOURCE' AND target_key > ? ORDER BY target_key LIMIT ?",
+                (row, index) -> WorkspaceOperations.work(row), operations.key(KIND, assetOperation()), after, PAGE + 1);
         ObjectNode page = JSON.createObjectNode();
         ArrayNode assets = page.putArray("assets");
         for (var row : rows.subList(0, Math.min(PAGE, rows.size()))) {
@@ -359,16 +385,15 @@ public final class WorkspaceRecoveryStore {
         return transactions.execute(status -> {
             mutable();
             recheckSession(session);
-            check(count("SELECT COUNT(*) FROM managed_workspace_recovery_work WHERE operation_id = ?"
-                    + " AND work_kind = 'REF' AND session_id = ? AND state <> 'COMPLETE'", id, session) == 0,
-                    "references_incomplete");
-            var saved = jdbc.queryForMap("SELECT summary_json FROM managed_workspace_recovery_session"
-                    + " WHERE operation_id = ? AND session_id = ?", id, session);
+            check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation_work WHERE operation_key = ?"
+                    + " AND work_kind = 'RECOVERY_EVIDENCE' AND session_id = ? AND state <> 'COMPLETE'",
+                    Long.class, operations.key(KIND, id), session) == 0, "references_incomplete");
+            var saved = operations.findWork(KIND, id, "SESSION", hash(session), true);
             if (saved.get("summary_json") != null) {
                 check(summary.equals(parse((String) saved.get("summary_json"))), "summary_conflict");
             }
-            jdbc.update("UPDATE managed_workspace_recovery_session SET state = 'COMPLETE', summary_json = ?"
-                    + " WHERE operation_id = ? AND session_id = ?", summary.toString(), id, session);
+            operations.updateWork(KIND, id, "SESSION", hash(session),
+                    WorkspaceOperations.values("state", "COMPLETE", "summary_json", summary.toString()));
             return JSON.createObjectNode().put("complete", true);
         });
     }
@@ -391,22 +416,20 @@ public final class WorkspaceRecoveryStore {
             throw failure("bundle_io_failed");
         }
         return transactions.execute(status -> {
-            Map<String, Object> operation = ownedOperation();
+            Map<String, Object> operation = operations.find(KIND, id, true);
+            check(operation != null, "operation_not_writable");
             if (Set.of("SEALED", "VERIFIED").contains(operation.get("state"))) {
                 check(digest.equals(operation.get("manifest_digest")), "manifest_digest_conflict");
                 return inspect();
             }
-            mutable();
-            check(count("SELECT COUNT(*) FROM managed_workspace_recovery_session WHERE operation_id = ?"
-                    + " AND state <> 'COMPLETE'", id) == 0, "sessions_incomplete");
-            check(count("SELECT COUNT(*) FROM managed_workspace_recovery_work WHERE operation_id = ?"
-                    + " AND work_kind = 'REF' AND state <> 'COMPLETE'", id) == 0, "references_incomplete");
+            check(("capture".equals(mode) ? "CAPTURING" : "VERIFYING").equals(operation.get("state")), "operation_not_writable");
+            check(workCount(id, "SESSION", "state <> 'COMPLETE'") == 0, "sessions_incomplete");
+            check(workCount(id, "RECOVERY_EVIDENCE", "state <> 'COMPLETE'") == 0, "references_incomplete");
             if ("verify".equals(mode)) {
                 check(digest.equals(operation((String) operation.get("capture_operation_id")).get("manifest_digest")),
                         "manifest_digest_conflict");
-                check(count("SELECT COUNT(*) FROM managed_workspace_recovery_work WHERE operation_id = ? AND work_kind = 'ASSET'", id)
-                        == count("SELECT COUNT(*) FROM managed_workspace_recovery_work WHERE operation_id = ? AND work_kind = 'ASSET'",
-                                assetOperation()), "assets_incomplete");
+                check(workCount(id, "RESOURCE", "1 = 1")
+                        == workCount(assetOperation(), "RESOURCE", "1 = 1"), "assets_incomplete");
             }
             boolean compatible;
             try {
@@ -425,11 +448,8 @@ public final class WorkspaceRecoveryStore {
             }
             ObjectNode completed = result.deepCopy();
             completed.put("authorityCompatible", compatible).put("activation", false);
-            int updated = jdbc.update("UPDATE managed_workspace_recovery_operation SET state = ?, manifest_digest = ?, last_error_code = NULL,"
-                    + " result_json = ?, updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state = ?",
-                    "capture".equals(mode) ? "SEALED" : "VERIFIED", digest, completed.toString(), id,
-                    "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
-            check(updated == 1, "operation_not_writable");
+            operations.update(KIND, id, WorkspaceOperations.values("state", "capture".equals(mode) ? "SEALED" : "VERIFIED",
+                    "manifest_digest", digest, "last_error_code", null, "result_json", completed.toString()));
             return inspect();
         });
     }
@@ -459,8 +479,7 @@ public final class WorkspaceRecoveryStore {
         }
         check(manifest.path("sessions").path("count").asLong() == ((Number) operation.get("session_count")).longValue(),
                 "invalid_manifest_index");
-        check(manifest.path("assets").path("count").asLong() == count("SELECT COUNT(*) FROM managed_workspace_recovery_work"
-                + " WHERE operation_id = ? AND work_kind = 'ASSET'", assetOperation()), "invalid_manifest_index");
+        check(manifest.path("assets").path("count").asLong() == workCount(assetOperation(), "RESOURCE", "1 = 1"), "invalid_manifest_index");
     }
 
     private SourceCut scanSources(boolean save) {
@@ -468,7 +487,7 @@ public final class WorkspaceRecoveryStore {
         String after = "";
         long count = 0;
         while (true) {
-            List<String> ids = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
+            List<String> ids = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                     + " AND workspace_storage_id = ? AND session_id > ? ORDER BY session_id LIMIT ?",
                     String.class, tenant, storage, after, PAGE);
             if (ids.isEmpty()) {
@@ -480,8 +499,8 @@ public final class WorkspaceRecoveryStore {
                 digest.update(bytes.getBytes(StandardCharsets.UTF_8));
                 digest.update((byte) '\n');
                 if (save) {
-                    jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id,"
-                            + " source_digest, source_json, state) VALUES (?, ?, ?, ?, 'PENDING')", id, session, hash(bytes), bytes);
+                    operations.insertWork(KIND, id, "SESSION", hash(session), session, session,
+                            WorkspaceOperations.values("source_digest", hash(bytes), "source_json", bytes), "PENDING");
                 }
                 count++;
             }
@@ -508,20 +527,23 @@ public final class WorkspaceRecoveryStore {
     }
 
     static JsonNode currentSource(JdbcTemplate jdbc, String tenant, String storage, String session, boolean lockSources) {
-        var rows = jdbc.queryForList("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?"
-                + " AND workspace_storage_id = ?" + (lockSources ? " FOR UPDATE" : ""), tenant, session, storage);
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT s.*, e.last_sequence FROM ma_session s JOIN ma_event_stream e"
+                + " ON e.tenant_id = s.tenant_id AND e.session_id = s.session_id AND e.stream_kind = 'SESSION' AND e.stream_id = ?"
+                + " WHERE s.tenant_id = ? AND s.session_id = ? AND s.workspace_storage_id = ?" + (lockSources ? " FOR UPDATE" : ""), new byte[0], tenant, session, storage);
         check(rows.size() == 1, "source_drift");
         Map<String, Object> row = rows.getFirst();
         check(("qwen-code".equals(row.get("agent_id")) || row.get("agent_definition_digest") != null)
                 && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
                 .contains(row.get("status")), "source_drift");
-        var receipts = jdbc.queryForList("SELECT actor_id, idempotency_key, request_digest, turn_id, created_at"
-                + " FROM managed_workspace_create_command WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        var receipts = WorkspaceOperations.rows(jdbc, "SELECT actor_id, idempotency_key, request_digest, turn_id, created_at"
+                + " FROM ma_request_receipt WHERE tenant_key = ? AND session_id = ? AND namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ?",
+                WorkspaceOperations.hash(tenant), session, tenant);
         check(receipts.size() == 1, "source_drift");
-        check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?"
+        check(count(jdbc, "SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')", tenant, session) == 0, "source_drift");
-        check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
-                + " AND state NOT IN ('COMPLETED', 'FAILED')", tenant, session) == 0, "source_drift");
+        check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE session_scope_key = ?"
+                + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL')"
+                + " AND state NOT IN ('COMPLETED', 'FAILED')", ManagedSessionStore.sessionScopeKey(tenant, session)) == 0, "source_drift");
         ObjectNode source = JSON.createObjectNode().put("sessionId", session);
         ObjectNode binding = source.putObject("binding").put("tenantId", tenant);
         fields(binding, row, "workspaceId", "workspace_id", "workspaceGeneration", "workspace_generation",
@@ -548,27 +570,31 @@ public final class WorkspaceRecoveryStore {
                 "turnId", "turn_id", "createdAt", "created_at");
         // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
         boolean lockHead = lockSources && count(jdbc,
-                "SELECT COUNT(*) FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
-                tenant, session) != 0;
-        var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?"
+                "SELECT COUNT(*) FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(session)) != 0;
+        var heads = jdbc.query("SELECT * FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
                 + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
-                    var value = new ColumnMapRowMapper().mapRow(result, index);
+                    var value = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(result);
                     value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));
                     LocalDateTime lease = result.getObject("writer_lease_until", LocalDateTime.class);
                     value.put("writer_lease_fingerprint", lease == null ? null : lease.toString());
                     return value;
-                }, tenant, session);
+                }, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(session));
         check(heads.size() <= 1, "source_drift");
         if (heads.isEmpty()) {
             source.putNull("head");
         } else {
             Map<String, Object> head = heads.getFirst();
+            check(tenant.equals(head.get("tenant_id")) && session.equals(head.get("session_id")), "source_drift");
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
-            check(Set.of("ACTIVE", "SEALED", "DELETING", "DELETED").contains(head.get("state"))
+            check(Set.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))
                     && List.of(1, 2).contains(((Number) head.get("storage_version")).intValue())
-                    && ((Number) head.get("compacted_through_revision")).longValue() == 0
+                    && ((Number) head.get("compacted_through_revision")).longValue() >= 0
+                    && ((Number) head.get("compacted_through_revision")).longValue() <= ((Number) head.get("journal_revision")).longValue()
                     && "READY".equals(head.get("recovery_status")), "source_drift");
             ObjectNode value = source.putObject("head");
             fields(value, head, "tenantId", "tenant_id", "workspaceId", "workspace_id", "sessionId", "session_id",
@@ -579,9 +605,24 @@ public final class WorkspaceRecoveryStore {
                     "latestCheckpointResourceId", "latest_checkpoint_resource_id", "compactedThroughRevision", "compacted_through_revision",
                     "recoveryStatus", "recovery_status", "recoveryDetailCode", "recovery_detail_code");
         }
-        var retirements = jdbc.queryForList("SELECT tenant_id, session_id, operation_id, generation, retired_at,"
-                + " recovery_protected FROM qwen_output_session_retirement WHERE tenant_key = ? AND session_key = ?",
-                hash(tenant), hash(session));
+        String privateScope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String currentRead = lockSources ? " FOR UPDATE" : "";
+        check(jdbc.queryForList("SELECT r.resource_key FROM ma_resource r JOIN ma_resource_ref f"
+                + " ON f.resource_key = r.resource_key AND f.session_scope_key = r.session_scope_key"
+                + " WHERE r.session_scope_key = ? AND r.state = 'REFERENCED' AND r.deletion_operation_key IS NOT NULL"
+                + " AND f.owner_kind IN ('JOURNAL','SESSION_RECORD') LIMIT 1" + currentRead, String.class, privateScope).isEmpty(), "source_drift");
+        var captureScopes = new java.util.LinkedHashSet<String>();
+        captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) row.get("workspace_id"), session));
+        if (!heads.isEmpty()) {
+            captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) heads.getFirst().get("workspace_id"), session));
+        }
+        for (String captureScope : captureScopes) {
+            check(jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_key = ?"
+                    + " AND retention_state = 'DELETING' LIMIT 1" + currentRead, String.class, captureScope).isEmpty(), "source_drift");
+        }
+        var retirements = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, retirement_operation_id AS operation_id,"
+                + " retirement_generation AS generation, retired_at, recovery_protected FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ? AND retirement_generation > 0", tenant, session);
         check(retirements.size() <= 1, "source_drift");
         source.putNull("retirement");
         if (!retirements.isEmpty()) {
@@ -596,23 +637,37 @@ public final class WorkspaceRecoveryStore {
             check(retiredHead.isNull() || "DELETED".equals(retiredHead.path("state").asText())
                     && retiredHead.path("latestCheckpointResourceId").isNull()
                     && retiredHead.path("writerId").isNull() && retiredHead.path("writerLeaseUntil").isNull(), "source_drift");
-            check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
+            check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                     + " AND operation_id = ? AND operation_kind = 'DELETE' AND state = 'COMPLETED'"
                     + " AND delivery_state = 'CONFIRMED' AND completed_at IS NOT NULL",
-                    tenant, session, retirement.get("operation_id")) == 1, "source_drift");
+                    privateScope, tenant, session, retirement.get("operation_id")) == 1, "source_drift");
             ObjectNode value = source.putObject("retirement");
             fields(value, retirement, "tenantId", "tenant_id", "sessionId", "session_id", "operationId", "operation_id",
                     "generation", "generation", "retiredAt", "retired_at");
             value.put("recoveryProtected", false);
         }
+        if (!heads.isEmpty()) {
+            var head = heads.getFirst();
+            long compacted = ((Number) head.get("compacted_through_revision")).longValue();
+            long revision = ((Number) head.get("journal_revision")).longValue();
+            if (compacted > 0 || revision == 0 && "DELETED".equals(head.get("state"))) {
+                check(!retirements.isEmpty() && "DELETED".equals(head.get("state")) && compacted == revision, "source_drift");
+                var completedGc = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE session_scope_key = ?"
+                        + " AND scope_key = ? AND target_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' AND state = 'SUCCEEDED'"
+                        + " AND operation_id = ? LIMIT 1" + currentRead, String.class,
+                        privateScope, privateScope, privateScope, "session-resources-" + privateScope);
+                check(completedGc.size() == 1, "source_drift");
+                source.set("retiredHead", source.path("head").deepCopy());
+                source.putNull("head");
+            }
+        }
         return source;
     }
 
     private JsonNode pinned(String session) {
-        var rows = jdbc.queryForList("SELECT source_json FROM managed_workspace_recovery_session"
-                + " WHERE operation_id = ? AND session_id = ?", id, session);
-        check(rows.size() == 1, "session_out_of_scope");
-        return parse((String) rows.getFirst().get("source_json"));
+        var row = operations.findWork(KIND, id, "SESSION", hash(session), false);
+        check(row != null && session.equals(row.get("session_id")), "session_out_of_scope");
+        return parse((String) row.get("source_json"));
     }
 
     private void recheckSession(String session) {
@@ -652,20 +707,41 @@ public final class WorkspaceRecoveryStore {
     }
 
     private JsonNode work(String operation, String kind, String key) {
-        var rows = jdbc.queryForList("SELECT work_key, metadata_json FROM managed_workspace_recovery_work"
-                + " WHERE operation_id = ? AND work_kind = ? AND key_hash = ?", operation, kind, hash(key));
-        if (rows.isEmpty()) {
+        var row = operations.findWork(KIND, operation, workKind(kind), workTarget(kind, key), false);
+        if (row == null) {
             return null;
         }
-        check(key.equals(rows.getFirst().get("work_key")), "work_key_conflict");
-        return parse((String) rows.getFirst().get("metadata_json"));
+        check(key.equals(row.get("work_key")), "work_key_conflict");
+        return parse((String) row.get("metadata_json"));
     }
 
     private void insertWork(String kind, String key, String session, JsonNode metadata, String state) {
         check(key.length() <= 640, "invalid_work_key");
-        jdbc.update("INSERT INTO managed_workspace_recovery_work (operation_id, work_kind, key_hash, work_key,"
-                + " session_id, metadata_json, state) VALUES (?, ?, ?, ?, ?, ?, ?)", id, kind, hash(key), key,
-                session, metadata.toString(), state);
+        operations.insertWork(KIND, id, workKind(kind), workTarget(kind, key), key, session,
+                WorkspaceOperations.values("metadata_json", metadata.toString()), state);
+    }
+
+    private static String workKind(String kind) {
+        return switch (kind) {
+            case "ASSET" -> "RESOURCE";
+            case "REF" -> "RECOVERY_EVIDENCE";
+            default -> throw failure("invalid_work_kind");
+        };
+    }
+
+    private static String workTarget(String kind, String key) {
+        return "ASSET".equals(kind) ? key : hash(key);
+    }
+
+    private long workCount(String operation, String kind, String condition) {
+        return count("SELECT COUNT(*) FROM ma_operation_work WHERE operation_key = ? AND work_kind = ? AND " + condition,
+                operations.key(KIND, operation), kind);
+    }
+
+    private List<Map<String, Object>> sessionRows(String operation, String after, int limit) {
+        return jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ? AND work_kind = 'SESSION'"
+                + " AND session_id > ? ORDER BY session_id LIMIT ?", (row, index) -> WorkspaceOperations.work(row),
+                operations.key(KIND, operation), after, limit);
     }
 
     private Map<String, Object> ownedOperation() {
@@ -675,8 +751,7 @@ public final class WorkspaceRecoveryStore {
     }
 
     private Map<String, Object> operation(String operation) {
-        var rows = jdbc.queryForList("SELECT * FROM managed_workspace_recovery_operation WHERE operation_id = ?", operation);
-        return rows.isEmpty() ? null : rows.getFirst();
+        return operations.find(KIND, operation, lockSources);
     }
 
     private long count(String sql, Object... args) {
@@ -756,16 +831,17 @@ public final class WorkspaceRecoveryStore {
         }
     }
 
+    // The deepest cause is not the verdict: a structural refusal keeps its
+    // service code even when the discarded I/O cause sits deeper in the chain.
     public static String errorCode(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        if (current instanceof RecoveryFailure failure) {
-            return failure.code;
-        }
-        if (current instanceof RuntimeBrokerException failure) {
-            return failure.getCode();
+        for (Throwable current = error; current != null && current != current.getCause();
+                current = current.getCause()) {
+            if (current instanceof RecoveryFailure failure) {
+                return failure.code;
+            }
+            if (current instanceof RuntimeBrokerException failure) {
+                return failure.getCode();
+            }
         }
         return "migration_failed";
     }

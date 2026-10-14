@@ -13,26 +13,28 @@ import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer.Materia
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
 /**
- * The MQ2c consumer roles against the real schema (H2, MySQL mode): every
- * decision is read from SQL — the activation fence from the Session and its
- * journal head, the wake dedup from the consumer-progress watermark, the
- * materialization dedup from the message projection's covered sequence —
- * and the broker is stood in for by handing the listener the message.
+ * The MQ2c consumer roles against the real schema (H2, MySQL mode): every decision is read from SQL
+ * — the activation fence from the Session and its journal head, the wake dedup from the
+ * consumer-progress watermark, the materialization dedup from the message projection's covered
+ * sequence — and the broker is stood in for by handing the listener the message.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:transport-consumer;MODE=MySQL;"
@@ -54,9 +56,6 @@ class EventTransportConsumerSqlTest {
     private JdbcTemplate jdbc;
 
     @Autowired
-    private Clock clock;
-
-    @Autowired
     private MessageMaterializer materializer;
 
     private HarnessConnector harness;
@@ -70,7 +69,7 @@ class EventTransportConsumerSqlTest {
         when(harness.activateForWake(anyString(), anyString()))
                 .thenReturn(true);
         activated = new ArrayList<>();
-        TransportConsumerStore store = new TransportConsumerStore(jdbc, clock);
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
         // Loads and batches run inline, so each delivery is settled when
         // consume returns.
         consumer = new EventTransportConsumer(
@@ -96,6 +95,78 @@ class EventTransportConsumerSqlTest {
 
         verify(harness, times(2)).activateForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aPrivateWakeCannotInsertOrAdvanceProgressOrActivate(boolean requestPinned) {
+        String session = session("ACTIVE");
+        if (requestPinned) {
+            jdbc.update(
+                    "UPDATE ma_session SET runtime_request_key = ?"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    DIGEST,
+                    TENANT,
+                    session);
+        } else {
+            jdbc.update(
+                    "UPDATE ma_session SET tool_profile = ?"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    CsiFilesRetirementProfile.PROFILE,
+                    TENANT,
+                    session);
+        }
+        head(session, "ACTIVE", 5, -60);
+        var sessionBefore =
+                jdbc.queryForMap(
+                        "SELECT * FROM ma_session" + " WHERE tenant_id = ? AND session_id = ?",
+                        TENANT,
+                        session);
+        var headBefore =
+                jdbc.queryForMap(
+                        "SELECT * FROM ma_session_head" + " WHERE tenant_id = ? AND session_id = ?",
+                        TENANT,
+                        session);
+        assertThat(sessionBefore.get("csi_guard")).isEqualTo(true);
+
+        deliver(wake(session, WORKSPACE, 3));
+        assertThat(wakeWatermark(session)).isNull();
+
+        jdbc.update(
+                "UPDATE ma_event_stream SET wake_covered_sequence = 1 WHERE tenant_id = ?"
+                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                TENANT,
+                session);
+        var progressBefore =
+                jdbc.queryForMap(
+                        "SELECT * FROM ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
+                                + " stream_kind = 'SESSION' AND stream_id = X''",
+                        TENANT,
+                        session);
+        deliver(wake(session, WORKSPACE, 5));
+        assertThat(
+                        jdbc.queryForMap(
+                                "SELECT * FROM ma_event_stream WHERE tenant_id = ? AND session_id ="
+                                        + " ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                                TENANT,
+                                session))
+                .isEqualTo(progressBefore);
+        assertThat(
+                        jdbc.queryForMap(
+                                "SELECT * FROM ma_session"
+                                        + " WHERE tenant_id = ? AND session_id = ?",
+                                TENANT,
+                                session))
+                .isEqualTo(sessionBefore);
+        assertThat(
+                        jdbc.queryForMap(
+                                "SELECT * FROM ma_session_head"
+                                        + " WHERE tenant_id = ? AND session_id = ?",
+                                TENANT,
+                                session))
+                .isEqualTo(headBefore);
+        verify(harness, never()).activateForWake(anyString(), anyString());
+        assertThat(activated).isEmpty();
     }
 
     @Test
@@ -130,7 +201,7 @@ class EventTransportConsumerSqlTest {
         verify(harness, never()).activateForWake(anyString(), anyString());
         assertThat(activated).isEmpty();
 
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        jdbc.update("UPDATE ma_session_head SET"
                 + " writer_lease_until = TIMESTAMPADD(SECOND, -60,"
                 + " CURRENT_TIMESTAMP(6)) WHERE tenant_id = ? AND"
                 + " session_id = ?", TENANT, held);
@@ -152,13 +223,10 @@ class EventTransportConsumerSqlTest {
     }
 
     @Test
-    void aDuplicateClaimIsRefusedOnTheInsertAndTheUpdatePath() {
+    void aDuplicateClaimIsRefusedOnTheFirstAndLaterUpdate() {
         String session = session("ACTIVE");
-        TransportConsumerStore store = new TransportConsumerStore(jdbc, clock);
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
 
-        // The first claim inserts the row; a duplicate takes the
-        // DuplicateKey path a racing loser takes, and refuses; only a strict
-        // advance wins.
         assertThat(store.claimWake(TENANT, session, 4)).isTrue();
         assertThat(store.claimWake(TENANT, session, 4)).isFalse();
         assertThat(store.claimWake(TENANT, session, 1)).isFalse();
@@ -167,15 +235,90 @@ class EventTransportConsumerSqlTest {
     }
 
     @Test
+    void concurrentWakeClaimsHaveOneWinner() throws Exception {
+        String session = session("ACTIVE");
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        var ready = new java.util.concurrent.CountDownLatch(8);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try (var workers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            var results = new ArrayList<java.util.concurrent.Future<Boolean>>();
+            for (int i = 0; i < 8; i++) {
+                results.add(workers.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Wake claim start barrier timed out");
+                    }
+                    return store.claimWake(TENANT, session, 10);
+                }));
+            }
+            assertThat(ready.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            int winners = 0;
+            for (var result : results) {
+                if (result.get(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                    winners++;
+                }
+            }
+            assertThat(winners).isEqualTo(1);
+        }
+        assertThat(wakeWatermark(session)).isEqualTo(10);
+        assertThat(store.claimWake(TENANT, "missing", 10)).isFalse();
+    }
+
+    @Test
+    void wakeAndMessageProgressAdvanceIndependently() {
+        String session = session("ACTIVE");
+        event(session, 1, "session.updated");
+        event(session, 2, "session.updated");
+        jdbc.update(
+                "UPDATE ma_event_stream SET covered_sequence=1, replay_floor_sequence=1 WHERE"
+                    + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
+                TENANT, session);
+        var before = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence,"
+                + " projection_version, updated_at FROM ma_event_stream WHERE"
+                                + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND"
+                                + " stream_id=X''", TENANT, session);
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        assertThat(store.claimWake(TENANT, session, 50)).isTrue();
+        assertThat(jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence,"
+                + " projection_version, updated_at FROM ma_event_stream WHERE"
+                                    + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND"
+                                    + " stream_id=X''", TENANT, session))
+                .isEqualTo(before);
+        assertThat(consumer.materialize(publicEvent(session, 2))).isEqualTo(MaterializeOutcome.QUEUED);
+        assertThat(projectionWatermark(session)).isEqualTo(2);
+        assertThat(wakeWatermark(session)).isEqualTo(50);
+        assertThat(store.claimWake(TENANT, session, 49)).isFalse();
+    }
+
+    @Test
+    void controlAndRetiredSessionsCannotSupplyPublicConsumerState() {
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        String control = session("ACTIVE");
+        head(control, "ACTIVE", 1, 60);
+        jdbc.update("UPDATE ma_session SET session_kind='CONTROL' WHERE tenant_id=? AND session_id=?",
+                TENANT, control);
+        String retired = session("ACTIVE");
+        head(retired, "ACTIVE", 1, 60);
+        jdbc.update("UPDATE ma_session SET retired_at=1 WHERE tenant_id=? AND session_id=?",
+                TENANT, retired);
+        for (String session : List.of(control, retired)) {
+            assertThat(store.wakeFence(TENANT, session)).isEmpty();
+            assertThat(store.workspaceOf(TENANT, session)).isEmpty();
+            assertThat(store.materializedThrough(TENANT, session)).isEmpty();
+        }
+    }
+
+    @Test
     void anEnvelopeNamesTheBindingOrElseTheJournalsWorkspace() {
-        TransportConsumerStore store = new TransportConsumerStore(jdbc, clock);
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
         String bound = session("ACTIVE");
         head(bound, "ACTIVE", 1, 60, "workspace-journal");
         // The binding wins over a journal that names another workspace.
         assertThat(store.workspaceOf(TENANT, bound)).contains(WORKSPACE);
 
         String unbound = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                 + " session_id, agent_id, status, created_at, updated_at)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 unbound);
@@ -188,7 +331,7 @@ class EventTransportConsumerSqlTest {
 
     @Test
     void theHeldSetIsTheJournalsThisWriterHoldsUnderALiveLease() {
-        TransportConsumerStore store = new TransportConsumerStore(jdbc, clock);
+        TransportConsumerStore store = new TransportConsumerStore(jdbc);
         String held = session("ACTIVE");
         head(held, "ACTIVE", 1, 60);
         String lapsed = session("ACTIVE");
@@ -197,7 +340,7 @@ class EventTransportConsumerSqlTest {
         head(sealed, "SEALED", 1, 60);
         String foreign = session("ACTIVE");
         head(foreign, "ACTIVE", 1, 60);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_id ="
+        jdbc.update("UPDATE ma_session_head SET writer_id ="
                 + " 'other-writer' WHERE tenant_id = ? AND session_id = ?",
                 TENANT, foreign);
 
@@ -256,7 +399,7 @@ class EventTransportConsumerSqlTest {
 
     private String session(String status) {
         String session = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id,"
                 + " agent_id, status, created_at, updated_at,"
                 + " workspace_storage_id, workspace_id, workspace_generation,"
                 + " cwd_relative, context_config_ref, context_revision,"
@@ -266,9 +409,9 @@ class EventTransportConsumerSqlTest {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_agent_consumer_progress (tenant_id,"
-                + " session_id, consumer_name, covered_sequence, updated_at)"
-                + " VALUES (?, ?, 'message_projection', 0, 1)",
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
+                + " session_id, stream_kind, stream_id, covered_sequence, updated_at)"
+                + " VALUES (?, ?, 'SESSION', X'', 0, 1)",
                 TENANT, session);
         return session;
     }
@@ -280,44 +423,47 @@ class EventTransportConsumerSqlTest {
 
     private void head(String session, String state, long committed,
             Integer leaseOffsetSeconds, String workspace) {
-        jdbc.update("INSERT INTO qwen_managed_session_journal_head (tenant_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                 + " workspace_id, session_id, storage_version, state,"
                 + " writer_generation, writer_id, writer_lease_until,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, recovery_status, created_at,"
-                + " updated_at) VALUES (?, ?, ?, 1, ?, 1, 'writer', "
+                + " updated_at, tenant_key, harness_key, harness_session_id, head_kind)"
+                + " VALUES (?, ?, ?, 1, ?, 1, 'writer', "
                 + (leaseOffsetSeconds == null ? "NULL"
                         : "TIMESTAMPADD(SECOND, " + leaseOffsetSeconds
                                 + ", CURRENT_TIMESTAMP(6))")
                 + ", 3, ?, 0, 0, 'READY', CURRENT_TIMESTAMP(6),"
-                + " CURRENT_TIMESTAMP(6))",
-                TENANT, workspace, session, state, committed);
+                + " CURRENT_TIMESTAMP(6), ?, ?, ?, 'MANAGED_SESSION')",
+                TENANT, workspace, session, state, committed,
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(TENANT),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(session), session);
     }
 
     private void event(String session, long sequence, String type) {
-        jdbc.update("INSERT INTO managed_agent_event (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                 + " sequence_id, event_id, turn_id, event_type, data_json,"
                 + " terminal, source_key, created_at) VALUES (?, ?, ?, ?,"
                 + " NULL, ?, '{}', FALSE, NULL, ?)",
                 TENANT, session, sequence, "evt-" + UUID.randomUUID(), type,
                 1_760_000_000_000L + sequence);
-        jdbc.update("UPDATE managed_agent_session SET last_sequence = ? WHERE"
-                + " tenant_id = ? AND session_id = ?", sequence, TENANT,
+        jdbc.update(
+                "UPDATE ma_event_stream SET last_sequence = ? WHERE tenant_id = ? AND session_id ="
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = X''", sequence, TENANT,
                 session);
     }
 
     private Long wakeWatermark(String session) {
-        List<Long> covered = jdbc.queryForList("SELECT covered_sequence FROM"
-                + " managed_agent_consumer_progress WHERE tenant_id = ? AND"
-                + " session_id = ? AND consumer_name = ?", Long.class, TENANT,
-                session, TransportConsumerStore.WAKE_CONSUMER);
+        List<Long> covered = jdbc.queryForList("SELECT wake_covered_sequence FROM"
+                + " ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
+                + " stream_kind = 'SESSION' AND stream_id = X''", Long.class, TENANT, session);
         return covered.isEmpty() ? null : covered.getFirst();
     }
 
     private long projectionWatermark(String session) {
         return jdbc.queryForObject("SELECT covered_sequence FROM"
-                + " managed_agent_consumer_progress WHERE tenant_id = ? AND"
-                + " session_id = ? AND consumer_name = 'message_projection'",
+                + " ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
+                + " stream_kind = 'SESSION' AND stream_id = X''",
                 Long.class, TENANT, session);
     }
 }

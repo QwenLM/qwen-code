@@ -29,9 +29,10 @@ import org.slf4j.LoggerFactory;
  * not hidden: until the old owner's next tick (or its broker-side inactivity)
  * removes a stale subscription, dispatch may still pick it; the old owner
  * then does no wake (the fence says another writer holds the Session) and
- * acknowledges, and the new owner recovers that notice from SQL — never by
- * assuming the MQ delivered it. Subscription is fallible (a quota may refuse
- * it), so a refused call is retried on the next tick.
+ * acknowledges; the new owner never receives that notice, and needs no MQ
+ * delivery for it — its Harness runs the wake input from the journal.
+ * Subscription is fallible (a quota may refuse it), so a refused call is
+ * retried on the next tick.
  */
 public class OwnerSubscriptions {
     private static final Logger LOG = LoggerFactory.getLogger(

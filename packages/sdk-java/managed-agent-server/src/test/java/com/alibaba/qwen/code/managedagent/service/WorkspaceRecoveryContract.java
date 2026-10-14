@@ -55,9 +55,9 @@ public final class WorkspaceRecoveryContract {
         String recoveryId;
         try (var pool = Executors.newSingleThreadExecutor(); var connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            try (var lock = connection.prepareStatement("SELECT tenant_id FROM qwen_runtime_placement_guard"
-                    + " WHERE tenant_id = ? FOR UPDATE")) {
-                lock.setString(1, fixture.tenant);
+            try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard"
+                    + " WHERE tenant_key = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
+                lock.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(fixture.tenant));
                 try (var rows = lock.executeQuery()) { assertThat(rows.next()).isTrue(); }
             }
             var started = new CountDownLatch(1);
@@ -114,8 +114,8 @@ public final class WorkspaceRecoveryContract {
                 .noneMatch(candidate -> candidate.getBindingId().equals(fenced.getBindingId()));
         assertThatThrownBy(() -> authority.release(fixture.session.workspace(), original.session()))
                 .isInstanceOf(RuntimeBrokerException.class);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_operator_recovery"
-                + " WHERE binding_id = ?", Long.class, original.binding().getBindingId())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
+                + " WHERE operation_kind = 'WORKSPACE_OPERATOR_RECOVERY' AND target_id = ?", Long.class, original.binding().getBindingId())).isEqualTo(1);
         var lostClaim = fixture.bindings.claimOperation(fenced.getBindingId(),
                 "loss-test", Duration.ofSeconds(10));
         var lost = fixture.bindings.compareAndSet(lostClaim,
@@ -127,7 +127,7 @@ public final class WorkspaceRecoveryContract {
                 lost.getOperationGeneration());
         assertThat(fixture.bindings.findRecoveryCandidates("local-process", null, 100))
                 .noneMatch(candidate -> candidate.getBindingId().equals(lost.getBindingId()));
-        jdbc.update("DELETE FROM managed_workspace_operator_recovery WHERE recovery_id = ?", recoveryId);
+        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'WORKSPACE_OPERATOR_RECOVERY' AND operation_id = ?", recoveryId);
         assertThat(fixture.bindings.findRecoveryCandidates("local-process", null, 100))
                 .anyMatch(candidate -> candidate.getBindingId().equals(lost.getBindingId()));
 
@@ -205,10 +205,10 @@ public final class WorkspaceRecoveryContract {
         assertThatThrownBy(() -> authority.release(fixture.session.workspace(), original.session()))
                 .isInstanceOf(RuntimeBrokerException.class);
 
-        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", fixture.tenant);
-        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 2 WHERE session_id = ?",
+        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", fixture.tenant);
+        jdbc.update("UPDATE ma_session SET status = 'DELETED', deleted_at = 2 WHERE session_id = ?",
                 fixture.session.sessionId());
-        jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'changed', workspace_generation = 2,"
+        jdbc.update("UPDATE ma_workspace SET storage_id = 'changed', workspace_generation = 2,"
                 + " state = 'REMOVED' WHERE tenant_id = ?", fixture.tenant);
         assertThatThrownBy(() -> authority.authorize(fixture.session)).isInstanceOf(RuntimeBrokerException.class);
         var absentMounts = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
@@ -228,22 +228,21 @@ public final class WorkspaceRecoveryContract {
         // Unique per run: the id is unique table-wide and the contract may
         // run twice against one database. The claim is live, so no scan of
         // the application context takes the hold for a stale one.
-        String maintenance = UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
-                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
-                + " state, claim_generation, claimed_until, created_at, updated_at) VALUES (?, ?, 'run', ?,"
-                + " 'workspace', 1, ?, '.', 'preparing', 1, ?, 0, 0)", fixture.tenant,
-                fixture.session.sessionId(), maintenance, fixture.session.workspace().getStorageId(),
-                Long.MAX_VALUE);
-        authority.holdForMaintenance(fixture.session.workspace(), maintenance, 1);
+        var childStore = new com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+        var admitted = childStore.admit(fixture.tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
+                fixture.session.workspace(), System.currentTimeMillis());
+        var claimed = childStore.claim(admitted, "maintenance-owner", System.currentTimeMillis(), 60_000);
+        String maintenance = claimed.childWorkspaceId();
+        String maintenanceStep = authority.holdForMaintenance(fixture.session.workspace(), maintenance, 1);
         authority.releaseLost(nextClaim);
-        assertThat(jdbc.queryForList("SELECT maintenance_id FROM managed_workspace_execution_lease"
+        assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"
                 + " WHERE maintenance_id = ? AND holder_key IS NOT NULL", String.class, maintenance))
                 .containsExactly(maintenance);
         assertThatThrownBy(() -> authority.claim(fixture.session.workspace(), rival.session()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
                         error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
-        authority.releaseMaintenance(fixture.session.workspace(), maintenance, 1);
+        authority.releaseMaintenance(fixture.session.workspace(), maintenance, 1, maintenanceStep);
 
         // The first clear is committed. Retry after a new holder arrives must not erase it.
         authority.claim(fixture.session.workspace(), rival.session());
@@ -265,7 +264,7 @@ public final class WorkspaceRecoveryContract {
         var original = fixture.runtime("late");
         try (var pool = Executors.newSingleThreadExecutor(); var connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            try (var lock = connection.prepareStatement("SELECT binding_id FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE")) {
+            try (var lock = connection.prepareStatement("SELECT binding_id FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE")) {
                 lock.setString(1, original.binding().getBindingId());
                 try (var rows = lock.executeQuery()) { assertThat(rows.next()).isTrue(); }
             }
@@ -276,14 +275,14 @@ public final class WorkspaceRecoveryContract {
             });
             assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
             assertThatThrownBy(() -> pending.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(java.util.concurrent.TimeoutException.class);
-            try (var lose = connection.prepareStatement("UPDATE qwen_runtime_binding SET binding_state = 'LOST',"
+            try (var lose = connection.prepareStatement("UPDATE ma_runtime_binding SET binding_state = 'LOST',"
                     + " record_version = record_version + 1 WHERE binding_id = ?")) {
                 lose.setString(1, original.binding().getBindingId());
                 assertThat(lose.executeUpdate()).isEqualTo(1);
             }
             connection.commit();
             assertThatThrownBy(() -> pending.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(RuntimeBrokerException.class);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE binding_id = ?",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?",
                     Long.class, original.binding().getBindingId())).isZero();
         }
     }
@@ -299,10 +298,11 @@ public final class WorkspaceRecoveryContract {
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             sessions = new JdbcRuntimeSessionRepository(source);
             executions = new JdbcToolExecutionRepository(source);
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage.register(jdbc, tenant, "storage");
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
                     + " 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new org.springframework.transaction.support.TransactionTemplate(
                     new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));

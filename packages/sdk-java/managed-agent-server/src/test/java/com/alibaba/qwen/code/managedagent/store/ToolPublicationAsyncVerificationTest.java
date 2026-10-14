@@ -56,7 +56,7 @@ public class ToolPublicationAsyncVerificationTest {
     @BeforeEach
     void setup() {
         DataSource source = dataSource();
-        Flyway.configure().dataSource(source).load().migrate();
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         fixture = PublicationJournalFixture.create(source, true);
         fixture.reserve();
         key = fixture.binding.path("sessionKey");
@@ -98,7 +98,7 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     private void due(String operation) {
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = CURRENT_TIMESTAMP(6)"
+        fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = CURRENT_TIMESTAMP(6)"
                 + " WHERE operation_id = ?", operation);
     }
 
@@ -111,7 +111,7 @@ public class ToolPublicationAsyncVerificationTest {
 
     private DataSource acceptCsiOperation() {
         DataSource source = dataSource();
-        Flyway.configure().dataSource(source).load().migrate();
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
                 "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
                 "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
@@ -137,18 +137,18 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(fixture.bindings.compareAndSet(runtime,
                     runtime.withState(RuntimeBindingRecord.State.RELEASED, runtime.getLease(), Instant.now())))
                     .isNotNull();
-            assertThat(fixture.jdbc.queryForObject("SELECT active_binding_id FROM qwen_runtime_binding_slot",
+            assertThat(fixture.jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot",
                     String.class)).isNull();
         } else {
-            fixture.jdbc.update("UPDATE managed_workspace_csi_registration SET registration_json = '{}'");
+            fixture.jdbc.update("UPDATE ma_storage SET registration_json = '{}'");
         }
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("csi").path("state").asText()).isEqualTo("FAILED");
         assertThat(status("csi").path("error").path("code").asText())
                 .isEqualTo("managed_tool_publication_runtime_unavailable");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNull();
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?",
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         assertThat(status("csi").path("state").asText()).isEqualTo("FAILED");
         assertThat(data.verifyNextOperation()).isFalse();
@@ -186,8 +186,8 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(other.verifyNextOperation()).isFalse();
         assertThat(status("csi").path("state").asText()).isEqualTo("PENDING");
         assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
-                + " FROM qwen_tool_publication_operation", Boolean.class)).isTrue();
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication", String.class))
+                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
+        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class))
                 .isEqualTo("csi");
         due("csi");
         assertThat(data.verifyNextOperation()).isTrue();
@@ -204,13 +204,13 @@ public class ToolPublicationAsyncVerificationTest {
         var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
                 Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?",
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         assertThat(other.verifyNextOperation()).isFalse();
         assertThat(status("csi").path("state").asText()).isEqualTo("EXPIRED");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNull();
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication", String.class)).isNull();
+        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class)).isNull();
         assertThat(bucket.opens).hasValue(0);
     }
 
@@ -219,11 +219,11 @@ public class ToolPublicationAsyncVerificationTest {
     void malformedCandidateInputsFailWithoutEscapingTheScan(String encoded) {
         publish("healthy", 0, "bytes");
         data.finish(key, "pub-1", PUBLICATION_TOKEN, "bad-inputs", terminal(10), true);
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_request_json = ?,"
-                        + " verification_next_at = ? WHERE operation_id = 'bad-inputs'",
+        fixture.jdbc.update("UPDATE ma_operation SET verification_request_json = ?,"
+                        + " verification_next_at = ? WHERE operation_id = X'6261642d696e70757473'",
                 encoded.equals("null") ? null : encoded, Timestamp.valueOf("2000-01-01 00:00:00"));
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = ?"
-                        + " WHERE operation_id = 'healthy'",
+        fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = ?"
+                        + " WHERE operation_id = X'6865616c746879'",
                 Timestamp.valueOf("2000-01-02 00:00:00"));
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("bad-inputs").path("state").asText()).isEqualTo("FAILED");
@@ -260,8 +260,8 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(response.path("state").asText()).isEqualTo("PENDING");
         assertThat(status("accepted").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.opens).hasValue(0);
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
-                + " WHERE operation_id = 'accepted' AND state = 'VERIFIED'", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
+                + " AND operation_id = X'6163636570746564' AND capture_state = 'VERIFIED'", Integer.class)).isZero();
         data = replacement();
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -362,8 +362,8 @@ public class ToolPublicationAsyncVerificationTest {
 
             @Override
             public void commit(TransactionStatus transaction) {
-                var values = fixture.jdbc.queryForList("SELECT verification_ready FROM qwen_tool_publication_operation"
-                        + " WHERE operation_id = 'commit'", Boolean.class);
+                var values = fixture.jdbc.queryForList("SELECT verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
+                        + " AND operation_id = X'636f6d6d6974'", Boolean.class);
                 if (values.size() == 1 && values.getFirst()) {
                     ready.countDown();
                     Bucket.await(release);
@@ -386,13 +386,13 @@ public class ToolPublicationAsyncVerificationTest {
                 assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
                 assertThat(request.isDone()).isFalse();
                 assertThat(bucket.puts).hasValue(1);
-                assertThat(fixture.jdbc.queryForObject("SELECT verification_ready FROM qwen_tool_publication_operation",
+                assertThat(fixture.jdbc.queryForObject("SELECT verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                         Boolean.class)).isFalse();
             } finally {
                 release.countDown();
             }
             assertThat(request.get(5, TimeUnit.SECONDS).path("state").asText()).isEqualTo("PENDING");
-            assertThat(fixture.jdbc.queryForObject("SELECT verification_ready FROM qwen_tool_publication_operation",
+            assertThat(fixture.jdbc.queryForObject("SELECT verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                     Boolean.class)).isTrue();
         }
     }
@@ -425,16 +425,16 @@ public class ToolPublicationAsyncVerificationTest {
         }
         assertThat(status("bad").path("state").asText()).isEqualTo("FAILED");
         assertThat(status("bad").path("error").path("code").asText()).isEqualTo("invalid_request");
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                 .isEqualTo("QUARANTINED");
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?",
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         assertThat(status("bad").path("state").asText()).isEqualTo("FAILED");
         assertThat(publish("bad", 0, "bytes").path("state").asText()).isEqualTo("FAILED");
         assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "bad"))
                 .hasMessageContaining("cannot be recovered");
         assertThat(bucket.puts).hasValue(1);
-        assertThat(fixture.jdbc.queryForObject("SELECT capture_used_bytes FROM qwen_tool_publication", Long.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_used_bytes FROM ma_output_capture", Long.class))
                 .isEqualTo(5);
     }
 
@@ -471,14 +471,15 @@ public class ToolPublicationAsyncVerificationTest {
         }
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class))
                 .isEqualTo("retry");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNotNull();
         // The deferral lands about a second out; pin it further ahead so the
         // not-yet-due rescan cannot lose that race on a loaded runner.
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = ?"
-                + " WHERE operation_id = 'retry'", Timestamp.valueOf("2100-01-01 00:00:00"));
+        assertThat(fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = ?"
+                + " WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = ?",
+                Timestamp.valueOf("2100-01-01 00:00:00"), "retry")).isOne();
         assertThat(data.verifyNextOperation()).isFalse();
         due("retry");
         assertThat(data.verifyNextOperation()).isTrue();
@@ -493,7 +494,7 @@ public class ToolPublicationAsyncVerificationTest {
         bucket.readFailure = new IllegalArgumentException("Unclassified storage read failure");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                 .isEqualTo("CANDIDATE");
         assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
         due("retry");
@@ -511,17 +512,17 @@ public class ToolPublicationAsyncVerificationTest {
         bucket.midRead = () -> blockRecovery("BLOCKED_EXECUTION");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(bucket.opens).hasValue(1);
-        assertThat(fixture.jdbc.queryForObject("SELECT recovery_status FROM qwen_managed_session_journal_head",
+        assertThat(fixture.jdbc.queryForObject("SELECT recovery_status FROM ma_session_head",
                 String.class)).isEqualTo("BLOCKED_EXECUTION");
         assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
         assertThat(status("resource").path("error").path("code").asText())
                 .isEqualTo("managed_tool_publication_fenced");
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                 .isEqualTo("CANDIDATE");
-        assertThat(fixture.jdbc.queryForObject("SELECT sha256 FROM qwen_tool_publication_object", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT sha256 FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                 .isEqualTo(ToolPublicationContract.sha256(bytes));
         assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNull();
         assertThat(data.verifyNextOperation()).isFalse();
         assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
@@ -540,10 +541,10 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("resource").path("error").path("code").asText())
                 .isEqualTo("managed_tool_publication_fenced");
         assertThat(bucket.opens).hasValue(0);
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                 .isEqualTo("CANDIDATE");
         assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNull();
         assertThat(data.verifyNextOperation()).isFalse();
         assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
@@ -560,12 +561,12 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("finish").path("error").path("code").asText())
                 .isEqualTo("managed_tool_publication_fenced");
         assertThat(bucket.opens).hasValue(0);
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object", Integer.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", Integer.class))
                 .isZero();
-        assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication", Long.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM ma_output_capture", Long.class))
                 .isZero();
         assertThat(bucket.objects).isEmpty();
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNull();
         assertThat(data.verifyNextOperation()).isFalse();
         assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
@@ -575,11 +576,11 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void lostSlotBeforeClaimCanRetryAfterTheSlotIsRestored() {
         publish("slot", 0, "bytes");
-        fixture.jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = 'other'");
+        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = X'6f74686572'");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("slot").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.opens).hasValue(0);
-        fixture.jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = 'slot'");
+        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = X'736c6f74'");
         due("slot");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("slot").path("state").asText()).isEqualTo("SUCCEEDED");
@@ -600,13 +601,13 @@ public class ToolPublicationAsyncVerificationTest {
         try (var verifier = manualVerifier(data); var worker = Executors.newSingleThreadExecutor()) {
             var attempt = worker.submit(verifier::runOnce);
             assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
+            fixture.jdbc.update("UPDATE ma_operation SET claim_until = ?, verification_next_at = ?",
                     Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
             bucket.readRelease.countDown();
             assertThat(attempt.get(5, TimeUnit.SECONDS)).isTrue();
             assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
             assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
-                    + " FROM qwen_tool_publication_operation", Boolean.class)).isTrue();
+                    + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
             assertThat(verifier.runOnce()).isFalse();
             assertThatThrownBy(() -> publish("next", 1, "later")).hasMessageContaining("busy");
             due("retry");
@@ -637,18 +638,18 @@ public class ToolPublicationAsyncVerificationTest {
     void expiredQueueRecoversTheOriginalInputsWithoutChangingItsFirstDeadline() {
         publish("expired", 0, "bytes");
         Timestamp original = Timestamp.valueOf("2000-01-01 00:00:00");
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?", original);
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?", original);
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isFalse();
             assertThat(status("expired").path("state").asText()).isEqualTo("EXPIRED");
-            assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+            assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                     Timestamp.class)).isNull();
             data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "expired");
             assertThat(status("expired").path("state").asText()).isEqualTo("PENDING");
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("expired").path("state").asText()).isEqualTo("SUCCEEDED");
-        assertThat(fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation", Timestamp.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT deadline FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Timestamp.class))
                 .isEqualTo(original);
         assertThat(bucket.puts).hasValue(1);
     }
@@ -657,7 +658,7 @@ public class ToolPublicationAsyncVerificationTest {
     void expiredPrefixCannotRecoverAndSealRecoveryRejectsAddedSegments() {
         data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
         data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout", true);
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ? WHERE operation_id = 'prefix'",
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'707265666978'",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         try (var verifier = manualVerifier(data)) {
             verifier.runOnce();
@@ -665,7 +666,7 @@ public class ToolPublicationAsyncVerificationTest {
                     .hasMessageContaining("prefix cannot be recovered");
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, 1,
                     ToolPublicationContract.sha256(new byte[] {1}), true);
-            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ? WHERE operation_id = 'seal'",
+            fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'7365616c'",
                     Timestamp.valueOf("2000-01-01 00:00:00"));
             verifier.runOnce();
             data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "extra", "stdout", 1, new byte[] {2}, null);
@@ -685,23 +686,23 @@ public class ToolPublicationAsyncVerificationTest {
                 var workers = Executors.newSingleThreadExecutor()) {
             var old = workers.submit(first::runOnce);
             assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            long firstEpoch = fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation", Long.class);
+            long firstEpoch = fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Long.class);
             due("takeover");
             assertThat(second.runOnce()).isFalse();
-            assertThat(fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation", Long.class))
+            assertThat(fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Long.class))
                     .isEqualTo(firstEpoch);
-            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
+            fixture.jdbc.update("UPDATE ma_operation SET claim_until = ?, verification_next_at = ?",
                     Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
             assertThat(second.runOnce()).isTrue();
-            long epoch = fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation", Long.class);
+            long epoch = fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Long.class);
             bucket.objects.values().iterator().next()[0] = 'x';
             bucket.readRelease.countDown();
             assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation", Long.class))
+            assertThat(fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Long.class))
                     .isEqualTo(epoch);
         }
         assertThat(status("takeover").path("state").asText()).isEqualTo("SUCCEEDED");
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                 .isEqualTo("VERIFIED");
     }
 
@@ -717,7 +718,7 @@ public class ToolPublicationAsyncVerificationTest {
             var old = workers.submit(first::runOnce);
             try {
                 assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
-                fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
+                fixture.jdbc.update("UPDATE ma_operation SET claim_until = ?, verification_next_at = ?",
                         Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
                 var successor = workers.submit(second::runOnce);
                 try {
@@ -725,9 +726,9 @@ public class ToolPublicationAsyncVerificationTest {
                     bucket.readRelease.countDown();
                     assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
-                    assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                    assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                             .isEqualTo("CANDIDATE");
-                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class)).isFalse();
+                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class)).isFalse();
                 } finally {
                     bucket.successorRelease.countDown();
                 }
@@ -761,21 +762,21 @@ public class ToolPublicationAsyncVerificationTest {
             var old = workers.submit(first::runOnce);
             try {
                 assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
-                long oldEpoch = fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation"
-                        + " WHERE operation_id = 'takeover'", Long.class);
-                fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?"
-                                + " WHERE operation_id = 'takeover'",
+                long oldEpoch = fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
+                        + " AND operation_id = X'74616b656f766572'", Long.class);
+                fixture.jdbc.update("UPDATE ma_operation SET claim_until = ?, verification_next_at = ?"
+                                + " WHERE operation_id = X'74616b656f766572'",
                         Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
                 var successor = workers.submit(second::runOnce);
                 try {
                     assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
-                    assertThat(fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation"
-                            + " WHERE operation_id = 'takeover'", Long.class)).isEqualTo(oldEpoch + 1);
+                    assertThat(fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
+                            + " AND operation_id = X'74616b656f766572'", Long.class)).isEqualTo(oldEpoch + 1);
                     bucket.readRelease.countDown();
                     assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
-                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class)).isFalse();
-                    assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class)).isFalse();
+                    assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                             .isEqualTo("VERIFIED");
                 } finally {
                     bucket.successorRelease.countDown();
@@ -802,7 +803,7 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(publish("original", 0, "bytes").path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(publish("alias", 0, "bytes").path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(bucket.opens).hasValue(reads);
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_operation", Integer.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Integer.class))
                 .isEqualTo(1);
         bucket.objects.values().iterator().next()[0] = 'x';
         assertThat(publish("original", 0, "bytes").path("state").asText()).isEqualTo("SUCCEEDED");
@@ -816,24 +817,19 @@ public class ToolPublicationAsyncVerificationTest {
         bucket.failPut = true;
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "sync", "stdout", 0,
                 new byte[] {1}, null)).hasMessageContaining("Unknown PUT result");
-        assertThat(fixture.jdbc.queryForObject("SELECT execution_mode FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT execution_mode FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 String.class)).isEqualTo("SYNC");
         assertThat(status("sync").path("state").asText()).isEqualTo("RETRYABLE");
         assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "sync", "stdout", 0,
                 new byte[] {1}, null, true).has("state")).isFalse();
-        bucket.failPut = true;
-        assertThatThrownBy(() -> publish("async", 1, "bytes")).hasMessageContaining("Unknown PUT result");
-        assertThat(status("async").path("state").asText()).isEqualTo("RETRYABLE");
+        assertThat(bucket.puts).hasValue(1);
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'",
+                String.class)).isEqualTo("RETURNED");
+        assertThat(fixture.jdbc.queryForObject("SELECT execution_mode FROM ma_operation WHERE operation_kind IN"
+                + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", String.class)).isEqualTo("SYNC");
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isFalse();
-            assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "async", "stdout", 1,
-                    "bytes".getBytes(StandardCharsets.UTF_8), null, false).path("state").asText())
-                    .isEqualTo("PENDING");
-            assertThat(verifier.runOnce()).isTrue();
         }
-        assertThat(fixture.jdbc.queryForObject("SELECT execution_mode FROM qwen_tool_publication_operation"
-                + " WHERE operation_id = 'async'", String.class)).isEqualTo("ASYNC");
-        assertThat(status("async").path("state").asText()).isEqualTo("SUCCEEDED");
     }
 
     @Test
@@ -856,22 +852,22 @@ public class ToolPublicationAsyncVerificationTest {
     void lapsedActivationDefersAcceptedWorkUntilItIsRenewed() {
         publish("lapse", 0, "bytes");
         Number expires = fixture.jdbc.queryForObject(
-                "SELECT activation_expires_at FROM qwen_managed_session_journal_head", Number.class);
+                "SELECT activation_expires_at FROM ma_session_head", Number.class);
         Number grant = fixture.jdbc.queryForObject(
-                "SELECT expires_at FROM qwen_tool_publication", Number.class);
+                "SELECT expires_at FROM ma_output_capture", Number.class);
         assertThat(expires).isNotNull();
         assertThat(grant).isNotNull();
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_expires_at = ?", 1L);
-        fixture.jdbc.update("UPDATE qwen_tool_publication SET expires_at = ?", 1L);
+        fixture.jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?", 1L);
+        fixture.jdbc.update("UPDATE ma_output_capture SET expires_at = ?", 1L);
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("lapse").path("state").asText()).isEqualTo("PENDING");
         assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at IS NOT NULL"
-                + " FROM qwen_tool_publication_operation WHERE operation_id = 'lapse'", Boolean.class)).isTrue();
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_expires_at = ?",
+                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = X'6c61707365'", Boolean.class)).isTrue();
+        fixture.jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?",
                 expires.longValue());
-        fixture.jdbc.update("UPDATE qwen_tool_publication SET expires_at = ?", grant.longValue());
+        fixture.jdbc.update("UPDATE ma_output_capture SET expires_at = ?", grant.longValue());
         due("lapse");
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -888,18 +884,18 @@ public class ToolPublicationAsyncVerificationTest {
         byte[] body = terminal(10);
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", body, true).path("state").asText())
                 .isEqualTo("PENDING");
-        fixture.jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ? WHERE slot_key = 'terminal'",
+        fixture.jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'",
                 new byte[] {1});
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
-        assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication", String.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class))
                 .isEqualTo("OPEN");
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
-                + " WHERE slot_key = 'terminal'", Integer.class)).isZero();
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
-                + " WHERE state <> 'VERIFIED'", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
+                + " AND slot_key = X'7465726d696e616c'", Integer.class)).isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
+                + " AND capture_state <> 'VERIFIED'", Integer.class)).isZero();
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body, true).path("state").asText())
                 .isEqualTo("PENDING");
         try (var verifier = manualVerifier(data)) {
@@ -913,14 +909,14 @@ public class ToolPublicationAsyncVerificationTest {
     @CsvSource({"lease,READY", "takeover,READY", "lease,BLOCKED_EXECUTION", "takeover,BLOCKED_EXECUTION"})
     void fencedAcceptedWorkFailsWithoutReadingAndStatusDoesNotReviveOrRenewIt(String cause, String recovery) {
         publish("fenced", 0, "bytes");
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = ?", recovery);
-        Timestamp deadline = fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation",
+        fixture.jdbc.update("UPDATE ma_session_head SET recovery_status = ?", recovery);
+        Timestamp deadline = fixture.jdbc.queryForObject("SELECT deadline FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class);
         Timestamp expired = Timestamp.valueOf("2000-01-01 00:00:00");
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?", expired);
-        fixture.jdbc.update("UPDATE qwen_tool_publication SET expires_at = ?", expired.getTime());
+        fixture.jdbc.update("UPDATE ma_session_head SET writer_lease_until = ?", expired);
+        fixture.jdbc.update("UPDATE ma_output_capture SET expires_at = ?", expired.getTime());
         if ("takeover".equals(cause)) {
-            fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_id = 'other',"
+            fixture.jdbc.update("UPDATE ma_session_head SET writer_id = 'other',"
                     + " writer_generation = writer_generation + 1, writer_lease_until = ?",
                     new Timestamp(System.currentTimeMillis() + 60000));
         }
@@ -930,10 +926,10 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("fenced").path("state").asText()).isEqualTo("FAILED");
         assertThat(status("fenced").path("error").path("code").asText()).isEqualTo("managed_tool_publication_fenced");
         assertThat(bucket.opens).hasValue(0);
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                 Timestamp.class)).isNull();
         for (int i = 0; i < 10; i++) status("fenced");
-        assertThat(fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation", Timestamp.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT deadline FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Timestamp.class))
                 .isEqualTo(deadline);
         assertThat(publish("fenced", 0, "bytes").path("state").asText()).isEqualTo("FAILED");
         String otherToken = java.util.Base64.getUrlEncoder().withoutPadding()
@@ -953,7 +949,7 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("bad-seal").path("state").asText()).isEqualTo("FAILED");
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_seal", Integer.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture WHERE seal_manifest_resource_key IS NOT NULL", Integer.class))
                 .isZero();
     }
 
@@ -1017,11 +1013,11 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(verifier.runOnce()).isTrue();
             if (readFailure) {
                 assertThat(status("finish").path("state").asText()).isEqualTo("PENDING");
-                assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication", String.class))
+                assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class))
                         .isEqualTo("FINISHING");
-                assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
-                        + " WHERE slot_key = 'terminal'", String.class)).isEqualTo("CANDIDATE");
-                assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication", Long.class))
+                assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
+                        + " AND slot_key = X'7465726d696e616c'", String.class)).isEqualTo("CANDIDATE");
+                assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM ma_output_capture", Long.class))
                         .isPositive();
                 due("finish");
                 assertThat(verifier.runOnce()).isTrue();
@@ -1039,14 +1035,14 @@ public class ToolPublicationAsyncVerificationTest {
         publish("predecessor", 0, "bytes");
         data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal(10), true);
         bucket.objects.values().iterator().next()[0] = 'x';
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = deadline"
+        fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = deadline"
                 + " WHERE operation_id = ?", "predecessor");
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
             assertThat(status("predecessor").path("state").asText()).isEqualTo("PENDING");
             assertThat(status("finish").path("state").asText()).isEqualTo("PENDING");
             assertThatThrownBy(() -> data.finished(key, "pub-1", WRITER_TOKEN)).hasMessageContaining("no finished");
-            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = deadline"
+            fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = deadline"
                     + " WHERE operation_id = ?", "finish");
             due("predecessor");
             assertThat(verifier.runOnce()).isTrue();

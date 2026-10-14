@@ -47,6 +47,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
@@ -116,6 +117,9 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
                 && harness.supportsLifecycle(session.toolProfile());
     }
@@ -314,7 +318,8 @@ public class ManagedAgentService {
             List<Map<String, Object>> input, boolean isolated) {
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -534,9 +539,9 @@ public class ManagedAgentService {
                 SessionRecord session = store.requireSession(tenantId, sessionId);
                 HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null, true);
+                store.markRenameSubmitted(delivery, owner);
                 harness.rename(tenantId, sessionId, effectiveTitle, command.renameRevision());
-                session = store.completeSessionRename(tenantId, idempotencyKey, sessionId,
-                        effectiveTitle, attachment.bootId(), command.renameRevision());
+                session = store.completeSessionRename(delivery, owner, attachment.bootId());
                 return new SessionMutationResult<>(publicSession(session),
                         command.replayed());
             } catch (RuntimeException error) {
@@ -712,29 +717,18 @@ public class ManagedAgentService {
 
     public PublicItemList listPublicItems(String tenantId, String actorId,
             String sessionId, long afterSequence, int requestedLimit) {
+        return listPublicItems(tenantId, actorId, sessionId, null, afterSequence, requestedLimit);
+    }
+
+    public PublicItemList listPublicItems(String tenantId, String actorId, String sessionId,
+            String cursor, long afterSequence, int requestedLimit) {
         if (afterSequence < 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "invalid_event_cursor",
-                    "Item sequence must be non-negative.");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_event_cursor", "Item sequence must be non-negative.");
         }
-        int limit = limit(requestedLimit);
         requireReadableSession(tenantId, actorId, sessionId);
-        SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
-                .orElse(null);
-        if (snapshot == null) {
-            return new PublicItemList("list", List.of(), false, null, 0);
-        }
-        List<ItemRecord> matching = snapshot.items().stream()
-                .filter(item -> item.firstSequence() > afterSequence)
-                .toList();
-        boolean hasMore = matching.size() > limit;
-        List<PublicItem> items = matching.stream().limit(limit)
-                .map(this::publicItem).toList();
-        String nextCursor = hasMore && !items.isEmpty()
-                ? Long.toString(items.get(items.size() - 1).firstSequence())
-                : null;
-        return new PublicItemList("list", items, hasMore, nextCursor,
-                snapshot.coveredSequence());
+        var page = store.findSnapshotPage(tenantId, sessionId, cursor, afterSequence, limit(requestedLimit));
+        return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(), page.hasMore(),
+                page.nextCursor(), page.coveredSequence());
     }
 
     public WebShellTranscript transcript(String tenantId, String actorId,
@@ -784,8 +778,7 @@ public class ManagedAgentService {
                 session.sessionId(), afterSequence, limit);
         ReplayWindow window = store.findReplayWindow(session.tenantId(),
                 session.sessionId());
-        if (afterSequence < window.floorSequence()
-                && window.floorSequence() <= window.snapshotThroughSequence()) {
+        if (afterSequence < window.floorSequence()) {
             throw new ReplayCursorExpired(window);
         }
         return events;
@@ -971,6 +964,9 @@ public class ManagedAgentService {
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return retention || session.workspace() != null && runtimeWarmer != null
                 && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
     }
