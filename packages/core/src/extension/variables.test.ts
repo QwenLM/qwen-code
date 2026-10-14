@@ -383,7 +383,10 @@ describe('performVariableReplacement', () => {
     /** Writes `files`, runs the markdown-only plugin-root pass, returns a reader. */
     function replaceRootIn(
       files: Record<string, string>,
-      { dir = 'root-ext', installedDir }: { dir?: string; installedDir?: string } = {},
+      {
+        dir = 'root-ext',
+        installedDir,
+      }: { dir?: string; installedDir?: string } = {},
     ) {
       const extDir = writeExt(files, dir);
       replacePluginRootInMarkdown(extDir, installedDir);
