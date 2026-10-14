@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import https from 'node:https';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -45,6 +45,30 @@ async function worker(root, node, bun, expectedHost) {
       binarySha256: sha(process.execPath),
     }),
   );
+  const started = performance.now();
+  let phase = 'setup';
+  const originalExecFile = childProcess.execFile;
+  let probeCount = 0;
+  childProcess.execFile = (command, args, options, callback) => {
+    const probeStarted = performance.now();
+    const probePhase = args[0] === '-e' ? 'identity' : 'version';
+    return originalExecFile(command, args, options, (err, out, stderr) => {
+      probeCount++;
+      console.log(
+        JSON.stringify({
+          host,
+          phase,
+          probePhase,
+          elapsedMs: Math.round(performance.now() - probeStarted),
+          code: err?.code ?? 0,
+          signal: err?.signal ?? null,
+          killed: err?.killed ?? false,
+        }),
+      );
+      callback(err, out, stderr);
+    });
+  };
+  syncBuiltinESMExports();
   const originalEnv = { ...process.env };
   const originalCwd = process.cwd();
   const tmp = path.join(root, 'tmp');
@@ -216,6 +240,7 @@ async function worker(root, node, bun, expectedHost) {
         'legacy',
       ]) {
         if (scenario === 'legacy' && runtime !== 'node') continue;
+        phase = `${runtime}/${scenario}`;
         const dir = path.join(root, `${runtime}-${scenario}`);
         const live = installFixture(dir, {
           version: '1.0.0',
@@ -354,6 +379,7 @@ async function worker(root, node, bun, expectedHost) {
       delete process.env.BUN_OPTIONS;
       for (const mode of ['direct', 'prepared']) {
         for (const actualVersion of ['0.0.9', '9.9.9']) {
+          phase = `${runtime}/${mode}/mismatch/${actualVersion}`;
           pack(
             `if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log(${JSON.stringify(actualVersion)});`,
           );
@@ -400,6 +426,7 @@ async function worker(root, node, bun, expectedHost) {
           ['v1.2.3', '1.2.3', 'v1.2.3'],
           ['1.2.3-rc.1', '1.2.3-rc.1', 'v1.2.3-rc.1'],
         ]) {
+          phase = `${runtime}/${mode}/normalized/${requested}`;
           pack(`console.log(${JSON.stringify(actual)});`, manifest);
           const dir = path.join(root, `${runtime}-${mode}-${requested}`);
           const live = installFixture(dir, {
@@ -449,6 +476,137 @@ async function worker(root, node, bun, expectedHost) {
           );
         }
       }
+      // Use the production wrapper verbatim, including its ambient version
+      // fast path. Node also runs this wrapper-specific fixture; its normal
+      // bundled CLI is covered by the original fixed-output cases above.
+      const wrapper = fs.readFileSync(
+        path.join(repo, 'scripts/cli-entry.js'),
+        'utf8',
+      );
+      for (const mode of ['direct', 'prepared']) {
+        for (const actualVersion of ['1.2.3', '0.0.9', '9.9.9']) {
+          phase = `${runtime}/${mode}/ambient/${actualVersion}`;
+          const legStarted = performance.now();
+          const ambientVersion = actualVersion === '1.2.3' ? '9.9.9' : '1.2.3';
+          fs.writeFileSync(
+            path.join(payload, 'lib/package.json'),
+            JSON.stringify({
+              name: '@qwen-code/qwen-code',
+              type: 'module',
+              version: actualVersion,
+            }),
+          );
+          pack(wrapper);
+          const controlEnv = { ...process.env };
+          for (const key of Object.keys(controlEnv))
+            if (
+              /^(NODE_OPTIONS|BUN_OPTIONS|CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(
+                key,
+              )
+            )
+              delete controlEnv[key];
+          assert.equal(
+            run(binaries[runtime], [cli, '--version'], { env: controlEnv }),
+            actualVersion,
+          );
+          assert.equal(
+            run(binaries[runtime], [cli, '--version'], {
+              env: { ...controlEnv, CLI_VERSION: ambientVersion },
+            }),
+            ambientVersion,
+            'wrapper pollution positive control',
+          );
+          const dir = path.join(
+            root,
+            `${runtime}-${mode}-ambient-${actualVersion}`,
+          );
+          const live = installFixture(dir, {
+            version: '1.0.0',
+            runtime,
+            target,
+          });
+          const before = snapshot(dir);
+          const parentEnv = { ...process.env };
+          process.env.CLI_VERSION = ambientVersion;
+          process.env.QWEN_CODE_RELAUNCH_ARGS = '["--version"]';
+          const envBefore = { ...process.env };
+          let pending;
+          try {
+            pending =
+              mode === 'prepared'
+                ? await prepareStandaloneUpdate(live, '1.2.3')
+                : undefined;
+            const update = pending
+              ? pending.activate()
+              : performStandaloneUpdate(live, '1.2.3');
+            if (actualVersion === '1.2.3') {
+              assert.equal(await update, 'done');
+              assert.equal(
+                sha(path.join(live, 'lib', path.basename(cli))),
+                sha(cli),
+              );
+              assert.equal(
+                JSON.parse(fs.readFileSync(path.join(live, 'manifest.json')))
+                  .version,
+                '1.2.3',
+              );
+              assert.deepEqual(
+                snapshot(live + '.old').filter(
+                  ([name]) => name !== '.qwen-rollback-info.json',
+                ),
+                before.find(([name]) => name === 'installed')[1],
+              );
+              assert.deepEqual(rollbackStandaloneUpdate(live), { ok: true });
+              assert.deepEqual(
+                snapshot(live).filter(
+                  ([name]) => name !== '.qwen-rollback-info.json',
+                ),
+                before.find(([name]) => name === 'installed')[1],
+              );
+              assert.equal(fs.existsSync(live + '.old'), false);
+            } else {
+              await assert.rejects(update, {
+                message:
+                  'Smoke test failed: CLI version does not match the expected version',
+              });
+              assert.deepEqual(snapshot(dir), before);
+            }
+            assert.deepEqual({ ...process.env }, envBefore);
+            assert.equal(fs.existsSync(archiveMarker), false);
+          } finally {
+            pending?.cleanup();
+            for (const key of ['CLI_VERSION', 'QWEN_CODE_RELAUNCH_ARGS']) {
+              if (key in parentEnv) process.env[key] = parentEnv[key];
+              else delete process.env[key];
+            }
+          }
+          assert.deepEqual({ ...process.env }, parentEnv);
+          assert.deepEqual(fs.readdirSync(tmp), []);
+          assert.deepEqual(
+            fs.readdirSync(dir).sort(),
+            actualVersion === '1.2.3'
+              ? ['installed']
+              : ['installed', 'installed.old'],
+          );
+          console.log(
+            JSON.stringify({
+              host,
+              runtime,
+              mode,
+              actualVersion,
+              ambientVersion,
+              wrapperSha256: sha(path.join(repo, 'scripts/cli-entry.js')),
+              scenario: 'ambient-wrapper',
+              result:
+                actualVersion === '1.2.3'
+                  ? 'updated-and-rolled-back'
+                  : 'rejected',
+              elapsedMs: Math.round(performance.now() - legStarted),
+            }),
+          );
+        }
+      }
+      fs.rmSync(path.join(payload, 'lib/package.json'));
       // Real interpreter failures: malformed CLI version and nonzero exit.
       for (const [failure, source, message] of [
         [
@@ -462,6 +620,7 @@ async function worker(root, node, bun, expectedHost) {
           'Smoke test failed: new binary exited with code 23',
         ],
       ]) {
+        phase = `${runtime}/${failure}`;
         pack(source);
         const dir = path.join(root, `${runtime}-${failure}`);
         const live = installFixture(dir, { runtime, target });
@@ -474,6 +633,7 @@ async function worker(root, node, bun, expectedHost) {
         console.log(JSON.stringify({ runtime, failure, rejected: true }));
       }
       // A real interpreter of the OTHER runtime must not satisfy identity.
+      phase = `${runtime}/identity-mismatch`;
       fs.copyFileSync(
         binaries[runtime === 'bun' ? 'node' : 'bun'],
         path.join(payload, runtime, 'bin', runtime),
@@ -506,6 +666,7 @@ async function worker(root, node, bun, expectedHost) {
         { target, runtime: null },
         { target, runtime: 'deno' },
       ].entries()) {
+        phase = `manifest/${mode}/${index}`;
         const dir = path.join(root, `manifest-${mode}-${index}`);
         const live = installFixture(dir, manifest);
         const before = snapshot(dir),
@@ -537,9 +698,25 @@ async function worker(root, node, bun, expectedHost) {
         complete: true,
         unsignedFixture: 'checksum-only; signature 404',
         tlsVerification: true,
+        elapsedMs: Math.round(performance.now() - started),
+        probeCount,
+        rawProbeObservable: probeCount > 0,
+        tmpResidue: fs.readdirSync(tmp),
       }),
     );
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        host,
+        failurePhase: phase,
+        elapsedMs: Math.round(performance.now() - started),
+        probeCount,
+        rawProbeObservable: probeCount > 0,
+      }),
+    );
+    throw err;
   } finally {
+    childProcess.execFile = originalExecFile;
     process.chdir(originalCwd);
     fs.mkdtempSync = originalMkdtemp;
     syncBuiltinESMExports();
@@ -689,6 +866,7 @@ if (process.argv[2] === '--ci') {
     ]) {
       const dir = path.join(root, host);
       fs.mkdirSync(dir);
+      const workerStarted = performance.now();
       const result = spawnSync(
         bin,
         [script, '--worker', dir, node, bun, host],
@@ -707,6 +885,8 @@ if (process.argv[2] === '--ci') {
           host,
           actualExitCode: result.status,
           signal: result.signal,
+          errorCode: result.error?.code ?? null,
+          elapsedMs: Math.round(performance.now() - workerStarted),
         }),
       );
       assert.equal(result.error, undefined);

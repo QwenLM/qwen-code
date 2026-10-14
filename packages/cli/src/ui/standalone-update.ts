@@ -436,9 +436,14 @@ function spawnAndCapture(
   cwd: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const env = { ...process.env };
-  // Probe the shipped interpreter and CLI without inherited preload hooks.
+  // Probe the shipped interpreter and CLI without inherited startup overrides.
   for (const key of Object.keys(env)) {
-    if (/^(NODE_OPTIONS|BUN_OPTIONS)$/i.test(key)) delete env[key];
+    if (
+      /^(NODE_OPTIONS|BUN_OPTIONS|CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(
+        key,
+      )
+    )
+      delete env[key];
   }
   return new Promise((resolve, reject) => {
     let settled = false;

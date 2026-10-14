@@ -19,47 +19,47 @@
 
 ### App launcher 身份（如何再次唤起本构建）
 
-| 位置 | 机制 | 备注 |
-| --- | --- | --- |
-| `scripts/cli-entry.js` | 写入 `QWEN_CODE_CLI`（设置了 `QWEN_CODE_LAUNCHER_PATH` 时为 shim 路径，否则为入口文件）；捕获并删除 `QWEN_CODE_LAUNCHER_PATH` | launcher 的事实来源 |
-| `packages/core/src/services/shellContextEnv.ts` | 将 `QWEN_CODE_CLI` 传播进 shell 子进程环境；已设置但不可用的脚本入口置空 | 消费方使用 `"${QWEN_CODE_CLI:-qwen}"` |
-| `packages/cli/src/cli.ts`（`getShellContextEnvVars` 接线） | 对 CLI 启动的所有 shell 做同样的环境传播 | |
-| `packages/cli/src/serve/routes/daemon-update.ts` | 读取 `QWEN_CODE_CLI` 作为更新重启的 bootstrap | |
-| `packages/cli/src/commands/review/**` | agent 提示词中的 `"${QWEN_CODE_CLI:-qwen}" review …` 自调用 | launcher 身份，已被测试固定 |
-| `scripts/cli-entry.js` `relaunchAfterUpdate()` | `findLauncher()` 优先 `QWEN_CODE_LAUNCHER_PATH`，其次按安装前缀打分的 PATH 扫描 | 更新后重启 |
-| `packages/cli/src/utils/relaunch.ts`（`relaunchAppInChildProcess`） | 监督式重启：`spawn(process.execPath, [execArgv, argv[1], args], ipc)`；可用时走 `process.execve` | launcher 的同解释器回退 |
-| `packages/cli/src/utils/processUtils.ts`（`relaunchApp`） | `execve(process.execPath, [execPath, execArgv, argv…])` | 同解释器回退 |
-| `packages/core/src/agents/arena/ArenaManager.ts` | 每个 arena agent `command: process.execPath, args: [resolve(argv[1]), …]` | worktree 内的应用再唤起；必须保持 launcher 形态 |
-| `packages/cli/src/serve/managed-runtime-session-worker.ts`（`currentCliWorkerLaunch`） | `command: process.execPath, args: [execArgv, QWEN_CLI_ENTRY \|\| argv[1], 'managed-runtime-worker']` | 应用再唤起 |
-| `packages/cli/src/commands/review/run.ts`（agent runner spawn） | `process.execPath` + 入口 | 应用再唤起 |
+| 位置                                                                                   | 机制                                                                                                                          | 备注                                            |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `scripts/cli-entry.js`                                                                 | 写入 `QWEN_CODE_CLI`（设置了 `QWEN_CODE_LAUNCHER_PATH` 时为 shim 路径，否则为入口文件）；捕获并删除 `QWEN_CODE_LAUNCHER_PATH` | launcher 的事实来源                             |
+| `packages/core/src/services/shellContextEnv.ts`                                        | 将 `QWEN_CODE_CLI` 传播进 shell 子进程环境；已设置但不可用的脚本入口置空                                                      | 消费方使用 `"${QWEN_CODE_CLI:-qwen}"`           |
+| `packages/cli/src/cli.ts`（`getShellContextEnvVars` 接线）                             | 对 CLI 启动的所有 shell 做同样的环境传播                                                                                      |                                                 |
+| `packages/cli/src/serve/routes/daemon-update.ts`                                       | 读取 `QWEN_CODE_CLI` 作为更新重启的 bootstrap                                                                                 |                                                 |
+| `packages/cli/src/commands/review/**`                                                  | agent 提示词中的 `"${QWEN_CODE_CLI:-qwen}" review …` 自调用                                                                   | launcher 身份，已被测试固定                     |
+| `scripts/cli-entry.js` `relaunchAfterUpdate()`                                         | `findLauncher()` 优先 `QWEN_CODE_LAUNCHER_PATH`，其次按安装前缀打分的 PATH 扫描                                               | 更新后重启                                      |
+| `packages/cli/src/utils/relaunch.ts`（`relaunchAppInChildProcess`）                    | 监督式重启：`spawn(process.execPath, [execArgv, argv[1], args], ipc)`；可用时走 `process.execve`                              | launcher 的同解释器回退                         |
+| `packages/cli/src/utils/processUtils.ts`（`relaunchApp`）                              | `execve(process.execPath, [execPath, execArgv, argv…])`                                                                       | 同解释器回退                                    |
+| `packages/core/src/agents/arena/ArenaManager.ts`                                       | 每个 arena agent `command: process.execPath, args: [resolve(argv[1]), …]`                                                     | worktree 内的应用再唤起；必须保持 launcher 形态 |
+| `packages/cli/src/serve/managed-runtime-session-worker.ts`（`currentCliWorkerLaunch`） | `command: process.execPath, args: [execArgv, QWEN_CLI_ENTRY \|\| argv[1], 'managed-runtime-worker']`                          | 应用再唤起                                      |
+| `packages/cli/src/commands/review/run.ts`（agent runner spawn）                        | `process.execPath` + 入口                                                                                                     | 应用再唤起                                      |
 
 ### JS interpreter 身份（如何运行任意 JS 子进程）
 
-| 位置 | 用途 | 本变更是否接入 `getJsInterpreterCommand` |
-| --- | --- | --- |
-| `packages/core/src/code-mode/host-client.ts`（`hostCommand`） | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`） | 是 |
-| `packages/core/src/sandbox/file-worker-client.ts` | sandbox file-worker 子进程（`sandboxAsset('file-worker')`） | 是 |
-| `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程） | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached | 是 |
-| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`） | cgroup v2 launcher 子进程（`--input-type=commonjs --eval LAUNCHER …`），在 hook 的受托单元内运行 | 暂未（S3）—— 仅 Linux（cgroup v2 平台守卫） |
-| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`） | 将解释器（`realpathSync(process.execPath)`）纳入 bubblewrap allowlist；relay 在其下启动 JS relay | 暂未（S3）—— 仅 Linux（bubblewrap） |
-| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | 将解释器纳入 landlock allowlist；relay 在其下启动 JS relay | 暂未（S3）—— 仅 Linux（landlock LSM） |
-| `packages/core/src/utils/getPty.ts`（`loadPty`） | PTY 门控的 Bun 检测（当前 Bun 下 PTY 禁用 —— **S2 用真实后端替换此分支**） | 检测走 `isBunRuntime()` |
-| `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`） | 内置 mem0 MCP 子进程；身份判断 `server.command !== process.execPath` | 暂未；须与其身份判断一起迁移（S3） |
-| `packages/core/src/agents/arena/ArenaManager.ts` | （另）worker 侧 in-process 运行时 | launcher 形态，见上表 |
-| `packages/cli/src/serve/pem-certificate-blocks.ts` | 辅助子进程 spawn | 暂未（S3 清扫） |
-| `packages/cli/src/commands/review/test-efficacy.ts` | 经 `process.execPath` 启动 vitest（开发工具路径） | 有意不接入；保持宿主工具身份 |
+| 位置                                                                   | 用途                                                                                             | 本变更是否接入 `getJsInterpreterCommand`    |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------- |
+| `packages/core/src/code-mode/host-client.ts`（`hostCommand`）          | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`）       | 是                                          |
+| `packages/core/src/sandbox/file-worker-client.ts`                      | sandbox file-worker 子进程（`sandboxAsset('file-worker')`）                                      | 是                                          |
+| `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程）          | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached                                     | 是                                          |
+| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`）           | cgroup v2 launcher 子进程（`--input-type=commonjs --eval LAUNCHER …`），在 hook 的受托单元内运行 | 暂未（S3）—— 仅 Linux（cgroup v2 平台守卫） |
+| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`）       | 将解释器（`realpathSync(process.execPath)`）纳入 bubblewrap allowlist；relay 在其下启动 JS relay | 暂未（S3）—— 仅 Linux（bubblewrap）         |
+| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | 将解释器纳入 landlock allowlist；relay 在其下启动 JS relay                                       | 暂未（S3）—— 仅 Linux（landlock LSM）       |
+| `packages/core/src/utils/getPty.ts`（`loadPty`）                       | PTY 门控的 Bun 检测（当前 Bun 下 PTY 禁用 —— **S2 用真实后端替换此分支**）                       | 检测走 `isBunRuntime()`                     |
+| `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`）      | 内置 mem0 MCP 子进程；身份判断 `server.command !== process.execPath`                             | 暂未；须与其身份判断一起迁移（S3）          |
+| `packages/core/src/agents/arena/ArenaManager.ts`                       | （另）worker 侧 in-process 运行时                                                                | launcher 形态，见上表                       |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                     | 辅助子进程 spawn                                                                                 | 暂未（S3 清扫）                             |
+| `packages/cli/src/commands/review/test-efficacy.ts`                    | 经 `process.execPath` 启动 vitest（开发工具路径）                                                | 有意不接入；保持宿主工具身份                |
 
 标注"暂未"的行由 **S3 迁移清扫**（V8/GC/TLS/env 兼容阶段）负责，该表即其检查清单。cgroup/bwrap/landlock 三行是**仅 Linux** 机制（macOS/Windows 上有平台守卫或不生效），其迁移须对照平台矩阵中的 Linux target 验证；mem0 与 pem 两行适用于所有平台。
 
 ### 更新 / 安装身份（必须保持宿主 Node）
 
-| 位置 | 备注 |
-| --- | --- |
-| `packages/cli/src/utils/managed-npm-update.ts` | 经 `process.execPath` 运行 npm 的 `cli.js`；npm **必须**在 Node 身份下运行，绝不能落入私有内置 Bun —— 这里要保持宿主 Node 解析 |
-| `packages/cli/src/ui/handleAutoUpdate.ts` | 选择更新命令；Node 身份路径 |
-| `packages/cli/src/serve/daemon-update-restart.ts` | 已在 Bun 下禁用（`process.versions['bun']`）且对 execve 做特性检测 |
-| `packages/cli/src/utils/installationInfo.ts` | 以 `process.execPath` 报告 node 路径（信息性） |
-| `scripts/build-standalone-release.js` / `create-standalone-package.js` | 固定 Bun 1.3.14、五个 target、`manifest.json`（`runtime`、版本）；布局 `bun/bin/bun`、`node/bin/node` |
+| 位置                                                                   | 备注                                                                                                                           |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/cli/src/utils/managed-npm-update.ts`                         | 经 `process.execPath` 运行 npm 的 `cli.js`；npm **必须**在 Node 身份下运行，绝不能落入私有内置 Bun —— 这里要保持宿主 Node 解析 |
+| `packages/cli/src/ui/handleAutoUpdate.ts`                              | 选择更新命令；Node 身份路径                                                                                                    |
+| `packages/cli/src/serve/daemon-update-restart.ts`                      | 已在 Bun 下禁用（`process.versions['bun']`）且对 execve 做特性检测                                                             |
+| `packages/cli/src/utils/installationInfo.ts`                           | 以 `process.execPath` 报告 node 路径（信息性）                                                                                 |
+| `scripts/build-standalone-release.js` / `create-standalone-package.js` | 固定 Bun 1.3.14、五个 target、`manifest.json`（`runtime`、版本）；布局 `bun/bin/bun`、`node/bin/node`                          |
 
 ### SDK 消费方
 
@@ -87,18 +87,18 @@
 ## Bun 兼容事实（本变更实测）
 
 以本机 Bun 1.4.0 对照 Node 24.19.0（同一 fixture，见
-`packages/core/src/utils/runtime-boundary.node-bun.test.ts`）。*交付* 的
+`packages/core/src/utils/runtime-boundary.node-bun.test.ts`）。_交付_ 的
 Bun 1.3.14 固定版本由打包验收负责，不在此处。
 
-| 行为 | Node 24.19.0 | Bun 1.4.0 |
-| --- | --- | --- |
-| `--expose-gc script.js` → `typeof gc === 'function'` | 是 | 是（接受 `--expose-gc`） |
-| `--input-type=commonjs --eval '…'` | 是 | 是 |
-| Node IPC 通道（`spawn stdio:[…,'ipc']`、`process.send` / `on('message')`） | 是 | 是，往返正常 |
-| SIGTERM 处理函数 → 优雅 `exit(0)` | 是 | 是 |
-| `process.exit(n)` 退出码传播 | 是 | 是 |
-| `process.execve` | 是 | 缺失 —— 代码必须特性检测（`relaunch.ts`、`processUtils.ts`、`daemon-update-restart.ts` 已做） |
-| PTY（`@lydell/node-pty`） | 是 | **在 `getPty` 中禁用** —— S2 阻塞项 |
+| 行为                                                                       | Node 24.19.0 | Bun 1.4.0                                                                                     |
+| -------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------- |
+| `--expose-gc script.js` → `typeof gc === 'function'`                       | 是           | 是（接受 `--expose-gc`）                                                                      |
+| `--input-type=commonjs --eval '…'`                                         | 是           | 是                                                                                            |
+| Node IPC 通道（`spawn stdio:[…,'ipc']`、`process.send` / `on('message')`） | 是           | 是，往返正常                                                                                  |
+| SIGTERM 处理函数 → 优雅 `exit(0)`                                          | 是           | 是                                                                                            |
+| `process.exit(n)` 退出码传播                                               | 是           | 是                                                                                            |
+| `process.execve`                                                           | 是           | 缺失 —— 代码必须特性检测（`relaunch.ts`、`processUtils.ts`、`daemon-update-restart.ts` 已做） |
+| PTY（`@lydell/node-pty`）                                                  | 是           | **在 `getPty` 中禁用** —— S2 阻塞项                                                           |
 
 ## 验证计划
 
@@ -121,8 +121,8 @@ checksum、身份/版本拒绝、激活和回滚；`.sig` 404 仅属 checksum-on
 不代表生产签名验证。
 
 两次 smoke 共用一个私有空目录，并在 `finally` 尝试删除，避免执行项目或归档中的
-`bunfig.toml` preload。smoke 环境副本移除 NODE_OPTIONS/BUN_OPTIONS，保留
-其他变量。安装 manifest 为 null、标量、数组或非法 runtime 时，在下载或锁
+`bunfig.toml` preload。smoke 环境副本移除 NODE_OPTIONS/BUN_OPTIONS、
+CLI_VERSION 和 QWEN_CODE_RELAUNCH_ARGS，不改变父环境或普通业务变量。安装 manifest 为 null、标量、数组或非法 runtime 时，在下载或锁
 分配前拒绝；合法对象缺 runtime 仍保留 legacy Node 回退。分配断言必须有
 成功更新的正对照；Bun 1.3.14 的 builtin 绑定观察不可用，仅检查目录清理，
 不宣称零分配。此入口避开 Vitest 的 Bun loader/coverage 限制，不改变其历史
@@ -136,22 +136,31 @@ Node 归档（核对发布 SHA256）和固定 @oven Bun 包（核对发布 integ
 Smoke 同时按既有 semver 规则比较实际 CLI 与请求版本，保留 `v` 规范化和预发布
 兼容。direct 与 prepared 更新的合法旧版/新版错配均须在替换前拒绝。仅版本
 preload 正对照通过 `--version` 匹配两个 CLI 入口，并验证身份探针不会执行
-preload。清理失败保留原 smoke 结果，可能留下临时目录；吞掉删除异常不能证明
+preload。回归还使用真实入口 wrapper 注入 ambient 版本：正确包仍能更新和回滚，
+旧/新错配仍拒绝，覆盖双宿主、双 payload 解释器及两种更新模式。Node 在此
+使用 wrapper 专项夹具，其生产 bundle 的版本是编译期常量。测试侧 callback
+观察在宿主支持 builtin 绑定观察时记录探针阶段、耗时、signal 和 killed，
+不改变 10 秒预算，也不能解释已记录的首轮 timeout；其根因仍未确定。
+清理失败保留原 smoke 结果，可能留下临时目录；吞掉删除异常不能证明
 目录已经删除。
 
-真实远端 CI 执行仍待验证。冻结 PR #14187 head `d14b2ad1` 没有 `ci.yml` run：
-堆叠 base 不在该 workflow 的分支过滤范围内。ECS lane 复用 Node 22，尚未实测
+真实远端 CI 执行仍待验证。本次冻结 PR #14210 head `c57e2cf8` 与前序
+PR #14187 head `d14b2ad1` 均没有 `ci.yml` run：两 PR 当前的堆叠目标分支
+均不匹配该 workflow 的 `pull_request` 目标分支过滤。ECS lane 复用 Node 22，尚未实测
 其对 nodejs.org 的可达性；该安装或未经核实的池镜像均不能满足固定
 Node 24.19.0/Bun 1.3.14 合同。本地脚本结果不能代表远端 lane 通过。
 分支过滤、PR base 与手动 dispatch 均维持原状。
 
 若池具有可信 Node 分发副本，CI 模式接受 `QWEN_TEST_NODE_BASE_URL`：以 `/`
 结尾的 HTTPS 目录，包含固定归档和 `SHASUMS256.txt`。默认仍为官方目录，
-checksum 和固定版本硬断言仍必须通过。也可传入真实的 `PINNED_NODE`/
+checksum 和固定版本硬断言仍必须通过。此覆盖仅供应 Node；除非传入已核证的
+Bun 1.3.14 `PINNED_BUN`，Bun 仍需访问 npm registry。隔离池采用 Node 分发
+副本方案时必须同时供应 `PINNED_BUN`。也可传入真实的 `PINNED_NODE`/
 `PINNED_BUN` 可执行文件；driver 在改变 cwd 前将两者解析为绝对路径。
 ECS 的镜像或固定预装工具尚未落实。待验证的最小 workflow 修改是在既有
 脚本测试步骤传入已核证的池资源，例如
-`QWEN_TEST_NODE_BASE_URL: ${{ vars.QWEN_TEST_NODE_BASE_URL }}`，或两条解释器路径。
+`QWEN_TEST_NODE_BASE_URL: ${{ vars.QWEN_TEST_NODE_BASE_URL }}`，registry 不可达时
+同时传入已核证的 `PINNED_BUN` 路径；或传入两条解释器路径。
 随后必须获得真实 Actions job 日志，证明 `test:scripts` rc 0 和两个 worker 的
 `actualExitCode: 0`。资源与结果未落实前，这只是可评审的配置方案，不是已验证
 的 CI lane。

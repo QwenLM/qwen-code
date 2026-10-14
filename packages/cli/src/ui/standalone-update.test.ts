@@ -726,6 +726,10 @@ describe('standalone-update', () => {
         vi.stubEnv('NODE_OPTIONS', `--require ${preload}`);
         vi.stubEnv('BUN_OPTIONS', `--preload ${preload}`);
         vi.stubEnv('QWEN_UPDATE_TEST_ENV', 'preserved');
+        vi.stubEnv('CLI_VERSION', '9.9.9');
+        vi.stubEnv('QWEN_CODE_RELAUNCH_ARGS', '["--help"]');
+        vi.stubEnv('cli_version', '9.9.9');
+        vi.stubEnv('qwen_code_relaunch_args', '["--help"]');
         for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
         const installedManifest = JSON.stringify({ target, runtime });
         fs.writeFileSync(
@@ -738,7 +742,7 @@ describe('standalone-update', () => {
           target,
           interpreterPath: process.execPath,
           cliSource:
-            'if (process.env.QWEN_UPDATE_TEST_ENV !== "preserved") process.exit(9); console.log("1.2.3");',
+            'if (process.env.QWEN_UPDATE_TEST_ENV !== "preserved" || Object.keys(process.env).some(key => /^(CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(key))) process.exit(9); console.log("1.2.3");',
         });
         expect(await performStandaloneUpdate(standaloneDir, '1.2.3')).toBe(
           'done',
@@ -750,6 +754,10 @@ describe('standalone-update', () => {
         ).toBe('1.2.3');
         expect(process.env['NODE_OPTIONS']).toContain(preload);
         expect(process.env['BUN_OPTIONS']).toContain(preload);
+        expect(process.env['CLI_VERSION']).toBe('9.9.9');
+        expect(process.env['QWEN_CODE_RELAUNCH_ARGS']).toBe('["--help"]');
+        expect(process.env['cli_version']).toBe('9.9.9');
+        expect(process.env['qwen_code_relaunch_args']).toBe('["--help"]');
         expect(
           fs
             .readdirSync(tempDir)
@@ -891,13 +899,18 @@ describe('standalone-update', () => {
     );
 
     it.skipIf(process.platform === 'win32').each([
-      ['direct', '0.0.9'],
-      ['direct', '9.9.9'],
-      ['prepared', '0.0.9'],
-      ['prepared', '9.9.9'],
+      ['direct', '0.0.9', false],
+      ['direct', '9.9.9', false],
+      ['prepared', '0.0.9', false],
+      ['prepared', '9.9.9', false],
+      ['direct', '0.0.9', true],
+      ['direct', '9.9.9', true],
+      ['prepared', '0.0.9', true],
+      ['prepared', '9.9.9', true],
     ])(
-      'rejects a legal CLI version mismatch before replacing live or backup (%s, %s)',
-      async (mode, actualVersion) => {
+      'rejects a legal CLI version mismatch before replacing live or backup (%s, %s, ambient: %s)',
+      async (mode, actualVersion, ambient) => {
+        if (ambient) vi.stubEnv('CLI_VERSION', '1.2.3');
         for (const name of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(name, tempDir);
         const runtime = process.versions['bun'] ? 'bun' : 'node';
         const target = `${os.platform()}-${os.arch()}`;
@@ -918,7 +931,9 @@ describe('standalone-update', () => {
           runtime,
           target,
           interpreterPath: process.execPath,
-          cliSource: `console.log(${JSON.stringify(actualVersion)});`,
+          cliSource: ambient
+            ? `console.log(process.env.CLI_VERSION || ${JSON.stringify(actualVersion)});`
+            : `console.log(${JSON.stringify(actualVersion)});`,
         });
         const envBefore = { ...process.env };
         const pending =
