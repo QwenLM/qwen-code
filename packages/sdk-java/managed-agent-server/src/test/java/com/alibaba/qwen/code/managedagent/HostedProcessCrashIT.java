@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -49,7 +50,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new JdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         var database = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
         try (var connection = source.getConnection()) {
@@ -96,6 +97,17 @@ class HostedProcessCrashIT {
 
         private void run() throws Exception {
             startSpring();
+            if ("Linux".equals(System.getProperty("os.name"))) {
+                WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
+                var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+                storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+                storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                                tenant, "storage", root.resolve("workspace").toString())));
+                new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
+                        .register(tenant, "storage", UUID.randomUUID().toString());
+            }
             controller = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
             controller.createContext("/", exchange -> {
                 try {
@@ -208,13 +220,15 @@ class HostedProcessCrashIT {
         }
 
         private List<Map<String, Object>> executions() {
-            return jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?",
+            return jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?",
                     ready.path("sessionId").asText());
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?",
-                    sha256((tenant + "\u0000storage").getBytes(StandardCharsets.UTF_8)));
+            return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                            + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                    com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+                    tenant, "storage");
         }
 
         private void captureOwner(Map<String, Object> execution) throws Exception {
@@ -258,12 +272,12 @@ class HostedProcessCrashIT {
                 assertThat(execution.get("result_json")).isNull();
             }
             assertOwner(execution);
-            var session = jdbc.queryForMap("SELECT * FROM qwen_runtime_session WHERE harness_session_id = ?",
+            var session = jdbc.queryForMap("SELECT * FROM ma_runtime_session WHERE harness_session_id = ?",
                     ready.path("sessionId").asText());
             assertThat(session.get("session_state")).isEqualTo("READY");
             assertThat(session.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
             assertThat(session.get("binding_id")).isEqualTo(execution.get("binding_id"));
-            assertThat(jdbc.queryForList("SELECT binding_state FROM qwen_runtime_binding WHERE tenant_id = ?", String.class,
+            assertThat(jdbc.queryForList("SELECT binding_state FROM ma_runtime_binding WHERE tenant_id = ?", String.class,
                     tenant)).containsExactly("READY");
             Path proof = root.resolve("workspace/child/proof.txt");
             assertThat(proof).isRegularFile();
@@ -274,7 +288,7 @@ class HostedProcessCrashIT {
 
         private void assertJournal(JsonNode report, boolean prepared) throws Exception {
             String session = ready.path("sessionId").asText();
-            var journal = jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_tx"
+            var journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, session);
             var transactionIds = new HashSet<String>();
             var eventIds = new HashSet<String>();
@@ -297,12 +311,12 @@ class HostedProcessCrashIT {
                     events.add(event);
                 }
             }
-            var head = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+            var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     tenant, session);
             assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
             assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
             Object checkpointId = head.get("latest_checkpoint_resource_id");
-            byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+            byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class, tenant, session, checkpointId);
             JsonNode saved = JSON.readTree(checkpoint);
             assertThat(saved.path("continuation").path("phase").asText()).isEqualTo(prepared ? "before_model" : "await_runtime");
@@ -312,7 +326,7 @@ class HostedProcessCrashIT {
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("turn.settled"))).isEmpty();
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                     && event.path("payload").path("role").asText().equals("tool_result"))).isEmpty();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE tenant_id = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? AND kind = 'managed-tool-outcome'", Integer.class, tenant, session))
                     .isZero();
             JsonNode target = report.path("target");

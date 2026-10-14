@@ -43,13 +43,13 @@ final class HostedWorkspaceColdLoadProbe implements AutoCloseable {
                             json.writeValueAsBytes(List.of(manifest.path("captureId").asText(), "stderr", "seal"))));
                     if (request.path("damage").asBoolean()) {
                         assertThat(damaged.putIfAbsent(sealId, resource(sessionId, sealId))).isNull();
-                        assertThat(jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
+                        assertThat(jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                                 new byte[0], tenant, sessionId, sealId)).isEqualTo(1);
                     } else {
                         byte[] original = damaged.remove(sealId);
                         assertThat(original).isNotNull();
-                        assertThat(jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
+                        assertThat(jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
                                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                                 original, tenant, sessionId, sealId)).isEqualTo(1);
                     }
@@ -87,14 +87,14 @@ final class HostedWorkspaceColdLoadProbe implements AutoCloseable {
     }
 
     private byte[] resource(String sessionId, String resourceId) {
-        return jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+        return jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
                 tenant, sessionId, resourceId);
     }
 
     @Override
     public void close() {
-        damaged.forEach((id, bytes) -> jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?"
+        damaged.forEach((id, bytes) -> jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
                 + " WHERE tenant_id = ? AND resource_id = ?", bytes, tenant, id));
     }
 }

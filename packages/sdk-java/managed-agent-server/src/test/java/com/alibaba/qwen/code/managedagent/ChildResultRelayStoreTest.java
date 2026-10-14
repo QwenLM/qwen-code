@@ -38,15 +38,22 @@ class ChildResultRelayStoreTest {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @org.junit.jupiter.api.BeforeEach
+    void clearRelayRecords() {
+        jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ?", TENANT);
+        jdbc.update("DELETE FROM ma_operation WHERE tenant_id = ?", TENANT);
+        jdbc.update("DELETE FROM ma_delivery WHERE tenant_id = ?", TENANT);
+    }
+
     private String boundParent() {
-        jdbc.update("INSERT IGNORE INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES ('" + TENANT + "', 'workspace', 1,"
                         + " 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT IGNORE INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT IGNORE INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES ('" + TENANT + "', 'workspace', ?,"
                         + " 'OPERATOR')",
@@ -75,7 +82,7 @@ class ChildResultRelayStoreTest {
         assertThat(first.replayed()).isFalse();
         assertThat(state.findChildLineage(TENANT, first.sessionId()))
                 .isEqualTo(lineage);
-        assertThat(jdbc.query("SELECT session_id FROM managed_agent_session"
+        assertThat(jdbc.query("SELECT session_id FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?"
                         + " ORDER BY created_at, session_id",
                 (result, row) -> result.getString("session_id"), TENANT,
@@ -94,7 +101,7 @@ class ChildResultRelayStoreTest {
         assertThat(replayed.replayed()).isTrue();
         assertThat(replayed.sessionId()).isEqualTo(first.sessionId());
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_agent_session"
+                "SELECT COUNT(*) FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?",
                 Integer.class, TENANT, parent)).isEqualTo(1);
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
@@ -106,7 +113,7 @@ class ChildResultRelayStoreTest {
                         .isEqualTo("idempotency_conflict"));
         assertThat(creationKey).matches("^[0-9a-f]{64}$");
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_agent_session"
+                "SELECT COUNT(*) FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?",
                 Integer.class, TENANT, parent)).isEqualTo(1);
     }
@@ -131,7 +138,7 @@ class ChildResultRelayStoreTest {
     @Test
     void refusesCreationOnAClosedParent() {
         String parent = boundParent();
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT, parent);
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
                 parent, "key-1", "digest", "audit", List.of(), null,
@@ -157,7 +164,7 @@ class ChildResultRelayStoreTest {
         // child_agent rows; the shell kind still has no delivery to drive.
         insertRecordRow(scopeKey, session, "workflow-live", "workflow",
                 "planned", "pending");
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, status, created_at,"
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
                         + " 1)",
@@ -194,9 +201,9 @@ class ChildResultRelayStoreTest {
                 .containsExactly("workflow-live");
         // A record the consumer already advanced owes the delivering
         // ledger its owed step: it surfaces, until classify retires it.
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+        jdbc.update("UPDATE ma_session_record SET"
                         + " delivery_state = 'consumed'"
-                        + " WHERE tenant_id = ? AND record_id = 'run-settled'",
+                        + " WHERE tenant_id = ? AND record_id = X'72756e2d736574746c6564'",
                 TENANT);
         RelayRow delivering = relayStore.claim(TENANT, session, "run-settled",
                 "key-settled", "owner", 30_000, 400);
@@ -254,7 +261,7 @@ class ChildResultRelayStoreTest {
     private void insertRecordRow(String scopeKey, String sessionId,
             String recordId, String kind, String deliveryState,
             String taskState) {
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
@@ -262,7 +269,9 @@ class ChildResultRelayStoreTest {
                         + " delivery_state, created_at)"
                         + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, ?, ?, ?, ?, 1)",
-                scopeKey, recordId + "-key", TENANT, sessionId, recordId,
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
+                TENANT, sessionId, recordId,
                 "resource-" + recordId,
                 "shell".equals(kind) ? "background_shell" : kind, taskState,
                 deliveryState == null ? null : "session",
@@ -486,20 +495,20 @@ class ChildResultRelayStoreTest {
         // page; only the execution read is under test here.
         insertRecordRow("scope-e", session, "run-exec-intent",
                 "child_agent", "delivered", "pending");
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+        jdbc.update("UPDATE ma_session_record SET"
                         + " runtime_state = 'unbound'"
                         + " WHERE tenant_id = ?"
-                        + " AND record_id = 'run-exec-intent'",
+                        + " AND record_id = X'72756e2d657865632d696e74656e74'",
                 TENANT);
         insertRecordBody("resource-run-exec-intent", session, "intent");
         assertThat(relayStore.executionState(TENANT, session,
                 "run-exec-intent")).isEqualTo("intent");
         insertRecordRow("scope-e", session, "run-exec-dispatch",
                 "child_agent", "delivered", "pending");
-        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+        jdbc.update("UPDATE ma_session_record SET"
                         + " runtime_state = 'provisioning'"
                         + " WHERE tenant_id = ?"
-                        + " AND record_id = 'run-exec-dispatch'",
+                        + " AND record_id = X'72756e2d657865632d6469737061746368'",
                 TENANT);
         insertRecordBody("resource-run-exec-dispatch", session,
                 "dispatch_started");
@@ -524,38 +533,25 @@ class ChildResultRelayStoreTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
-    private void insertRecordBody(String resourceId, String sessionId,
-            String execution) {
-        String body = "{\"kind\":\"child_agent\",\"run\":{\"state\":"
-                + "\"admitted\",\"execution\":\"" + execution + "\"}}";
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
-                        + " session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind,"
-                        + " inline_bytes, publish_command_id, state,"
-                        + " created_at)"
-                        + " VALUES ('scope', ?, 'workspace', ?, ?,"
-                        + " 'managed-child_run', 1, ?, '" + "a".repeat(64)
-                        + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED',"
-                        + " CURRENT_TIMESTAMP)",
-                TENANT, sessionId, resourceId, body.length(),
-                body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    private void insertRecordBody(String resourceId, String sessionId, String execution) {
+        resource(sessionId, resourceId, "managed-child_run", "{\"kind\":\"child_agent\",\"run\":{\"state\":\"admitted\",\"execution\":\"" + execution + "\"}}");
+    }
+
+    private void resource(String sessionId, String resourceId, String kind, String body) {
+        String scope = com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
+                        + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
+                        + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,
+                resourceId, kind, bytes.length, "a".repeat(64), bytes);
     }
 
     @Test
     void readsInlineResourcesOnly() {
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
-                        + " session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at)"
-                        + " VALUES ('scope', ?, 'workspace', 'session',"
-                        + " 'res-1', 'managed-input', 1, 2, '" + "a".repeat(64)
-                        + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED',"
-                        + " CURRENT_TIMESTAMP)",
-                TENANT, "xy".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        assertThat(relayStore.readResource(TENANT, "res-1")).isEqualTo("xy");
-        assertThat(relayStore.readResource(TENANT, "res-2")).isNull();
+        resource("session", "res-1", "managed-input", "xy");
+        assertThat(relayStore.readResource(TENANT, "session", "res-1")).isEqualTo("xy");
+        assertThat(relayStore.readResource(TENANT, "session", "res-2")).isNull();
     }
 
     // Two workers read the same expired lease; the first renews it. The
@@ -583,14 +579,14 @@ class ChildResultRelayStoreTest {
     }
 
     @Test
-    void readsTheTurnLineAndTerminalResult() {
+    void readsTheTurnLineAndTerminalResult() throws Exception {
         String session = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, status, created_at,"
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
                         + " 1)",
                 TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, submission_attempted, created_at,"
                         + " updated_at, completed_at, version)"
@@ -604,7 +600,7 @@ class ChildResultRelayStoreTest {
         assertThat(turn.dispatched()).isTrue();
         // A Turn whose admission never landed is a pre-admission failure,
         // never dispatch proof (R23's cascade producer).
-        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
                         + " status, submission_attempted, created_at,"
                         + " updated_at, completed_at, version)"
@@ -618,68 +614,48 @@ class ChildResultRelayStoreTest {
                 .isEqualTo("turn-1");
         assertThat(relayStore.firstTurn(TENANT, UUID.randomUUID().toString()))
                 .isNull();
-        jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_message (tenant_id, session_id,"
                         + " item_id, turn_id, item_type, item_role,"
                         + " item_status, attributes_json, first_sequence,"
-                        + " last_sequence, created_at, updated_at, revision)"
+                        + " last_sequence, created_at, updated_at, revision, parts_json)"
                         + " VALUES (?, ?, 'item-1', 'turn-1', 'message',"
-                        + " 'assistant', 'completed', '{}', 1, 3, 1, 1, 1)",
+                        + " 'assistant', 'completed', '{}', 1, 3, 1, 1, 1, '[]')",
                 TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
-                        + " session_id, item_id, part_id, part_type,"
-                        + " part_text, first_sequence, last_sequence,"
-                        + " created_at, updated_at, revision)"
-                        + " VALUES (?, ?, 'item-1', 'part-1', 'output_text',"
-                        + " '审阅通过', 2, 2, 1, 1, 1)",
-                TENANT, session);
+        part(session, "item-1", "part-1", "output_text", "审阅通过", 2);
         // R1-90: pin the two decisions the result query makes — the
         // NEWEST assistant message wins over an older assistant and over
         // a newer non-assistant row, and the chosen item's output_text
         // parts join in sequence order.
-        jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_message (tenant_id, session_id,"
                         + " item_id, turn_id, item_type, item_role,"
                         + " item_status, attributes_json, first_sequence,"
-                        + " last_sequence, created_at, updated_at, revision)"
+                        + " last_sequence, created_at, updated_at, revision, parts_json)"
                         + " VALUES (?, ?, 'item-0', 'turn-1', 'message',"
-                        + " 'assistant', 'completed', '{}', 1, 1, 1, 1, 1)",
+                        + " 'assistant', 'completed', '{}', 1, 1, 1, 1, 1, '[]')",
                 TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
-                        + " session_id, item_id, part_id, part_type,"
-                        + " part_text, first_sequence, last_sequence,"
-                        + " created_at, updated_at, revision)"
-                        + " VALUES (?, ?, 'item-0', 'part-0', 'output_text',"
-                        + " 'older answer', 1, 1, 1, 1, 1)",
-                TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
+        part(session, "item-0", "part-0", "output_text", "older answer", 1);
+        jdbc.update("INSERT INTO ma_message (tenant_id, session_id,"
                         + " item_id, turn_id, item_type, item_role,"
                         + " item_status, attributes_json, first_sequence,"
-                        + " last_sequence, created_at, updated_at, revision)"
+                        + " last_sequence, created_at, updated_at, revision, parts_json)"
                         + " VALUES (?, ?, 'item-2', 'turn-1', 'message', 'user',"
-                        + " 'completed', '{}', 4, 4, 1, 1, 1)",
+                        + " 'completed', '{}', 4, 4, 1, 1, 1, '[]')",
                 TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
-                        + " session_id, item_id, part_id, part_type,"
-                        + " part_text, first_sequence, last_sequence,"
-                        + " created_at, updated_at, revision)"
-                        + " VALUES (?, ?, 'item-2', 'part-2', 'output_text',"
-                        + " 'newer but not the child answer', 4, 4, 1, 1, 1)",
-                TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
-                        + " session_id, item_id, part_id, part_type,"
-                        + " part_text, first_sequence, last_sequence,"
-                        + " created_at, updated_at, revision)"
-                        + " VALUES (?, ?, 'item-1', 'part-3', 'output_text',"
-                        + " '第二段', 3, 3, 1, 1, 1)",
-                TENANT, session);
-        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
-                        + " session_id, item_id, part_id, part_type,"
-                        + " part_text, first_sequence, last_sequence,"
-                        + " created_at, updated_at, revision)"
-                        + " VALUES (?, ?, 'item-1', 'part-4',"
-                        + " 'reasoning_text', 'not the answer', 5, 5, 1, 1,"
-                        + " 1)",
-                TENANT, session);
+        part(session, "item-2", "part-2", "output_text", "newer but not the child answer", 4);
+        part(session, "item-1", "part-3", "output_text", "第二段", 3);
+        part(session, "item-1", "part-4", "reasoning_text", "not the answer", 5);
         assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
                 .isEqualTo("审阅通过\n第二段");
     }
+    private void part(String session, String item, String id, String type, String text, long sequence) throws Exception {
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        var parts = (com.fasterxml.jackson.databind.node.ArrayNode) json.readTree(jdbc.queryForObject(
+                "SELECT parts_json FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
+                String.class, TENANT, session, item));
+        parts.addObject().put("partId", id).put("type", type).put("text", text).put("firstSequence", sequence)
+                .put("lastSequence", sequence).put("createdAt", 1).put("updatedAt", 1).put("revision", 1);
+        jdbc.update("UPDATE ma_message SET parts_json = ? WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
+                parts.toString(), TENANT, session, item);
+    }
+
 }

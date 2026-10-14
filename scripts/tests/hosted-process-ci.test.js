@@ -384,12 +384,9 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  // The Hosted*IT classes share one failsafe fork, so a case stalled to its
-  // @Timeout must still leave the fork its healthy runtime: on main the
-  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the fork itself ~14s, so 650s covers them. A larger ceiling lets
-  // failsafe kill the fork mid-run, and the classes left unrun never report,
-  // failing the gate undiagnosably (#13780).
+  // Retain the conservative 650s healthy-run allowance when checking each
+  // class's timeout ceilings. Isolated forks remove time spent in earlier
+  // classes; a stalled class must still report before its fork is killed.
   const hostedForkHealthySeconds = 650;
   const hostedForkSeconds = () =>
     Number(
@@ -416,7 +413,7 @@ describe('Hosted real-process gates', () => {
       Number(m[1]),
     );
 
-  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
+  it('keeps the HostedHarnessMySqlIT ceilings inside the class fork budget', () => {
     const ceilings = ceilingsOf(hostedTestSource('HostedHarnessMySqlIT'));
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
@@ -426,7 +423,7 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
+  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the class fork budget', () => {
     const source = hostedTestSource('HostedTeamLeadMySqlIT');
     const cases = [
       ...source.matchAll(
@@ -450,11 +447,10 @@ describe('Hosted real-process gates', () => {
     );
   });
 
-  // The Hosted*IT classes share one fork, and Spring caches a test context
-  // for the rest of it. A Managed Agent context's recovery scans cover
-  // every tenant of its schema, so one left open on the shared MySQL schema
-  // claims the work of the classes that run after it. A context inherited
-  // from a base class or a meta-annotation is not seen here; none exists.
+  // Retain explicit Spring context cleanup even with isolated class forks.
+  // Recovery scans cover every tenant in the shared MySQL schema, so they
+  // must stop during class teardown. No context is inherited from a base
+  // class or a meta-annotation here.
   it('closes the Spring test context each Hosted IT class declares', () => {
     const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
     const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {

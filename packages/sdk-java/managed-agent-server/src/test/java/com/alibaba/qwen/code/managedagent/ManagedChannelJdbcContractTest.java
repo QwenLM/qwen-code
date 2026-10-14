@@ -17,7 +17,7 @@ class ManagedChannelJdbcContractTest {
         dataSource.setURL("jdbc:h2:mem:channel-contract-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
+                .locations(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.FLYWAY_LOCATION).load().migrate();
         ManagedChannelJdbcContract.verify(dataSource,
                 "h2-" + UUID.randomUUID());
     }
