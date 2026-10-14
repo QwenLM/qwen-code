@@ -1559,7 +1559,7 @@ class ToolPublicationStoreTest {
             }
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(metadataJdbc, manager, store, sessions,
-                bucket, Duration.ofSeconds(1), Duration.ofMillis(500), VERIFICATION_BUDGET);
+                bucket, Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
         byte[] unit = new byte[1024 * 1024];
         java.util.Arrays.fill(unit, (byte) 0x91);
@@ -1635,7 +1635,7 @@ class ToolPublicationStoreTest {
                 envelope.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(metadataQueries[0]).isGreaterThanOrEqualTo(segments);
         ToolPublicationDataStore reopened = new ToolPublicationDataStore(jdbc, manager, store, sessions,
-                bucket, Duration.ofSeconds(1), Duration.ofMillis(500), VERIFICATION_BUDGET);
+                bucket, Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         assertThat(reopened.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 manifest, "stdout", captureBytes - 64, 64))
                 .isEqualTo(java.util.Arrays.copyOf(unit, 64));

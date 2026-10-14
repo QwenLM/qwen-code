@@ -414,6 +414,11 @@ public class ManagedExtensionRecordStore {
 
     boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
+        return hasNewLifecycleDispatch(tenantId, sessionId, bytes, resources, false, false);
+    }
+
+    boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources, boolean v2, boolean resourcePhase) {
         boolean dispatch = false;
         var revisions = new java.util.HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
@@ -431,6 +436,9 @@ public class ManagedExtensionRecordStore {
             }
             if ("model.attempt".equals(event.path("kind").asText())
                     && "started".equals(payload.path("state").asText())) {
+                if (v2) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                }
                 dispatch = true;
             }
             if (!"domain.committed".equals(event.path("kind").asText())) {
@@ -443,6 +451,20 @@ public class ManagedExtensionRecordStore {
             // enter the hook dispatch analysis or its network re-verify.
             boolean hookDomain = "hook_execution".equals(domain)
                     || "hook_registration".equals(domain);
+            if (v2 && (resourcePhase || List.of("monitor_run", "mcp_configuration", "mcp_operation",
+                    "schedule", "automation_run", "session_message", "channel_delivery").contains(domain))) {
+                if (!List.of("monitor_run", "child_run", "child_acceptance", "mcp_configuration", "mcp_operation",
+                        "hook_execution", "hook_registration", "schedule", "automation_run", "session_message", "channel_delivery").contains(domain)) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                }
+                JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+                JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+                if (previous == null || requiresLifecycleDispatch(previous, next)
+                        || !ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(previous, next)) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                }
+                continue;
+            }
             if (!hookDomain
                     && !"child_run".equals(domain)
                     && !"child_acceptance".equals(domain)) {
@@ -495,7 +517,7 @@ public class ManagedExtensionRecordStore {
 
     private JsonNode previousLifecycleRecord(String tenantId, String sessionId, String domain, JsonNode next,
             java.util.Map<String, JsonNode> revisions) {
-        String id = next.path("hook_execution".equals(domain) ? "hookExecutionId" : "registrationId").asText();
+        String id = ManagedExtensionProjection.RECORD_BODIES.get(domain).recordId().apply(next);
         String key = domain + ":" + id;
         JsonNode previous = revisions.get(key);
         if (previous == null) {

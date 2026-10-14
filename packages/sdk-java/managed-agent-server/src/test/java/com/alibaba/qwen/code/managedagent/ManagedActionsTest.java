@@ -143,7 +143,8 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
-            "team_create", "task_create", "task_update", "request_shutdown"})
+            "team_create", "task_create", "task_update", "workflow",
+            "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
         String tenant = tenant();
         String session = session(tenant);
@@ -155,7 +156,10 @@ class ManagedActionsTest {
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
+            case "workflow" -> "{ \"script\" : \"return 1;\" }";
             case "request_shutdown" -> "{ \"to\" : \"alice\" }";
+            case "exit_plan_mode" -> "{ \"plan\" : \"Read then edit\" }";
+            case "team_plan_approval" -> "{ \"request_id\" : \"cmd_plan\", \"decision\" : \"approve\" }";
             default -> throw new AssertionError(tool);
         };
         String payload = " { \"toolName\" : \"" + tool + "\", \"input\" : " + arguments + " } ";
@@ -916,7 +920,10 @@ class ManagedActionsTest {
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getDispatch().setLeaseDuration(Duration.ofMillis(300));
-        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(50));
+        // 400ms > leaseDuration/3, so the coordinator's clamp (min → 100ms)
+        // is what picks the period. Inverting the clamp (max → 400ms) starves
+        // the 300ms lease and the competing replica must win it.
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(400));
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;

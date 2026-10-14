@@ -6954,6 +6954,247 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it.each([1, 1025])(
+    'supplements a persisted page with %i unpersisted lifecycle frames',
+    async (count) => {
+      const handle = makeChannel({
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+            throw new Error(`unexpected ${method}`);
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            hasMore: false,
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        for (let index = 0; index < count; index++) {
+          await handle.agentConnection.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'body must not enter lifecycle supplement',
+              },
+              _meta: {
+                executionLifecycle: {
+                  v: 1,
+                  kind: 'request',
+                  executionId: `execution-${index}`,
+                  sessionId: session.sessionId,
+                  promptId: 'prompt',
+                  model: 'model',
+                  phase: 'ended',
+                  startedAt: 1,
+                  endedAt: 2,
+                  durationMs: 1,
+                  outcome: 'success',
+                },
+              },
+            },
+          });
+        }
+        const memory = bridge.getSessionReplaySnapshot(session.sessionId)!;
+        const refreshed = await bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+          clientId: session.clientId,
+          historyReplay: 'response',
+          liveReplayMode: 'summary',
+          historyPageSize: 100,
+        });
+        expect(refreshed.compactedReplay).toEqual([]);
+        expect(refreshed.liveJournal).toEqual([]);
+        expect(refreshed.lifecycleReplay).toHaveLength(Math.min(count, 1024));
+        expect(refreshed.lifecycleReplayIncomplete).toBe(count > 1024);
+        expect(refreshed.lastEventId).toBe(memory.lastEventId);
+        expect(refreshed.eventEpoch).toBe(
+          bridge.getSessionEventEpoch(session.sessionId),
+        );
+        expect(JSON.stringify(refreshed.lifecycleReplay)).not.toContain(
+          'body must not enter',
+        );
+        expect(refreshed.lifecycleReplay?.at(-1)?.data).toMatchObject({
+          _meta: {
+            executionLifecycle: { executionId: `execution-${count - 1}` },
+          },
+        });
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it('supplements a persisted page with tool lifecycle metadata only', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const lifecycle = {
+        v: 1,
+        kind: 'tool',
+        executionId: 'tool-execution',
+        sessionId: session.sessionId,
+        callId: 'tool-call',
+        toolName: 'read_file',
+        phase: 'ended',
+        startedAt: 1,
+        endedAt: 2,
+        executionDurationMs: 1,
+        executionStatus: 'success',
+        outcome: 'success',
+      };
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-call',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'private tool body' },
+            },
+          ],
+          _meta: { toolLifecycle: lifecycle },
+        },
+      });
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize: 100,
+      });
+      expect(refreshed.compactedReplay).toEqual([]);
+      expect(refreshed.lifecycleReplay).toEqual([
+        {
+          v: 1,
+          type: 'session_update',
+          id: expect.any(Number),
+          data: { _meta: { toolLifecycle: lifecycle } },
+        },
+      ]);
+      expect(refreshed.lifecycleReplayIncomplete).toBe(false);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('preserves completed request lifecycles before transcript persistence', async () => {
+    const handle = makeChannel({
+      promptImpl: async (params) => {
+        for (const executionId of ['request-one', 'request-two']) {
+          for (const phase of ['started', 'ended'] as const) {
+            await handle.agentConnection.sessionUpdate({
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: '' },
+                _meta: {
+                  executionLifecycle: {
+                    v: 1,
+                    kind: 'request',
+                    executionId,
+                    sessionId: params.sessionId,
+                    promptId: 'prompt',
+                    model: 'model',
+                    phase,
+                    startedAt: 1,
+                    ...(phase === 'ended'
+                      ? { endedAt: 2, durationMs: 1, outcome: 'success' }
+                      : {}),
+                  },
+                },
+              },
+            });
+          }
+        }
+        await handle.agentConnection.sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'final visible answer' },
+          },
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'two requests' }],
+      });
+      const memory = bridge.getSessionReplaySnapshot(session.sessionId)!;
+      expect(
+        memory.compactedTurns.some((event) => event.type === 'turn_complete'),
+      ).toBe(true);
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize: 100,
+      });
+      expect(refreshed.compactedReplay).toEqual([]);
+      expect(refreshed.liveJournal).toEqual([]);
+      expect(refreshed.lifecycleReplayIncomplete).toBe(false);
+      expect(refreshed.lastEventId).toBe(memory.lastEventId);
+      for (const executionId of ['request-one', 'request-two']) {
+        for (const phase of ['started', 'ended']) {
+          expect(refreshed.lifecycleReplay).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                data: expect.objectContaining({
+                  _meta: expect.objectContaining({
+                    executionLifecycle: expect.objectContaining({
+                      executionId,
+                      phase,
+                    }),
+                  }),
+                }),
+              }),
+            ]),
+          );
+        }
+      }
+      expect(JSON.stringify(refreshed.lifecycleReplay)).not.toContain(
+        'final visible answer',
+      );
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('refreshes an attached load from a bounded persisted page', async () => {
     const handle = makeChannel({
       loadSessionImpl: () => ({
@@ -8097,6 +8338,7 @@ describe('createAcpSessionBridge', () => {
         historyPageSize: 100,
       });
 
+      expect(refreshed.lifecycleReplayIncomplete).toBe(true);
       const compactedReplay = refreshed.compactedReplay ?? [];
       expect(compactedReplay).toHaveLength(2);
       expect(compactedReplay[0]).toMatchObject({

@@ -75,9 +75,9 @@ class WorkspaceSessionRetentionTest {
     @Autowired com.alibaba.qwen.code.managedagent.service.HarnessCoordinator coordinator;
 
     @ParameterizedTest
-    @CsvSource({"ACTIVE, hosted-workspace-shell/1", "CLOSED, hosted-workspace-shell/1", "ARCHIVED, hosted-workspace-shell/1",
+    @CsvSource({"ACTIVE, hosted-workspace-shell/1",
             "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2"})
-    void shellCapabilitiesAndLifecycleStayDisabledDespiteCloseSupportAndProof(String state, String profile) throws Exception {
+    void unsupportedShellLifecycleStaysDisabledDespiteCloseProof(String state, String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
         assertThat(runtime.supportsWorkspaceClose()).isTrue();
@@ -171,7 +171,7 @@ class WorkspaceSessionRetentionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2", "hosted-workspace-shell/1", "hosted-workspace-mcp/1"})
     void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup(String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
@@ -203,10 +203,13 @@ class WorkspaceSessionRetentionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void deletesClosedOrArchivedWithoutRuntimeAndRetiresTheJournal(boolean archived) throws Exception {
+    @CsvSource({"false, hosted-workspace-files/1", "true, hosted-workspace-files/1",
+            "false, hosted-workspace-shell/1", "true, hosted-workspace-shell/1",
+            "false, hosted-workspace-mcp/1", "true, hosted-workspace-mcp/1"})
+    void deletesClosedOrArchivedWithoutRuntimeAndRetiresTheJournal(boolean archived, String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
+        jdbc.update("UPDATE managed_agent_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, tenant, session);
         if (archived) {
             archive(tenant, session, "archive");
         }
