@@ -293,6 +293,51 @@ describe('managed-agent-server e2e runner', () => {
     ).toHaveLength(2);
   });
 
+  // The frozen control-plane arm proves #12952 Q2's binding half only if the
+  // woken former Spring really tried its stale claim: without the general-log
+  // witness every unchanged row would hold just as well after a wake that
+  // never reached a store call. A failed run must also wake the stopped JVM
+  // before teardown, or stopChild's SIGTERM stays pending on it.
+  it('keeps the frozen control-plane wake non-vacuous and woken at teardown', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain("SET GLOBAL general_log = 'ON'");
+    expect(source).toMatch(
+      /LOCATE\(\$\{sqlString\(formerDispatchOwner\)\}, CONVERT\(argument USING utf8mb4\)\)/,
+    );
+    // Only statements sent after the wake may count, or the frozen owner's
+    // pre-freeze renewals would satisfy the witness on their own.
+    expect(source).toMatch(
+      /FROM mysql\.general_log WHERE event_time >= \$\{sqlString\(wokeAt\)\}/,
+    );
+    const quiet = source.indexOf("'Replacement quiet before the wake'");
+    const wake = source.indexOf(
+      "signalProcessTree(child.child, 'SIGCONT');",
+      quiet,
+    );
+    const witness = source.indexOf(
+      '(remainingMs) => staleClaimUpdates(remainingMs) > 0',
+    );
+    const compare = source.indexOf('const afterWake = fencedState();');
+    expect(quiet).toBeGreaterThan(-1);
+    expect(
+      wake,
+      'the before-wake snapshot must settle before the former pair resumes',
+    ).toBeGreaterThan(quiet);
+    expect(witness).toBeGreaterThan(wake);
+    expect(
+      compare,
+      'the fenced-state comparison must wait for the stale-claim witness',
+    ).toBeGreaterThan(witness);
+    const teardown = source.lastIndexOf('} finally {');
+    const teardownWake = source.indexOf(
+      'for (const child of frozenChildren.splice(0))',
+      teardown,
+    );
+    const stop = source.indexOf('await stopChild(child.child);', teardown);
+    expect(teardownWake).toBeGreaterThan(teardown);
+    expect(stop).toBeGreaterThan(teardownWake);
+  });
+
   // Every mode now runs through the G0 public Workspace admission, and the
   // failover modes hand the same Session to a replacement owner: both Spring
   // launch sites and both Harness launch sites must carry the admission
@@ -830,13 +875,13 @@ describe('managed-agent-server e2e runner', () => {
     // payload is printed eagerly. The freeze arm's wake record reads as a
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
-    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(4);
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(5);
     expect(
       source.match(/approvalResultJson = JSON\.stringify\(/g),
     ).toHaveLength(1);
     expect(source.match(/g3SummaryJson = JSON\.stringify\(/g)).toHaveLength(1);
     expect(source.match(/fencedWriterJson = JSON\.stringify\(/g)).toHaveLength(
-      1,
+      2,
     );
     expect(source).not.toMatch(/console\.log\(\s*JSON\.stringify\(/);
     // No gate typechecks scripts/ (tsx strips types unchecked), so the
@@ -983,9 +1028,10 @@ describe('managed-agent-server e2e runner', () => {
 
   // spawnSync blocks the event loop, so waitUntil's race cannot bound a
   // synchronous probe: the mysqladmin readiness probe carries its own
-  // timeout, and the two lease polls derive each call's timeout from the
-  // remaining waitUntil budget rather than a site-local constant that can
-  // overshoot the declared budget several-fold.
+  // timeout, and the lease polls (writer and dispatch lease expiry, and the
+  // model-round arm's second writer lease) derive each call's timeout from
+  // the remaining waitUntil budget rather than a site-local constant that
+  // can overshoot the declared budget several-fold.
   it('bounds every synchronous MySQL probe by the poll budget', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/spawnSync\(\s*mysqladmin,[\s\S]*?timeout: 10_000/);
@@ -994,8 +1040,8 @@ describe('managed-agent-server e2e runner', () => {
     // default inside a budget that may be smaller.
     expect(
       source.match(/\(remainingMs\) =>\s*runMysql\([\s\S]*?remainingMs,/g),
-      'both lease polls must derive the probe timeout from the waitUntil budget',
-    ).toHaveLength(2);
+      'every lease poll must derive the probe timeout from the waitUntil budget',
+    ).toHaveLength(3);
   });
 
   it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {

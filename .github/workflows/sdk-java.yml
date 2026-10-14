@@ -766,15 +766,15 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (45 + 9×10 + 20 + 50 = 205 — the Verify, admission
+    # The step ceilings (45 + 16×10 + 20 + 50 = 275 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
     # classes raised the hosted fork 900→1200 s and the L4 recovery class
     # 1200→1800 s; the admission gates share a 2400 s fork for both witness
     # classes)) plus ~13 minutes for the uncapped setup steps
-    # (Checkout..Install MySQL binaries, the report checks) need ~218; 220
+    # (Checkout..Install MySQL binaries, the report checks) need ~288; 290
     # keeps a thin margin, and each arm buys its own 10 instead of sharing
     # an envelope.
-    timeout-minutes: 220
+    timeout-minutes: 290
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     services:
@@ -897,6 +897,41 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-frozen-owner-failover
+      # G3 Step 3's packaged gates: a replaced Harness finishes a parked
+      # approval wait (Allow, Deny, Cancel, expiry) or model continuation on
+      # its original identities, then the original cleanup, a next Turn and
+      # close complete. Evidence lands under .qwen/investigations.
+      - name: 'Run Harness-restart approval Allow recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-allow
+      - name: 'Run Harness-restart approval Deny recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-deny
+      - name: 'Run Harness-restart approval Cancel recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cancel
+      - name: 'Run Harness-restart approval expiry recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-expiry
+      - name: 'Run Harness-restart continuation closeout E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-closeout
+      # The first model round of a no-tool Session survives two Harness
+      # replacements; the frozen arm wakes a still-alive former control
+      # plane after its Turn moved on (#12952 Q2, binding half).
+      - name: 'Run Harness-restart model-round failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-model-round-failover
+      - name: 'Run frozen former control-plane fencing E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-frozen-control-plane-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -907,6 +942,17 @@ jobs:
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
             packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
+          retention-days: 7
+      # A separate artifact keeps the reports' layout: a .qwen/ path in the
+      # same upload would move their common root to the repository root.
+      - name: 'Upload G3 Step 3 gate evidence'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'hosted-harness-g3-step3-evidence'
+          path: '.qwen/investigations/g3-step3-implementation/'
+          # upload-artifact skips hidden paths such as .qwen/ unless asked.
+          include-hidden-files: true
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
