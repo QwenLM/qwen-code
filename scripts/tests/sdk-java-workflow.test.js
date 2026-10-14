@@ -21,6 +21,28 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('builds native producer prerequisites before either Server test lane', () => {
+    const jobs = parse(workflow).jobs;
+    for (const name of ['mysql-integration', 'hosted-harness-mysql']) {
+      const steps = jobs[name].steps;
+      const install = steps.findIndex((s) =>
+        s.run?.includes('corepack pnpm install --frozen-lockfile'),
+      );
+      const verify = steps.findIndex(
+        (s) =>
+          (s['working-directory'] ===
+            'packages/sdk-java/managed-agent-server' ||
+            s.run?.includes(
+              '-f packages/sdk-java/managed-agent-server/pom.xml',
+            )) &&
+          s.run?.includes('clean verify'),
+      );
+      expect(install, name).toBeGreaterThan(-1);
+      expect(verify, name).toBeGreaterThan(install);
+      expect(steps[install].run, name).not.toContain('--ignore-scripts');
+    }
+  });
+
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
     for (const fragment of [
@@ -150,7 +172,7 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
-  it('scans every sdk-java module that owns a db/migration directory', () => {
+  it('scans every sdk-java module that owns a registered migration directory', () => {
     // The guard's premise is the shared classpath:db/migration namespace —
     // managed-agent-server depends on runtime-broker, so one invocation must
     // name every module that owns a migration sequence. Derive the
@@ -161,11 +183,10 @@ describe('SDK Java Flyway migration version guard', () => {
       withFileTypes: true,
     })) {
       if (!entry.isDirectory()) continue;
-      for (const location of [
-        'src/main/resources/db/migration',
-        'src/main/java/db/migration',
-      ]) {
-        if (existsSync(join('packages/sdk-java', entry.name, location))) {
+      for (const location of LOCATIONS) {
+        if (
+          existsSync(join('packages/sdk-java', entry.name, ...location.dir))
+        ) {
           owners.add(`packages/sdk-java/${entry.name}`);
         }
       }

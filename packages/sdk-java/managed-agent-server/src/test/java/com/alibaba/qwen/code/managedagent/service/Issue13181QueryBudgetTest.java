@@ -128,14 +128,13 @@ class Issue13181QueryBudgetTest {
             fixture.tx.executeWithoutResult(status -> fixture.store
                     .materializeNextBatch(tenant, sessionId, perBatch));
             itemRowsRead.add(fixture.ledger.rows(
-                    "from managed_agent_item where", "order by first_sequence"));
+                    "from ma_message where", "order by first_sequence"));
             // The single fragment also counts the per-event attributes read
-            // (the trailing " where" keeps managed_agent_item_part out).
-            itemReads.add(fixture.ledger.count("from managed_agent_item where"));
+            // (the trailing " where" keeps ma_message out).
+            itemReads.add(fixture.ledger.count("from ma_message where"));
             partReads.add(fixture.ledger.count(
-                    "from managed_agent_item_part where"));
-            snapshotWrites.add(fixture.ledger.count("into managed_agent_snapshot")
-                    + fixture.ledger.count("update managed_agent_snapshot set"));
+                    "select parts_json, body_resource_key from ma_message"));
+            snapshotWrites.add(fixture.ledger.count("insert into ma_snapshot"));
             totals.add(fixture.ledger.total());
         }
         System.out.println("[issue-13181] materializeNextBatch per batch:"
@@ -153,16 +152,16 @@ class Issue13181QueryBudgetTest {
         // statement per covered event plus the page read, nothing more. The
         // parts read rides the same discipline.
         assertThat(itemReads)
-                .containsExactly(10L, 10L, 10L, 10L, 10L, 10L, 10L, 10L, 2L);
+                .containsExactly(11L, 10L, 10L, 10L, 10L, 10L, 10L, 10L, 5L);
         // The parts read rides the same discipline; the last batch also
         // projects the text delta, which reads the part it continues.
         assertThat(partReads)
-                .containsExactly(1L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 2L);
+                .containsExactly(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
         // Hot path 1 is bounded the same way hot path 3 is: the whole
         // batch's statement count is pinned, so any added per-row read
         // shows here.
         assertThat(totals)
-                .containsExactly(35L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 17L);
+                .containsExactly(60L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 43L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -202,8 +201,7 @@ class Issue13181QueryBudgetTest {
             fixture.ledger.reset();
             fixture.tx.executeWithoutResult(status -> fixture.store
                     .materializeNextBatch(tenant, sessionId, 200));
-            snapshotWrites.add(fixture.ledger.count("into managed_agent_snapshot")
-                    + fixture.ledger.count("update managed_agent_snapshot set"));
+            snapshotWrites.add(fixture.ledger.count("insert into ma_snapshot"));
         }
         System.out.println("[issue-13181] trickle snapshotRewrites per tick: "
                 + snapshotWrites);
@@ -247,8 +245,8 @@ class Issue13181QueryBudgetTest {
                 .doesNotContain(new MaterializationTarget(tenant, sessionId));
         // ...but is re-selected once the deferral MARKER alone ages out —
         // the snapshot row stays fresh, so a regression to probing
-        // managed_agent_snapshot per row would not select it here.
-        fixture.jdbc.update("UPDATE managed_agent_consumer_progress SET"
+        // ma_snapshot per row would not select it here.
+        fixture.jdbc.update("UPDATE ma_event_stream SET"
                         + " snapshot_stale_since = snapshot_stale_since - 6000"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 tenant, sessionId);
@@ -257,10 +255,10 @@ class Issue13181QueryBudgetTest {
                 .contains(new MaterializationTarget(tenant, sessionId));
         assertThat(fixture.ledger.count("snapshot_stale_since"))
                 .isGreaterThan(0);
-        assertThat(fixture.ledger.count("managed_agent_snapshot")).isZero();
+        assertThat(fixture.ledger.count("ma_snapshot")).isZero();
         // The convergence tick still waits for the snapshot's own age.
-        fixture.jdbc.update("UPDATE managed_agent_snapshot SET updated_at ="
-                        + " updated_at - 6000 WHERE tenant_id = ? AND"
+        fixture.jdbc.update("UPDATE ma_snapshot SET published_at ="
+                        + " published_at - 6000 WHERE tenant_id = ? AND"
                         + " session_id = ?", tenant, sessionId);
         // The re-selected tick has no new events; it converges the snapshot.
         fixture.ledger.reset();
@@ -269,7 +267,7 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.store.findSnapshotCoveredSequences(tenant,
                 List.of(sessionId)).getOrDefault(sessionId, 0L))
                 .isEqualTo(lastSequence);
-        assertThat(fixture.ledger.count("update managed_agent_snapshot set"))
+        assertThat(fixture.ledger.count("insert into ma_snapshot"))
                 .isEqualTo(1);
     }
 
@@ -289,8 +287,8 @@ class Issue13181QueryBudgetTest {
         // Age the snapshot past the 5s floor, then drain one more event:
         // the catching-up batch must rewrite inline instead of waiting for
         // an aged-out reselection tick.
-        fixture.jdbc.update("UPDATE managed_agent_snapshot SET updated_at ="
-                        + " updated_at - 6000 WHERE tenant_id = ? AND"
+        fixture.jdbc.update("UPDATE ma_snapshot SET published_at ="
+                        + " published_at - 6000 WHERE tenant_id = ? AND"
                         + " session_id = ?", tenant, sessionId);
         fixture.store.appendPublicEventIfAbsent(tenant, sessionId, "turn-1",
                 "item.tool_call.updated",
@@ -303,7 +301,7 @@ class Issue13181QueryBudgetTest {
                 List.of(sessionId)).getOrDefault(sessionId, 0L))
                 .isEqualTo(fixture.store.requireSession(tenant, sessionId)
                         .lastSequence());
-        assertThat(fixture.ledger.count("update managed_agent_snapshot set"))
+        assertThat(fixture.ledger.count("insert into ma_snapshot"))
                 .isEqualTo(1);
     }
 
@@ -333,14 +331,14 @@ class Issue13181QueryBudgetTest {
                 .materializeNextBatch(tenant, sessionId, 200));
         Long marker = fixture.jdbc.queryForObject(
                 "SELECT snapshot_stale_since FROM"
-                        + " managed_agent_consumer_progress WHERE tenant_id = ?"
+                        + " ma_event_stream WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 Long.class, tenant, sessionId);
         assertThat(marker).isNotNull();
         fixture.ledger.reset();
         fixture.tx.executeWithoutResult(status -> fixture.store
                 .materializeNextBatch(tenant, sessionId, 200));
-        assertThat(fixture.ledger.count("update managed_agent_snapshot set"))
+        assertThat(fixture.ledger.count("insert into ma_snapshot"))
                 .isZero();
         // The empty tick — the scheduler's hottest path — is pinned whole:
         // the event read, the session lock, the progress lock, and the
@@ -351,7 +349,7 @@ class Issue13181QueryBudgetTest {
         // ever converging the snapshot.
         assertThat(fixture.jdbc.queryForObject(
                 "SELECT snapshot_stale_since FROM"
-                        + " managed_agent_consumer_progress WHERE tenant_id = ?"
+                        + " ma_event_stream WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 Long.class, tenant, sessionId)).isEqualTo(marker);
         assertThat(fixture.store.findMaterializationTargets(32))
@@ -432,8 +430,7 @@ class Issue13181QueryBudgetTest {
             fixture.ledger.reset();
             fixture.tx.executeWithoutResult(status -> fixture.store
                     .materializeNextBatch(tenant, sessionId, 500));
-            snapshotWrites.add(fixture.ledger.count("into managed_agent_snapshot")
-                    + fixture.ledger.count("update managed_agent_snapshot set"));
+            snapshotWrites.add(fixture.ledger.count("insert into ma_snapshot"));
         }
         assertThat(snapshotWrites).containsExactly(0L, 1L, 0L, 1L);
         assertThat(fixture.store.findSnapshot(tenant, sessionId)).get()
@@ -447,13 +444,13 @@ class Issue13181QueryBudgetTest {
     void eventStreamRechecksReadPermissionOnAWindow() throws Exception {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
-        fixture.jdbc.update("INSERT INTO managed_workspace_registry"
+        fixture.jdbc.update("INSERT INTO ma_workspace"
                 + " (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?,"
                 + " 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES"
                 + " (?, 'workspace', ?, 'OPERATOR')", tenant,
                 "actor".getBytes(StandardCharsets.UTF_8));
@@ -482,7 +479,7 @@ class Issue13181QueryBudgetTest {
             // The first in-loop grant check proves the hub subscription
             // exists, so published events can no longer be dropped.
             await().atMost(Duration.ofSeconds(10)).until(() ->
-                    fixture.ledger.count("managed_workspace_access") >= 2);
+                    fixture.ledger.count("ma_workspace_access") >= 2);
             for (int index = 0; index < events; index++) {
                 fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
                         "turn-1", "test.progress", Map.of("index", index),
@@ -493,10 +490,10 @@ class Issue13181QueryBudgetTest {
             assertThat(emitter.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(emitter.failed).isEmpty();
             assertThat(emitter.ids).hasSize(events + 1);
-            long grants = fixture.ledger.count("managed_workspace_access");
+            long grants = fixture.ledger.count("ma_workspace_access");
             System.out.println("[issue-13181] workspace session stream of "
                     + (events + 1) + " events ran " + grants
-                    + " managed_workspace_access read-grant queries");
+                    + " ma_workspace_access read-grant queries");
             // 1 admission + 1 first in-loop check; the 60-second recheck
             // window (overridden above, beyond the completion budget)
             // covers every delivered event.
@@ -536,7 +533,7 @@ class Issue13181QueryBudgetTest {
             // Control: the per-event checks only exist for workspace-bound
             // sessions, i.e. they are the permission check, not overhead of
             // the stream itself.
-            assertThat(fixture.ledger.count("managed_workspace_access"))
+            assertThat(fixture.ledger.count("ma_workspace_access"))
                     .isZero();
         } finally {
             executor.shutdownNow();
@@ -577,7 +574,7 @@ class Issue13181QueryBudgetTest {
                     .materializeNextBatch(plain, sid, 1000));
         }
         // One turn is already completed: its row must differ from the rest.
-        fixture.jdbc.update("UPDATE managed_agent_turn SET status ="
+        fixture.jdbc.update("UPDATE ma_turn SET status ="
                 + " 'COMPLETED' WHERE tenant_id = ? AND session_id = ?",
                 plain, plainIds.get(7));
         fixture.ledger.reset();
@@ -590,11 +587,11 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.total()).isEqualTo(3);
         // The batch turn read projects only the summary columns; the page
         // never holds a parsed prompt graph per row.
-        assertThat(fixture.ledger.count("select * from managed_agent_turn"))
+        assertThat(fixture.ledger.count("select * from ma_turn"))
                 .isZero();
         assertThat(fixture.ledger.count("session_id, turn_id, status,"
                 + " created_at, completed_at, error_code"
-                + " from managed_agent_turn")).isEqualTo(1);
+                + " from ma_turn")).isEqualTo(1);
         // Every row carries its own title, its own active turn, and its own
         // snapshot coverage: session 7 is the one without an active turn,
         // and the two environment sessions were covered through one more
@@ -627,7 +624,7 @@ class Issue13181QueryBudgetTest {
                 + " turn_record.turn_id, turn_record.status,"
                 + " turn_record.created_at, turn_record.completed_at,"
                 + " turn_record.error_code"
-                + " from managed_agent_turn")).isEqualTo(1);
+                + " from ma_turn")).isEqualTo(1);
         // The latest turn surfaces even when completed, still per session,
         // and each row carries its own latest turn's environment event.
         for (var row : webShellPage) {
@@ -654,13 +651,13 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.total()).isEqualTo(3);
 
         String bound = "tenant-" + UUID.randomUUID();
-        fixture.jdbc.update("INSERT INTO managed_workspace_registry"
+        fixture.jdbc.update("INSERT INTO ma_workspace"
                 + " (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?,"
                 + " 'ACTIVE')", bound, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES"
                 + " (?, 'workspace', ?, 'OPERATOR')", bound,
                 "actor".getBytes(StandardCharsets.UTF_8));
@@ -677,18 +674,21 @@ class Issue13181QueryBudgetTest {
         // One workspace session opts out of yolo: its actions capability
         // must differ from the other rows'. Another holds a completed close:
         // its retention capabilities must differ per row, not per page.
-        fixture.jdbc.update("UPDATE managed_agent_session SET approval_mode ="
+        fixture.jdbc.update("UPDATE ma_session SET approval_mode ="
                 + " 'confirm' WHERE tenant_id = ? AND session_id = ?",
                 bound, boundIds.get(3));
-        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state, admission_stage,"
-                + " delivery_state, session_status_before, receipt_id,"
-                + " available_at, created_at, updated_at, completed_at)"
-                + " VALUES (?, ?, ?, 'CLOSE', '', 'close-key', 'digest',"
-                + " 'COMPLETED', 'JAVA_DURABLE', 'DELIVERED', 'CLOSED',"
-                + " 'rcpt', 0, 0, 0, 0)",
-                bound, boundIds.get(5), "op_" + UUID.randomUUID());
+        String closeSession = boundIds.get(5);
+        String closeId = "op_" + UUID.randomUUID();
+        String closeScope = ManagedSessionStore.sessionScopeKey(bound, closeSession);
+        fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
+                + " target_key, request_json, phase, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before,"
+                + " receipt_id, available_at, created_at, updated_at, completed_at)"
+                + " VALUES (?, ?, ?, 'SESSION', ?, '{}', 'COMPLETED', ?, ?, ?, 'CLOSE', '', 'close-key',"
+                + " 'digest', 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', 'CLOSED', 'rcpt', 0, 0, 0, 0)",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(closeScope, "CLOSE", closeId),
+                closeScope, closeScope, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(closeSession),
+                bound, closeSession, closeId);
         fixture.ledger.reset();
         var boundPublic = fixture.service.listPublicSessions(bound, "actor",
                 null, 20).data();
@@ -699,9 +699,9 @@ class Issue13181QueryBudgetTest {
         // batch; the approval mode rides on the page's own SELECT *.
         assertThat(fixture.ledger.total()).isEqualTo(4);
         assertThat(fixture.ledger.count(
-                "approval_mode from managed_agent_session"))
+                "approval_mode from ma_session"))
                 .isZero();
-        assertThat(fixture.ledger.count("from managed_agent_operation"))
+        assertThat(fixture.ledger.count("from ma_operation"))
                 .isEqualTo(1);
         for (var row : boundPublic) {
             int index = boundIds.indexOf(row.id());
@@ -722,7 +722,7 @@ class Issue13181QueryBudgetTest {
         // rides on the page's own SELECT *.
         assertThat(fixture.ledger.total()).isEqualTo(3);
         assertThat(fixture.ledger.count(
-                "approval_mode from managed_agent_session"))
+                "approval_mode from ma_session"))
                 .isZero();
         for (var row : boundWebShell) {
             int index = boundIds.indexOf(row.sessionId());
@@ -738,14 +738,14 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture();
         when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
         String tenant = "tenant-" + UUID.randomUUID();
-        fixture.jdbc.update("INSERT INTO managed_workspace_registry"
+        fixture.jdbc.update("INSERT INTO ma_workspace"
                 + " (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?,"
                 + " 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         for (String actor : new String[] {"actor", "other"}) {
-            fixture.jdbc.update("INSERT INTO managed_workspace_access"
+            fixture.jdbc.update("INSERT INTO ma_workspace_access"
                     + " (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, actor.getBytes(StandardCharsets.UTF_8));
@@ -754,15 +754,15 @@ class Issue13181QueryBudgetTest {
         // its session exercises the grant's role term, and the page's two
         // workspaces make the grant batch's single-query shape
         // discriminable.
-        fixture.jdbc.update("INSERT INTO managed_workspace_registry"
+        fixture.jdbc.update("INSERT INTO ma_workspace"
                 + " (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state)"
-                + " VALUES (?, 'workspace2', 1, 'storage', 'Workspace2', ?,"
+                + " VALUES (?, X'776f726b737061636532', 1, 'storage', 'Workspace2', ?,"
                 + " ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+        fixture.jdbc.update("INSERT INTO ma_workspace_access"
                 + " (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES (?, 'workspace2', ?, 'OPERATOR')",
+                + " VALUES (?, X'776f726b737061636532', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
         List<String> ids = new ArrayList<>();
         for (int index = 0; index < 7; index++) {
@@ -780,7 +780,7 @@ class Issue13181QueryBudgetTest {
         // An eighth session whose creator has no access row at all — the
         // caller stays OPERATOR while its creator's grant is gone, the
         // shape the executable conjunct alone must refuse on.
-        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+        fixture.jdbc.update("INSERT INTO ma_workspace_access"
                 + " (tenant_id, workspace_id, actor_id, role) VALUES (?,"
                 + " 'workspace', ?, 'OPERATOR')", tenant,
                 "ghost".getBytes(StandardCharsets.UTF_8));
@@ -790,8 +790,8 @@ class Issue13181QueryBudgetTest {
                         "qwen-code", null, "w-ghost", List.of(), null,
                         new WorkspaceSelection("workspace", ".")))
                 .sessionId());
-        fixture.jdbc.update("DELETE FROM managed_workspace_access"
-                + " WHERE tenant_id = ? AND workspace_id = 'workspace'"
+        fixture.jdbc.update("DELETE FROM ma_workspace_access"
+                + " WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365'"
                 + " AND actor_id = ?", tenant,
                 "ghost".getBytes(StandardCharsets.UTF_8));
         // One session is closed: the shape gate fences it. The workspace2
@@ -799,15 +799,15 @@ class Issue13181QueryBudgetTest {
         // Only "other", creator of indices 4 and 5, drops with "actor"
         // keeping OPERATOR, so those two Sessions fail the creator-keyed
         // facts while the caller's own role is intact.
-        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+        fixture.jdbc.update("UPDATE ma_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
+        fixture.jdbc.update("UPDATE ma_workspace_access SET"
                 + " role = 'READER' WHERE tenant_id = ? AND workspace_id"
-                + " = 'workspace2'", tenant);
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                + " = X'776f726b737061636532'", tenant);
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                 + " 'READER' WHERE tenant_id = ? AND workspace_id ="
-                + " 'workspace' AND actor_id = ?", tenant,
+                + " X'776f726b7370616365' AND actor_id = ?", tenant,
                 "other".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",
@@ -819,10 +819,9 @@ class Issue13181QueryBudgetTest {
         // both workspaces + the execution-facts batch over the
         // submit-shaped sessions: constant, not per row.
         assertThat(fixture.ledger.total()).isEqualTo(5);
-        assertThat(fixture.ledger.count("from managed_workspace_registry"))
+        assertThat(fixture.ledger.count("from ma_workspace r join ma_workspace_access"))
                 .isEqualTo(1);
-        assertThat(fixture.ledger.count("from managed_agent_session s join"
-                + " managed_workspace_registry")).isEqualTo(1);
+        assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
         // workspaceTurns holds exactly for ACTIVE sessions whose caller
         // holds OPERATOR or above on the Workspace AND whose creator still
         // holds the execution-registry facts — the two conjuncts split at
@@ -836,15 +835,14 @@ class Issue13181QueryBudgetTest {
 
         // A caller whose only grant is READER pays no facts read at all,
         // the zero-query shape the removed creator chain provided.
-        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+        fixture.jdbc.update("INSERT INTO ma_workspace_access"
                 + " (tenant_id, workspace_id, actor_id, role) VALUES (?,"
                 + " 'workspace', ?, 'READER')", tenant,
                 "reader-only".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
         var readerPage = fixture.service.listWebShellSessions(tenant,
                 "reader-only", null, 20).data();
-        assertThat(fixture.ledger.count("from managed_agent_session s join"
-                + " managed_workspace_registry")).isZero();
+        assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isZero();
         for (var row : readerPage) {
             assertThat(row.capabilities().workspaceTurns()).isFalse();
         }
@@ -862,8 +860,32 @@ class Issue13181QueryBudgetTest {
             assertThat(page).hasSize(size);
             assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
             assertThat(fixture.ledger.total()).isEqualTo(5);
-            assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+            assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
         }
+    }
+
+    @Test
+    void executableFactsBatchInheritsOnlyAnExactParentBindingAndRejectsCycles() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "lineage-" + UUID.randomUUID();
+        List<String> ids = fixture.createCwdSessions(tenant, 3);
+        String parent = ids.get(0);
+        String child = ids.get(1);
+        String grandchild = ids.get(2);
+        fixture.jdbc.update("UPDATE ma_session SET parent_session_id = ?, creator_actor_key = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?", parent, tenant, child);
+        fixture.jdbc.update("UPDATE ma_session SET parent_session_id = ?, creator_actor_key = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?", child, tenant, grandchild);
+        fixture.ledger.reset();
+        assertThat(fixture.store.sessionsWithExecutionRegistryFacts(tenant, ids)).containsExactlyInAnyOrderElementsOf(ids);
+        assertThat(fixture.ledger.total()).isEqualTo(1);
+        fixture.ledger.reset();
+        assertThat(fixture.store.sessionsWithExecutionRegistryFacts(tenant, List.of(grandchild))).containsExactly(grandchild);
+        assertThat(fixture.ledger.total()).isEqualTo(3);
+        fixture.jdbc.update("UPDATE ma_session SET workspace_generation = 2 WHERE tenant_id = ? AND session_id = ?", tenant, child);
+        assertThat(fixture.store.sessionsWithExecutionRegistryFacts(tenant, ids)).containsExactly(parent);
+        fixture.jdbc.update("UPDATE ma_session SET workspace_generation = 1, parent_session_id = ? WHERE tenant_id = ? AND session_id = ?", grandchild, tenant, parent);
+        assertThat(fixture.store.sessionsWithExecutionRegistryFacts(tenant, ids)).isEmpty();
     }
 
     @Test
@@ -871,7 +893,7 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture(Clock.systemUTC(), true);
         String tenant = "cwd-" + UUID.randomUUID();
         String id = fixture.createCwdSessions(tenant, 1).getFirst();
-        fixture.jdbc.update("UPDATE managed_agent_session SET agent_id = 'custom' WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        fixture.jdbc.update("UPDATE ma_session SET agent_id = 'custom' WHERE tenant_id = ? AND session_id = ?", tenant, id);
         var view = fixture.service.getWebShellSession(tenant, "actor", id);
         assertThat(view.capabilities().workspaceTurns()).isFalse();
         assertThat(JSON.valueToTree(view).path("capabilities").path("cwdChange").asBoolean()).isTrue();
@@ -888,22 +910,22 @@ class Issue13181QueryBudgetTest {
         // A non-creator holding OPERATOR on the Workspace sees the
         // capability, mirroring admission's atLeast(OPERATOR); a READER
         // does not.
-        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = 'workspace' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
         for (String mutation : new String[] {
-                "UPDATE managed_workspace_registry SET state = 'DRAINING'",
-                "UPDATE managed_workspace_registry SET state = 'ACTIVE', workspace_generation = 2",
-                "UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = 'other-storage'",
-                "UPDATE managed_workspace_registry SET storage_id = 'storage'; UPDATE managed_workspace_access SET role = 'READER'"
+                "UPDATE ma_workspace SET state = 'DRAINING'",
+                "UPDATE ma_workspace SET state = 'ACTIVE', workspace_generation = 2",
+                "UPDATE ma_workspace SET workspace_generation = 1, storage_id = 'other-storage'",
+                "UPDATE ma_workspace SET storage_id = 'storage'; UPDATE ma_workspace_access SET role = 'READER'"
         }) {
             // This fixture has only one tenant; each mutation proves a separate admission conjunct.
             for (String statement : mutation.split(";")) fixture.jdbc.update(statement);
             assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
         }
-        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'");
-        fixture.jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'");
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'");
+        fixture.jdbc.update("UPDATE ma_session SET status = 'CLOSED'");
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
     }
 
@@ -912,11 +934,11 @@ class Issue13181QueryBudgetTest {
         Fixture fixture = new Fixture(Clock.systemUTC(), true);
         String tenant = "cwd-" + UUID.randomUUID();
         String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
-        fixture.jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         String operateRow = fixture.tx.execute(status -> fixture.store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-2", "."))).sessionId();
-        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "other".getBytes(StandardCharsets.UTF_8));
-        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "other", null, 20).data();
         java.util.Map<String, Boolean> cwd = new java.util.HashMap<>();
@@ -924,7 +946,7 @@ class Issue13181QueryBudgetTest {
             cwd.put(row.sessionId(), row.capabilities().cwdChange());
         }
         assertThat(cwd).hasSize(2).containsEntry(operateRow, true).containsEntry(readRow, false);
-        assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+        assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
     }
 
     @Test
@@ -933,12 +955,12 @@ class Issue13181QueryBudgetTest {
             Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
             String tenant = "cwd-" + UUID.randomUUID();
             fixture.createCwdSessions(tenant, 1);
-            fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
+            fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
             fixture.ledger.reset();
             var page = fixture.service.listWebShellSessions(tenant, "reader", null, 20).data();
             assertThat(page).hasSize(1);
             assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("cwdChange").asBoolean()).isFalse();
-            assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isZero();
+            assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isZero();
         }
     }
 
@@ -991,7 +1013,7 @@ class Issue13181QueryBudgetTest {
         assertThat(transcript.hasMore()).isFalse();
         assertThat(transcript.olderCursor()).isNull();
         assertThat(transcript.lastSequence()).isEqualTo(lastSequence);
-        assertThat(fixture.ledger.count("from managed_agent_event",
+        assertThat(fixture.ledger.count("from ma_public_event",
                 "sequence_id >")).isEqualTo(1);
     }
 
@@ -1029,7 +1051,7 @@ class Issue13181QueryBudgetTest {
                 .filter(event -> event.sequence() > covered).count())
                 .isEqualTo(999);
         assertThat(transcript.hasMore()).isFalse();
-        assertThat(fixture.ledger.count("from managed_agent_event",
+        assertThat(fixture.ledger.count("from ma_public_event",
                 "sequence_id >")).isEqualTo(1);
         // A tail longer than one page (a session the materializer never
         // visited) is served completely, paging per 1000.
@@ -1047,7 +1069,7 @@ class Issue13181QueryBudgetTest {
                 .filter(event -> event.sequence() > covered).count())
                 .isEqualTo(1599);
         assertThat(longer.hasMore()).isFalse();
-        assertThat(fixture.ledger.count("from managed_agent_event",
+        assertThat(fixture.ledger.count("from ma_public_event",
                 "sequence_id >")).isEqualTo(2);
     }
 
@@ -1065,14 +1087,14 @@ class Issue13181QueryBudgetTest {
                 "order-a-" + UUID.randomUUID(), "digest", sessionId,
                 List.of(Map.of("type", "text", "text", "a")), "digest")
                 .turnId();
-        fixture.jdbc.update("UPDATE managed_agent_turn SET status ="
+        fixture.jdbc.update("UPDATE ma_turn SET status ="
                         + " 'COMPLETED' WHERE tenant_id = ? AND turn_id = ?",
                 tenant, turnA);
         String turnB = fixture.store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "order-b-" + UUID.randomUUID(), "digest", sessionId,
                 List.of(Map.of("type", "text", "text", "b")), "digest")
                 .turnId();
-        fixture.jdbc.update("UPDATE managed_agent_turn SET created_at ="
+        fixture.jdbc.update("UPDATE ma_turn SET created_at ="
                         + " created_at + 10000 WHERE tenant_id = ? AND"
                         + " turn_id = ?", tenant, turnA);
         // Inverted environment sequences: the older Turn's failed event
@@ -1158,10 +1180,10 @@ class Issue13181QueryBudgetTest {
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
         }
-        long renewals = fixture.ledger.count("update qwen_tool_publication_operation set claim_until");
+        long renewals = fixture.ledger.count("update ma_operation set claim_until");
         assertThat(renewals).isGreaterThanOrEqualTo(2);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update"))
+        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("from ma_session_head", "for update"))
                 .isGreaterThanOrEqualTo(2 * (renewals + 1));
         fixture.ledger.reset();
         for (int i = 0; i < 12; i++) {
@@ -1169,8 +1191,8 @@ class Issue13181QueryBudgetTest {
                     .path("state").asText()).isEqualTo("SUCCEEDED");
         }
         assertThat(fixture.ledger.total()).isEqualTo(12);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head")).isZero();
+        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("from ma_session_head")).isZero();
     }
 
     @Test
@@ -1206,9 +1228,9 @@ class Issue13181QueryBudgetTest {
         assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read")
                 .path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(reads).hasValueGreaterThan(1000);
-        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isZero();
-        assertThat(fixture.ledger.count("select inline_bytes from qwen_tool_publication_object")).isZero();
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("update ma_operation set claim_until")).isZero();
+        assertThat(fixture.ledger.count("select inline_bytes from ma_resource")).isZero();
+        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
     }
 
     @Test
@@ -1220,13 +1242,13 @@ class Issue13181QueryBudgetTest {
         JdbcToolExecutionRepository executions = publication.executions();
         long activationRevision = fixture.jdbc.queryForObject(
                 "SELECT MAX(journal_revision)"
-                        + " FROM qwen_managed_session_journal_tx",
+                        + " FROM ma_session_journal_tx",
                 Long.class);
 
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
 
         int filler = 30;
@@ -1237,14 +1259,14 @@ class Issue13181QueryBudgetTest {
                     1, List.of(), null);
         }
         long head = fixture.jdbc.queryForObject("SELECT MAX(journal_revision)"
-                + " FROM qwen_managed_session_journal_tx", Long.class);
+                + " FROM ma_session_journal_tx", Long.class);
         assertThat(head).isEqualTo(activationRevision + filler);
 
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
         long scans = fixture.ledger.count(
-                "from qwen_managed_session_journal_tx", "for update");
+                "from ma_session_journal_tx", "for update");
         System.out.println("[issue-13181] verifyDispatch with the activation "
                 + filler + " revisions behind the head: " + scans
                 + " locked journal reads");
@@ -1277,7 +1299,7 @@ class Issue13181QueryBudgetTest {
                 PUBLICATION_TOKEN, "op-1", "stdout", 0, bytes, digest("hello"));
         // publish() authorizes twice per call (claim + install); both read
         // the activation state from the head row.
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
         // Positive control: the publish path locks the head row six times
         // (claim's authorize, the retention put, the verify-open read
@@ -1285,7 +1307,7 @@ class Issue13181QueryBudgetTest {
         // lease recheck), so the zero above cannot pass
         // vacuously on a broken store.
         assertThat(fixture.ledger.count(
-                "from qwen_managed_session_journal_head", "for update"))
+                "from ma_session_head", "for update"))
                 .isEqualTo(6);
     }
 
@@ -1305,7 +1327,7 @@ class Issue13181QueryBudgetTest {
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
         // The head columns answered the check: no journal reads.
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
 
@@ -1321,13 +1343,13 @@ class Issue13181QueryBudgetTest {
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
-                + " FROM qwen_managed_session_journal_head");
+                + " FROM ma_session_head");
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
                         activation("released")) + COMMIT_MARKER,
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
@@ -1345,9 +1367,9 @@ class Issue13181QueryBudgetTest {
                 .hasMessageContaining("Original activation is fenced");
         // The legacy path's cost is explicit: one locked journal read (the
         // release sits at the latest revision), no head write.
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isEqualTo(1);
-        assertThat(fixture.ledger.count("update qwen_managed_session_journal_head"))
+        assertThat(fixture.ledger.count("update ma_session_head"))
                 .isZero();
         // The renew path's evidence read must not trust the stale head
         // either.
@@ -1367,13 +1389,13 @@ class Issue13181QueryBudgetTest {
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
-                + " FROM qwen_managed_session_journal_head");
+                + " FROM ma_session_head");
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
                         activation("released")) + COMMIT_MARKER,
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
@@ -1389,7 +1411,7 @@ class Issue13181QueryBudgetTest {
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isGreaterThan(0);
     }
 
@@ -1400,20 +1422,20 @@ class Issue13181QueryBudgetTest {
         // The self-heal arm: the columns are current but the stamp lags, so
         // the first authorization scans and re-stamps; the next reads the
         // head again.
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                 + " activation_head_revision = activation_head_revision - 1");
         publication.store().verifyDispatch(publication.executions()
                 .findByExecutionCallId("execution-1"), "pub-1",
                 PUBLICATION_TOKEN);
         var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
-                + " journal_revision FROM qwen_managed_session_journal_head");
+                + " journal_revision FROM ma_session_head");
         assertThat(head.get("activation_head_revision"))
                 .isEqualTo(head.get("journal_revision"));
         fixture.ledger.reset();
         publication.store().verifyDispatch(publication.executions()
                 .findByExecutionCallId("execution-1"), "pub-1",
                 PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
 
@@ -1428,13 +1450,13 @@ class Issue13181QueryBudgetTest {
         var head = fixture.jdbc.queryForMap("SELECT activation_id,"
                 + " activation_phase, activation_event_epoch,"
                 + " activation_expires_at, activation_head_revision"
-                + " FROM qwen_managed_session_journal_head");
+                + " FROM ma_session_head");
         append("activation.release",
                 event(journal.sequence + 1, "activation.changed",
                         activation("released")) + COMMIT_MARKER,
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
@@ -1452,7 +1474,7 @@ class Issue13181QueryBudgetTest {
                 1, List.of(), null);
         var stamped = fixture.jdbc.queryForMap(
                 "SELECT activation_head_revision, journal_revision"
-                        + " FROM qwen_managed_session_journal_head");
+                        + " FROM ma_session_head");
         assertThat(stamped.get("activation_head_revision"))
                 .isNotEqualTo(stamped.get("journal_revision"));
         // The skew stays detectable: authorization rescans the journal and
@@ -1462,7 +1484,7 @@ class Issue13181QueryBudgetTest {
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isGreaterThan(0);
     }
 
@@ -1481,10 +1503,10 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " qwen_managed_session_journal_head", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("active");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isNull();
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
                 WRITER_TOKEN, PUBLICATION_TOKEN))
@@ -1501,7 +1523,7 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isNull();
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
                 WRITER_TOKEN, PUBLICATION_TOKEN))
@@ -1517,7 +1539,7 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isNull();
         // The width check itself must not overflow: the largest exponent a
         // JSON string can carry wraps an int precision-minus-scale negative,
@@ -1531,7 +1553,7 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isNull();
         // The positive-scale direction: 1e-N expands 10^N before dividing
         // (measured ~56s of CPU for these 12 bytes without the bound), so
@@ -1545,7 +1567,7 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isNull();
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
@@ -1553,7 +1575,7 @@ class Issue13181QueryBudgetTest {
                 .hasMessageContaining("Activation is not active");
         // The head answers before the intent read: a fenced renew pays no
         // journal statement.
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx"))
+        assertThat(fixture.ledger.count("from ma_session_journal_tx"))
                 .isZero();
     }
 
@@ -1578,7 +1600,7 @@ class Issue13181QueryBudgetTest {
                 .hasMessageContaining("Activation is not active");
         // The head answers the activation term before the intent is read:
         // a fenced renew pays no journal statement at all.
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx"))
+        assertThat(fixture.ledger.count("from ma_session_journal_tx"))
                 .isZero();
         fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
@@ -1586,7 +1608,7 @@ class Issue13181QueryBudgetTest {
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
         // Through the head columns: no locked journal read at all.
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
 
@@ -1596,7 +1618,7 @@ class Issue13181QueryBudgetTest {
         PublicationFixture publication = publicationFixture(fixture);
         // Simulate a pre-V36 head: the evidence scan on renew authorizes
         // from the journal and backfills the head columns.
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
                 + " activation_expires_at = NULL,"
@@ -1604,7 +1626,7 @@ class Issue13181QueryBudgetTest {
         publication.store().apply(request("renew"), WRITER_TOKEN,
                 PUBLICATION_TOKEN);
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " qwen_managed_session_journal_head", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("active");
         // The next authorization reads the head: zero journal reads.
         fixture.ledger.reset();
@@ -1612,7 +1634,7 @@ class Issue13181QueryBudgetTest {
                 .findByExecutionCallId("execution-1"), "pub-1",
                 PUBLICATION_TOKEN);
         assertThat(fixture.ledger.count(
-                "from qwen_managed_session_journal_tx", "for update"))
+                "from ma_session_journal_tx", "for update"))
                 .isZero();
     }
 
@@ -1631,7 +1653,7 @@ class Issue13181QueryBudgetTest {
                 1, List.of(), null))
                 .hasMessageContaining("is not one of the transaction's events");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " qwen_managed_session_journal_head", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("active");
     }
 
@@ -1665,7 +1687,7 @@ class Issue13181QueryBudgetTest {
                         + " with exactly");
         // The head columns keep the previous activation.
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " qwen_managed_session_journal_head", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("active");
     }
 
@@ -1688,10 +1710,10 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_phase FROM"
-                        + " qwen_managed_session_journal_head", String.class))
+                        + " ma_session_head", String.class))
                 .isNull();
         var head = fixture.jdbc.queryForMap("SELECT activation_head_revision,"
-                + " journal_revision FROM qwen_managed_session_journal_head");
+                + " journal_revision FROM ma_session_head");
         assertThat(head.get("activation_head_revision"))
                 .isEqualTo(head.get("journal_revision"));
         // Authorization reads the journal and fences the unknown phase.
@@ -1700,7 +1722,7 @@ class Issue13181QueryBudgetTest {
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isGreaterThan(0);
     }
 
@@ -1721,7 +1743,7 @@ class Issue13181QueryBudgetTest {
                         + COMMIT_MARKER,
                 1, List.of(), null);
         assertThat(fixture.jdbc.queryForObject("SELECT activation_id FROM"
-                        + " qwen_managed_session_journal_head", String.class))
+                        + " ma_session_head", String.class))
                 .isNull();
         // Authorization reads the journal and fences the id mismatch
         // cleanly — no storage error from writing the oversized value.
@@ -1745,7 +1767,7 @@ class Issue13181QueryBudgetTest {
                     1, List.of(), null);
         }
         // Simulate a journal last written before migration V36.
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
                 + " activation_expires_at = NULL,"
@@ -1755,7 +1777,7 @@ class Issue13181QueryBudgetTest {
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
         long scans = fixture.ledger.count(
-                "from qwen_managed_session_journal_tx", "for update");
+                "from ma_session_journal_tx", "for update");
         System.out.println("[issue-13181] legacy head verifyDispatch: "
                 + scans + " locked journal reads, then backfilled");
         // The legacy fallback scans the filler revisions plus the
@@ -1763,12 +1785,12 @@ class Issue13181QueryBudgetTest {
         assertThat(scans).isEqualTo(filler + 1L);
         // The scan backfills the head, so later checks are O(1).
         assertThat(fixture.jdbc.queryForObject(
-                "SELECT activation_phase FROM qwen_managed_session_journal_head",
+                "SELECT activation_phase FROM ma_session_head",
                 String.class)).isEqualTo("active");
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
 
@@ -1787,7 +1809,7 @@ class Issue13181QueryBudgetTest {
         publication.store().apply(request("renew"), WRITER_TOKEN,
                 PUBLICATION_TOKEN);
         long reads = fixture.ledger
-                .count("from qwen_managed_session_journal_tx");
+                .count("from ma_session_journal_tx");
         System.out.println("[issue-13181] renew with the intent " + filler
                 + " revisions behind the head: " + reads
                 + " journal statements");
@@ -1795,7 +1817,7 @@ class Issue13181QueryBudgetTest {
         // verified page: constant, independent of the filler depth, and none
         // of them locked.
         assertThat(reads).isEqualTo(4);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
 
@@ -1819,17 +1841,17 @@ class Issue13181QueryBudgetTest {
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isEqualTo(expiry);
         // The head branch authorizes it without a journal read.
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
         // A pre-V36 head scans the journal, parses the same value, and
         // backfills it; the next authorization reads the head again.
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        fixture.jdbc.update("UPDATE ma_session_head SET"
                 + " activation_id = NULL, activation_phase = NULL,"
                 + " activation_event_epoch = NULL,"
                 + " activation_expires_at = NULL,"
@@ -1837,12 +1859,12 @@ class Issue13181QueryBudgetTest {
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
         assertThat(fixture.jdbc.queryForObject("SELECT activation_expires_at"
-                        + " FROM qwen_managed_session_journal_head",
+                        + " FROM ma_session_head",
                 Long.class)).isEqualTo(expiry);
         fixture.ledger.reset();
         store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN);
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+        assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
     }
 
@@ -1894,10 +1916,10 @@ class Issue13181QueryBudgetTest {
             raw.setURL("jdbc:h2:mem:repro-" + UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;"
                     + "LOCK_TIMEOUT=10000");
-            Flyway.configure().dataSource(raw).load().migrate();
+            Flyway.configure().dataSource(raw).locations("classpath:db/managed-schema").load().migrate();
             ledger = new QueryLedger(raw);
             dataSource = ledger.dataSource();
-            jdbc = new JdbcTemplate(dataSource);
+            jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource);
             manager = new DataSourceTransactionManager(dataSource);
             tx = new TransactionTemplate(manager);
             ManagedWorkspaceRegistry registry =
@@ -1912,8 +1934,8 @@ class Issue13181QueryBudgetTest {
         }
 
         List<String> createCwdSessions(String tenant, int count) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             List<String> ids = new ArrayList<>();
             for (int index = 0; index < count; index++) {
                 ids.add(tx.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId());

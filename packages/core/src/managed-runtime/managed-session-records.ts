@@ -1899,6 +1899,19 @@ export function managedSessionEventsDigest(
   return createHash('sha256').update(encoded).digest('hex');
 }
 
+/**
+ * SHA-256 over the canonical JSON of one JSON value: the canonical form
+ * `managedSessionEventsDigest` applies to an event list, for a committed
+ * body that is not a journal event (the public event row a `public_event`
+ * envelope binds).
+ */
+export function managedSessionJsonDigest(value: unknown): string {
+  assertJsonValue(value, 'value', new Set<object>(), 0);
+  return createHash('sha256')
+    .update(canonicalManagedSessionJson(value))
+    .digest('hex');
+}
+
 function canonicalManagedSessionJson(value: ManagedSessionJsonValue): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalManagedSessionJson).join(',')}]`;

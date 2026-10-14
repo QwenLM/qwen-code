@@ -39,6 +39,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedAgentProperties.Harness properties;
     private final ManagedAgentProperties.SessionStore sessionStore;
+    private final ManagedAgentProperties.ToolPublication toolPublication;
     private final String workspaceId;
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore workspaceExecution;
@@ -87,6 +88,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.resources = resources;
         this.properties = properties.getHarness();
         this.sessionStore = properties.getSessionStore();
+        this.toolPublication = properties.getToolPublication();
         this.workspaceId = sessionStore.getWorkspaceId();
         this.sessions = sessions;
         this.actions = actions;
@@ -228,7 +230,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             request.put("phase", phase);
             request.put("toolProfile", session.toolProfile());
         }
-        return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+        } catch (DaemonHttpException error) {
+            // A lost detach ACK can leave this reference cached after the
+            // Harness sealed and removed it. Retry through a current-claim
+            // cleanup load; absence never proves resource completion.
+            if (operation.lifecycleProtocolVersion() == 2 && !"effects".equals(phase)
+                    && error.getStatusCode() == 404 && attachments.remove(key, ref)) {
+                pendingRecovery.remove(key);
+            }
+            throw error;
+        }
     }
 
     @Override
@@ -606,6 +619,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
         try {
+            AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+            if (!attachments.containsKey(key)
+                    && sessions.requireSession(tenantId, sessionId)
+                            .harnessBootId() != null) {
+                // Relay writes reattach the original Session without
+                // driving the parent's parked Turn.
+                createOrLoad(tenantId, sessionId, true, true);
+            }
             // Same ordering as the automation relay: the attachment
             // resolves first, the client reads after it.
             HarnessSessionRef ref = attachment(tenantId, sessionId, true);
@@ -738,6 +759,50 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
+    @Override
+    public String writerIdentity() {
+        HostedHarnessClient current = client;
+        if (current == null) {
+            return null;
+        }
+        try {
+            return current.capabilities().getBootId();
+        } catch (RuntimeException closed) {
+            return null;
+        }
+    }
+
+    @Override
+    public boolean activateForWake(String tenantId, String sessionId) {
+        try {
+            // An attachment held here is not this verb's to evict: a wake
+            // only accelerates, and a stale entry is repaired by the paths
+            // that own it.
+            if (attachments.containsKey(new AttachmentKey(tenantId,
+                    sessionId))) {
+                return false;
+            }
+            // The relay verbs' new-work order: the Workspace checks, then a
+            // Session a prior control-plane process attached re-attaches
+            // through the takeover load, then the attachment itself.
+            requireReadyForNewWork(tenantId, sessionId, false);
+            reattachTakenOver(tenantId, sessionId);
+            attachment(tenantId, sessionId, true);
+            return true;
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public List<AttachedSession> attachedSessions() {
+        return attachments.keySet().stream()
+                .map(key -> new AttachedSession(key.tenantId(),
+                        key.sessionId()))
+                .toList();
+    }
+
     private String doCloseSession(String tenantId, String sessionId) {
         attachments.remove(new AttachmentKey(tenantId, sessionId));
         pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
@@ -842,6 +907,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private HarnessSessionRef create(SessionRecord session, boolean passiveManagedRuntimeRecovery) {
         try {
+            String profile = toolProfile(session);
             CreateHarnessSession.Builder builder =
                     CreateHarnessSession.builder()
                             .harnessSessionId(session.sessionId())
@@ -854,10 +920,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.tenantId(),
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
-                            .toolProfile(toolProfile(session))
+                            .toolProfile(profile)
                             .childWorkspaces(childWorkspaces);
-            if (WorkspaceToolProfiles.isPublicShell(toolProfile(session))) {
+            if (WorkspaceToolProfiles.isPublicShell(profile)) {
                 builder.suppressChildAgents();
+            }
+            if (toolPublication.isEnabled()
+                    && (WorkspaceToolProfiles.isPublicShell(profile)
+                            || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(profile))) {
+                builder.captureBytes(toolPublication.getExecutionBytes());
             }
             ManagedSessionStoreConnection store = managedSessionStore(
                     session);
