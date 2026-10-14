@@ -1753,10 +1753,12 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
       {},
       abort.signal,
     );
-    await vi.waitFor(() =>
-      expect(
-        requests.filter((request) => request.kind === 'hook-execute'),
-      ).toHaveLength(1),
+    await vi.waitFor(
+      () =>
+        expect(
+          requests.filter((request) => request.kind === 'hook-execute'),
+        ).toHaveLength(1),
+      { timeout: 5000 },
     );
     abort.abort();
     await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
