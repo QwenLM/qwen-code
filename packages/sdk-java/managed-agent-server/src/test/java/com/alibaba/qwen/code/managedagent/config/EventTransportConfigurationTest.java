@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
@@ -25,10 +26,13 @@ import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumerBuilder;
+import org.apache.rocketmq.client.apis.message.Message;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.apis.producer.ProducerBuilder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -65,6 +69,10 @@ class EventTransportConfigurationTest {
         producer = mock(Producer.class);
         when(producerBuilder.build()).thenReturn(producer);
         when(provider.newProducerBuilder()).thenReturn(producerBuilder);
+        // Messages are plain values: build them for real.
+        ClientServiceProvider real = ClientServiceProvider.loadService();
+        when(provider.newMessageBuilder()).thenAnswer(
+                invocation -> real.newMessageBuilder());
         probeBuilder = mock(LitePushConsumerBuilder.class, RETURNS_SELF);
         ownerBuilder = mock(LitePushConsumerBuilder.class, RETURNS_SELF);
         bootstrapBuilder = mock(LitePushConsumerBuilder.class, RETURNS_SELF);
@@ -88,16 +96,8 @@ class EventTransportConfigurationTest {
                         "qwen.managed-agent.event-transport.enabled=true",
                         "qwen.managed-agent.event-transport.endpoints=127.0.0.1:8081",
                         "qwen.managed-agent.event-transport.topic=" + TOPIC)
-                .withBean(ManagedAgentProperties.class,
-                        () -> {
-                            ManagedAgentProperties properties =
-                                    new ManagedAgentProperties();
-                            properties.getEventTransport().setEnabled(true);
-                            properties.getEventTransport()
-                                    .setEndpoints("127.0.0.1:8081");
-                            properties.getEventTransport().setTopic(TOPIC);
-                            return properties;
-                        })
+                // Bound from the property values, as in a deployment.
+                .withUserConfiguration(PropertiesConfiguration.class)
                 .withBean(ClientServiceProvider.class, () -> provider)
                 .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
                 .withBean(Clock.class, Clock::systemUTC)
@@ -153,7 +153,7 @@ class EventTransportConfigurationTest {
         verify(bootstrap).subscribeLite("qwen-wake-bootstrap");
         verify(owner, never()).subscribeLite(anyString());
         verify(probeBuilder).setConsumerGroup(
-                EventTransportConfiguration.CAPABILITY_PROBE_GROUP);
+                "qwen-managed-journal-capability-probe");
         verify(ownerBuilder).setConsumerGroup("qwen-managed-session-owner");
         verify(bootstrapBuilder).setConsumerGroup(
                 "qwen-managed-wake-bootstrap");
@@ -161,9 +161,44 @@ class EventTransportConfigurationTest {
                 ownerBuilder, bootstrapBuilder)) {
             verify(builder).bindTopic(TOPIC);
         }
+        // The send probe went to the probe's own lite topic on the topic.
+        ArgumentCaptor<Message> probeSend = ArgumentCaptor.forClass(Message.class);
+        verify(producer).send(probeSend.capture());
+        assertThat(probeSend.getValue().getTopic()).isEqualTo(TOPIC);
+        assertThat(probeSend.getValue().getLiteTopic()).contains(
+                EventTransportConfiguration.CAPABILITY_PROBE_LITE);
         verify(owner).close();
         verify(bootstrap).close();
         verify(producer).close();
+    }
+
+    // A group binds to a topic whatever its message type, so the
+    // subscription probe passes on a NORMAL topic; the send probe is what
+    // refuses it, before any envelope would be dropped at send time.
+    @Test
+    void aTopicThatIsNotLiteFailsStartupAtTheSendProbe() throws Exception {
+        when(producer.send(any(Message.class))).thenThrow(new ClientException(
+                "the topic does not accept LITE messages"));
+
+        enabled().run(started -> assertThat(started).hasFailed()
+                .getFailure().hasStackTraceContaining(
+                        "refused a LiteTopic message"));
+        verify(producer).close();
+        // The probe consumer was built; no lane consumer ever was.
+        verify(ownerBuilder, never()).build();
+        verify(bootstrapBuilder, never()).build();
+    }
+
+    @Test
+    void theProbeSubscribesInTheConfiguredGroup() throws Exception {
+        enabled().withPropertyValues(
+                "qwen.managed-agent.event-transport.capability-probe-group=probe-2")
+                .run(started -> assertThat(started).hasNotFailed());
+        verify(probeBuilder).setConsumerGroup("probe-2");
+    }
+
+    @EnableConfigurationProperties(ManagedAgentProperties.class)
+    static class PropertiesConfiguration {
     }
 
     @Test
