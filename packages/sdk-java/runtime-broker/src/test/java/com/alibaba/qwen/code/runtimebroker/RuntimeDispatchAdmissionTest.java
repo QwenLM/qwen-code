@@ -32,7 +32,7 @@ class RuntimeDispatchAdmissionTest {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:dispatch-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         verify(new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
                 new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source));
     }
@@ -42,7 +42,7 @@ class RuntimeDispatchAdmissionTest {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:dispatch-timeout-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         var queries = new ArrayList<String>();
         var timeouts = new ArrayList<Integer>();
         var recording = (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(),
@@ -78,7 +78,7 @@ class RuntimeDispatchAdmissionTest {
         assertEquals(ToolExecutionRecord.State.EXECUTING, bindings.authorizeDispatch(
                 sessions, executions, claimed, "owner", claimed.getDispatchGeneration()).getState());
         assertEquals(3, queries.size());
-        assertEquals(List.of("qwen_runtime_binding", "qwen_runtime_session", "qwen_tool_execution"),
+        assertEquals(List.of("ma_runtime_binding", "ma_runtime_session", "ma_tool_execution"),
                 queries.stream().map(sql -> sql.substring(sql.indexOf(" FROM ") + 6).split(" ")[0]).toList());
         assertEquals(List.of(10, 10, 10), timeouts);
     }

@@ -13,6 +13,7 @@ public final class LoadHarnessSession {
     private final boolean cancellationTakeover;
     private final boolean suppressChildAgents;
     private Map<String, Object> lifecycleAuthority;
+    private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
     private boolean stopMessages;
 
@@ -33,12 +34,20 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = value;
         copy.stopMessages = stopMessages;
         return copy;
     }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration) {
+        return forLifecycle(operationId, claimGeneration, 1);
+    }
+
+    public LoadHarnessSession forLifecycle(String operationId, long claimGeneration, int protocolVersion) {
+        if (protocolVersion != 1 && protocolVersion != 2) {
+            throw new IllegalArgumentException("Invalid lifecycle protocol");
+        }
         if (operationId == null || !operationId.matches("[A-Za-z0-9._:-]{1,128}") || claimGeneration < 1) {
             throw new IllegalArgumentException("Invalid lifecycle authority");
         }
@@ -47,6 +56,7 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
+        copy.lifecycleProtocolVersion = protocolVersion;
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = stopMessages;
         return copy;
@@ -60,6 +70,7 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = true;
         return copy;
@@ -151,6 +162,9 @@ public final class LoadHarnessSession {
         }
         if (lifecycleAuthority != null) {
             result.put("lifecycleAuthority", lifecycleAuthority);
+            if (lifecycleProtocolVersion == 2) {
+                result.put("lifecycleProtocolVersion", 2);
+            }
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
