@@ -707,6 +707,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_write',
   // Binary file upload (never overwrites; auto-numbers occupied names).
   'workspace_file_upload',
+  'workspace_file_delete',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',

@@ -1,6 +1,7 @@
 import type {
   DaemonCapabilities,
   DaemonWorkspaceCapability,
+  WorkspaceDaemonClient,
 } from '@qwen-code/sdk/daemon';
 import {
   useWorkspace,
@@ -20,7 +21,8 @@ export type ArtifactWorkspaceActions = Pick<
   | 'listScheduledTasks'
   | 'updateScheduledTask'
   | 'deleteScheduledTask'
->;
+> &
+  Partial<Pick<WorkspaceDaemonClient, 'deleteWorkspaceFile'>>;
 
 interface ArtifactWorkspaceOwner {
   cwd: string;
@@ -95,6 +97,18 @@ export function useArtifactWorkspaceTarget(
     () => resolveArtifactWorkspaceOwner(workspace.capabilities, workspaceCwd),
     [workspace.capabilities, workspaceCwd],
   );
+  const canDelete = Boolean(
+    owner?.id &&
+      workspace.capabilities?.features?.includes('workspace_file_delete') &&
+      workspace.capabilities?.features?.includes(
+        'workspace_qualified_rest_core',
+      ) &&
+      !workspace.capabilities?.workspaces?.find(
+        (entry) => entry.id === owner.id,
+      )?.ssh,
+  );
+  const deleteAllowedRef = useRef(canDelete);
+  deleteAllowedRef.current = canDelete;
   const authorityRef = useRef<ArtifactWorkspaceAuthority | undefined>(
     undefined,
   );
@@ -145,6 +159,25 @@ export function useArtifactWorkspaceTarget(
       return current;
     };
     return {
+      ...(canDelete
+        ? {
+            async deleteWorkspaceFile(path: string) {
+              const current = requireOwner();
+              if (!deleteAllowedRef.current)
+                throw new Error(
+                  'Workspace file deletion is no longer available',
+                );
+              await workspace.client
+                .workspaceByCwd(current.cwd)
+                .deleteWorkspaceFile(path);
+              requireOwner();
+              if (!deleteAllowedRef.current)
+                throw new Error(
+                  'Workspace file deletion is no longer available',
+                );
+            },
+          }
+        : {}),
       async listDirectory(path) {
         const current = requireOwner();
         const result = await (current.id
@@ -207,7 +240,7 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
       },
     };
-  }, [authority, primaryActions, workspace.client]);
+  }, [authority, primaryActions, workspace.client, canDelete]);
 
   if (!authority || !actions) return undefined;
   return {

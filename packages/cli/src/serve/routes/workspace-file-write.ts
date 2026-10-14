@@ -9,6 +9,7 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import express from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
+  FsError,
   MAX_UPLOAD_BYTES,
   hasSuspiciousPathPattern,
   isContentHash,
@@ -317,6 +318,40 @@ async function handlePostFileEdit(
   }
 }
 
+async function handlePostFileDelete(
+  req: Request,
+  res: Response,
+  deps: RegisterDeps,
+): Promise<void> {
+  const ROUTE = 'POST /workspaces/:workspace/file/delete';
+  const factory = getWorkspaceRouteContext(req)!.runtime.routeFileSystemFactory;
+  const filePath = requireBodyString(deps.safeBody(req), 'path', res, ROUTE);
+  if (filePath === null) return;
+  const clientId = deps.parseClientId(req, res);
+  if (clientId === null) return;
+  const originatorClientId = resolveOriginatorClientId(
+    clientId,
+    deps,
+    res,
+    req,
+  );
+  if (originatorClientId === null) return;
+  const fs = factory.forRequest({ originatorClientId, route: ROUTE });
+  try {
+    if (!fs.deleteFile)
+      throw new FsError(
+        'parse_error',
+        'File deletion is unavailable for this workspace',
+        { status: 422 },
+      );
+    const deleted = await fs.deleteFile(filePath);
+    applyReadHeaders(res);
+    res.json({ kind: 'file_delete', path: workspaceRelative(req, deleted) });
+  } catch (err) {
+    sendFsError(res, err, ROUTE);
+  }
+}
+
 export function registerWorkspaceFileWriteRoutes(
   app: Application,
   deps: RegisterDeps,
@@ -347,6 +382,14 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
     });
     return true;
   };
+  app.post(
+    '/workspaces/:workspace/file/delete',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (!resolve(req, res)) return;
+      void handlePostFileDelete(req, res, deps);
+    },
+  );
   app.post(
     '/workspaces/:workspace/file/write',
     deps.mutate({ strict: true }),

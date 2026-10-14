@@ -15,6 +15,16 @@ import type { DaemonDirectoryEntry } from '@qwen-code/web-shell/daemon-react-sdk
 import type { ArtifactWorkspaceActions } from './useArtifactWorkspaceTarget';
 import { Button } from '../ui/button';
 import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from '../ui/alert-dialog';
+import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
@@ -64,6 +74,11 @@ export function WorkspaceFileBrowser({
   const treeLabelRef = useRef(t('files.title'));
   treeLabelRef.current = t('files.title');
   const treeRef = useRef<FileTree | undefined>(undefined);
+  const deletedRef = useRef<((path: string) => void) | undefined>(undefined);
+  const transferMenuFocusRef = useRef(false);
+  const [deletePath, setDeletePath] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
   const retryRef = useRef<((path: string) => void) | undefined>(undefined);
   const [selectedPath, setSelectedPath] = useState<string>();
   const hasPreview = selectedPath !== undefined;
@@ -75,6 +90,7 @@ export function WorkspaceFileBrowser({
   const [directories, setDirectories] = useState<DirectoryState[]>([]);
   const [menu, setMenu] = useState<{
     path: string;
+    kind: 'file' | 'symlink';
     context: ContextMenuOpenContext;
   }>();
   const [actionError, setActionError] = useState<string>();
@@ -98,6 +114,9 @@ export function WorkspaceFileBrowser({
     const lifetime = {};
     lifetimeRef.current = lifetime;
     setMenu(undefined);
+    setDeletePath(undefined);
+    setDeleting(false);
+    const deletedPaths = new Set<string>();
     const entries = new Map<string, DaemonDirectoryEntry>();
     const cache = new Map<string, DirectoryState>();
     const tree = new FileTree({
@@ -129,8 +148,9 @@ export function WorkspaceFileBrowser({
             const entry = entries.get(item.path);
             if (entry?.kind === 'file' || entry?.kind === 'symlink') {
               closingMenuRef.current = false;
+              transferMenuFocusRef.current = false;
               setActionError(undefined);
-              setMenu({ path: item.path, context });
+              setMenu({ path: item.path, kind: entry.kind, context });
             } else {
               context.close();
             }
@@ -177,12 +197,16 @@ export function WorkspaceFileBrowser({
       try {
         const listing = await actions.listDirectory(path || '.');
         if (disposed) return;
+        const visibleEntries = listing.entries.filter(
+          (entry) =>
+            !deletedPaths.has(`${path ? `${path}/` : ''}${entry.name}`),
+        );
         cache.set(path, {
           path,
-          empty: listing.entries.length === 0,
+          empty: visibleEntries.length === 0,
           truncated: listing.truncated,
         });
-        const added = listing.entries.map((entry) => {
+        const added = visibleEntries.map((entry) => {
           const child = `${path ? `${path}/` : ''}${entry.name}${entry.kind === 'directory' ? '/' : ''}`;
           entries.set(child, entry);
           return { type: 'add' as const, path: child };
@@ -214,6 +238,23 @@ export function WorkspaceFileBrowser({
       cache.delete(path);
       void load(path);
     };
+    deletedRef.current = (path) => {
+      deletedPaths.add(path);
+      entries.delete(path);
+      if (tree.getItem(path)) tree.remove(path);
+      const parent = path.slice(0, Math.max(0, path.lastIndexOf('/')));
+      const directory = cache.get(parent);
+      if (directory)
+        cache.set(parent, {
+          ...directory,
+          empty: ![...entries.keys()].some(
+            (child) =>
+              child.startsWith(parent ? `${parent}/` : '') &&
+              child !== `${parent}/`,
+          ),
+        });
+      publish();
+    };
     void load('');
     return () => {
       disposed = true;
@@ -224,6 +265,7 @@ export function WorkspaceFileBrowser({
       host.replaceChildren();
       treeRef.current = undefined;
       retryRef.current = undefined;
+      deletedRef.current = undefined;
     };
   }, [actions, version]);
 
@@ -244,6 +286,7 @@ export function WorkspaceFileBrowser({
   ) => {
     const lifetime = lifetimeRef.current;
     closingMenuRef.current = true;
+    transferMenuFocusRef.current = transferFocus;
     menu?.context.close({ restoreFocus: !transferFocus });
     setMenu(undefined);
     try {
@@ -252,6 +295,26 @@ export function WorkspaceFileBrowser({
       if (lifetimeRef.current === lifetime) {
         setActionError(error instanceof Error ? error.message : String(error));
       }
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deletePath || deleting || !actions.deleteWorkspaceFile) return;
+    const path = deletePath;
+    const lifetime = lifetimeRef.current;
+    setDeleting(true);
+    setDeleteError(undefined);
+    try {
+      await actions.deleteWorkspaceFile(path);
+      if (lifetimeRef.current !== lifetime) return;
+      deletedRef.current?.(path);
+      setSelectedPath((selected) => (selected === path ? undefined : selected));
+      setDeletePath(undefined);
+    } catch (error) {
+      if (lifetimeRef.current === lifetime)
+        setDeleteError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (lifetimeRef.current === lifetime) setDeleting(false);
     }
   };
 
@@ -305,7 +368,7 @@ export function WorkspaceFileBrowser({
             data-file-tree-context-menu-root="true"
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              menu.context.restoreFocus();
+              if (!transferMenuFocusRef.current) menu.context.restoreFocus();
             }}
           >
             {(/\.(?:md|markdown|html?)$/i.test(menu.path) ||
@@ -356,9 +419,71 @@ export function WorkspaceFileBrowser({
             >
               {t('common.download')}
             </DropdownMenuItem>
+            {menu.kind === 'file' && actions.deleteWorkspaceFile && (
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => {
+                  const path = menu.path;
+                  void runMenuAction(() => {
+                    setDeleteError(undefined);
+                    setDeletePath(path);
+                  }, true);
+                }}
+              >
+                {t('files.deleteMenu')}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+      <AlertDialog
+        open={deletePath !== undefined}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeletePath(undefined);
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            treeRef.current
+              ?.getFileTreeContainer()
+              ?.shadowRoot?.querySelector<HTMLElement>(
+                '[role="treeitem"][tabindex="0"], [role="tree"]',
+              )
+              ?.focus();
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('files.deleteTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('files.deleteWarning')}
+              <span className="mt-2 block break-all font-medium text-foreground">
+                {safeDisplayText(deletePath)}
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteError && (
+            <div role="alert" className="break-words text-sm text-destructive">
+              {deleteError}
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>
+              {t('common.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={deleting}
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmDelete();
+              }}
+            >
+              {t(deleting ? 'files.deleting' : 'files.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <header className={styles.toolbar}>
         <span
           className={styles.path}

@@ -2781,3 +2781,127 @@ describe('WorkspaceFileSystem - factory', () => {
     }
   });
 });
+
+describe('WorkspaceFileSystem - deleteFile', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await teardown(h);
+  });
+
+  it.each(['text', 'binary', 'empty'])(
+    'deletes only the requested %s file and audits the operation',
+    async (kind) => {
+      await fsp.mkdir(path.join(h.workspace, 'nested'));
+      const target = path.join(h.workspace, 'nested', 'file.bin');
+      await fsp.writeFile(
+        target,
+        kind === 'empty'
+          ? Buffer.alloc(0)
+          : kind === 'binary'
+            ? Buffer.from([0, 255, 128])
+            : 'text',
+      );
+      await fsp.writeFile(path.join(h.workspace, 'keep.txt'), 'keep');
+      expect(await h.fs.deleteFile!('nested/file.bin')).toBe(target);
+      expect(await fsp.stat(target).catch(() => null)).toBeNull();
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'keep.txt'), 'utf8'),
+      ).toBe('keep');
+      expect(
+        h.events.some(
+          (event) =>
+            event.type === FS_ACCESS_EVENT_TYPE &&
+            (event.data as { intent: string }).intent === 'delete',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['.', '..', '', 'folder/', 'folder', '../outside.txt'])(
+    'refuses invalid/non-file target %j',
+    async (target) => {
+      await fsp.mkdir(path.join(h.workspace, 'folder'));
+      await fsp.writeFile(path.join(h.workspace, 'folder', 'keep.txt'), 'keep');
+      await fsp.writeFile(path.join(h.scratch, 'outside.txt'), 'outside');
+      await expect(h.fs.deleteFile!(target)).rejects.toThrow();
+      expect(
+        await fsp.readFile(
+          path.join(h.workspace, 'folder', 'keep.txt'),
+          'utf8',
+        ),
+      ).toBe('keep');
+      expect(
+        await fsp.readFile(path.join(h.scratch, 'outside.txt'), 'utf8'),
+      ).toBe('outside');
+    },
+  );
+
+  it('rejects final symlinks without removing either link or target', async () => {
+    const target = path.join(h.workspace, 'target.txt');
+    await fsp.writeFile(target, 'keep');
+    await fsp.symlink(target, path.join(h.workspace, 'link'));
+    await expect(h.fs.deleteFile!('link')).rejects.toMatchObject({
+      kind: 'symlink_escape',
+    });
+    expect(
+      (await fsp.lstat(path.join(h.workspace, 'link'))).isSymbolicLink(),
+    ).toBe(true);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rejects a symlink parent escaping the workspace', async () => {
+    const outside = path.join(h.scratch, 'outside');
+    await fsp.mkdir(outside);
+    await fsp.writeFile(path.join(outside, 'keep.txt'), 'keep');
+    await fsp.symlink(outside, path.join(h.workspace, 'link'), 'dir');
+    await expect(h.fs.deleteFile!('link/keep.txt')).rejects.toMatchObject({
+      kind: 'symlink_escape',
+    });
+    expect(await fsp.readFile(path.join(outside, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      h.events.filter((event) => event.type === FS_DENIED_EVENT_TYPE),
+    ).toHaveLength(1);
+  });
+
+  it('rejects untrusted workspaces before deletion', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: false });
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    await expect(h.fs.deleteFile!('keep.txt')).rejects.toMatchObject({
+      kind: 'untrusted_workspace',
+    });
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rechecks generation after metadata work and before unlink', async () => {
+    await teardown(h);
+    let closed = false;
+    const failure = Object.assign(new Error('generation closed'), {
+      code: 'workspace_generation_closed',
+    });
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          if (closed) throw failure;
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const original = fsp.lstat;
+    vi.spyOn(fsp, 'lstat').mockImplementation(async (...args) => {
+      const stat = await original(...args);
+      if (args[0] === target) closed = true;
+      return stat;
+    });
+    await expect(h.fs.deleteFile!('keep.txt')).rejects.toBe(failure);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+});

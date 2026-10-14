@@ -66,7 +66,7 @@ async function makeHarness(opts?: {
       hostname: opts?.hostname ?? baseOpts.hostname,
     },
     undefined,
-    { fsFactory },
+    { fsFactory, primaryWorkspaceTrusted: opts?.trusted ?? true },
   );
   return { workspace, scratch, events, app };
 }
@@ -1504,5 +1504,70 @@ describe('fileUploadBodyParser 413 (oversized buffered body)', () => {
       .send(Buffer.from('x'));
     expect(res.status).toBe(415);
     expect(res.text).not.toContain('file_too_large');
+  });
+});
+
+describe('POST /workspaces/:workspace/file/delete', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness({ token: 'secret' });
+  });
+  afterEach(async () => teardown(h));
+  const endpoint = (workspace: string) =>
+    `/workspaces/${encodeURIComponent(workspace)}/file/delete`;
+
+  it('deletes a regular file through the qualified runtime', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'delete me');
+    const res = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'file.txt' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ kind: 'file_delete', path: 'file.txt' });
+    expect(
+      await fsp.stat(path.join(h.workspace, 'file.txt')).catch(() => null),
+    ).toBeNull();
+  });
+
+  it('requires mutation auth and never deletes on an unknown workspace', async () => {
+    const target = path.join(h.workspace, 'keep.txt');
+    await fsp.writeFile(target, 'keep');
+    const denied = await request(h.app)
+      .post(endpoint(h.workspace))
+      .set('Host', loopbackHost())
+      .send({ path: 'keep.txt' });
+    expect(denied.status).toBe(401);
+    const unknown = await request(h.app)
+      .post(endpoint('unknown'))
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ path: 'keep.txt' });
+    expect(unknown.status).toBe(400);
+    expect(await fsp.readFile(target, 'utf8')).toBe('keep');
+  });
+
+  it('rejects invalid bodies, directories and symlinks', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'folder'));
+    await fsp.writeFile(path.join(h.workspace, 'keep.txt'), 'keep');
+    await fsp.symlink(
+      path.join(h.workspace, 'keep.txt'),
+      path.join(h.workspace, 'link'),
+    );
+    for (const filePath of [null, '', '.', 'folder', 'link']) {
+      const res = await request(h.app)
+        .post(endpoint(h.workspace))
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .send({ path: filePath });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBeLessThan(500);
+    }
+    expect(await fsp.readFile(path.join(h.workspace, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      (await fsp.lstat(path.join(h.workspace, 'link'))).isSymbolicLink(),
+    ).toBe(true);
   });
 });
