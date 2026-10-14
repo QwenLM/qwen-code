@@ -78,6 +78,12 @@ on:
       - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
+  # Nightly home of the JDK 11/17 test-matrix lanes (see the 'test' job):
+  # version compatibility is a slow-moving target and does not need to ride
+  # every push and pull request. Every other job skips schedule ticks, so a
+  # nightly run is exactly the five test-matrix lanes.
+  schedule:
+    - cron: '35 2 * * *' # ~02:35 UTC, clear of CodeQL (03:00) and the E2E nightly (04:00)
 
 permissions:
   contents: 'read'
@@ -98,17 +104,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: 'ubuntu-latest'
-            java: '11'
-          - os: 'ubuntu-latest'
-            java: '17'
-          - os: 'ubuntu-latest'
-            java: '21'
-          - os: 'macos-latest'
-            java: '21'
-          - os: 'windows-latest'
-            java: '21'
+        # The JDK 11/17 lanes ride the nightly schedule (and manual dispatch)
+        # only. maven.compiler.release=11 already pins the bytecode and API
+        # level in every lane, so per-push 11/17 runs re-ran the same suites
+        # on older JVMs for runtime-only differences -- on every pull request
+        # AND every merge to main, up to 60 minutes a lane.
+        include: '${{ fromJSON((github.event_name == ''schedule'' || github.event_name == ''workflow_dispatch'') && ''[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]'' || ''[{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]'') }}'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -303,8 +304,11 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress clean test'
 
+      # 21, not 11: checkstyle is JDK-independent source analysis, and the
+      # 11/17 lanes are nightly-only now -- pinning it to 11 would drop
+      # style feedback from every pull request.
       - name: 'Run Java SDK Checkstyle'
-        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -317,6 +321,9 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
+      # Stays on the Java 11 lane (nightly now) to mirror the release
+      # toolchain; the release workflow re-verifies the build on Java 11 at
+      # release time.
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
@@ -341,6 +348,9 @@ jobs:
   # default merge-ref checkout is kept on both — the merge result is the point.
   flyway-migrations:
     name: 'Flyway migration version uniqueness'
+    # Nightly ticks belong to the JDK matrix alone; every non-test job keeps
+    # its pull_request / push / dispatch triggers unchanged.
+    if: "${{ github.event_name != 'schedule' }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
@@ -488,6 +498,7 @@ jobs:
 
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
+    if: "${{ github.event_name != 'schedule' }}"
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
     # pool-safe: the database is a per-job service container on a random host
@@ -765,6 +776,7 @@ jobs:
 
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
+    if: "${{ github.event_name != 'schedule' }}"
     runs-on: 'ubuntu-latest'
     # The step ceilings (45 + 9×10 + 20 + 50 = 205 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
@@ -962,6 +974,7 @@ jobs:
 
   event-transport-broker:
     name: 'EventTransport broker gates / RocketMQ 5.5.1 / Java 21'
+    if: "${{ github.event_name != 'schedule' }}"
     # Hosted: the gates boot their own broker on fixed ports.
     runs-on: 'ubuntu-latest'
     # 10 + 20 capped minutes plus the uncapped setup.
@@ -1036,6 +1049,7 @@ jobs:
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
+    if: "${{ github.event_name != 'schedule' }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
     # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
