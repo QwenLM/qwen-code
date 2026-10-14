@@ -879,7 +879,8 @@ class RuntimeBrokerHttpServerTest {
             ToolExecutionRecord landed = inner.findByIdempotencyKey("key");
             assertEquals(executionCallId, landed.getExecutionCallId());
             // Every route that reads the execution store maps the same outage
-            // class the same way: read, start (both variants), and cancel.
+            // class the same way: read, start (both variants), cancel, and
+            // acknowledge.
             failingMethod.set("findByExecutionCallId");
             failing.set(true);
             HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + executionCallId
@@ -911,6 +912,15 @@ class RuntimeBrokerHttpServerTest {
             var cancelError = JSON.parseObject(cancelled.body());
             assertEquals("runtime_broker_store_unavailable", cancelError.getString("code"));
             assertTrue(cancelError.getBooleanValue("retryable"));
+            HttpResponse<String> acknowledged = fixture.post(
+                    "/executions/" + executionCallId + ":acknowledge", Map.of(
+                            "protocolVersion", 1, "requestId", "acknowledge",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                            "receipt", Map.of("executionCallId", executionCallId)));
+            assertEquals(503, acknowledged.statusCode(), acknowledged.body());
+            var acknowledgeError = JSON.parseObject(acknowledged.body());
+            assertEquals("runtime_broker_store_unavailable", acknowledgeError.getString("code"));
+            assertTrue(acknowledgeError.getBooleanValue("retryable"));
             // A permanent invariant violation is not a store outage: it keeps
             // the non-retryable 500 the HTTP layer gives any other failure.
             outage.set(new IllegalStateException("Tool idempotency hash is invalid"));
@@ -928,7 +938,7 @@ class RuntimeBrokerHttpServerTest {
             assertSame(landed, inner.findByExecutionCallId(executionCallId));
             assertEquals(List.of("findByIdempotencyKey", "findByExecutionCallId",
                     "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
-                    "findByIdempotencyKey"),
+                    "findByExecutionCallId", "findByIdempotencyKey"),
                     intercepted);
         }
     }

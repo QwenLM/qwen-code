@@ -955,21 +955,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String runtimeSessionId, Map<String, Object> publisher) {
         requireOpen();
         Map<String, Object> descriptor = immutableMap(publisher, "publisher");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            context.lock();
-            try {
-                requireReadySessionRecord(context);
-                context.beginControl();
-            } finally {
-                context.unlock();
-            }
-            return safeStage(() -> {
-                requireUsableLease(context);
-                return transport.installPublisher(context.lease(), context.session(), descriptor);
-            }).thenApply(ignored -> Map.<String, Object>of("installed", true,
-                    "bindingGeneration", Long.toString(context.binding().getGeneration())))
-                    .whenComplete((ignored, error) -> context.endControl());
-        });
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenCompose(context -> {
+                    context.lock();
+                    try {
+                        requireReadySessionRecord(context);
+                        context.beginControl();
+                    } finally {
+                        context.unlock();
+                    }
+                    return safeStage(() -> {
+                        requireUsableLease(context);
+                        return transport.installPublisher(context.lease(), context.session(), descriptor);
+                    }).thenApply(ignored -> Map.<String, Object>of("installed", true,
+                            "bindingGeneration", Long.toString(context.binding().getGeneration())))
+                            .whenComplete((ignored, error) -> context.endControl());
+                })));
     }
 
     private CompletionStage<Map<String, Object>> acknowledgeLocalExecution(String harnessSessionId,
@@ -1008,7 +1009,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String executionCallId, Map<String, Object> receipt) {
         requireOpen();
         String id = BrokerValues.requireId(executionCallId, "executionCallId");
-        return requireReadySession(harnessSessionId, runtimeSessionId)
+        return mapStoreFailure(safeStage(() -> requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord execution = requireExecution(context, id);
                     if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
@@ -1063,7 +1064,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 original.getReference(), saved);
                     }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());
-                });
+                })));
     }
 
     private static boolean sameReceipt(Map<String, Object> expected,
