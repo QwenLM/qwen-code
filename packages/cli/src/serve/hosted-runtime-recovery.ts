@@ -1073,6 +1073,7 @@ async function sessionCommandJournalAnswer(
         // The accepted/consumed arm above answered already; what remains
         // of the delivery vocabulary is exactly the settle-relevant five.
         state as 'planned' | 'accepting' | 'rejected' | 'cancelled' | 'unknown',
+        record?.kind,
       ),
     );
   }
