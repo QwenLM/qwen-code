@@ -33,6 +33,7 @@ on:
       - 'scripts/run-java-daemon-sdk-e2e.ts'
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
+      - 'scripts/rocketmq-lite-broker.sh'
       - 'scripts/check-flyway-migrations.js'
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/check-contract-version.js'
@@ -70,6 +71,7 @@ on:
       - 'scripts/run-java-daemon-sdk-e2e.ts'
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
+      - 'scripts/rocketmq-lite-broker.sh'
       - 'scripts/check-flyway-migrations.js'
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/check-contract-version.js'
@@ -939,6 +941,80 @@ jobs:
           name: 'o4-mysql-gate-reports'
           path: 'packages/sdk-java/managed-agent-server/target/failsafe-reports/'
           retention-days: 7
+
+  event-transport-broker:
+    name: 'EventTransport broker gates / RocketMQ 5.5.1 / Java 21'
+    # Hosted: the gates boot their own broker on fixed ports.
+    runs-on: 'ubuntu-latest'
+    # 10 + 20 capped minutes plus the uncapped setup.
+    timeout-minutes: 40
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          # 17 runs the broker; 21, last, is the default.
+          java-version: |-
+            17
+            21
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/**/pom.xml'
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Install Managed Agent dependencies'
+        id: 'managed_dependencies'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+      - name: 'Cache the RocketMQ distribution'
+        uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
+        with:
+          # The script checks the zip against a pinned SHA-512.
+          path: '${{ runner.temp }}/rocketmq-dist'
+          key: 'rocketmq-5.5.1-bin-release'
+      - name: 'Start the RocketMQ LiteTopic cluster'
+        id: 'broker'
+        # Runs the broker on setup-java's JAVA_HOME_17_X64.
+        timeout-minutes: 10
+        env:
+          RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
+          RMQ_CACHE_DIR: '${{ runner.temp }}/rocketmq-dist'
+          RMQ_EXTRA_GROUPS: 'qwen-transport-gate-oracle'
+          RMQ_NORMAL_TOPIC: 'qwen-managed-events-normal'
+          RMQ_NORMAL_GROUPS: 'qwen-transport-gate-normal-probe'
+        run: 'scripts/rocketmq-lite-broker.sh start'
+      - name: 'Verify the EventTransport broker gates'
+        id: 'event_transport'
+        # Outlives the 900 s failsafe fork (#13503).
+        timeout-minutes: 20
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml \
+            -Pevent-transport-broker-gates \
+            -Dqwen.gate.rocketmq.endpoints=127.0.0.1:18081 \
+            -Dqwen.gate.rocketmq.topic=qwen-managed-events \
+            -Dqwen.gate.rocketmq.normal-topic=qwen-managed-events-normal clean verify && \
+            node scripts/check-failsafe-reports.js event-transport packages/sdk-java/managed-agent-server
+      - name: 'Upload broker gate reports'
+        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'event-transport-broker-gate-reports'
+          path: |-
+            packages/sdk-java/managed-agent-server/target/failsafe-reports/
+            packages/sdk-java/managed-agent-server/target/event-transport-latency.json
+            ${{ runner.temp }}/rocketmq/logs/
+            ${{ runner.temp }}/rocketmq/home/logs/
+          retention-days: 7
+      - name: 'Stop the RocketMQ cluster'
+        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        env:
+          RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
+        run: 'scripts/rocketmq-lite-broker.sh stop'
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
