@@ -3,10 +3,17 @@ package com.alibaba.qwen.code.managedagent.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitor;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
@@ -981,6 +988,21 @@ class ChildWorktreeGitTest {
         Files.createDirectories(linked.resolve("nested"));
         assertThat(git.layout(root, "linked/nested")).isEqualTo(new ChildWorktreeGit.Layout("linked", "nested"));
         assertThat(git.open(root, "linked").commonDir()).isEqualTo(project.resolve(".git"));
+    }
+
+    @Test
+    void aVanishedObjectEntryDoesNotRejectTheRepository() throws Exception {
+        Path objects = project.resolve(".git/objects");
+        Path removed = objects.resolve("removed-object");
+        try (var files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            files.when(() -> Files.walkFileTree(eq(objects), anySet(), eq(1), any()))
+                    .thenAnswer(invocation -> {
+                        FileVisitor<Path> visitor = invocation.getArgument(3);
+                        visitor.visitFileFailed(removed, new NoSuchFileException(removed.toString()));
+                        return invocation.callRealMethod();
+                    });
+            assertThat(git.open(root, "project").commonDir()).isEqualTo(project.resolve(".git"));
+        }
     }
 
     @Test

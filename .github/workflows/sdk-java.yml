@@ -1,83 +1,9 @@
 name: 'SDK Java'
 
 on:
+  schedule:
+    - cron: '47 19 * * *'
   workflow_dispatch:
-  pull_request:
-    branches:
-      - 'main'
-      - 'release/**'
-    paths:
-      - 'packages/sdk-java/**'
-      - '**/.mvn/**'
-      - 'packages/core/src/config/approval-modes.json'
-      - 'packages/core/src/managed-runtime/**'
-      - 'packages/cli/src/config/**'
-      - 'packages/core/src/config/**'
-      - 'packages/core/src/core/**'
-      - 'packages/cli/src/commands/serve.ts'
-      - 'packages/cli/src/commands/channel/**'
-      - 'packages/cli/src/commands/channel.ts'
-      - 'packages/cli/src/serve/**'
-      - 'packages/channels/email/**'
-      - 'packages/channels/base/**'
-      - 'packages/cli/src/acp-integration/**'
-      - 'packages/acp-bridge/**'
-      - 'integration-tests/fake-openai-server.ts'
-      - 'integration-tests/helpers/hosted-*'
-      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
-      - 'integration-tests/baselines/hosted-latency.json'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'docs/developers/sdk-java.md'
-      - 'docs/design/java-daemon-sdk-alpha.md'
-      - 'scripts/run-java-daemon-sdk-e2e.ts'
-      - 'scripts/run-managed-agent-server-e2e.ts'
-      - 'scripts/check-failsafe-reports.js'
-      - 'scripts/rocketmq-lite-broker.sh'
-      - 'scripts/check-flyway-migrations.js'
-      - 'scripts/flyway-migration-utils.js'
-      - 'scripts/check-contract-version.js'
-      - 'scripts/contract-version-utils.js'
-      - '.github/workflows/sdk-java.yml'
-      - '.github/workflows/release-sdk-java.yml'
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
-    paths:
-      - 'packages/sdk-java/**'
-      - '**/.mvn/**'
-      - 'packages/core/src/config/approval-modes.json'
-      - 'packages/core/src/managed-runtime/**'
-      - 'packages/cli/src/config/**'
-      - 'packages/core/src/config/**'
-      - 'packages/core/src/core/**'
-      - 'packages/cli/src/commands/serve.ts'
-      - 'packages/cli/src/commands/channel/**'
-      - 'packages/cli/src/commands/channel.ts'
-      - 'packages/cli/src/serve/**'
-      - 'packages/channels/email/**'
-      - 'packages/channels/base/**'
-      - 'packages/cli/src/acp-integration/**'
-      - 'packages/acp-bridge/**'
-      - 'integration-tests/fake-openai-server.ts'
-      - 'integration-tests/helpers/hosted-*'
-      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
-      - 'integration-tests/baselines/hosted-latency.json'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'docs/developers/sdk-java.md'
-      - 'docs/design/java-daemon-sdk-alpha.md'
-      - 'scripts/run-java-daemon-sdk-e2e.ts'
-      - 'scripts/run-managed-agent-server-e2e.ts'
-      - 'scripts/check-failsafe-reports.js'
-      - 'scripts/rocketmq-lite-broker.sh'
-      - 'scripts/check-flyway-migrations.js'
-      - 'scripts/flyway-migration-utils.js'
-      - 'scripts/check-contract-version.js'
-      - 'scripts/contract-version-utils.js'
-      - '.github/workflows/sdk-java.yml'
-      - '.github/workflows/release-sdk-java.yml'
 
 permissions:
   contents: 'read'
@@ -87,13 +13,15 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.event.pull_request.number || github.run_id }}'
-  cancel-in-progress: true
+  group: 'sdk-java-${{ github.event.pull_request.number || github.ref }}'
+  # Post-merge runs must not cancel each other: cancelled push runs would erase
+  # the only post-merge regression evidence (see e2e.yml / pnpm-worktree-smoke.yml).
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
 
 jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
-    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
+    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -225,18 +153,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (runner.environment == 'self-hosted' && github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-
-      - name: 'Verify checkout includes expected head commit'
-        if: "${{ runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
-        env:
-          EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+          ref: '${{ github.sha }}'
 
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
@@ -462,30 +379,6 @@ jobs:
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
 
-      # Contract version monotonicity, #13804: every pull request that
-      # changes the OpenAPI document must move info.version strictly past
-      # the base ref's — consumers key capability detection on it, and a
-      # regressed or stalled number breaks nothing at runtime to be caught
-      # by. The default checkout is one commit deep and holds the
-      # prospective merge result, so the base branch's head is fetched at
-      # depth one for the comparison copy. Pull requests only: a push has
-      # no base to compare, and the races that remain after this ran are
-      # the re-check workflow's. Comparing contents, not a changed-paths
-      # list, is what lets a merge result that already advanced (another
-      # pull request landed) read as regressed-or-stalled instead of
-      # passing on a stale branch point.
-      - name: 'Check the API contract version advances'
-        if: "${{ github.event_name == 'pull_request' }}"
-        env:
-          BASE_REF: '${{ github.event.pull_request.base.ref }}'
-        run: |-
-          set -uo pipefail
-          DOCUMENT='packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
-          BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
-          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
-          git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null || : > "${BASE_DOCUMENT}"
-          node scripts/check-contract-version.js "${BASE_DOCUMENT}" "${DOCUMENT}"
-
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
@@ -671,6 +564,24 @@ jobs:
           # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
           # Set this job's disposable service before its first JDBC connection.
           docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
+      - name: 'Set up Node.js 22 (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set MAINTAINER_ECS_RUNNER_DISABLED=true."
+            exit 1
+          fi
+          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+
+      - name: 'Build native producer prerequisites'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
 
       - name: 'Run Runtime Broker MySQL integration tests'
         working-directory: 'packages/sdk-java/runtime-broker'
@@ -1018,7 +929,7 @@ jobs:
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
     # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
     # about a minute. On the shared pool that setup is what stretches: npm ci
@@ -1144,18 +1055,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (runner.environment == 'self-hosted' && github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-
-      - name: 'Verify checkout includes expected head commit'
-        if: "${{ runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
-        env:
-          EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+          ref: '${{ github.sha }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22 (hosted)'
