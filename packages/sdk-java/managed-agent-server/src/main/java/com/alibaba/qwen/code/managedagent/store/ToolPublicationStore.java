@@ -1,23 +1,32 @@
 package com.alibaba.qwen.code.managedagent.store;
-
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
 import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
+
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
@@ -25,14 +34,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import javax.sql.DataSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** Reserves publication capacity and fences producer grants against the Session owner. */
 public final class ToolPublicationStore {
@@ -234,23 +235,31 @@ public final class ToolPublicationStore {
             String suppliedHash, Row row, JsonNode binding, Original original, Access access,
             boolean deferActivationLapse) {
         JsonNode key = binding.get("sessionKey");
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, row.tenant(), row.session());
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
-        var head = jdbc.query("SELECT workspace_id, state, storage_version, writer_id, writer_generation,"
-                        + " CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
-                        + " recovery_status, activation_epoch, journal_revision,"
-                        + " activation_id, activation_phase, activation_event_epoch, activation_expires_at,"
-                        + " activation_head_revision"
-                        + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+        var head = jdbc.query(
+                                "SELECT workspace_id, state, storage_version, writer_id,"
+                                    + " writer_generation, CASE WHEN writer_lease_until >"
+                                    + " CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
+                                    + " recovery_status, activation_epoch, journal_revision,"
+                                    + " activation_id, activation_phase, activation_event_epoch,"
+                                    + " activation_expires_at, activation_head_revision FROM"
+                                    + " ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
+                                    + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND"
+                                    + " session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session()).getFirst();
         require(((Number) head.get("storage_version")).intValue() >= 1
                 && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
                 "Managed Session storage version is unsupported.");
-        var current = jdbc.query("SELECT token_hash, state, expires_at, binding_digest, binding_json,"
-                + " tenant_id, workspace_id, session_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
-                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+        var current = jdbc.query(
+                                "SELECT token_hash, state, expires_at, binding_digest,"
+                                    + " binding_json, tenant_id, workspace_id, session_id, CASE"
+                                    + " WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM"
+                                    + " ma_output_capture WHERE scope_key = ? AND publication_id ="
+                                    + " ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
         long nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         require(((Number) current.get("quarantined")).intValue() == 0, "Publication is quarantined");
@@ -305,9 +314,11 @@ public final class ToolPublicationStore {
                     nowEpoch, head, deferActivationLapse);
         }
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
-        Integer writerLive = jdbc.queryForObject("SELECT CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6)"
-                + " THEN 1 ELSE 0 END FROM ma_session_head"
-                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
+        Integer writerLive = jdbc.queryForObject(
+                        "SELECT CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0"
+                            + " END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
+                            + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id"
+                            + " = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
         if (writerLive == null || writerLive != 1) {
             require(false, "Original Session or activation expired");
         }
@@ -327,9 +338,8 @@ public final class ToolPublicationStore {
     }
 
     /**
-     * Authorizes against the journal scan for heads whose activation columns
-     * predate migration V36, then backfills the head so later checks are
-     * answered from the head row.
+     * Authorizes against the journal scan for heads whose activation columns predate migration V36,
+     * then backfills the head so later checks are answered from the head row.
      */
     private long requireLegacyActivation(String tenant, String session,
             JsonNode binding, long journalRevision, long nowEpoch,
@@ -337,8 +347,9 @@ public final class ToolPublicationStore {
         JsonNode found = null;
         for (long revision = journalRevision; revision > 0 && found == null; revision--) {
             // The locking head read can see a newer revision than this transaction's snapshot.
-            byte[] record = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
-                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ? FOR UPDATE",
+            byte[] record = jdbc.queryForObject(
+                            "SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND"
+                                    + " session_id = ? AND journal_revision = ? FOR UPDATE",
                     byte[].class, tenant, session, revision);
             String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
             for (int index = lines.length - 1; index >= 0; index--) {
@@ -394,10 +405,9 @@ public final class ToolPublicationStore {
     }
 
     /**
-     * Backfills the head's activation columns from a journal scan; a head
-     * already holding exactly these values is not rewritten. Both callers
-     * reach this only after requiring an `active` phase and the binding's
-     * contract-validated id, so the values always fit the columns.
+     * Backfills the head's activation columns from a journal scan; a head already holding exactly
+     * these values is not rewritten. Both callers reach this only after requiring an `active` phase
+     * and the binding's contract-validated id, so the values always fit the columns.
      */
     private void backfillActivation(String tenant, String session,
             String activationId, String phase, long epoch, Long expiresAt,
@@ -406,12 +416,11 @@ public final class ToolPublicationStore {
                 journalRevision)) {
             return;
         }
-        jdbc.update("UPDATE ma_session_head SET"
-                        + " activation_id = ?, activation_phase = ?,"
-                        + " activation_event_epoch = ?,"
-                        + " activation_expires_at = ?,"
-                        + " activation_head_revision = ? WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ?",
+        jdbc.update(
+                "UPDATE ma_session_head SET activation_id = ?, activation_phase = ?,"
+                    + " activation_event_epoch = ?, activation_expires_at = ?,"
+                    + " activation_head_revision = ? WHERE head_kind = 'MANAGED_SESSION' AND"
+                    + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 activationId, phase, epoch, expiresAt, journalRevision,
                 ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), tenant, session);
     }
@@ -428,10 +437,12 @@ public final class ToolPublicationStore {
         PublicationTarget target = lockPublicationPlacement(key, id, candidate);
         lockOriginal(target.binding(), false, target.runtime());
         // Every mutation uses this order, including no-start capacity release.
-        jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        String savedTenant = jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
-                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE", String.class, tenantKey);
+        jdbc.update(
+                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?,"
+                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
+        String savedTenant = jdbc.queryForObject(
+                        "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
+                                + " 'output_publication' AND tenant_key = ? FOR UPDATE", String.class, tenantKey);
         require(tenant.equals(savedTenant), "Tenant key conflicts");
         JsonNode owner = request.get("owner");
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
@@ -469,15 +480,18 @@ public final class ToolPublicationStore {
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
             jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
-                    + " capture_held_bytes = capture_used_bytes, producer_held_bytes = producer_used_bytes,"
-                    + " admission_held_bytes = CASE WHEN producer_phase IN ('FINISHED', 'REFERENCED')"
-                    + " THEN admission_held_bytes ELSE admission_used_bytes END"
-                    + " WHERE tenant_key = ? AND state = 'OPEN' AND expires_at <= ?", tenantKey, writer.now());
-            var totals = jdbc.query("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
-                    + " + admission_held_bytes), 0) AS reserved,"
-                    + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND producer_phase IN ('OPEN', 'FINISHING')"
-                    + " THEN 1 ELSE 0 END), 0) AS captures"
-                    + " FROM ma_output_capture WHERE tenant_key = ? AND state <> 'NOT_STARTED'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenantKey).getFirst();
+                    + " capture_held_bytes = capture_used_bytes, producer_held_bytes ="
+                        + " producer_used_bytes, admission_held_bytes = CASE WHEN producer_phase IN"
+                        + " ('FINISHED', 'REFERENCED') THEN admission_held_bytes ELSE"
+                        + " admission_used_bytes END WHERE tenant_key = ? AND state = 'OPEN' AND"
+                        + " expires_at <= ?", tenantKey, writer.now());
+            var totals = jdbc.query(
+                                    "SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes +"
+                                        + " admission_held_bytes), 0) AS reserved,"
+                                        + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND"
+                                        + " producer_phase IN ('OPEN', 'FINISHING') THEN 1 ELSE 0"
+                                        + " END), 0) AS captures FROM ma_output_capture WHERE"
+                                        + " tenant_key = ? AND state <> 'NOT_STARTED'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenantKey).getFirst();
             long reserved = ((Number) totals.get("reserved")).longValue();
             long count = ((Number) totals.get("captures")).longValue();
             Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
@@ -487,10 +501,11 @@ public final class ToolPublicationStore {
                     && sessionReserved <= capacity.sessionBytes() - allocation
                     && count < capacity.activeCaptures(), "Publication capacity exhausted");
             jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
-                            + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
-                            + " token_hash, state, expires_at, capture_bytes, producer_bytes, admission_bytes,"
-                            + " capture_held_bytes, producer_held_bytes, admission_held_bytes, write_evidence)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
+                            + " session_id, publication_id, execution_key, capture_id, binding_json,"
+                        + " binding_digest, token_hash, state, expires_at, capture_bytes,"
+                        + " producer_bytes, admission_bytes, capture_held_bytes,"
+                        + " producer_held_bytes, admission_held_bytes, write_evidence) VALUES (?,"
+                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
                     scope, tenantKey, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
                     text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
                     ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES,
@@ -506,7 +521,9 @@ public final class ToolPublicationStore {
                     && owner.get("writerGeneration").longValue() == binding.get("writerGeneration").longValue(),
                     "Original writer is fenced");
             long expires = requireEvidence(binding, writerToken, writer, false);
-            jdbc.update("UPDATE ma_output_capture SET expires_at = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update(
+                    "UPDATE ma_output_capture SET expires_at = ? WHERE scope_key = ? AND"
+                            + " publication_id = ?",
                     expires, scope, id);
             return grant(id, row.withState("OPEN", expires));
         }
@@ -521,20 +538,22 @@ public final class ToolPublicationStore {
             Long attempted = jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
                     + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
             require(published == 0 && attempted == 0 && "OPEN".equals(jdbc.queryForObject(
-                    "SELECT producer_phase FROM ma_output_capture WHERE scope_key = ?"
-                            + " AND publication_id = ?", String.class, scope, id)),
+                                                    "SELECT producer_phase FROM ma_output_capture"
+                                                        + " WHERE scope_key = ? AND publication_id"
+                                                        + " = ?", String.class, scope, id)),
                     "Publication has accepted producer work");
             state = "NOT_STARTED";
         } else if ("NOT_STARTED".equals(row.state())) {
             state = row.state();
         }
-        jdbc.update("UPDATE ma_output_capture SET state = ?, expires_at = NULL,"
-                + " capture_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_used_bytes END,"
-                + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE producer_used_bytes END,"
-                + " admission_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0"
-                + " WHEN producer_phase IN ('FINISHED', 'REFERENCED') THEN admission_held_bytes"
-                + " ELSE admission_used_bytes END"
-                + " WHERE scope_key = ? AND publication_id = ?", state, state, state, state, scope, id);
+        jdbc.update(
+                "UPDATE ma_output_capture SET state = ?, expires_at = NULL, capture_held_bytes ="
+                    + " CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_used_bytes END,"
+                    + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE"
+                    + " producer_used_bytes END, admission_held_bytes = CASE WHEN ? = 'NOT_STARTED'"
+                    + " THEN 0 WHEN producer_phase IN ('FINISHED', 'REFERENCED') THEN"
+                    + " admission_held_bytes ELSE admission_used_bytes END WHERE scope_key = ? AND"
+                    + " publication_id = ?", state, state, state, state, scope, id);
         return grant(id, row.withState(state, null));
     }
 
@@ -649,10 +668,9 @@ public final class ToolPublicationStore {
     }
 
     /**
-     * Reads the tool.intent event at the revision its sequence belongs to,
-     * keeping the scan's fail-closed checks: the located revision's page
-     * must be exactly that revision, and the revisions above it up to the
-     * locked head must be gap-free.
+     * Reads the tool.intent event at the revision its sequence belongs to, keeping the scan's
+     * fail-closed checks: the located revision's page must be exactly that revision, and the
+     * revisions above it up to the locked head must be gap-free.
      */
     private JsonNode readIntent(JsonNode b, JsonNode key, String writerToken,
             long intentSequence,
@@ -806,7 +824,8 @@ public final class ToolPublicationStore {
             execution = jdbc.execute((ConnectionCallback<ToolExecutionRecord>) connection -> {
                 var target = DataSourceUtils.getTargetConnection(connection);
                 require(DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()),
-                        "CSI publication requires the original transaction connection");
+                                                "CSI publication requires the original transaction"
+                                                        + " connection");
                 if (acknowledgement) {
                     var session = new JdbcRuntimeSessionRepository(jdbc.getDataSource()).findByIdForUpdate(
                             target, locked.binding().getRequest().getScope(), text(b.path("reference"), "sessionId"));
@@ -1012,8 +1031,9 @@ public final class ToolPublicationStore {
         require(sameResult, "Original settled Broker result conflicts with terminal result");
         JsonNode terminal = finished.path("terminal");
         var publication = jdbc.query("SELECT producer_phase, finish_operation_id, finish_digest,"
-                + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
-                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0"
+                                    + " END AS quarantined FROM ma_output_capture WHERE scope_key ="
+                                    + " ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
         require(("FINISHED".equals(publication.get("producer_phase"))
                 || "REFERENCED".equals(publication.get("producer_phase")))
@@ -1022,9 +1042,12 @@ public final class ToolPublicationStore {
                 && text(terminal, "resourceId").equals(publication.get("terminal_resource_id"))
                 && text(terminal, "digest").equals(publication.get("finish_digest")),
                 "Original finished publication changed");
-        var operation = jdbc.query("SELECT scope_key, publication_id, operation_id, state, slot_key, request_digest"
-                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ?"
-                + " AND operation_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId, text(finished, "finishOperationId")).getFirst();
+        var operation = jdbc.query(
+                                "SELECT scope_key, publication_id, operation_id, state, slot_key,"
+                                    + " request_digest FROM ma_operation WHERE operation_kind IN"
+                                    + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
+                                    + " scope_key = ? AND publication_id = ? AND operation_id = ?"
+                                    + " FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId, text(finished, "finishOperationId")).getFirst();
         require("SUCCEEDED".equals(operation.get("state")) && "terminal".equals(operation.get("slot_key"))
                 && (!acknowledgement || scope.equals(operation.get("scope_key"))
                         && publicationId.equals(operation.get("publication_id"))
@@ -1032,9 +1055,12 @@ public final class ToolPublicationStore {
                 && hash(JSON.createArrayNode().add("terminal").add(terminal.path("byteLength").longValue())
                         .add(text(terminal, "digest")).toString()).equals(operation.get("request_digest")),
                 "Original finish operation changed");
-        var object = jdbc.query("SELECT scope_key, publication_id, resource_id, kind AS resource_kind, byte_length, sha256, capture_state AS state, operation_id"
-                + " FROM ma_resource WHERE scope_key = ? AND publication_id = ?"
-                + " AND slot_key = X'7465726d696e616c' FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
+        var object = jdbc.query(
+                                "SELECT scope_key, publication_id, resource_id, kind AS"
+                                    + " resource_kind, byte_length, sha256, capture_state AS state,"
+                                    + " operation_id FROM ma_resource WHERE scope_key = ? AND"
+                                    + " publication_id = ? AND slot_key = X'7465726d696e616c' FOR"
+                                    + " UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
         require("VERIFIED".equals(object.get("state"))
                 && (!acknowledgement || scope.equals(object.get("scope_key"))
                         && publicationId.equals(object.get("publication_id")))
@@ -1067,10 +1093,12 @@ public final class ToolPublicationStore {
 
     private void lockTenant(String tenant) {
         String tenantKey = ManagedSchemaKeys.key(tenant);
-        jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        require(tenant.equals(jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
-                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE", String.class, tenantKey)), "Publication tenant conflicts");
+        jdbc.update(
+                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?,"
+                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
+        require(tenant.equals(jdbc.queryForObject(
+                                "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
+                                        + " 'output_publication' AND tenant_key = ? FOR UPDATE", String.class, tenantKey)), "Publication tenant conflicts");
     }
 
     private static JsonNode grant(String id, Row row) {
