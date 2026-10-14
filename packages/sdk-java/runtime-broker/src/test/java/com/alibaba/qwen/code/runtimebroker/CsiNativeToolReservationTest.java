@@ -8,17 +8,18 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Instant;
-import java.util.List;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
 
 /** Tuple-validation units only; the supplied prefix does not prove native SQL admission. */
 class CsiNativeToolReservationTest {
@@ -163,7 +164,7 @@ class CsiNativeToolReservationTest {
             var prior = tuple(first, 0);
             prepare(connection, first, prior);
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("UPDATE qwen_tool_execution SET execution_state = 'UNKNOWN'");
+                statement.executeUpdate("UPDATE ma_tool_execution SET execution_state = 'UNKNOWN'");
             }
             var next = prefix(capturedParts(), UUID.randomUUID().toString(), UUID.randomUUID().toString());
             var batches = new HashMap<>(first.batches());
@@ -185,8 +186,9 @@ class CsiNativeToolReservationTest {
                 assertEquals(combined.pendingBatch().messageId(), ref.get("batchId"));
                 assertEquals(index, ((Number) ref.get("ordinal")).intValue());
             }
-            try (var statement = connection.prepareStatement("UPDATE qwen_tool_execution SET runtime_session_id = ?, runtime_session_key = ?"
-                    + " WHERE execution_call_id = ?")) {
+            try (var statement = connection.prepareStatement(
+                            "UPDATE ma_tool_execution SET runtime_session_id = ?,"
+                                    + " runtime_session_key = ? WHERE execution_call_id = ?")) {
                 statement.setString(1, "foreign-session");
                 statement.setString(2, JdbcRepositorySupport.valueKey("foreign-session"));
                 statement.setString(3, prior.execution().getExecutionCallId());
@@ -237,7 +239,9 @@ class CsiNativeToolReservationTest {
             CsiNativeToolReservation.preflightHistory(connection, original, prefix, frozen(prefix, tuples), inventory);
             assertEquals(0, published(connection));
             try (var statement = connection.createStatement();
-                    var rows = statement.executeQuery("SELECT resource_id, publish_command_id, state FROM qwen_managed_session_resource")) {
+                    var rows = statement.executeQuery(
+                                    "SELECT resource_id, publish_command_id, state FROM"
+                                            + " ma_resource")) {
                 while (rows.next()) {
                     assertEquals(rows.getString("resource_id"), rows.getString("publish_command_id"));
                     assertEquals("REFERENCED", rows.getString("state"));
@@ -264,9 +268,22 @@ class CsiNativeToolReservationTest {
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("INSERT INTO qwen_managed_session_journal_tx VALUES ('tenant','workspace','" + SESSION
-                        + "',99,15,15,1,'commitFileHistory')");
-                statement.executeUpdate("INSERT INTO qwen_managed_session_resource_ref SELECT session_scope_key, tenant_id, workspace_id, session_id, resource_id, 99 FROM qwen_managed_session_resource");
+                statement.executeUpdate(
+                        "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
+                                + " journal_revision, command_key_hash, transaction_id, operation,"
+                                + " command_id, content_digest, first_sequence, last_sequence,"
+                                + " event_count, writer_generation, writer_id, writer_token_hash,"
+                                + " activation_epoch, record_encoding, record_bytes, byte_length,"
+                                + " record_digest, created_at) VALUES ('tenant','workspace','"
+                                + SESSION
+                                + "',99,'0000000000000000000000000000000000000000000000000000000000000099','fixture-99','commitFileHistory','fixture-99','0000000000000000000000000000000000000000000000000000000000000000',15,15,1,1,'fixture-owner','0000000000000000000000000000000000000000000000000000000000000000',1,'identity',X'7b7d',2,'0000000000000000000000000000000000000000000000000000000000000000',CURRENT_TIMESTAMP)");
+                statement.executeUpdate(
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                            + " resource_id, journal_revision, created_at) SELECT"
+                            + " session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key,"
+                            + " tenant_id, workspace_id, session_id, resource_id, 99,"
+                            + " CURRENT_TIMESTAMP FROM ma_resource");
             }
             assertEquals(3, CsiNativeToolReservation.complete(connection, original, frozen, inventory).size());
             var retry = tuples.getFirst();
@@ -274,18 +291,26 @@ class CsiNativeToolReservationTest {
                     inventory, retry.execution(), retry.input(), retry.definition()).getExecutionCallId());
             assertThrows(RuntimeException.class, () -> prepare(connection, frozen, tuple(frozen, 0)));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("UPDATE qwen_managed_session_resource_ref SET journal_revision = 100");
+                statement.executeUpdate("UPDATE ma_resource_ref SET journal_revision = 100");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("UPDATE qwen_managed_session_resource_ref SET journal_revision = 99");
-                statement.executeUpdate("INSERT INTO qwen_managed_session_journal_tx VALUES ('tenant','workspace','" + SESSION
-                        + "',100,15,15,1,'commitFileHistory')");
+                statement.executeUpdate("UPDATE ma_resource_ref SET journal_revision = 99");
+                statement.executeUpdate(
+                        "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
+                                + " journal_revision, command_key_hash, transaction_id, operation,"
+                                + " command_id, content_digest, first_sequence, last_sequence,"
+                                + " event_count, writer_generation, writer_id, writer_token_hash,"
+                                + " activation_epoch, record_encoding, record_bytes, byte_length,"
+                                + " record_digest, created_at) VALUES ('tenant','workspace','"
+                                + SESSION
+                                + "',100,'0000000000000000000000000000000000000000000000000000000000000100','fixture-100','commitFileHistory','fixture-100','0000000000000000000000000000000000000000000000000000000000000000',15,15,1,1,'fixture-owner','0000000000000000000000000000000000000000000000000000000000000000',1,'identity',X'7b7d',2,'0000000000000000000000000000000000000000000000000000000000000000',CURRENT_TIMESTAMP)");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("DELETE FROM qwen_managed_session_journal_tx WHERE journal_revision = 100");
-                statement.executeUpdate("DELETE FROM qwen_tool_execution");
+                statement.executeUpdate(
+                        "DELETE FROM ma_session_journal_tx WHERE journal_revision = 100");
+                statement.executeUpdate("DELETE FROM ma_tool_execution");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
         }
@@ -307,7 +332,13 @@ class CsiNativeToolReservationTest {
                     CsiNativeToolReservation.inventory(connection, original));
             associationTables(connection);
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("INSERT INTO qwen_managed_session_resource_ref SELECT session_scope_key, tenant_id, workspace_id, session_id, resource_id, 99 FROM qwen_managed_session_resource");
+                statement.executeUpdate(
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                            + " resource_id, journal_revision, created_at) SELECT"
+                            + " session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key,"
+                            + " tenant_id, workspace_id, session_id, resource_id, 99,"
+                            + " CURRENT_TIMESTAMP FROM ma_resource");
             }
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
@@ -317,12 +348,12 @@ class CsiNativeToolReservationTest {
                         frozen, inventory, candidate[0], candidate[1]));
             }
             try (var statement = connection.createStatement();
-                    var row = statement.executeQuery("SELECT COUNT(*) FROM qwen_managed_session_journal_tx")) {
+                    var row = statement.executeQuery("SELECT COUNT(*) FROM ma_session_journal_tx")) {
                 row.next();
                 assertEquals(0, row.getInt(1));
             }
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("UPDATE qwen_managed_session_resource_ref SET workspace_id = 'foreign'");
+                statement.executeUpdate("UPDATE ma_resource_ref SET workspace_id = 'foreign'");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original,
                     frozen, inventory, 15, 99));
@@ -349,7 +380,13 @@ class CsiNativeToolReservationTest {
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, entered, inventory));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("INSERT INTO qwen_managed_session_resource_ref SELECT session_scope_key, tenant_id, workspace_id, session_id, resource_id, 99 FROM qwen_managed_session_resource WHERE state = 'REFERENCED'");
+                statement.executeUpdate(
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                            + " resource_id, journal_revision, created_at) SELECT"
+                            + " session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key,"
+                            + " tenant_id, workspace_id, session_id, resource_id, 99,"
+                            + " CURRENT_TIMESTAMP FROM ma_resource WHERE state = 'REFERENCED'");
             }
             assertEquals(2, CsiNativeToolReservation.complete(connection, original, entered, inventory).size());
             assertEquals(first.execution().getExecutionCallId(), CsiNativeToolReservation.prepare(connection, original,
@@ -358,7 +395,7 @@ class CsiNativeToolReservationTest {
             var all = CsiNativeToolReservation.complete(connection, original, entered, inventory);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.qualifyNativeBatch(entered, all, true));
             try (var statement = connection.createStatement()) {
-                statement.executeUpdate("UPDATE qwen_managed_session_resource_ref SET journal_revision = 100");
+                statement.executeUpdate("UPDATE ma_resource_ref SET journal_revision = 100");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, entered, inventory));
         }
@@ -424,7 +461,8 @@ class CsiNativeToolReservationTest {
 
     private static int published(Connection connection) throws Exception {
         try (var statement = connection.createStatement();
-                var row = statement.executeQuery("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE state = 'PUBLISHED'")) {
+                var row = statement.executeQuery(
+                                "SELECT COUNT(*) FROM ma_resource WHERE state = 'PUBLISHED'")) {
             row.next();
             return row.getInt(1);
         }
@@ -449,10 +487,14 @@ class CsiNativeToolReservationTest {
     }
 
     private static void associationTables(Connection connection) throws Exception {
-        // Minimal association-query fixture only; not an original native journal or SQL admission proof.
-        try (var statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE qwen_managed_session_journal_tx (tenant_id VARCHAR, workspace_id VARCHAR, session_id VARCHAR, journal_revision BIGINT, first_sequence BIGINT, last_sequence BIGINT, event_count BIGINT, operation VARCHAR)");
-            statement.execute("CREATE TABLE qwen_managed_session_resource_ref (session_scope_key VARCHAR, tenant_id VARCHAR, workspace_id VARCHAR, session_id VARCHAR, resource_id VARCHAR, journal_revision BIGINT)");
+        assertEquals(0, count(connection, "ma_resource_ref"));
+    }
+
+    private static int count(Connection connection, String table) throws Exception {
+        try (var statement = connection.createStatement();
+                var rows = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+            rows.next();
+            return rows.getInt(1);
         }
     }
 
@@ -467,10 +509,6 @@ class CsiNativeToolReservationTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=0;DATABASE_TO_LOWER=TRUE");
         Connection connection = source.getConnection();
         JdbcRuntimeBrokerSchema.initialize(source);
-        try (var input = CsiNativeToolReservationTest.class.getResourceAsStream("/csi-native-resource-schema-fixture.sql");
-                var statement = connection.createStatement()) {
-            statement.execute(new String(input.readAllBytes(), StandardCharsets.UTF_8));
-        }
         connection.setAutoCommit(false);
         return connection;
     }

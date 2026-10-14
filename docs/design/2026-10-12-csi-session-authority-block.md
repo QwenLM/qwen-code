@@ -105,7 +105,7 @@ Main's public Shell/MCP lifecycle uses protocol 2 while Files retains protocol 1
 
 Ordinary projection completion derives its locking scope from the persisted result row and retains tenant, private guard, head, publication, public Session and result ordering. After reading the current result row, it checks LEASED state and claim generation first. Settled work returns false without parsing obsolete source JSON. Active claims still require complete stored-source, scope and caller-claim agreement before any write. Private refusal derives from the persisted owner and cannot borrow a foreign caller's tenant.
 
-The two private operator repackage artifacts use `csi-session` and `csi-runtime` classifiers. The ordinary Server image selector explicitly excludes them and still requires one unclassified main JAR; this adds no private execution entry point to the image or Kubernetes deployment. Upgrade verification includes V69–V72 in the exact added inventory while retaining row-by-row Flyway history comparison. Concurrency tests observe the requested row lock within the exact current schema and table: MySQL uses `performance_schema.data_lock_waits`/`data_locks`, while MariaDB uses `information_schema.INNODB_LOCK_WAITS`/`INNODB_LOCKS`. Polling allows the InnoDB information-schema cache to refresh instead of retaining a pre-wait snapshot. The five-second deadline, blocked-future, refusal and no-effect assertions remain unchanged.
+The two private operator repackage artifacts use `csi-session` and `csi-runtime` classifiers. The ordinary Server image selector explicitly excludes them and still requires one unclassified main JAR; this adds no private execution entry point to the image or Kubernetes deployment. Upgrade verification admits only the canonical active V1/V2 inventory while retaining row-by-row V1 Flyway history comparison. Concurrency tests observe the requested row lock within the exact current schema and table: MySQL uses `performance_schema.data_lock_waits`/`data_locks`, while MariaDB uses `information_schema.INNODB_LOCK_WAITS`/`INNODB_LOCKS`. Polling allows the InnoDB information-schema cache to refresh instead of retaining a pre-wait snapshot. The five-second deadline, blocked-future, refusal and no-effect assertions remain unchanged.
 
 ### READY scope and failure behavior
 
@@ -150,10 +150,35 @@ execution qualification.
 
 ### Migration history
 
-Main already owns V64–V68. The extracted unpublished CSI additions receive
-fresh increasing versions. The final branch is checked again for version
-collisions before submission. Neither published main migrations nor #13526's
-migrations are rewritten.
+The active catalog is main's fresh 32-table `db/managed-schema` baseline.
+Published V1 remains byte-for-byte unchanged. Additive V2 places the request pin
+and generated private classification on `ma_session`, the original activation
+revision on `ma_runtime_binding`, and immutable native authorization on
+`ma_tool_execution`. The proposed legacy CSI migrations are removed; archived
+migrations never enter the runtime or test classpath. No version is reserved
+for an unmerged PR, and #13526 remains unchanged.
+
+Initialization admits only the complete canonical V1 or V2 catalog. An
+unversioned V1 database receives the same additive extension; a versioned V1
+database upgrades through Flyway. Server baselining records the actual catalog
+version before migrating, preserving existing V1 history and checksums. Partial,
+foreign and legacy catalogs remain rejected.
+
+Native resources retain binary tenant/session identities, computed scope and
+resource keys, `MANAGED_SESSION` heads and `JOURNAL` ownership references.
+Persistent reads use `ma_request_receipt` with namespace `SESSION_COMMAND`,
+operation `CSI_RESOURCE_READ` and a separate hashed read scope. Its immutable
+JSON evidence retains OPEN/RETURNED/UNKNOWN state independently of the transient
+`ma_read_lease`. Ordinary receipt consumers remain separated by namespace,
+operation and scope. Publication locking still acquires placement before
+retention and session authority; generic consumers refuse private sessions.
+
+The integrated main includes #13642's four canonical retention indexes. Its
+terminal JDBC sweep keeps private capability families and Sessions with a
+retained private pin, and treats persisted native authorization as a reference.
+This is a cleanup refusal for existing historical evidence; it adds no private
+release or terminal transition. Ordinary unreferenced terminal history still
+expires under the main retention policy.
 
 ## Validation and acceptance criteria
 
@@ -182,14 +207,26 @@ Tests against the original proposal do not qualify the extracted branch.
 
 The 16 native activation proof tests use the standard Surefire `Test` suffix, so ordinary Server test discovery includes them. Both Server CI lanes build their Node producer prerequisites before Maven runs. These H2-backed native proof tests do not replace the actual SQL grant-to-worker acceptance below.
 
-The extraction has been externally marked Ready and still requires maintainer review. Local build, typecheck, bundle, focused
+The extraction has been externally marked Ready and still requires maintainer review. Before canonical schema integration, local build, typecheck, bundle, focused
 Java and worker tests have passed. An independent owned MySQL 8.4 run applied
-the complete migration inventory and observed real private CREATE/replay,
+the then-current legacy migration inventory and observed real private CREATE/replay,
 seven native journal commits and their replays, original activation/renewal,
 replacement refusal, ordinary controls, authenticated adapter bind readback,
-and current-state locking reads under both isolation levels. Independent
+and current-state locking reads under both isolation levels. These earlier
+results do not qualify the canonical V1/V2 adaptation. Independent
 regressions also cover retained request pins and the worker-sized HTTP result
 receive limit. Every report records its actual candidate and artifact hashes.
+
+Canonical integration verification separately exercises real MySQL V1-to-V2
+upgrades and baselining of unversioned V1/V2 catalogs, preserving V1 history,
+ordinary rows and distinct binary tenant identities. Owned MySQL tests cover
+private creation versus collection, current-row refusal under both isolation
+levels, and original resource reads with durable OPEN/RETURNED/UNKNOWN receipts.
+The read fixture supplies an original READY identity and explicit JDBC cleanup
+faults; it does not launch an authenticated worker or mint a native SQL grant.
+Ordinary materialization retains main's measured query budgets, including its
+empty tick and snapshot-writing batches. These are schema and component
+observations; the full acceptance limitation below still applies.
 
 These observations do not complete criterion 3: an actual SQL execution grant,
 authenticated execution readback and positive worker/retained-history effects

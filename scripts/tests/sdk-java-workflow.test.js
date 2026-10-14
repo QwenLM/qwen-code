@@ -172,7 +172,7 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
-  it('scans every sdk-java module that owns a db/migration directory', () => {
+  it('scans every sdk-java module that owns a registered migration directory', () => {
     // The guard's premise is the shared classpath:db/migration namespace —
     // managed-agent-server depends on runtime-broker, so one invocation must
     // name every module that owns a migration sequence. Derive the
@@ -183,11 +183,10 @@ describe('SDK Java Flyway migration version guard', () => {
       withFileTypes: true,
     })) {
       if (!entry.isDirectory()) continue;
-      for (const location of [
-        'src/main/resources/db/migration',
-        'src/main/java/db/migration',
-      ]) {
-        if (existsSync(join('packages/sdk-java', entry.name, location))) {
+      for (const location of LOCATIONS) {
+        if (
+          existsSync(join('packages/sdk-java', entry.name, ...location.dir))
+        ) {
           owners.add(`packages/sdk-java/${entry.name}`);
         }
       }

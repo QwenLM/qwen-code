@@ -6,17 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.net.URI;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
 
 class JdbcCsiBindingControlTest {
     private static final String SESSION = "2815c6b8-468c-449a-869a-8794b0d52fca";
@@ -30,7 +26,7 @@ class JdbcCsiBindingControlTest {
         var source = source();
         try (var connection = source.getConnection()) {
             sql(connection, "CREATE SCHEMA other");
-            sql(connection, "CREATE TABLE other.managed_agent_session (csi_guard BOOLEAN)");
+            sql(connection, "CREATE TABLE other.ma_session (csi_guard BOOLEAN)");
         }
         var bindings = bindings(source);
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
@@ -51,9 +47,9 @@ class JdbcCsiBindingControlTest {
     void provisioningControlsPreserveTheOriginalBootstrapWithoutAReservation() throws Exception {
         var fixture = fixture();
         try (var connection = fixture.source().getConnection()) {
-            assertEquals(0, count(connection, "qwen_tool_publication_tenant"));
-            assertEquals(0, count(connection, "qwen_runtime_binding_slot"));
-            assertEquals(0, count(connection, "qwen_runtime_binding"));
+            assertEquals(0, count(connection, "ma_tenant_guard"));
+            assertEquals(0, count(connection, "ma_runtime_slot"));
+            assertEquals(0, count(connection, "ma_runtime_binding"));
         }
         var created = fixture.bindings().findOrCreate(request());
         assertEquals(1, created.getGeneration());
@@ -64,19 +60,20 @@ class JdbcCsiBindingControlTest {
         assertNotNull(fixture.bindings().releaseOperation(created.getBindingId(), "owner", claimed.getOperationGeneration()));
         assertNotNull(fixture.bindings().claimOperation(created.getBindingId(), "next", LEASE));
         try (var connection = fixture.source().getConnection()) {
-            assertEquals(1, count(connection, "qwen_tool_publication_tenant"));
-            assertEquals(1, count(connection, "qwen_runtime_binding_slot"));
-            assertEquals(1, count(connection, "qwen_runtime_binding"));
-            assertEquals(0, count(connection, "managed_workspace_execution_lease"));
-            assertEquals(0, count(connection, "managed_workspace_csi_retirement"));
+            assertEquals(1, count(connection, "ma_tenant_guard"));
+            assertEquals(1, count(connection, "ma_runtime_slot"));
+            assertEquals(1, count(connection, "ma_runtime_binding"));
+            assertEquals(0, count(connection, "ma_storage_owner"));
+            assertEquals(0, count(connection, "ma_operation"));
         }
     }
 
     @Test
     void anUnprovisionedPrivateSessionCannotCreateARetentionRootWithoutItsFullPin() throws Exception {
-        for (String mutation : List.of("DELETE FROM managed_agent_session",
-                "UPDATE managed_agent_session SET runtime_request_key = '" + "b".repeat(64) + "'",
-                "UPDATE managed_agent_session SET workspace_generation = 2")) {
+        for (String mutation : List.of(
+                        "DELETE FROM ma_session",
+                        "UPDATE ma_session SET runtime_request_key = '" + "b".repeat(64) + "'",
+                        "UPDATE ma_session SET workspace_generation = 2")) {
             var fixture = fixture();
             try (var connection = fixture.source().getConnection()) {
                 sql(connection, mutation);
@@ -84,9 +81,9 @@ class JdbcCsiBindingControlTest {
             var failure = assertThrows(RuntimeBrokerException.class, () -> fixture.bindings().findOrCreate(request()));
             assertEquals("csi_original_binding_unavailable", failure.getCode());
             try (var connection = fixture.source().getConnection()) {
-                assertEquals(0, count(connection, "qwen_tool_publication_tenant"));
-                assertEquals(0, count(connection, "qwen_runtime_binding_slot"));
-                assertEquals(0, count(connection, "qwen_runtime_binding"));
+                assertEquals(0, count(connection, "ma_tenant_guard"));
+                assertEquals(0, count(connection, "ma_runtime_slot"));
+                assertEquals(0, count(connection, "ma_runtime_binding"));
             }
         }
     }
@@ -95,17 +92,22 @@ class JdbcCsiBindingControlTest {
     void firstPrivateProvisionCannotOverwriteAConflictingRetentionTenant() throws Exception {
         var fixture = fixture();
         try (var connection = fixture.source().getConnection()) {
-            sql(connection, "INSERT INTO qwen_tool_publication_tenant VALUES ('"
-                    + CsiNativeActivationProof.sha256("tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8)) + "', 'other')");
+            sql(connection,
+                    "INSERT INTO ma_tenant_guard VALUES ('"
+                            + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                                    .key("tenant")
+                            + "', 'other', 'output_publication')");
         }
         var failure = assertThrows(RuntimeBrokerException.class, () -> fixture.bindings().findOrCreate(request()));
         assertEquals("csi_original_binding_unavailable", failure.getCode());
         try (var connection = fixture.source().getConnection(); var statement = connection.createStatement();
-                var row = statement.executeQuery("SELECT tenant_id FROM qwen_tool_publication_tenant")) {
+                var row = statement.executeQuery(
+                                "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
+                                        + " 'output_publication'")) {
             row.next();
             assertEquals("other", row.getString(1));
-            assertEquals(0, count(connection, "qwen_runtime_binding_slot"));
-            assertEquals(0, count(connection, "qwen_runtime_binding"));
+            assertEquals(0, count(connection, "ma_runtime_slot"));
+            assertEquals(0, count(connection, "ma_runtime_binding"));
         }
     }
 
@@ -116,7 +118,8 @@ class JdbcCsiBindingControlTest {
                 "sha256:" + "b".repeat(64), "session"), UUID.randomUUID().toString(), "test-supervisor", "storage");
         var original = fixture.bindings().findOrCreate(ordinary);
         try (var connection = fixture.source().getConnection()) {
-            sql(connection, "DELETE FROM qwen_tool_publication_tenant");
+            sql(connection,
+                    "DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
         }
         var claimed = fixture.bindings().claimOperation(original.getBindingId(), "owner", LEASE);
         assertNotNull(claimed);
@@ -131,12 +134,17 @@ class JdbcCsiBindingControlTest {
         var ordinary = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 "sha256:" + "b".repeat(64), "session"), SESSION, "kubernetes-workspace", "storage");
         try (var connection = fixture.source().getConnection()) {
-            sql(connection, "UPDATE qwen_runtime_binding SET capability_digest = '" + ordinary.getScope().getCapabilityDigest()
+            sql(connection,
+                    "UPDATE ma_runtime_binding SET capability_digest = '"
+                            + ordinary.getScope().getCapabilityDigest()
                     + "', request_key = '" + ordinary.requestKey() + "', scope_key = '"
                     + JdbcRepositorySupport.scopeKey(ordinary.getScope()) + "'");
-            sql(connection, "UPDATE qwen_runtime_binding_slot SET capability_digest = '" + ordinary.getScope().getCapabilityDigest()
+            sql(connection,
+                    "UPDATE ma_runtime_slot SET capability_digest = '"
+                            + ordinary.getScope().getCapabilityDigest()
                     + "', request_key = '" + ordinary.requestKey() + "'");
-            sql(connection, "DELETE FROM qwen_tool_publication_tenant");
+            sql(connection,
+                    "DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
         }
         assertEquals(ordinary, fixture.bindings().findById(original.getBindingId()).getRequest());
         assertThrows(RuntimeBrokerException.class,
@@ -149,7 +157,8 @@ class JdbcCsiBindingControlTest {
         var fixture = fixture();
         var original = fixture.bindings().findOrCreate(request());
         try (var connection = fixture.source().getConnection()) {
-            sql(connection, "DELETE FROM qwen_tool_publication_tenant");
+            sql(connection,
+                    "DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
         }
         for (Runnable control : List.<Runnable>of(
                 () -> fixture.bindings().claimOperation(original.getBindingId(), "owner", LEASE),
@@ -161,9 +170,9 @@ class JdbcCsiBindingControlTest {
             assertEquals("csi_original_binding_unavailable", failure.getCode());
             assertEquals(original.getVersion(), fixture.bindings().findById(original.getBindingId()).getVersion());
             try (var connection = fixture.source().getConnection()) {
-                assertEquals(0, count(connection, "qwen_tool_publication_tenant"));
-                assertEquals(1, count(connection, "qwen_runtime_binding_slot"));
-                assertEquals(1, count(connection, "qwen_runtime_binding"));
+                assertEquals(0, count(connection, "ma_tenant_guard"));
+                assertEquals(1, count(connection, "ma_runtime_slot"));
+                assertEquals(1, count(connection, "ma_runtime_binding"));
             }
         }
     }
@@ -173,16 +182,19 @@ class JdbcCsiBindingControlTest {
         var fixture = fixture();
         fixture.bindings().findOrCreate(request());
         try (var connection = fixture.source().getConnection()) {
-            sql(connection, "DELETE FROM qwen_tool_publication_tenant");
-            sql(connection, "DELETE FROM qwen_runtime_binding");
-            sql(connection, "UPDATE qwen_runtime_binding_slot SET active_binding_id = NULL, last_generation = 0");
+            sql(connection,
+                    "DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
+            sql(connection, "DELETE FROM ma_runtime_binding");
+            sql(
+                    connection,
+                    "UPDATE ma_runtime_slot SET active_binding_id = NULL, last_generation = 0");
         }
         var failure = assertThrows(RuntimeBrokerException.class, () -> fixture.bindings().findOrCreate(request()));
         assertEquals("csi_original_binding_unavailable", failure.getCode());
         try (var connection = fixture.source().getConnection()) {
-            assertEquals(0, count(connection, "qwen_tool_publication_tenant"));
-            assertEquals(1, count(connection, "qwen_runtime_binding_slot"));
-            assertEquals(0, count(connection, "qwen_runtime_binding"));
+            assertEquals(0, count(connection, "ma_tenant_guard"));
+            assertEquals(1, count(connection, "ma_runtime_slot"));
+            assertEquals(0, count(connection, "ma_runtime_binding"));
         }
     }
 
@@ -192,9 +204,25 @@ class JdbcCsiBindingControlTest {
         var created = fixture.bindings().findOrCreate(request());
         var claimed = fixture.bindings().claimOperation(created.getBindingId(), "owner", LEASE);
         try (var connection = fixture.source().getConnection(); var statement = connection.prepareStatement(
-                "INSERT INTO managed_workspace_csi_retirement (retirement_id, binding_id, runtime_generation) VALUES (?, ?, 1)")) {
-            statement.setString(1, UUID.randomUUID().toString());
-            statement.setString(2, claimed.getBindingId());
+                                "INSERT INTO ma_operation (operation_key, scope_key, operation_id,"
+                                        + " operation_kind, tenant_id, target_kind, target_key,"
+                                        + " target_revision, request_digest, request_json, state,"
+                                        + " phase, created_at, updated_at) VALUES (?, ?, ?,"
+                                        + " 'CSI_RETIREMENT', 'tenant', 'RUNTIME_BINDING', ?, 1,"
+                                        + " 'digest', '{}', 'ADMITTED', 'ADMITTED', 0, 0)")) {
+            String id = UUID.randomUUID().toString();
+            statement.setString(
+                    1,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            "CSI_RETIREMENT", "tenant", id));
+            statement.setString(2,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            "tenant"));
+            JdbcRepositorySupport.setIdentity(statement, 3, id);
+            statement.setString(
+                    4,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            claimed.getBindingId()));
             statement.executeUpdate();
         }
         for (Runnable control : List.<Runnable>of(
@@ -215,34 +243,24 @@ class JdbcCsiBindingControlTest {
     private static Fixture fixture() throws Exception {
         var source = source();
         try (var connection = source.getConnection()) {
-            sql(connection, "CREATE TABLE qwen_tool_publication_tenant (tenant_key VARCHAR(64) PRIMARY KEY, tenant_id VARCHAR(64))");
-            sql(connection, "CREATE TABLE managed_agent_session (tenant_id VARCHAR(64), session_id VARCHAR(64),"
-                    + " agent_id VARCHAR(64), tool_profile VARCHAR(64), runtime_request_key VARCHAR(64),"
-                    + " workspace_id VARCHAR(64), workspace_generation BIGINT, workspace_storage_id VARCHAR(64),"
-                    + " cwd_relative VARCHAR(64), context_config_ref VARCHAR(128), context_revision BIGINT,"
-                    + " workspace_config_ref VARCHAR(128), workspace_policy_ref VARCHAR(128),"
-                    + " csi_guard BOOLEAN GENERATED ALWAYS AS (CASE WHEN tool_profile = 'csi-files-retirement/1'"
-                    + " OR runtime_request_key IS NOT NULL THEN TRUE ELSE FALSE END), PRIMARY KEY (tenant_id, session_id))");
-            sql(connection, "CREATE UNIQUE INDEX managed_session_csi_guard_idx ON managed_agent_session (tenant_id, session_id, csi_guard)");
-            try (var statement = connection.prepareStatement("INSERT INTO managed_agent_session"
-                    + " (tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id, workspace_generation,"
-                    + " workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
-                    + " VALUES ('tenant', ?, 'qwen-code', ?, ?, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)")) {
-                statement.setString(1, SESSION);
+            try (var statement = connection.prepareStatement(
+                            "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
+                                + " runtime_request_key, workspace_id, workspace_generation,"
+                                + " workspace_storage_id, cwd_relative, context_config_ref,"
+                                + " context_revision, workspace_config_ref, workspace_policy_ref,"
+                                + " created_at, updated_at) VALUES ('tenant', ?, 'qwen-code', ?, ?,"
+                                + " 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, SESSION);
                 statement.setString(2, CsiFilesRetirementProfile.PROFILE);
                 statement.setString(3, request().requestKey());
-                statement.setString(4, CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
-                statement.setString(5, CsiFilesRetirementProfile.CONFIG_REF);
-                statement.setString(6, CsiFilesRetirementProfile.POLICY_REF);
+                JdbcRepositorySupport.setIdentity(
+                        statement, 4, CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+                JdbcRepositorySupport.setIdentity(
+                        statement, 5, CsiFilesRetirementProfile.CONFIG_REF);
+                JdbcRepositorySupport.setIdentity(
+                        statement, 6, CsiFilesRetirementProfile.POLICY_REF);
                 statement.executeUpdate();
             }
-            sql(connection, "CREATE TABLE managed_workspace_csi_registration (alias_key VARCHAR(64) PRIMARY KEY,"
-                    + " tenant_id VARCHAR(64), storage_id VARCHAR(64), physical_key VARCHAR(64), registration_revision BIGINT)");
-            sql(connection, "CREATE TABLE managed_workspace_csi_retirement (retirement_id VARCHAR(64) PRIMARY KEY, binding_id VARCHAR(64),"
-                    + " runtime_generation BIGINT, physical_key VARCHAR(64), phase VARCHAR(16), identity_json CLOB,"
-                    + " progress_format VARCHAR(64), progress_version BIGINT, progress_stage VARCHAR(16), settlement_deadline_ms BIGINT,"
-                    + " frozen_request_bytes BLOB, frozen_request_sha256 VARCHAR(64), cut_bytes BLOB, cut_sha256 VARCHAR(64),"
-                    + " finalize_receipt_bytes BLOB, finalize_receipt_sha256 VARCHAR(64), UNIQUE (binding_id, runtime_generation))");
         }
         return new Fixture(source, bindings(source), null);
     }
@@ -259,7 +277,10 @@ class JdbcCsiBindingControlTest {
     }
 
     private static int count(Connection connection, String table) throws Exception {
-        try (var statement = connection.createStatement(); var row = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
+        try (var statement = connection.createStatement(); var row = statement.executeQuery("SELECT COUNT(*) FROM " + table
+                                        + ("ma_tenant_guard".equals(table)
+                                                ? " WHERE guard_domain = 'output_publication'"
+                                                : ""))) {
             row.next();
             return row.getInt(1);
         }

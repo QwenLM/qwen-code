@@ -92,7 +92,7 @@ MQ wake claim 在插入或推进 `journal_wake` 进度、调度 Hosted activatio
 
 普通 projection 完成从已持久化 result 行导出加锁范围，保持 tenant、私有守卫、head、publication、公共 Session、result 的顺序。取得当前 result 行后先检查 LEASED 状态和 claim generation；已结束的工作返回 false，不再解析已失效的 source JSON。活跃 claim 在任何写入前仍需完整 stored-source、scope 与 caller-claim 一致性证明。私有拒绝边界从持久化 owner 导出，不能借用外来 caller 的 tenant。
 
-两个私有 operator repackage 产物采用 `csi-session` 与 `csi-runtime` classifier。普通 Server 镜像选择器显式排除它们，继续要求唯一 unclassified 主 JAR；这不增加镜像中的私有执行入口或 Kubernetes 部署。升级验证将 V69–V72 纳入准确新增清单，继续逐行比较既有 Flyway history。并发测试在准确的当前 schema 和表中观察被请求的行锁：MySQL 使用 `performance_schema.data_lock_waits`/`data_locks`，MariaDB 使用 `information_schema.INNODB_LOCK_WAITS`/`INNODB_LOCKS`。轮询间隔允许 InnoDB information-schema 缓存刷新，避免保留等待前的快照。五秒期限、future 保持阻塞、拒绝与无副作用断言均保持不变。
+两个私有 operator repackage 产物采用 `csi-session` 与 `csi-runtime` classifier。普通 Server 镜像选择器显式排除它们，继续要求唯一 unclassified 主 JAR；这不增加镜像中的私有执行入口或 Kubernetes 部署。升级验证将 canonical active V1/V2 纳入准确新增清单，继续逐行比较既有 Flyway history。并发测试在准确的当前 schema 和表中观察被请求的行锁：MySQL 使用 `performance_schema.data_lock_waits`/`data_locks`，MariaDB 使用 `information_schema.INNODB_LOCK_WAITS`/`INNODB_LOCKS`。轮询间隔允许 InnoDB information-schema 缓存刷新，避免保留等待前的快照。五秒期限、future 保持阻塞、拒绝与无副作用断言均保持不变。
 
 ### READY 范围与失败行为
 
@@ -127,8 +127,30 @@ execution envelope 和 history。缺失、篡改、重复、过短、超限或�
 
 ### Migration history
 
-主干 V64–V68 已被占用。拆出的未发布 CSI 增量使用新的递增版本，提交前再次检查
-冲突。不重写主干已发布 migration，也不改 #13526 的 migration。
+当前运行时使用主干 `db/managed-schema` 的全新 32 表基线。
+已发布 V1 保持字节不变。新增 V2 在 `ma_session` 保存 request pin 与生成的
+私有分类，在 `ma_runtime_binding` 保存原 owner 首次 activation revision，
+在 `ma_tool_execution` 保存不可变 native authorization。移除此前提议的旧 CSI
+migration；归档迁移不进入运行时或测试 classpath。不为未合并 PR 预留版本，
+#13526 保持不变。
+
+初始化只接纳完整 canonical V1 或 V2 catalog。没有迁移历史的 V1 数据库应用同一
+增量；有迁移历史的 V1 数据库通过 Flyway 升级。Server 按实际 catalog 版本
+baseline 后迁移，保留既有 V1 history 与 checksum。部分、外来和旧 catalog
+继续拒绝。
+
+原生资源保留 tenant/session 二进制身份、计算的 scope/resource key、
+`MANAGED_SESSION` head 与 `JOURNAL` ownership reference。
+持久读取使用 `ma_request_receipt`，namespace 为 `SESSION_COMMAND`、operation
+为 `CSI_RESOURCE_READ`，并使用独立 hash read scope。不可变 JSON evidence
+与 OPEN/RETURNED/UNKNOWN 状态独立于临时 `ma_read_lease` 保留。普通回执消费者
+继续按 namespace、operation 与 scope 隔离。Publication 锁顺序保持 placement
+先于 retention 和 Session authority；普通消费者拒绝私有 Session。
+
+整合的主干包含 #13642 的四个 canonical retention 索引。终态 JDBC sweep
+保留私有 capability family 和带持久私有 pin 的 Session，并把已保存 native
+authorization 视为引用。这只是对既有历史证据的清理拒绝，不增加私有 release
+或终态转换。普通无引用终态历史仍按主干 retention 策略过期。
 
 ## 验证与验收条件
 
@@ -155,12 +177,21 @@ Darwin 上的正向私有 worker 执行需要明确记录 Linux metadata/procfs 
 
 16 项原生 activation proof 测试使用标准 Surefire `Test` 后缀，由普通 Server 测试发现自动收集。两个 Server CI lane 均在 Maven 运行前构建 Node producer 前置产物。这些基于 H2 的原生 proof 测试不能替代下述实际 SQL grant 到 worker 的验收。
 
-本拆分已由外部操作转为 Ready，仍需 maintainer 评审。本地 build、typecheck、bundle、定向 Java 与 worker
-测试已通过。独立自有 MySQL 8.4 测试应用了完整 migration 清单，并观察到实际
+本拆分已由外部操作转为 Ready，仍需 maintainer 评审。在 canonical schema 整合前，本地 build、typecheck、bundle、定向 Java 与 worker
+测试已通过。独立自有 MySQL 8.4 测试应用了当时完整的旧 migration 清单，并观察到实际
 私有 CREATE/replay、七个原生日志 commit 及其 replay、原 activation/renewal、
 替代拒绝、普通对照、认证 adapter bind 回读，以及两种 isolation level 下的
-当前状态 locking read。独立回归还覆盖 retained request pin 与 worker 大小的
+当前状态 locking read。这些早期结果不资格化 canonical V1/V2 适配。独立回归还覆盖 retained request pin 与 worker 大小的
 HTTP result 接收边界。每份报告记录实际候选及构建产物 hash。
+
+Canonical 整合验证另行覆盖真实 MySQL V1 到 V2 升级以及无历史 V1/V2 catalog
+的 baseline，保留 V1 history、普通数据与互不混同的二进制 tenant 身份。
+自有 MySQL 测试覆盖私有创建与 collection 并发、两种 isolation level 下的
+当前行拒绝，以及保存 OPEN/RETURNED/UNKNOWN 持久回执的原 owner 资源读取。
+读取 fixture 提供原 READY 身份并显式注入 JDBC cleanup 故障；没有启动认证
+worker，也没有生成 native SQL grant。普通 materialization 保留主干实际测量的
+查询预算，包括空 tick 与写 snapshot 的批次。这些是 schema 与组件观察，
+下述完整验收限制仍然有效。
 
 这些观察尚未完成验收条件 3：实际 SQL execution grant、认证 execution 回读、
 正向 worker 与 retained-history 效果尚未连起来执行。Resource delivery fault

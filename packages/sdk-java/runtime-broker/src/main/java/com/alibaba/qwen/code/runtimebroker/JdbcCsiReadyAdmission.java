@@ -47,30 +47,40 @@ public final class JdbcCsiReadyAdmission {
         long registrationRevision;
         String alias = aliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
         try (PreparedStatement statement = statement(connection,
-                "SELECT tenant_id, storage_id, physical_key, registration_revision"
-                        + " FROM managed_workspace_csi_registration WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, alias);
+                        "SELECT tenant_id, storage_id, physical_key, registration_revision FROM"
+                                + " ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND"
+                                + " registration_state = 'REGISTERED' FOR UPDATE")) {
+            JdbcRepositorySupport.setStringParameter(statement, 1, alias);
             try (var row = statement.executeQuery()) {
                 require(row.next()
-                        && original.request().getScope().getTenantId().equals(row.getString("tenant_id"))
-                        && original.request().getStorageId().equals(row.getString("storage_id")));
+                        && original.request().getScope().getTenantId().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        row, "tenant_id"))
+                        && original.request().getStorageId().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        row, "storage_id")));
                 physicalKey = row.getString("physical_key");
                 registrationRevision = row.getLong("registration_revision");
                 require(physicalKey != null && physicalKey.matches("[0-9a-f]{64}") && registrationRevision > 0 && !row.next());
             }
         }
         try (PreparedStatement statement = statement(connection,
-                "SELECT storage_kind, csi_phase, csi_revision, csi_registration_key, csi_registration_revision,"
-                        + " binding_id, runtime_generation FROM managed_workspace_execution_lease"
-                        + " WHERE storage_key = ? FOR UPDATE")) {
-            statement.setString(1, physicalKey);
+                        "SELECT storage_kind, csi_phase, csi_revision, csi_registration_key,"
+                                + " csi_registration_revision, binding_id, runtime_generation FROM"
+                                + " ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setStringParameter(statement, 1, physicalKey);
             try (var row = statement.executeQuery()) {
                 require(row.next() && "CSI".equals(row.getString("storage_kind"))
                         && "RESERVED".equals(row.getString("csi_phase"))
                         && row.getLong("csi_revision") == 1
                         && alias.equals(row.getString("csi_registration_key"))
                         && registrationRevision == row.getLong("csi_registration_revision")
-                        && original.bindingId().equals(row.getString("binding_id"))
+                        && original.bindingId().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        row, "binding_id"))
                         && original.generation() == row.getLong("runtime_generation") && !row.next());
             }
         }

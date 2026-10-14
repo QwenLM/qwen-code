@@ -24,6 +24,17 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -40,16 +51,6 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DynamicTest;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestFactory;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
 
 class WorkspaceCsiSessionMainTest {
     private final ObjectMapper json = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
@@ -66,33 +67,37 @@ class WorkspaceCsiSessionMainTest {
     void setUp() {
         source = new DriverManagerDataSource("jdbc:h2:mem:csi-create-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         new WorkspaceCsiReservationStore(jdbc, manager, json).register(registration);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
-                + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
+        jdbc.update(
+                "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                        + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        jdbc.update(
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
     }
 
     @Test
     void createsAnOriginalPinBeforeAnyWorkerOrTurnAndReplaysWithoutChangingIt() {
-        assertThat(count("qwen_tool_publication_tenant")).isZero();
-        var physicalBefore = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        assertThat(count("ma_tenant_guard")).isZero();
+        var physicalBefore = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         var first = create(request("create"));
-        var retention = jdbc.queryForMap("SELECT * FROM qwen_tool_publication_tenant");
+        var retention = jdbc.queryForMap(
+                        "SELECT * FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
         assertThat(retention.get("tenant_id")).isEqualTo("tenant");
-        assertThat(retention.get("tenant_key")).isEqualTo(ToolPublicationRetentionStore.hash("tenant"));
+        assertThat(retention.get("tenant_key")).isEqualTo(
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant"));
         assertThat(first.replayed()).isFalse();
         assertThat(UUID.fromString(first.sessionId()).toString()).isEqualTo(first.sessionId());
-        var row = jdbc.queryForMap("SELECT * FROM managed_agent_session");
+        var row = jdbc.queryForMap("SELECT * FROM ma_session");
         assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.PROFILE);
         assertThat(row.get("runtime_request_key")).isEqualTo(first.runtimeRequestKey());
         assertThat(row.get("workspace_generation")).isEqualTo(3L);
@@ -108,26 +113,35 @@ class WorkspaceCsiSessionMainTest {
         assertThat(original.requestKey()).isEqualTo(first.runtimeRequestKey());
         assertThat(original.getScope().getCanonicalCwd()).isEqualTo("/workspace");
         properties.setAgentRevision("later-agent/2");
-        jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 4, storage_id = 'changed',"
-                + " config_ref = 'changed', policy_ref = 'changed'");
+        jdbc.update(
+                "UPDATE ma_workspace SET workspace_generation = 4, storage_id = 'changed',"
+                        + " config_ref = 'changed', policy_ref = 'changed'");
         var replay = create(request("create"));
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication_tenant")).isEqualTo(retention);
+        assertThat(jdbc.queryForMap(
+                                "SELECT * FROM ma_tenant_guard WHERE guard_domain ="
+                                        + " 'output_publication'")).isEqualTo(retention);
         assertThat(replay).isEqualTo(new WorkspaceCsiSessionMain.Created(first.sessionId(), first.runtimeRequestKey(), true));
-        assertThat(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(jdbc.queryForMap("SELECT * FROM managed_agent_session"))).isEqualTo(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(row));
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(physicalBefore);
-        assertEmpty("managed_agent_turn", "qwen_runtime_binding", "qwen_runtime_session", "qwen_tool_execution",
-                "qwen_managed_session_journal_head");
-        assertThat(count("managed_workspace_create_command")).isEqualTo(1);
-        assertThat(count("managed_agent_consumer_progress")).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT event_type FROM managed_agent_event", String.class)).isEqualTo("session.created");
+        assertThat(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(jdbc.queryForMap("SELECT * FROM ma_session"))).isEqualTo(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(row));
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(physicalBefore);
+        assertEmpty(
+                "ma_turn",
+                "ma_runtime_binding",
+                "ma_runtime_session",
+                "ma_tool_execution",
+                "ma_session_head");
+        assertThat(count("ma_request_receipt")).isEqualTo(1);
+        assertThat(count("ma_event_stream")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT event_type FROM ma_public_event", String.class)).isEqualTo("session.created");
     }
 
     @Test
     void privateCsiParentCannotCreateAnUnpinnedChildSession() {
         var original = create(request("parent"));
-        var before = jdbc.queryForList("SELECT * FROM managed_agent_session");
-        var commands = jdbc.queryForList("SELECT * FROM managed_workspace_create_command");
-        var events = jdbc.queryForList("SELECT * FROM managed_agent_event");
+        var before = jdbc.queryForList("SELECT * FROM ma_session");
+        var commands = jdbc.queryForList(
+                        "SELECT * FROM ma_request_receipt WHERE namespace ="
+                                + " 'SESSION_CREATE_ACTOR'");
+        var events = jdbc.queryForList("SELECT * FROM ma_public_event");
         assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store()
                 .insertChildSessionCommand("tenant", original.sessionId(), "child", "digest", "child",
                         List.of(), null, new StoreModels.SessionLineage(original.sessionId(),
@@ -140,13 +154,15 @@ class WorkspaceCsiSessionMainTest {
                 .isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).getCode())
                         .isEqualTo("child_parent_unavailable"));
-        assertThat(jdbc.queryForList("SELECT * FROM managed_agent_session"))
+        assertThat(jdbc.queryForList("SELECT * FROM ma_session"))
                 .usingRecursiveComparison().isEqualTo(before);
-        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_create_command"))
+        assertThat(jdbc.queryForList(
+                                "SELECT * FROM ma_request_receipt WHERE namespace ="
+                                        + " 'SESSION_CREATE_ACTOR'"))
                 .usingRecursiveComparison().isEqualTo(commands);
-        assertThat(jdbc.queryForList("SELECT * FROM managed_agent_event"))
+        assertThat(jdbc.queryForList("SELECT * FROM ma_public_event"))
                 .usingRecursiveComparison().isEqualTo(events);
-        assertEmpty("managed_agent_turn");
+        assertEmpty("ma_turn");
     }
 
     @Test
@@ -192,29 +208,31 @@ class WorkspaceCsiSessionMainTest {
             assertThat(first.runtimeRequestKey()).isEqualTo(second.runtimeRequestKey());
             assertThat(first.replayed()).isNotEqualTo(second.replayed());
         }
-        assertThat(count("managed_agent_session")).isEqualTo(1);
-        assertThat(count("managed_workspace_create_command")).isEqualTo(1);
-        assertThat(count("managed_agent_event")).isEqualTo(1);
+        assertThat(count("ma_session")).isEqualTo(1);
+        assertThat(count("ma_request_receipt")).isEqualTo(1);
+        assertThat(count("ma_public_event")).isEqualTo(1);
     }
 
     @Test
     void differentIdempotencyKeysProduceDifferentSessionAuthority() {
         assertThat(create(request("first")).runtimeRequestKey()).isNotEqualTo(create(request("second")).runtimeRequestKey());
-        assertThat(count("managed_agent_session")).isEqualTo(2);
+        assertThat(count("ma_session")).isEqualTo(2);
     }
 
     @Test
     void refusesRegistrationStoragePolicyPermissionAndRevisionChangesWithoutPartialCreate() {
-        String[] changes = {"UPDATE managed_workspace_registry SET storage_id = 'other'",
-                "UPDATE managed_workspace_registry SET config_ref = 'legacy'",
-                "UPDATE managed_workspace_registry SET policy_ref = 'other'",
-                "UPDATE managed_workspace_registry SET state = 'DRAINING'",
-                "UPDATE managed_workspace_access SET role = 'READER'",
-                "UPDATE managed_workspace_access SET actor_id = X'6f74686572'",
-                "UPDATE managed_workspace_csi_registration SET registration_revision = 8"};
+        String[] changes = {
+            "UPDATE ma_workspace SET storage_id = 'other'",
+            "UPDATE ma_workspace SET config_ref = 'legacy'",
+            "UPDATE ma_workspace SET policy_ref = 'other'",
+            "UPDATE ma_workspace SET state = 'DRAINING'",
+            "UPDATE ma_workspace_access SET role = 'READER'",
+            "UPDATE ma_workspace_access SET actor_id = X'6f74686572'",
+            "UPDATE ma_storage SET registration_revision = 8"
+        };
         for (String change : changes) {
             jdbc.update(change);
-            if (change.contains("managed_workspace_csi_registration")) {
+            if (change.contains("ma_storage")) {
                 assertThatThrownBy(() -> create(request("rejected"))).isInstanceOf(RuntimeBrokerException.class)
                         .hasMessage("Workspace CSI admission is unavailable.");
             } else {
@@ -222,46 +240,58 @@ class WorkspaceCsiSessionMainTest {
                         .satisfies(error -> assertThat(((ApiException) error).getCode())
                                 .isIn("workspace_unavailable", "workspace_not_found", "workspace_forbidden"));
             }
-            assertEmpty("managed_agent_session", "managed_workspace_create_command", "managed_agent_event",
-                    "managed_agent_consumer_progress", "managed_session_create_scope");
-            jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'storage', config_ref = ?, policy_ref = ?,"
-                    + " state = 'ACTIVE'", CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR', actor_id = ?",
+            assertEmpty(
+                    "ma_session",
+                    "ma_request_receipt",
+                    "ma_public_event",
+                    "ma_event_stream",
+                    "ma_request_receipt");
+            jdbc.update(
+                    "UPDATE ma_workspace SET storage_id = 'storage', config_ref = ?, policy_ref ="
+                            + " ?, state = 'ACTIVE'", CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
+            jdbc.update(
+                    "UPDATE ma_workspace_access SET role = 'OPERATOR', actor_id = ?",
                     ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-            jdbc.update("UPDATE managed_workspace_csi_registration SET registration_revision = 7");
+            jdbc.update("UPDATE ma_storage SET registration_revision = 7");
         }
         var wrongRevision = new WorkspaceCsiSessionMain.Request(registration, "actor", "rejected", "unsupported", null,
                 new WorkspaceSelection("workspace", "."));
         assertThatThrownBy(() -> create(wrongRevision)).isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).getCode()).isEqualTo("unsupported_feature"));
-        assertEmpty("managed_agent_session", "managed_session_create_scope");
+        assertEmpty("ma_session", "ma_request_receipt");
     }
 
     @Test
     void refusesChangedRequestAndCorruptedPinOnReplay() {
         var first = create(request("replay"));
-        var before = jdbc.queryForMap("SELECT * FROM managed_agent_session");
+        var before = jdbc.queryForMap("SELECT * FROM ma_session");
         var changed = new WorkspaceCsiSessionMain.Request(registration, "actor", "replay", null, "different",
                 new WorkspaceSelection("workspace", "."));
         assertThatThrownBy(() -> create(changed)).isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).getCode()).isEqualTo("idempotency_conflict"));
-        assertThat(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(jdbc.queryForMap("SELECT * FROM managed_agent_session"))).isEqualTo(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(before));
-        jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ?", "a".repeat(64));
+        assertThat(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(jdbc.queryForMap("SELECT * FROM ma_session"))).isEqualTo(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(before));
+        jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
         assertThatThrownBy(() -> create(request("replay"))).isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).getCode()).isEqualTo("workspace_unavailable"));
-        assertThat(count("managed_agent_session")).isEqualTo(1);
-        assertThat(count("managed_agent_event")).isEqualTo(1);
-        assertThat(first.sessionId()).isEqualTo(jdbc.queryForObject("SELECT session_id FROM managed_agent_session", String.class));
+        assertThat(count("ma_session")).isEqualTo(1);
+        assertThat(count("ma_public_event")).isEqualTo(1);
+        assertThat(first.sessionId()).isEqualTo(jdbc.queryForObject("SELECT session_id FROM ma_session", String.class));
     }
 
     @Test
     void failedInsertRollsBackTheCompleteCreationCommand() {
-        jdbc.execute("ALTER TABLE managed_agent_session ADD CONSTRAINT refuse_test_create CHECK (title <> 'reject')");
+        jdbc.execute(
+                "ALTER TABLE ma_session ADD CONSTRAINT refuse_test_create CHECK (title <>"
+                        + " 'reject')");
         var refused = new WorkspaceCsiSessionMain.Request(registration, "actor", "reject", null, "reject",
                 new WorkspaceSelection("workspace", "."));
         assertThatThrownBy(() -> create(refused)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
-        assertEmpty("managed_agent_session", "managed_session_create_scope", "managed_workspace_create_command",
-                "managed_agent_event", "managed_agent_consumer_progress");
+        assertEmpty(
+                "ma_session",
+                "ma_request_receipt",
+                "ma_request_receipt",
+                "ma_public_event",
+                "ma_event_stream");
     }
 
     @Test
@@ -270,7 +300,7 @@ class WorkspaceCsiSessionMainTest {
                 "CREATE_SESSION", "unbound", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null));
         assertThatThrownBy(() -> create(request("unbound"))).isInstanceOf(ApiException.class)
                 .satisfies(error -> assertThat(((ApiException) error).getCode()).isEqualTo("idempotency_conflict"));
-        assertThat(count("managed_agent_session")).isEqualTo(1);
+        assertThat(count("ma_session")).isEqualTo(1);
         new TransactionTemplate(manager).executeWithoutResult(status -> assertThatThrownBy(() -> create(request("new")))
                 .isInstanceOf(IllegalStateException.class).hasMessage("Private CSI CREATE requires a fresh transaction"));
     }
@@ -281,9 +311,9 @@ class WorkspaceCsiSessionMainTest {
                 "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
                 new WorkspaceSelection("workspace", ".")));
         assertThat(legacy).isNotNull();
-        assertThat(jdbc.queryForObject("SELECT tool_profile FROM managed_agent_session", String.class))
+        assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session", String.class))
                 .isEqualTo("hosted-workspace-files/1");
-        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM managed_agent_session", String.class)).isNull();
+        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM ma_session", String.class)).isNull();
     }
 
     @Test
@@ -292,7 +322,7 @@ class WorkspaceCsiSessionMainTest {
         assertThatThrownBy(() -> WorkspaceCsiSessionMain.create(jdbc, new DataSourceTransactionManager(other),
                 json, properties, request("other-transaction"))).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Private CSI CREATE requires its original transaction connection");
-        assertEmpty("managed_agent_session", "managed_workspace_create_command", "managed_agent_event");
+        assertEmpty("ma_session", "ma_request_receipt", "ma_public_event");
     }
 
     @Test
@@ -302,8 +332,12 @@ class WorkspaceCsiSessionMainTest {
         Files.writeString(path, encoded.replace("\"cwdRelative\":\".\"", "\"cwdRelative\":\"subdir\""));
         assertThatThrownBy(() -> WorkspaceCsiSessionMain.readRequest(path, json))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("CSI Session request could not be read");
-        assertEmpty("managed_agent_session", "managed_workspace_create_command", "managed_agent_event",
-                "managed_agent_consumer_progress", "managed_session_create_scope");
+        assertEmpty(
+                "ma_session",
+                "ma_request_receipt",
+                "ma_public_event",
+                "ma_event_stream",
+                "ma_request_receipt");
     }
 
     @Test
@@ -318,7 +352,7 @@ class WorkspaceCsiSessionMainTest {
             assertThatThrownBy(() -> WorkspaceCsiSessionMain.readRequest(path, json))
                     .isInstanceOf(IllegalArgumentException.class).hasMessage("CSI Session request could not be read");
         }
-        assertEmpty("managed_agent_session");
+        assertEmpty("ma_session");
     }
 
     @TestFactory
@@ -345,7 +379,8 @@ class WorkspaceCsiSessionMainTest {
                 .map(method -> DynamicTest.dynamicTest(method.toString(), () -> {
                     assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
                             invokeMutation(method, original.sessionId())));
-                    assertThat(allTables()).isEqualTo(before);
+                    assertThat(allTables()).as(method.toString())
+                                                    .isEqualTo(before);
                 }));
     }
 
@@ -374,8 +409,8 @@ class WorkspaceCsiSessionMainTest {
     @Test
     void retainedRequestPinStillRefusesAfterAConflictingProfileChange() {
         var original = create(request("retained-pin"));
-        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-files/1'");
-        assertThat(jdbc.queryForObject("SELECT csi_guard FROM managed_agent_session", Boolean.class)).isTrue();
+        jdbc.update("UPDATE ma_session SET tool_profile = 'hosted-workspace-files/1'");
+        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session", Boolean.class)).isTrue();
         var before = allTables();
         assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
                 store().appendPublicEventIfAbsent("tenant", original.sessionId(), null, "session.environment",
@@ -390,7 +425,7 @@ class WorkspaceCsiSessionMainTest {
     @Test
     void retainedPinRefusesDirectWriterAllocationAfterAnOrdinaryProfileChange() {
         var original = create(request("direct-retained-pin"));
-        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'workspace-files/1'");
+        jdbc.update("UPDATE ma_session SET tool_profile = 'workspace-files/1'");
         var before = allTables();
         assertThatThrownBy(() -> new ManagedSessionStore(jdbc).acquireWriter("tenant", original.sessionId(),
                 "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60000L)))
@@ -404,8 +439,36 @@ class WorkspaceCsiSessionMainTest {
         for (int index = 0; index < 3; index++) {
             var original = create(request("backlog-" + index));
             insertLegacyOperation(original.sessionId());
-            jdbc.update("INSERT INTO managed_agent_snapshot (tenant_id, session_id, snapshot_version,"
-                    + " covered_sequence, items_json, created_at, updated_at) VALUES ('tenant', ?, 1, 1, '[]', 0, 0)",
+            String resourceKey =
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            ManagedSessionStore.sessionScopeKey("tenant", original.sessionId()),
+                            "private-manifest");
+            jdbc.update(
+                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                        + " session_id, resource_id, kind, schema_version, byte_length, sha256,"
+                        + " storage_kind, inline_bytes, state, publish_command_id, created_at)"
+                        + " VALUES (?, ?, 'tenant', ?, 'private-manifest', 'snapshot-manifest', 1,"
+                        + " 2, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 'private-fixture',"
+                        + " CURRENT_TIMESTAMP(6))",
+                    resourceKey,
+                    ManagedSessionStore.sessionScopeKey("tenant", original.sessionId()),
+                    original.sessionId(),
+                    com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
+                            new byte[] {91, 93}),
+                    new byte[] {91, 93});
+            jdbc.update(
+                    "INSERT INTO ma_snapshot (tenant_id, session_id, snapshot_id, snapshot_version,"
+                        + " covered_sequence, projection_version, manifest_resource_key,"
+                        + " manifest_sha256, item_count, state, created_at, retain_until) VALUES"
+                        + " ('tenant', ?, 'private-snapshot', 1, 1, 1, ?, ?, 0, 'PUBLISHED', 0, 0)",
+                    original.sessionId(),
+                    resourceKey,
+                    com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
+                            new byte[] {91, 93}));
+            jdbc.update(
+                    "UPDATE ma_event_stream SET covered_sequence = 1, current_snapshot_id ="
+                        + " 'private-snapshot' WHERE tenant_id = X'74656e616e74' AND session_id ="
+                        + " ?",
                     original.sessionId());
         }
         var tx = new TransactionTemplate(manager);
@@ -424,14 +487,18 @@ class WorkspaceCsiSessionMainTest {
                 .containsExactly(ordinary.sessionId());
         assertThat(tx.execute(status -> store().advanceReplayFloor("tenant", ordinary.sessionId(), 100)).floorSequence())
                 .isGreaterThan(0);
-        var ordinaryTurn = jdbc.queryForMap("SELECT * FROM managed_agent_turn WHERE session_id = ?", ordinary.sessionId());
+        var ordinaryTurn = jdbc.queryForMap(
+                        "SELECT * FROM ma_turn WHERE session_id = ?", ordinary.sessionId());
         var privateTurn = new java.util.LinkedHashMap<>(ordinaryTurn);
-        privateTurn.put("session_id", jdbc.queryForObject("SELECT session_id FROM managed_agent_session"
-                + " WHERE csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
+        privateTurn.put("session_id", jdbc.queryForObject(
+                        "SELECT session_id FROM ma_session"
+                                + " WHERE csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
         privateTurn.put("turn_id", "private-legacy-turn");
         privateTurn.put("prompt_id", UUID.randomUUID().toString());
         privateTurn.put("updated_at", 0L);
-        jdbc.update("INSERT INTO managed_agent_turn (" + String.join(",", privateTurn.keySet()) + ") VALUES ("
+        jdbc.update(
+                "INSERT INTO ma_turn ("
+                        + String.join(",", privateTurn.keySet()) + ") VALUES ("
                 + String.join(",", java.util.Collections.nCopies(privateTurn.size(), "?")) + ")",
                 privateTurn.values().toArray());
         assertThat(store().findDispatchable(System.currentTimeMillis(), 1))
@@ -486,16 +553,24 @@ class WorkspaceCsiSessionMainTest {
             if (type == Map.class) {
                 return Map.of();
             }
-            throw new IllegalStateException("Unsupported mutation parameter " + type);
+                                    if (type == StoreModels.RenameDelivery.class) {
+                                        return new StoreModels.RenameDelivery(
+                                                "tenant", sessionId, "unused", "title", 1, 0);
+                                    }
+                                    throw new IllegalStateException("Unsupported mutation parameter " + type);
         }).toArray();
-        arguments[0] = "tenant";
+        if (method.getParameterTypes()[0] == String.class) {
+            arguments[0] = "tenant";
+        }
         int sessionIndex = switch (method.getName()) {
             case "insertTurnCommand", "insertCancelCommand", "beginSessionMutation" -> 4;
             case "completeSessionMutation", "abandonSessionMutation", "beginSessionRename" -> 3;
             case "completeSessionRename", "abandonSessionRename" -> 2;
             default -> 1;
         };
-        arguments[sessionIndex] = sessionId;
+        if (method.getParameterTypes()[0] == String.class) {
+            arguments[sessionIndex] = sessionId;
+        }
         try {
             method.invoke(store(), arguments);
         } catch (InvocationTargetException error) {
@@ -509,17 +584,32 @@ class WorkspaceCsiSessionMainTest {
     }
 
     private void insertLegacyOperation(String session) {
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
-                + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
-                + " session_status_before, available_at, created_at, updated_at) VALUES"
-                + " ('tenant', ?, ?, 'CLOSE', '', 'unused', 'digest', 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0, 0)",
-                session, count("managed_agent_operation") == 0 ? "unused" : UUID.randomUUID().toString());
+        String id = count("ma_operation") == 0 ? "unused" : UUID.randomUUID().toString();
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+        String target =
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(session);
+        jdbc.update(
+                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                    + " target_kind, target_key, request_json, phase, tenant_id, session_id,"
+                    + " operation_id, operation_kind, actor_digest, idempotency_key,"
+                    + " request_digest, state, admission_stage, delivery_state,"
+                    + " session_status_before, available_at, created_at, updated_at) VALUES (?, ?,"
+                    + " ?, 'SESSION', ?, '{}', 'ADMITTED', 'tenant', ?, ?, 'CLOSE', '', 'unused',"
+                    + " 'digest', 'PENDING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE', 0, 0, 0)",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                        "CLOSE", scope, target, id),
+                scope,
+                scope,
+                target,
+                session,
+                id);
     }
 
     private Map<String, JsonNode> allTables() {
         var result = new TreeMap<String, JsonNode>();
-        for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
-                + " WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
+        for (String table : jdbc.queryForList(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema ="
+                                + " 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
             var rows = jdbc.queryForList("SELECT * FROM " + table).stream().map(row -> {
                 row.replaceAll((column, value) -> {
                     if (value instanceof java.sql.Clob clob) {
@@ -536,7 +626,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(65);
+        assertThat(result).hasSize(33);
         return result;
     }
 
@@ -568,6 +658,11 @@ class WorkspaceCsiSessionMainTest {
     }
 
     private int count(String table) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
+        return jdbc.queryForObject("SELECT COUNT(*) FROM " + table
+                        + ("ma_request_receipt".equals(table)
+                                ? " WHERE namespace = 'SESSION_CREATE_ACTOR'"
+                                : "ma_tenant_guard".equals(table)
+                                        ? " WHERE guard_domain = 'output_publication'"
+                                        : ""), Integer.class);
     }
 }

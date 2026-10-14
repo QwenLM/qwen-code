@@ -102,10 +102,12 @@ public final class JdbcCsiActivationAdmission {
 
     static void refuseUnqualifiedWriter(Connection connection, String bindingId) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT capability_digest FROM qwen_runtime_binding WHERE binding_id = ?")) {
-            statement.setString(1, bindingId);
+                        "SELECT capability_digest FROM ma_runtime_binding WHERE binding_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
             try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(row.getString("capability_digest"))) {
+                if (!row.next() || !CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
+                                        .identity(row, "capability_digest"))) {
                     return;
                 }
             }
@@ -184,13 +186,14 @@ public final class JdbcCsiActivationAdmission {
         if (first) {
             require(original.version() < 9_007_199_254_740_990L);
             try (PreparedStatement statement = statement(connection,
-                    "UPDATE qwen_runtime_binding SET first_activation_journal_revision = ?,"
-                            + " record_version = record_version + 1 WHERE binding_id = ? AND request_key = ?"
-                            + " AND runtime_generation = 1 AND record_version = ?"
-                            + " AND first_activation_journal_revision IS NULL")) {
+                            "UPDATE ma_runtime_binding SET first_activation_journal_revision = ?,"
+                                + " record_version = record_version + 1 WHERE binding_id = ? AND"
+                                + " request_key = ? AND runtime_generation = 1 AND record_version ="
+                                + " ? AND first_activation_journal_revision IS NULL")) {
                 statement.setLong(1, previousRevision + 1);
-                statement.setString(2, original.bindingId());
-                statement.setString(3, original.request().requestKey());
+                JdbcRepositorySupport.setIdentity(statement, 2, original.bindingId());
+                JdbcRepositorySupport.setStringParameter(
+                        statement, 3, original.request().requestKey());
                 statement.setLong(4, original.version());
                 progress.requireCurrentTime(connection);
                 require(statement.executeUpdate() == 1);
@@ -330,22 +333,43 @@ public final class JdbcCsiActivationAdmission {
     private static NativeHead activeNativeHead(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
+                        "SELECT * FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
+                            + " tenant_id = ? AND session_id = ? AND tenant_key = ? AND harness_key"
+                            + " = ? AND harness_session_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(
+                    statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            statement.setString(
+                    3,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            original.request().getScope().getTenantId()));
+            statement.setString(
+                    4,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            original.request().getIsolationKey()));
+            JdbcRepositorySupport.setIdentity(statement, 5, original.request().getIsolationKey());
             try (ResultSet head = statement.executeQuery()) {
-                require(head.next() && original.request().getScope().getWorkspaceId().equals(head.getString("workspace_id"))
+                require(head.next() && original.request().getScope().getWorkspaceId().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        head, "workspace_id"))
                         && "ACTIVE".equals(head.getString("state")) && head.getLong("writer_generation") > 0
                         && head.getInt("storage_version") == 1
                         && head.getLong("compacted_through_revision") == 0
                         && "READY".equals(head.getString("recovery_status")));
                 require(head.getTimestamp("writer_lease_until") != null);
                 var history = history(connection, original, head.getLong("journal_revision"),
-                        head.getLong("committed_sequence"), head.getString("last_commit_digest"), head.getString("writer_id"));
+                        head.getLong("committed_sequence"), head.getString("last_commit_digest"),
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
+                                        .identity(head, "writer_id"));
                 require(history.activation() != null && head.getLong("activation_epoch") == history.activation().epoch()
-                        && history.activation().activationId().equals(head.getString("activation_id"))
+                        && history.activation().activationId().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        head, "activation_id"))
                         && head.getLong("writer_generation") == history.activation().writerGeneration()
-                        && head.getString("writer_id").equals(history.activation().workerId()));
+                        && com.alibaba.qwen.code.runtimebroker.managedschema
+                                        .ManagedSchemaRows.identity(head, "writer_id").equals(history.activation().workerId()));
                 var result = new NativeHead(head.getLong("journal_revision"), head.getLong("committed_sequence"),
                         head.getString("last_commit_digest"), history.prefix(),
                         head.getTimestamp("writer_lease_until").toInstant().toEpochMilli(), history.activation().expiresAt(), history.activation());
@@ -377,16 +401,22 @@ public final class JdbcCsiActivationAdmission {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                    "SELECT * FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                            + " AND journal_revision > ? AND journal_revision <= ? ORDER BY journal_revision LIMIT 100 FOR UPDATE")) {
-                statement.setString(1, original.request().getScope().getTenantId());
-                statement.setString(2, original.request().getIsolationKey());
+                            "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id"
+                                + " = ? AND journal_revision > ? AND journal_revision <= ? ORDER BY"
+                                + " journal_revision LIMIT 100 FOR UPDATE")) {
+                JdbcRepositorySupport.setIdentity(
+                        statement, 1, original.request().getScope().getTenantId());
+                JdbcRepositorySupport.setIdentity(
+                        statement, 2, original.request().getIsolationKey());
                 statement.setLong(3, revision);
                 statement.setLong(4, expectedRevision);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         require(revision < MAX_HISTORY && rows.getLong("journal_revision") == revision + 1
-                                && original.request().getScope().getWorkspaceId().equals(rows.getString("workspace_id"))
+                                && original.request().getScope().getWorkspaceId().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(rows, "workspace_id"))
                                 && rows.getLong("writer_generation") > 0
                                 && "identity".equals(rows.getString("record_encoding")));
                         byte[] bytes = rows.getBytes("record_bytes");
@@ -399,8 +429,12 @@ public final class JdbcCsiActivationAdmission {
                         var parsed = CsiNativeActivationProof.records(bytes);
                         if (revision == 0) {
                             genesisMetadata(metadata, original.request(), CsiNativeActivationProof.sha256(bytes));
-                            CsiNativeActivationProof.uuid(rows.getString("writer_id"));
-                            firstWriterId = rows.getString("writer_id");
+                            CsiNativeActivationProof.uuid(
+                                    com.alibaba.qwen.code.runtimebroker.managedschema
+                                            .ManagedSchemaRows.identity(rows, "writer_id"));
+                            firstWriterId =
+                                    com.alibaba.qwen.code.runtimebroker.managedschema
+                                            .ManagedSchemaRows.identity(rows, "writer_id");
                             genesis = CsiNativeActivationProof.genesis(parsed, original.request(),
                                     ref -> resource(connection, original, ref, rowRevision));
                             lastUuid = genesis.lastRecordUuid();
@@ -408,7 +442,10 @@ public final class JdbcCsiActivationAdmission {
                             require(rows.getLong("first_sequence") == sequence + 1
                                     && Objects.equals(digest, rows.getString("previous_commit_digest")));
                             if (activation == null) {
-                                require(firstWriterId.equals(rows.getString("writer_id"))
+                                require(firstWriterId.equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(rows, "writer_id"))
                                         && rows.getLong("writer_generation") == 1);
                             }
                             var transaction = CsiNativeActivationProof.transaction(parsed, metadata,
@@ -418,11 +455,16 @@ public final class JdbcCsiActivationAdmission {
                                     require(revision == 1 && Objects.equals(original.firstActivationJournalRevision(), 2L));
                                 }
                                 activation = CsiNativeActivationProof.activation(transaction, metadata, original.request(),
-                                        rows.getString("writer_id"), genesis.definitionDigest(), activation,
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        rows, "writer_id"), genesis.definitionDigest(), activation,
                                         ref -> resource(connection, original, ref, rowRevision));
                             } else {
                                 prefix = CsiNativeActivationProof.advance(transaction, metadata,
-                                        original.request(), rows.getString("writer_id"), genesis, activation, rowRevision - 1, sequence, prefix,
+                                        original.request(),
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        rows, "writer_id"), genesis, activation, rowRevision - 1, sequence, prefix,
                                         ref -> resource(connection, original, ref, rowRevision));
                             }
                             lastUuid = transaction.lastRecordUuid();
@@ -443,12 +485,27 @@ public final class JdbcCsiActivationAdmission {
                 && (activation == null ? original.firstActivationJournalRevision() == null
                         : Objects.equals(original.firstActivationJournalRevision(), 2L)));
         try (PreparedStatement statement = statement(connection,
-                "SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head"
-                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
+                        "SELECT latest_checkpoint_resource_id FROM ma_session_head WHERE head_kind"
+                            + " = 'MANAGED_SESSION' AND tenant_id = ? AND session_id = ? AND"
+                            + " tenant_key = ? AND harness_key = ? AND harness_session_id = ? FOR"
+                            + " UPDATE")) {
+            JdbcRepositorySupport.setIdentity(
+                    statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            statement.setString(
+                    3,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            original.request().getScope().getTenantId()));
+            statement.setString(
+                    4,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            original.request().getIsolationKey()));
+            JdbcRepositorySupport.setIdentity(statement, 5, original.request().getIsolationKey());
             try (ResultSet row = statement.executeQuery()) {
-                require(row.next() && Objects.equals(prefix.checkpointResourceId(), row.getString("latest_checkpoint_resource_id")));
+                require(row.next() && Objects.equals(prefix.checkpointResourceId(),
+                                        com.alibaba.qwen.code.runtimebroker.managedschema
+                                                .ManagedSchemaRows.identity(
+                                                row, "latest_checkpoint_resource_id")));
             }
         }
         return new History(genesis, lastUuid, activation, prefix, revision, sequence, digest);
@@ -457,10 +514,11 @@ public final class JdbcCsiActivationAdmission {
     private static void requireNoJournalTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long revision) throws SQLException {
         try (var statement = statement(connection,
-                "SELECT journal_revision FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND journal_revision > ? LIMIT 1 FOR UPDATE")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
+                        "SELECT journal_revision FROM ma_session_journal_tx WHERE tenant_id = ? AND"
+                                + " session_id = ? AND journal_revision > ? LIMIT 1 FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(
+                    statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
             statement.setLong(3, revision);
             try (var row = statement.executeQuery()) {
                 require(!row.next());
@@ -475,19 +533,33 @@ public final class JdbcCsiActivationAdmission {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                    "SELECT * FROM qwen_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
-                            + " OR runtime_session_id = ?) AND execution_call_id_hash > ?"
-                            + " ORDER BY execution_call_id_hash LIMIT 100 FOR UPDATE")) {
-                statement.setString(1, original.bindingId());
-                statement.setString(2, original.request().getIsolationKey());
-                statement.setString(3, original.request().getIsolationKey());
+                            "SELECT * FROM ma_tool_execution WHERE (binding_id = ? OR"
+                                    + " harness_session_id = ? OR runtime_session_id = ?) AND"
+                                    + " execution_call_id_hash > ? ORDER BY execution_call_id_hash"
+                                    + " LIMIT 100 FOR UPDATE")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
+                JdbcRepositorySupport.setIdentity(
+                        statement, 2, original.request().getIsolationKey());
+                JdbcRepositorySupport.setIdentity(
+                        statement, 3, original.request().getIsolationKey());
                 statement.setString(4, cursor);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
-                        require(++total <= MAX_HISTORY && original.bindingId().equals(rows.getString("binding_id"))
+                        require(++total <= MAX_HISTORY && original.bindingId().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(rows, "binding_id"))
                                 && rows.getLong("runtime_generation") == 1
-                                && original.request().getIsolationKey().equals(rows.getString("harness_session_id"))
-                                && original.request().getIsolationKey().equals(rows.getString("runtime_session_id"))
+                                && original.request().getIsolationKey().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(
+                                                                        rows, "harness_session_id"))
+                                && original.request().getIsolationKey().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(
+                                                                        rows, "runtime_session_id"))
                                 && rows.getObject("authorized_dispatch_generation") == null
                                 && rows.getObject("authorized_binding_version") == null
                                 && rows.getLong("dispatch_generation") == 0
@@ -546,24 +618,44 @@ public final class JdbcCsiActivationAdmission {
     static byte[] resource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JsonNode ref, long revision) {
         try (PreparedStatement statement = statement(connection,
-                "SELECT r.* FROM qwen_managed_session_resource r JOIN qwen_managed_session_resource_ref x"
-                        + " ON r.session_scope_key = x.session_scope_key AND r.resource_id = x.resource_id"
-                        + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.resource_id = ?"
-                        + " AND x.journal_revision = ? AND x.tenant_id = ? AND x.workspace_id = ?"
-                        + " AND x.session_id = ? AND r.session_scope_key = ? FOR UPDATE")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
-            statement.setString(3, ref.path("resourceId").textValue());
+                        "SELECT r.* FROM ma_resource r JOIN ma_resource_ref x ON r.resource_key ="
+                            + " x.resource_key AND r.session_scope_key = x.session_scope_key WHERE"
+                            + " r.tenant_id = ? AND r.session_id = ? AND r.resource_id = ? AND"
+                            + " x.owner_kind = 'JOURNAL' AND x.owner_key = r.session_scope_key AND"
+                            + " x.journal_revision = ? AND x.owner_revision = x.journal_revision"
+                            + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND"
+                            + " r.session_scope_key = ? AND r.resource_key = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(
+                    statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(statement, 3, ref.path("resourceId").textValue());
             statement.setLong(4, revision);
-            statement.setString(5, original.request().getScope().getTenantId());
-            statement.setString(6, original.request().getScope().getWorkspaceId());
-            statement.setString(7, original.request().getIsolationKey());
-            statement.setString(8, CsiNativeActivationProof.sha256((original.request().getScope().getTenantId()
-                    + "\u0000" + original.request().getIsolationKey()).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            JdbcRepositorySupport.setIdentity(
+                    statement, 5, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(
+                    statement, 6, original.request().getScope().getWorkspaceId());
+            JdbcRepositorySupport.setIdentity(statement, 7, original.request().getIsolationKey());
+            JdbcRepositorySupport.setStringParameter(
+                    statement,
+                    8,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.request().getScope().getTenantId(),
+                            original.request().getIsolationKey()));
+            statement.setString(
+                    9,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                                    original.request().getScope().getTenantId(),
+                                    original.request().getIsolationKey()),
+                            ref.path("resourceId").textValue()));
             try (ResultSet row = statement.executeQuery()) {
-                require(row.next() && original.request().getScope().getWorkspaceId().equals(row.getString("workspace_id"))
+                require(row.next() && original.request().getScope().getWorkspaceId().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(
+                                                        row, "workspace_id"))
                         && "REFERENCED".equals(row.getString("state")) && "MYSQL_INLINE".equals(row.getString("storage_kind"))
-                        && ref.path("kind").textValue().equals(row.getString("kind"))
+                        && ref.path("kind").textValue().equals(
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(row, "kind"))
                         && row.getLong("schema_version") == ref.path("schemaVersion").longValue()
                         && row.getLong("byte_length") == ref.path("byteLength").longValue()
                         && ref.path("digest").textValue().equals(row.getString("sha256")));
@@ -579,12 +671,15 @@ public final class JdbcCsiActivationAdmission {
     static byte[] frozenResource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JsonNode ref, long intentSequence) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "SELECT journal_revision FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND workspace_id = ? AND first_sequence = ? AND last_sequence = ?"
-                        + " AND event_count = 1 AND operation = 'commitFileHistory' FOR UPDATE")) {
-            statement.setString(1, original.request().getScope().getTenantId());
-            statement.setString(2, original.request().getIsolationKey());
-            statement.setString(3, original.request().getScope().getWorkspaceId());
+                        "SELECT journal_revision FROM ma_session_journal_tx WHERE tenant_id = ? AND"
+                                + " session_id = ? AND workspace_id = ? AND first_sequence = ? AND"
+                                + " last_sequence = ? AND event_count = 1 AND operation ="
+                                + " 'commitFileHistory' FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(
+                    statement, 1, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(
+                    statement, 3, original.request().getScope().getWorkspaceId());
             statement.setLong(4, intentSequence);
             statement.setLong(5, intentSequence);
             try (ResultSet row = statement.executeQuery()) {

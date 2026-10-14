@@ -55,24 +55,61 @@ final class CsiNativeToolReservation {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                    "SELECT * FROM qwen_managed_session_resource WHERE session_scope_key = ? AND resource_id > ?"
-                            + " ORDER BY resource_id LIMIT 100 FOR UPDATE")) {
-                statement.setString(1, scope(original));
-                statement.setString(2, cursor);
+                            "SELECT * FROM ma_resource WHERE session_scope_key = ? AND resource_id"
+                                    + " > ? ORDER BY resource_id LIMIT 100 FOR UPDATE")) {
+                JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
+                JdbcRepositorySupport.setStringParameter(statement, 2, cursor);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         require(result.size() < LIMIT
-                                && original.request().getScope().getTenantId().equals(rows.getString("tenant_id"))
-                                && original.request().getScope().getWorkspaceId().equals(rows.getString("workspace_id"))
-                                && original.request().getIsolationKey().equals(rows.getString("session_id")));
-                        cursor = rows.getString("resource_id");
-                        ObjectNode ref = JSON.createObjectNode().put("resourceId", cursor).put("kind", rows.getString("kind"))
+                                && original.request().getScope().getTenantId().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(rows, "tenant_id"))
+                                && original.request().getScope().getWorkspaceId().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(rows, "workspace_id"))
+                                && original.request().getIsolationKey().equals(
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(rows, "session_id")));
+                        cursor =
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
+                                        .identity(rows, "resource_id");
+                        ObjectNode ref = JSON.createObjectNode().put("resourceId", cursor).put("kind",
+                                                com.alibaba.qwen.code.runtimebroker.managedschema
+                                                        .ManagedSchemaRows.identity(rows, "kind"))
                                 .put("schemaVersion", rows.getLong("schema_version"))
                                 .put("byteLength", rows.getLong("byte_length")).put("digest", rows.getString("sha256"));
                         require(result.put(cursor, new Resource(ref, rows.getBytes("inline_bytes"),
-                                rows.getString("state"), rows.getString("storage_kind"), rows.getString("publish_command_id"),
-                                rows.getString("object_key") == null && rows.getString("object_version_id") == null
-                                        && rows.getString("encryption_key_id") == null)) == null);
+                                rows.getString("state"), rows.getString("storage_kind"),
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                .managedschema.ManagedSchemaRows
+                                                                .identity(
+                                                                        rows, "publish_command_id"),
+                                                        com.alibaba.qwen.code.runtimebroker
+                                                                                .managedschema
+                                                                                .ManagedSchemaRows
+                                                                                .identity(
+                                                                                        rows,
+                                                                                        "object_key")
+                                                                        == null
+                                                                && com.alibaba.qwen.code
+                                                                                .runtimebroker
+                                                                                .managedschema
+                                                                                .ManagedSchemaRows
+                                                                                .identity(
+                                                                                        rows,
+                                                                                        "object_version_id")
+                                                                        == null
+                                                                && com.alibaba.qwen.code
+                                                                                .runtimebroker
+                                                                                .managedschema
+                                                                                .ManagedSchemaRows
+                                                                                .identity(
+                                                                                        rows,
+                                                                                        "encryption_key_id") == null)) == null);
                         count++;
                     }
                 }
@@ -101,13 +138,16 @@ final class CsiNativeToolReservation {
         while (true) {
             int count = 0;
             try (PreparedStatement statement = statement(connection,
-                    "SELECT * FROM qwen_tool_execution WHERE (binding_id = ? OR harness_session_id = ?"
-                            + " OR runtime_session_id = ?) AND execution_call_id_hash > ?"
-                            + " ORDER BY execution_call_id_hash LIMIT 100 FOR UPDATE")) {
-                statement.setString(1, original.bindingId());
-                statement.setString(2, original.request().getIsolationKey());
-                statement.setString(3, original.request().getIsolationKey());
-                statement.setString(4, cursor);
+                            "SELECT * FROM ma_tool_execution WHERE (binding_id = ? OR"
+                                    + " harness_session_id = ? OR runtime_session_id = ?) AND"
+                                    + " execution_call_id_hash > ? ORDER BY execution_call_id_hash"
+                                    + " LIMIT 100 FOR UPDATE")) {
+                JdbcRepositorySupport.setStringParameter(statement, 1, original.bindingId());
+                JdbcRepositorySupport.setStringParameter(
+                        statement, 2, original.request().getIsolationKey());
+                JdbcRepositorySupport.setStringParameter(
+                        statement, 3, original.request().getIsolationKey());
+                JdbcRepositorySupport.setStringParameter(statement, 4, cursor);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         require(result.size() < LIMIT);
@@ -458,10 +498,10 @@ final class CsiNativeToolReservation {
 
     private static void promote(Connection connection, JdbcCsiFilesRetirementGuard.Original original, JsonNode ref) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                "UPDATE qwen_managed_session_resource SET state = 'REFERENCED'"
-                        + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'")) {
-            statement.setString(1, scope(original));
-            statement.setString(2, id(ref, "resourceId"));
+                        "UPDATE ma_resource SET state = 'REFERENCED' WHERE session_scope_key = ?"
+                                + " AND resource_id = ? AND state = 'PUBLISHED'")) {
+            JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
+            JdbcRepositorySupport.setStringParameter(statement, 2, id(ref, "resourceId"));
             require(statement.executeUpdate() == 1);
         }
     }
@@ -517,10 +557,12 @@ final class CsiNativeToolReservation {
                         continue;
                     }
                     try (PreparedStatement statement = statement(connection,
-                            "UPDATE qwen_managed_session_resource SET state = 'REFERENCED'"
-                                    + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED'")) {
-                        statement.setString(1, scope(original));
-                        statement.setString(2, id(ref, "resourceId"));
+                                    "UPDATE ma_resource SET state = 'REFERENCED' WHERE"
+                                        + " session_scope_key = ? AND resource_id = ? AND state ="
+                                        + " 'PUBLISHED'")) {
+                        JdbcRepositorySupport.setStringParameter(statement, 1, scope(original));
+                        JdbcRepositorySupport.setStringParameter(
+                                statement, 2, id(ref, "resourceId"));
                         require(statement.executeUpdate() == 1);
                     }
                 }
@@ -535,29 +577,39 @@ final class CsiNativeToolReservation {
             return;
         }
         try (PreparedStatement statement = statement(connection,
-                "INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)")) {
-            statement.setString(1, scope(original));
-            statement.setString(2, original.request().getScope().getTenantId());
-            statement.setString(3, original.request().getScope().getWorkspaceId());
-            statement.setString(4, original.request().getIsolationKey());
-            statement.setString(5, id(ref, "resourceId"));
-            statement.setString(6, text(ref, "kind"));
-            statement.setLong(7, bytes.length);
-            statement.setString(8, text(ref, "digest"));
-            statement.setBytes(9, bytes);
-            statement.setString(10, id(ref, "resourceId"));
+                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                            + " workspace_id, session_id, resource_id, kind, schema_version,"
+                            + " byte_length, sha256, storage_kind, inline_bytes,"
+                            + " publish_command_id, state, created_at, last_verified_at) VALUES (?,"
+                            + " ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED',"
+                            + " ?, ?)")) {
+            JdbcRepositorySupport.setStringParameter(
+                    statement,
+                    1,
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                            scope(original), id(ref, "resourceId")));
+            JdbcRepositorySupport.setStringParameter(statement, 2, scope(original));
+            JdbcRepositorySupport.setStringParameter(
+                    statement, 3, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setStringParameter(
+                    statement, 4, original.request().getScope().getWorkspaceId());
+            JdbcRepositorySupport.setStringParameter(
+                    statement, 5, original.request().getIsolationKey());
+            JdbcRepositorySupport.setStringParameter(statement, 6, id(ref, "resourceId"));
+            JdbcRepositorySupport.setStringParameter(statement, 7, text(ref, "kind"));
+            statement.setLong(8, bytes.length);
+            JdbcRepositorySupport.setStringParameter(statement, 9, text(ref, "digest"));
+            statement.setBytes(10, bytes);
+            JdbcRepositorySupport.setStringParameter(statement, 11, id(ref, "resourceId"));
             var now = java.sql.Timestamp.from(JdbcRepositorySupport.databaseNowPrecise(connection));
-            statement.setTimestamp(11, now);
             statement.setTimestamp(12, now);
+            statement.setTimestamp(13, now);
             require(statement.executeUpdate() == 1);
         }
     }
 
     private static String scope(JdbcCsiFilesRetirementGuard.Original original) {
-        return sha256(utf8(original.request().getScope().getTenantId() + "\u0000" + original.request().getIsolationKey()));
+        return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(original.request().getScope().getTenantId(), original.request().getIsolationKey());
     }
 
     private static JsonNode definitions() {

@@ -620,7 +620,7 @@ class RuntimeHarnessDrainTest {
             provisioner.original = original;
             replacement.requestHarnessDrain("tenant", "harness");
             try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                    "UPDATE qwen_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?")) {
+                    "UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?")) {
                 statement.setString(1, original.getBindingId());
                 statement.executeUpdate();
             }
@@ -1005,9 +1005,12 @@ class RuntimeHarnessDrainTest {
     private RuntimeLifecycleAuthority resourceClaim() throws Exception {
         bindings.requestHarnessDrain("tenant", "harness");
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                "UPDATE qwen_runtime_harness_drain SET operation_id = 'lifecycle', claim_generation = 1,"
-                        + " claim_lease_until = ? WHERE tenant_id = 'tenant' AND harness_session_id = 'harness'")) {
-            statement.setLong(1, System.currentTimeMillis() + 30_000);
+                "UPDATE ma_session_head SET operation_id = ?, claim_generation = 1,"
+                        + " claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, "lifecycle");
+            statement.setLong(2, System.currentTimeMillis() + 30_000);
+            JdbcRepositorySupport.setIdentity(statement, 3, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 4, "harness");
             assertEquals(1, statement.executeUpdate());
         }
         return new RuntimeLifecycleAuthority("lifecycle", 1);
@@ -1015,7 +1018,7 @@ class RuntimeHarnessDrainTest {
 
     private void advanceResourceClaim() throws Exception {
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                "UPDATE qwen_runtime_harness_drain SET claim_generation = 2")) {
+                "UPDATE ma_session_head SET claim_generation = 2")) {
             assertEquals(1, statement.executeUpdate());
         }
     }
@@ -1175,7 +1178,7 @@ class RuntimeHarnessDrainTest {
     private static JdbcDataSource source() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return source;
     }
 }

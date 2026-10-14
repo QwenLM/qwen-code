@@ -24,19 +24,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.sql.Connection;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.List;
-import java.util.Map;
-import java.util.Base64;
-import java.util.TreeMap;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,8 +32,20 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /** Native SQL proof tests require built Node producer modules. */
 class WorkspaceCsiNativeActivationGateTest {
@@ -74,8 +73,8 @@ class WorkspaceCsiNativeActivationGateTest {
     void setUp(TestInfo info) throws Exception {
         var source = new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         transaction = new TransactionTemplate(manager);
         transaction.setTimeout(10);
@@ -83,12 +82,14 @@ class WorkspaceCsiNativeActivationGateTest {
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         reservations = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
         reservations.register(registration);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
-                + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
+        jdbc.update(
+                "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                        + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        jdbc.update(
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         sessionId = WorkspaceCsiSessionMain.create(jdbc, manager, JSON, properties,
@@ -149,7 +150,8 @@ class WorkspaceCsiNativeActivationGateTest {
             assertThat(commit(index).replayed()).isFalse();
         }
         assertThat(pin()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT committed_sequence FROM qwen_managed_session_journal_head", Long.class))
+        assertThat(jdbc.queryForObject(
+                                "SELECT committed_sequence FROM ma_session_head", Long.class))
                 .isEqualTo(41);
         before = allRows();
         for (int index = 0; index < 32; index++) {
@@ -210,7 +212,9 @@ class WorkspaceCsiNativeActivationGateTest {
         JsonNode part = nativeFixture.path("commits").get(27).path("request").path("resources").get(1);
         String id = part.path("resourceId").textValue();
         assertThat(part.path("kind").textValue()).isEqualTo("managed-message-part");
-        assertThat(jdbc.update("UPDATE qwen_managed_session_resource_ref SET journal_revision = 1 WHERE resource_id = ?",
+        assertThat(jdbc.update(
+                                "UPDATE ma_resource_ref SET journal_revision = 1 WHERE resource_id"
+                                        + " = ?",
                 id)).isEqualTo(1);
         var before = allRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(8).path("request"));
@@ -221,13 +225,14 @@ class WorkspaceCsiNativeActivationGateTest {
 
     private Map<String, List<String>> allRows() {
         Map<String, List<String>> rows = new TreeMap<>();
-        for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
-                + " WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
+        for (String table : jdbc.queryForList(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema ="
+                                + " 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
             rows.put(table, jdbc.queryForList("SELECT * FROM \"" + table + "\"").stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
-        assertThat(rows).containsKeys("qwen_managed_child_result_relay", "managed_agent_session",
-                "qwen_managed_session_journal_head", "qwen_csi_resource_read");
+        assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
+        assertThat(rows).hasSize(33);
         return rows;
     }
 
@@ -269,7 +274,8 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(authorityRows()).isEqualTo(before);
         commit(6);
         assertThat(pin()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+        assertThat(jdbc.queryForObject(
+                                "SELECT latest_checkpoint_resource_id FROM ma_session_head",
                 String.class)).isEqualTo(checkpoint);
         before = authorityRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(7).path("request"));
@@ -358,7 +364,8 @@ class WorkspaceCsiNativeActivationGateTest {
         commit(5);
         String resource = nativeFixture.path("commits").get(5).path("request").path("resources").get(0)
                 .path("resourceId").textValue();
-        jdbc.update("UPDATE qwen_managed_session_resource_ref SET journal_revision = 1 WHERE resource_id = ?", resource);
+        jdbc.update(
+                "UPDATE ma_resource_ref SET journal_revision = 1 WHERE resource_id = ?", resource);
         var before = authorityRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(5).path("request"));
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(6).path("request"));
@@ -429,7 +436,7 @@ class WorkspaceCsiNativeActivationGateTest {
         ready();
         commit(2);
         commit(3);
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = NULL");
+        jdbc.update("UPDATE ma_session_head SET latest_checkpoint_resource_id = NULL");
         var before = authorityRows();
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(4).path("request"));
         rejectedCommit((ObjectNode) nativeFixture.path("commits").get(3).path("request"));
@@ -454,35 +461,37 @@ class WorkspaceCsiNativeActivationGateTest {
         commit(2);
         assertThat(pin()).isEqualTo(2);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(pinnedVersion);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isEqualTo(3);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(3);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(4);
     }
 
     @Test
     void lateJournalFailureRollsBackPinVersionHeadAndOriginalResourceReference() throws Exception {
         commit(0);
         var before = head();
-        jdbc.execute("ALTER TABLE qwen_managed_session_journal_tx ADD CONSTRAINT owned_reject_install CHECK (journal_revision < 2)");
+        jdbc.execute(
+                "ALTER TABLE ma_session_journal_tx ADD CONSTRAINT owned_reject_install CHECK"
+                        + " (journal_revision < 2)");
         assertThatThrownBy(() -> commit(1)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(binding.getVersion());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(2);
     }
 
     @Test
     void missingPinnedOriginalReferenceBlocksSelectedAdmissionWithoutNewExecution() throws Exception {
         commit(0);
         commit(1);
-        jdbc.update("DELETE FROM qwen_managed_session_resource_ref WHERE journal_revision = 2");
+        jdbc.update("DELETE FROM ma_resource_ref WHERE journal_revision = 2");
         var candidate = ToolExecutionRecord.prepared("missing-ref-call", "missing-ref-key", binding.getBindingId(), 1,
                 sessionId, sessionId, "turn", "call", "sha256:" + "b".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
                         "promptId", "turn", "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_original_activation_unavailable");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution", Integer.class)).isZero();
         assertThat(pin()).isEqualTo(2);
     }
 
@@ -603,10 +612,17 @@ class WorkspaceCsiNativeActivationGateTest {
 
     private Map<String, List<String>> authorityRows() {
         Map<String, List<String>> rows = new TreeMap<>();
-        for (String table : List.of("qwen_managed_session_journal_head", "qwen_managed_session_journal_tx",
-                "qwen_managed_session_resource", "qwen_managed_session_resource_ref", "qwen_runtime_binding",
-                "managed_agent_session", "qwen_runtime_session", "qwen_tool_execution",
-                "managed_workspace_execution_lease", "managed_workspace_csi_retirement")) {
+        for (String table : List.of(
+                        "ma_session_head",
+                        "ma_session_journal_tx",
+                        "ma_resource",
+                        "ma_resource_ref",
+                        "ma_runtime_binding",
+                        "ma_session",
+                        "ma_runtime_session",
+                        "ma_tool_execution",
+                        "ma_storage_owner",
+                        "ma_operation")) {
             rows.put(table, jdbc.queryForList("SELECT * FROM " + table).stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
@@ -617,14 +633,14 @@ class WorkspaceCsiNativeActivationGateTest {
     void pinNullWithCommittedActivationHistoryCannotBeRepairedByRenewal() throws Exception {
         commit(0);
         commit(1);
-        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = NULL");
+        jdbc.update("UPDATE ma_runtime_binding SET first_activation_journal_revision = NULL");
         var before = head();
         assertThatThrownBy(() -> commit(2)).isInstanceOfSatisfying(RuntimeBrokerException.class,
                 error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(3);
     }
 
     @Test
@@ -634,26 +650,29 @@ class WorkspaceCsiNativeActivationGateTest {
                 sessionId, sessionId, "prior-turn", "prior-tool", "sha256:" + "c".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
                         "promptId", "prior-turn", "callId", "prior-tool", "argsDigest", "sha256:" + "c".repeat(64)));
         executions.findOrCreate(historical);
-        jdbc.update("UPDATE qwen_tool_execution SET binding_id = ?, execution_state = 'SETTLED',"
-                + " execution_status = 'success', dispatch_generation = 1, authorized_dispatch_generation = 1,"
-                + " authorized_binding_version = ?", binding.getBindingId(), binding.getVersion());
+        jdbc.update(
+                "UPDATE ma_tool_execution SET binding_id = ?, execution_state = 'SETTLED',"
+                        + " execution_status = 'success', dispatch_generation = 1,"
+                        + " authorized_dispatch_generation = 1, authorized_binding_version = ?", binding.getBindingId(), binding.getVersion());
         var before = head();
         assertThatThrownBy(() -> commit(1)).isInstanceOfSatisfying(RuntimeBrokerException.class,
                 error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
         assertThat(pin()).isNull();
         assertThat(head()).isEqualTo(before);
         assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(binding.getVersion());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_ref", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref", Integer.class)).isEqualTo(2);
     }
 
     private Long pin() {
-        return jdbc.queryForObject("SELECT first_activation_journal_revision FROM qwen_runtime_binding WHERE binding_id = ?",
+        return jdbc.queryForObject(
+                "SELECT first_activation_journal_revision FROM ma_runtime_binding WHERE binding_id"
+                        + " = ?",
                 Long.class, binding.getBindingId());
     }
 
     private List<Map<String, Object>> head() {
-        return jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_head");
+        return jdbc.queryForList("SELECT * FROM ma_session_head");
     }
 
     private void generate(boolean conversation) throws Exception {
