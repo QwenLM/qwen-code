@@ -536,13 +536,13 @@ const RESUME_TRAILER =
  *
  * NOTE on the regex:
  *  - `[\s\S]*?` (non-greedy) handles newlines inside the block AND
- *    stops at the first `</analysis>` — so multiple non-overlapping
+ *    stops at the first reasoning closer — so multiple non-overlapping
  *    blocks each get stripped via the `/g` flag.
- *  - It matches the exact tag `<analysis>` only. If the prompt ever
- *    evolves to use attributes (e.g. `<analysis type="...">`) or
- *    nested `<analysis>` tags, this pattern will leak content. The
- *    compression prompt is under our control, so we keep the pattern
- *    strict rather than over-engineering.
+ *  - Openers and closers come from the same four tag names. If the prompt
+ *    ever evolves to use attributes (e.g. `<analysis type="...">`) or
+ *    nested blocks, this pattern will leak content. The compression prompt
+ *    is under our control, so we keep the pattern simple rather than
+ *    over-engineering.
  *  - The closed-block pattern accepts the reasoning tags thinking models
  *    actually close with (`</think>` and friends), not just the literal
  *    `</analysis>` the prompt asks for: a thinking model instructed to open
@@ -618,22 +618,43 @@ export function stripAnalysisBlock(rawSummary: string): string {
   // that can be payload interior (#13707).
   const reasoningSpans = closedReasoningSpans(rawSummary);
   let closeAt = -1;
+  let lastCloseAt = -1;
   for (const match of rawSummary.matchAll(/<\/state_snapshot>/g)) {
+    lastCloseAt = match.index;
     if (!reasoningSpans.some(([s, e]) => match.index >= s && match.index < e)) {
       closeAt = match.index;
     }
   }
-  for (const match of rawSummary.matchAll(/(?:^|\n)[ \t]*<state_snapshot>/g)) {
-    const start = match.index + match[0].length - ENVELOPE_OPEN.length;
+  // Every closer landing inside a reasoning span means the span boundaries
+  // are the artifact (an unterminated opener paired with a quoted or
+  // cross-name closer past the envelope), not proof the envelope is scratch.
+  // Bind the last closer anyway; dropping the envelope here fails the summary
+  // empty and strikes the consecutive-failure breaker.
+  if (closeAt === -1) {
+    closeAt = lastCloseAt;
+  }
+  const openers = [...rawSummary.matchAll(/(?:^|\n)[ \t]*<state_snapshot>/g)];
+  const openerStart = (m: RegExpExecArray) =>
+    m.index + m[0].length - ENVELOPE_OPEN.length;
+  const inReasoningSpan = (index: number) =>
+    reasoningSpans.some(([s, e]) => index >= s && index < e);
+  const hasOutOfSpanOpener = openers.some(
+    (m) => !inReasoningSpan(openerStart(m)),
+  );
+  for (const match of openers) {
+    const start = openerStart(match);
     if (closeAt < start + ENVELOPE_OPEN.length) {
       break;
     }
     if (!rawSummary.slice(start + ENVELOPE_OPEN.length, closeAt).trim()) {
       continue; // an empty span is a mention, not an envelope
     }
-    // An opener inside a closed reasoning block is a draft the model already
-    // discarded, not a summary.
-    if (reasoningSpans.some(([s, e]) => start >= s && start < e)) {
+    // An opener inside a closed reasoning block is normally a draft the
+    // model already discarded, but only skip it when a line-start opener
+    // outside every span exists. Otherwise the span is the artifact (a
+    // quoted or cross-name closer pairing) and this envelope is the only
+    // summary we have.
+    if (hasOutOfSpanOpener && inReasoningSpan(start)) {
       continue;
     }
     // A state_snapshot quoted inside an unclosed instructed scratchpad is a

@@ -1636,8 +1636,10 @@ describe('stripAnalysisBlock', () => {
 
   it('pins the case-insensitive flag on both constructors', () => {
     // Without `i`, an uppercase-tagged block reads as unterminated and the
-    // summary after it would be swallowed with the scratchpad.
-    expect(stripAnalysisBlock('<ANALYSIS>r</ANALYSIS>\n\nREAL SUMMARY')).toBe(
+    // summary after it would be swallowed with the scratchpad. The closed
+    // pin must use a native pair: an uppercase <ANALYSIS> pair is also
+    // stripped by the unanchored instructed pattern and guards nothing here.
+    expect(stripAnalysisBlock('<THINK>r</THINK>\n\nREAL SUMMARY')).toBe(
       'REAL SUMMARY',
     );
     expect(stripAnalysisBlock('<THINK>cut off')).toBe('');
@@ -1778,6 +1780,34 @@ describe('stripAnalysisBlock', () => {
       '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
     expect(stripAnalysisBlock('<think>never closed\n' + snapshot)).toBe(
       snapshot,
+    );
+  });
+
+  it('keeps the envelope when a later reasoning closer pairs across it', () => {
+    // The unterminated <think> spans to the closed block's </analysis> past
+    // the envelope, and that span covers the envelope's own closer. Binding
+    // must still happen; returning empty here is COMPRESSION_FAILED_EMPTY_SUMMARY
+    // and one strike against the consecutive-failure breaker.
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        '<think>never closed\n' + snapshot + '\n<analysis>r</analysis>',
+      ),
+    ).toBe(snapshot);
+  });
+
+  it('keeps the whole envelope when the payload quotes a native closer', () => {
+    // The quoted </think> closes a phantom span over the envelope opener.
+    // Skipping the opener as a discarded draft then hands only the payload's
+    // back half to the resuming agent, with no failure recorded anywhere.
+    const envelope =
+      '<state_snapshot>\n' +
+      '<files_and_code_sections>\n- the parser saw a bare </think> with no opener and threw.\n</files_and_code_sections>\n' +
+      '<next_step>Land the fix.</next_step>\n' +
+      '</state_snapshot>';
+    expect(stripAnalysisBlock('<think>drafting the summary\n' + envelope)).toBe(
+      envelope,
     );
   });
 
