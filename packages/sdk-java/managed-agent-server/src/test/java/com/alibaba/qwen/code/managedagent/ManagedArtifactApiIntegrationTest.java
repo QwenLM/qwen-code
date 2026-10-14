@@ -65,11 +65,11 @@ class ManagedArtifactApiIntegrationTest {
     }
 
     void configureApi() {
-        fixture.jdbc().update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+        fixture.jdbc().update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                 + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant-1', 'workspace-1', 1, 'storage-1', 'Test', 'config', 'policy', 'ACTIVE')");
         for (String actor : new String[] {"reader", "metadata-reader"}) {
-            fixture.jdbc().update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id,"
+            fixture.jdbc().update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id,"
                     + " role) VALUES ('tenant-1', 'workspace-1', ?, 'READER')",
                     actor.getBytes(StandardCharsets.UTF_8));
         }
@@ -113,7 +113,7 @@ class ManagedArtifactApiIntegrationTest {
 
     @Test
     void unboundReadableSessionHasNoArtifactCapabilityOrRoutes() throws Exception {
-        fixture.jdbc().update("UPDATE managed_agent_session SET workspace_id=NULL, workspace_generation=NULL, workspace_storage_id=NULL, cwd_relative=NULL, context_config_ref=NULL, context_revision=NULL, workspace_config_ref=NULL, workspace_policy_ref=NULL");
+        fixture.jdbc().update("UPDATE ma_session SET workspace_id=NULL, workspace_generation=NULL, workspace_storage_id=NULL, cwd_relative=NULL, context_config_ref=NULL, context_revision=NULL, workspace_config_ref=NULL, workspace_policy_ref=NULL");
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         for (String path : new String[] {"/items/" + itemId + "/tool-result", "/artifacts",
@@ -153,7 +153,7 @@ class ManagedArtifactApiIntegrationTest {
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isTrue();
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().sessionClose()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().sessionClose()).isFalse();
-        fixture.jdbc().update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = 'session-1'");
+        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = X'73657373696f6e2d31'");
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
     }
@@ -163,7 +163,7 @@ class ManagedArtifactApiIntegrationTest {
         new TransactionTemplate(fixture.manager()).executeWithoutResult(ignored ->
                 new ManagedSessionStore(fixture.jdbc()).sealWriter("tenant-1", "session-1", "a".repeat(32),
                         new SealWriterRequest("workspace-1", "writer-1", 1)));
-        assertThat(fixture.jdbc().queryForObject("SELECT state FROM qwen_managed_session_journal_head", String.class))
+        assertThat(fixture.jdbc().queryForObject("SELECT state FROM ma_session_head", String.class))
                 .isEqualTo("SEALED");
         assertThat(fixture.sessions().requireSession("tenant-1", "session-1").status()).isEqualTo("CLOSED");
 
@@ -205,7 +205,7 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(status().isPreconditionFailed());
         mvc.perform(asReader(bytes(stdout)).header("Range", "bytes=3-"))
                 .andExpect(status().isRequestedRangeNotSatisfiable()).andExpect(header().string("Content-Range", "bytes */3"));
-        assertThat(fixture.jdbc().queryForObject("SELECT state FROM qwen_managed_session_journal_head", String.class))
+        assertThat(fixture.jdbc().queryForObject("SELECT state FROM ma_session_head", String.class))
                 .isEqualTo("SEALED");
         assertThat(fixture.sessions().findEvents("tenant-1", "session-1", 0, 100)).hasSize(1);
 
@@ -247,7 +247,7 @@ class ManagedArtifactApiIntegrationTest {
         mvc.perform(asActor(bytes(stdout), "tenant-1", "metadata-reader").header("Range", "malformed"))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.error.code").value("artifact_content_forbidden"))
                 .andExpect(header().doesNotExist("Content-Range"));
-        fixture.jdbc().update("DELETE FROM managed_workspace_access WHERE actor_id = ?",
+        fixture.jdbc().update("DELETE FROM ma_workspace_access WHERE actor_id = ?",
                 "reader".getBytes(StandardCharsets.UTF_8));
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isNotFound());
     }
@@ -305,20 +305,20 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(jsonPath("$.access.can_read_content").value(false));
         mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.data").isEmpty());
-        assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class))
+        assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class))
                 .isTrue();
     }
 
     @Test
     void deletionAndQuarantineHideContentWithoutChangingExecutionFacts() throws Exception {
-        fixture.jdbc().update("UPDATE qwen_tool_publication SET quarantined = TRUE WHERE publication_id = 'pub-1'");
+        fixture.jdbc().update("UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id = X'7075622d31'");
         mvc.perform(asReader(get(ROOT + "/artifacts/" + stdout.path("id").asText())))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.artifact.availability").value("unavailable"))
                 .andExpect(jsonPath("$.access.can_read_content").value(false));
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isServiceUnavailable());
         mvc.perform(asReader(get(ROOT + "/items/" + itemId + "/tool-result")))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.result.execution_status").value("success"));
-        fixture.jdbc().update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = 'session-1'");
+        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = X'73657373696f6e2d31'");
         mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isNotFound());
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isNotFound());
     }
@@ -426,7 +426,7 @@ class ManagedArtifactApiIntegrationTest {
     void deletionDuringLeaseAdmissionPreservesPublicNotFound() {
         var reader = org.mockito.Mockito.spy(fixture.reader());
         org.mockito.Mockito.doAnswer(call -> {
-            fixture.jdbc().update("UPDATE managed_agent_session SET status = 'DELETED' WHERE session_id = 'session-1'");
+            fixture.jdbc().update("UPDATE ma_session SET status = 'DELETED' WHERE session_id = X'73657373696f6e2d31'");
             throw new com.alibaba.qwen.code.managedagent.api.ApiException(org.springframework.http.HttpStatus.CONFLICT,
                     "tool_output_session_retired", "Retired during lease admission");
         }).when(reader).lease(org.mockito.ArgumentMatchers.any());

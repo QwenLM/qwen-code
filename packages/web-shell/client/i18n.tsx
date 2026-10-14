@@ -22,6 +22,10 @@ import {
 import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  MCP_APP_MESSAGES_EN,
+  MCP_APP_MESSAGES_ZH,
+} from './mcp-app/messages.js';
+import {
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_ZH,
 } from './components/workspace-agents/messages.js';
@@ -4381,6 +4385,7 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...MCP_APP_MESSAGES_EN,
   ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
@@ -8459,6 +8464,7 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...MCP_APP_MESSAGES_ZH,
   ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,

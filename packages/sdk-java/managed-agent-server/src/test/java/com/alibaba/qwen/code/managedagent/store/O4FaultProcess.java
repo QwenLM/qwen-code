@@ -20,14 +20,15 @@ public final class O4FaultProcess {
         String mode = args[0];
         var source = new DriverManagerDataSource(args[1], args[2],
                 System.getenv().getOrDefault("QWEN_O4_MYSQL_PASSWORD", ""));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var retention = new ToolPublicationRetentionStore(jdbc, manager);
         Path root = Path.of(args[6]);
         var objects = new O4FileObjects(root) {
             @Override public void putIfAbsent(String key, byte[] bytes) {
+                if ("put-before".equals(mode)) { pause(); }
                 super.putIfAbsent(key, bytes);
-                pause();
+                if (!"put-before".equals(mode)) { pause(); }
             }
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
@@ -58,7 +59,7 @@ public final class O4FaultProcess {
         };
         var key = new ObjectMapper().createObjectNode().put("tenantId", args[3])
                 .put("workspaceId", "workspace-1").put("sessionId", args[4]);
-        if ("put".equals(mode)) {
+        if ("put".equals(mode) || "put-before".equals(mode)) {
             retention.put(key, args[5], "pub-1", "exact/one", new byte[] {7}, objects);
         } else if ("delete".equals(mode)) {
             var props = new ManagedAgentProperties();

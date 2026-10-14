@@ -97,8 +97,8 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(commit.toString()))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM qwen_managed_session_journal_head WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id = ?", Integer.class, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id = ?", Integer.class, session)).isZero();
         mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
                 .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andExpect(status().isOk());
@@ -116,7 +116,7 @@ class ManagedSessionStoreIntegrationTest {
             if (!header.isEmpty()) replay.header(ceiling, header);
             mvc.perform(replay).andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session);
+            var before = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session);
             var acquire = post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
                     .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                     .contentType(MediaType.APPLICATION_JSON).content(writer.toString());
@@ -127,7 +127,7 @@ class ManagedSessionStoreIntegrationTest {
                     .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).contentType(MediaType.APPLICATION_JSON).content(renewBody.toString());
             if (!header.isEmpty()) renew.header(ceiling, header);
             mvc.perform(renew).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session)).isEqualTo(before);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
         }
         mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
@@ -143,7 +143,7 @@ class ManagedSessionStoreIntegrationTest {
         String session = "migration-" + UUID.randomUUID();
         String storage = "storage-" + UUID.randomUUID();
         String base = "/internal/managed-session-store/v1/sessions/" + session;
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status,"
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
                 + " created_at, updated_at, workspace_storage_id, workspace_id, workspace_generation, cwd_relative,"
                 + " context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1, ?, 'workspace', 1, '.', ?, 1, ?, ?)",
@@ -154,7 +154,7 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
                 .andExpect(status().isOk());
-        var original = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session);
+        var original = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session);
         new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]))
                 .requestStorageFence(TENANT, storage, UUID.randomUUID().toString());
         mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
@@ -165,9 +165,9 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
                 .andExpect(jsonPath("$.error.retryable").value(false));
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session))
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_session_head WHERE session_id = ?", session))
                 .isEqualTo(original);
-        jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_id = ? AND storage_id = ?", TENANT, storage);
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = NULL WHERE tenant_id = ? AND storage_id = ?", TENANT, storage);
         mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
@@ -277,9 +277,9 @@ class ManagedSessionStoreIntegrationTest {
                     .andExpect(jsonPath("$.byteLength").value(bytes.length))
                     .andExpect(jsonPath("$.digest").value(sha256(bytes))).andExpect(jsonPath("$.bytesBase64").doesNotExist());
         }
-        assertThat(jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head WHERE session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT journal_revision FROM ma_session_head WHERE session_id = ?",
                 Long.class, session)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id = ?",
                 Long.class, session)).isEqualTo(1);
         mvc.perform(get(base + "/resources/captured-segment").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
@@ -298,7 +298,7 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(body.deepCopy().put("digest", "0".repeat(64)).toString()))
                 .andExpect(status().isBadRequest());
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE session_id = ?", session);
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE session_id = ?", session);
         mvc.perform(post(base + "/tool-results:publish").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(body.toString())).andExpect(status().isConflict());
@@ -352,7 +352,7 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
                 .andExpect(status().isConflict());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=?",
                 Integer.class, session)).isZero();
         resources.remove(resourceCount);
         for (int attempt = 0; attempt < 2; attempt++) {
@@ -363,9 +363,9 @@ class ManagedSessionStoreIntegrationTest {
                     .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
                     .andExpect(jsonPath("$.replayed").value(attempt == 1));
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=?",
                 Integer.class, session)).isEqualTo(resourceCount);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=? AND resource_id='resource-context'",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=? AND resource_id=X'7265736f757263652d636f6e74657874'",
                 Integer.class, session)).isEqualTo(1);
         ObjectNode oversized = request.deepCopy();
         ArrayNode oversizedResources = oversized.withArray("resources");
@@ -398,7 +398,7 @@ class ManagedSessionStoreIntegrationTest {
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(oversized.toString()))
                 .andExpect(status().isPayloadTooLarge());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id=?",
                 Integer.class, session)).isEqualTo(resourceCount);
     }
 
@@ -720,13 +720,13 @@ class ManagedSessionStoreIntegrationTest {
                         .value("BLOCKED_EXECUTION"))
                 .andExpect(jsonPath("$.recoveryDetailCode")
                         .value("runtime_execution_outcome_unknown"));
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+        jdbc.update("UPDATE ma_session_head SET"
                         + " recovery_status = 'READY',"
                         + " recovery_detail_code = NULL WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 TENANT, SESSION);
 
-        jdbc.update("UPDATE qwen_managed_session_journal_head"
+        jdbc.update("UPDATE ma_session_head"
                         + " SET recovery_status = 'UNKNOWN'"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 TENANT, SESSION);
@@ -738,11 +738,11 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_head_corrupt"));
-        jdbc.update("UPDATE qwen_managed_session_journal_head"
+        jdbc.update("UPDATE ma_session_head"
                         + " SET recovery_status = 'READY'"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 TENANT, SESSION);
-        jdbc.update("DELETE FROM qwen_managed_session_journal_tx"
+        jdbc.update("DELETE FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND journal_revision = 1",
                 TENANT, SESSION);
