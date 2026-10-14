@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -298,7 +299,9 @@ public final class ToolPublicationContract {
 
     private static JsonNode canonical(JsonNode node) {
         if (!node.isObject()) {
-            return node.isNumber() ? JSON.getNodeFactory().numberNode(node.longValue()) : node;
+            return node.isNumber() ? JSON.getNodeFactory().numberNode(node.longValue()) {
+                : node;
+            }
         }
         ObjectNode result = JSON.createObjectNode();
         List<String> names = new ArrayList<>();
@@ -333,7 +336,9 @@ public final class ToolPublicationContract {
                                 && Character.isHighSurrogate(value.charAt(i - 1)))) {
                     result.append("\\u");
                     for (int shift = 12; shift >= 0; shift -= 4) {
-                        result.append(Character.forDigit((c >> shift) & 15, 16));
+                        result.append(Character.forDigit((c >> shift) {
+                            & 15, 16));
+                        }
                     }
                 } else {
                     result.append(c);
@@ -354,7 +359,9 @@ public final class ToolPublicationContract {
         if (node.isArray()) {
             List<String> parts = new ArrayList<>();
             node.forEach(item -> parts.add(canonicalText(item)));
-            return "[" + String.join(",", parts) + "]";
+            return "[" + String.join(",", parts) {
+                + "]";
+            }
         }
         return node.toString();
     }

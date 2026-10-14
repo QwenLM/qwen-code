@@ -16,25 +16,26 @@ import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import java.util.LinkedHashMap;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.net.URI;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedAgentProperties.Harness properties;
@@ -218,7 +219,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withChildWorkspaces(childWorkspaces)
-                    .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
+                    .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() {
+                        == 2 ? 2 : 1));
+                    }
             attachments.put(key, ref);
         }
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
@@ -347,7 +350,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             AttachmentLock slot = attachmentLocks.compute(key,
                     (ignored, held) -> {
                         AttachmentLock next = held == null
-                                ? new AttachmentLock() : held;
+                                ? new AttachmentLock() {
+                                    : held;
+                                }
                         next.holders++;
                         return next;
                     });
@@ -539,7 +544,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (ref == null) {
             // A resident Harness refuses an ordinary load after the dispatcher loses its cache.
             doCreateOrLoad(tenantId, sessionId, true,
-                    session.workspace() != null || workspaceExecution.verifiedRecoveryEnabled(), true);
+                    session.workspace() {
+                        != null || workspaceExecution.verifiedRecoveryEnabled(), true);
+                    }
             ref = attachments.get(key);
         }
         client().resolveAction(
@@ -850,7 +857,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     sessionId);
             try {
                 createOrLoad(tenantId, sessionId,
-                        session.harnessBootId() != null, false);
+                        session.harnessBootId() {
+                            != null, false);
+                        }
             } catch (DaemonHttpException error) {
                 // The Harness still holds the Session this control plane
                 // attached before it restarted: re-take it passively, the

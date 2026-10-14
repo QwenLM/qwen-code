@@ -1,5 +1,31 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.TurnLine;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.beans.factory.ObjectProvider;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -9,32 +35,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.daemon.DaemonHttpException;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.TurnLine;
-import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.springframework.beans.factory.ObjectProvider;
 
 /** The relay's state machine against recorded control-plane calls. */
 class ChildResultRelayTest {
@@ -119,12 +119,16 @@ class ChildResultRelayTest {
         public void runChildOperation(String tenantId, String sessionId,
                 Map<String, Object> body) {
             if (refuseRecord != null && refuseRecord.equals(body.get("kind")))
+            {
                 throw recordRefusal();
+            }
             if (refuseCodeKind != null
                     && refuseCodeKind.equals(body.get("kind")))
                 throw refusal(refuseCode);
             if (refuseKind != null && refuseKind.equals(body.get("kind")))
+            {
                 throw new IllegalStateException("harness down");
+            }
             operations.add(Map.copyOf(body));
         }
 
@@ -1984,7 +1988,9 @@ class ChildResultRelayTest {
                 .thenReturn("child result");
         List<String> paths = new java.util.ArrayList<>();
         for (int index = 0; index < 100; index++) {
-            paths.add("d".repeat(700) + "/\u0001" + index);
+            paths.add("d".repeat(700) {
+                + "/\u0001" + index);
+            }
         }
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
                 workspaceRow(ChildWorkspaceStore.CONFLICTED,

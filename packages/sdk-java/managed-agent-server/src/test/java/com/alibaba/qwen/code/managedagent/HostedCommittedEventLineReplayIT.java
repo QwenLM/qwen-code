@@ -1,30 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Test;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
 
-/**
- * The commit-side fixtures mint lines the commit gate accepts by design
- * without re-deriving the per-kind payload schemas; the only oracle that
- * can call a drift is the TypeScript authority's reader. Replay the events
- * the fixture composers mint through the real reader, in the hosted lane
- * that carries Node and the repository's tsx, so reverting any lifted
- * fixture (an empty checkpoint.committed, a scope-less activation subject,
- * a short activation or intent payload, an empty input.accepted) fails
- * here while the Java suites report green.
- */
-class HostedCommittedEventLineReplayIT {
-    private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String DRIVER = """
-            import { readFileSync } from 'node:fs';
+import static org.assertj.core.api.Assertions.assertThat;
+
             const [module, input] = process.argv.slice(2);
             const { parseManagedSessionEvent } = await import(module);
             const events = JSON.parse(readFileSync(input, 'utf8'));

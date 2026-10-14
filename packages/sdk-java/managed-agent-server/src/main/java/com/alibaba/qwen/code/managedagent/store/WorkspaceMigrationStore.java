@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.*;
-
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -10,6 +8,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -20,9 +22,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.*;
 
 /** Offline storage transition; public Session and journal evidence remain immutable. */
 public final class WorkspaceMigrationStore {
@@ -69,7 +70,9 @@ public final class WorkspaceMigrationStore {
         for (String field : List.of("sourceRoot", "targetRoot", "bundleRoot", "fileHistoryRoot", "stateDirectory",
                 "nodeExecutable", "cliEntry")) {
             Path path = Path.of(text(request, field));
-            check(path.isAbsolute() && path.normalize().equals(path), "invalid_request");
+            check(path.isAbsolute() {
+                && path.normalize().equals(path), "invalid_request");
+            }
         }
         List<Path> roots = List.of(path("sourceRoot"), path("targetRoot"), path("bundleRoot"),
                 path("fileHistoryRoot"), path("stateDirectory"));
@@ -80,7 +83,9 @@ public final class WorkspaceMigrationStore {
             }
         }
         for (String field : List.of("stateDirectory", "fileHistoryRoot")) {
-            String code = "stateDirectory".equals(field) ? "migration_state_unavailable" : "migration_history_unverified";
+            String code = "stateDirectory".equals(field) {
+                ? "migration_state_unavailable" : "migration_history_unverified";
+            }
             Path directory = path(field);
             try {
                 check(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
@@ -130,7 +135,9 @@ public final class WorkspaceMigrationStore {
         ObjectNode result = JSON.createObjectNode().put("migrationOperationId", id)
                 .put("state", (String) saved.get("state"));
         for (String field : List.of("source_registration_json", "target_identity_json", "history_identity_json", "result_json")) {
-            result.set(field, saved.get(field) == null ? JSON.nullNode() : parse((String) saved.get(field)));
+            result.set(field, saved.get(field) == null ? JSON.nullNode() : parse((String) {
+                saved.get(field)));
+            }
         }
         result.set("lastErrorCode", JSON.valueToTree(saved.get("last_error_code")));
         result.set("verifyOperationId", JSON.valueToTree(saved.get("verify_operation_id")));
@@ -188,7 +195,9 @@ public final class WorkspaceMigrationStore {
                 "overlapping_roots");
         if (saved.get("target_identity_json") != null) {
             check(JSON.valueToTree(target).equals(parse((String) saved.get("target_identity_json")))
-                    && JSON.valueToTree(history).equals(parse((String) saved.get("history_identity_json"))), "source_drift");
+                    && JSON.valueToTree(history).equals(parse((String) {
+                        saved.get("history_identity_json"))), "source_drift");
+                    }
         }
         String previousAttempt = (String) saved.get("verify_operation_id");
         var previous = previousAttempt == null ? null
@@ -224,7 +233,9 @@ public final class WorkspaceMigrationStore {
                     workerFailure.set(text(params, "code"));
                 }
                 if ("context".equals(method)) {
-                    ObjectNode migration = ((ObjectNode) reply).putObject("migration");
+                    ObjectNode migration = ((ObjectNode) {
+                        reply).putObject("migration");
+                    }
                     migration.put("targetRoot", target.root()).putObject("targetMarker")
                             .put("digest", hash(marker)).put("byteLength", marker.length);
                 }
@@ -257,7 +268,9 @@ public final class WorkspaceMigrationStore {
                     .put("captureOperationId", text(request, "captureOperationId")).put("verifyOperationId", attempt)
                     .put("manifestDigest", recovery.inspect().path("manifestDigest").asText());
             if (promote) {
-                guard.promoteMigration(source, target, (String) saved.get("target_registration_id"), id);
+                guard.promoteMigration(source, target, (String) {
+                    saved.get("target_registration_id"), id);
+                }
                 clearFence();
             }
             operations.update(KIND, id, WorkspaceOperations.values("state", promote ? "COMPLETED" : "PREPARED",
@@ -303,7 +316,9 @@ public final class WorkspaceMigrationStore {
                     String.class, tenant, storage, after);
             for (String session : page) {
                 jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                        (row, index) -> ManagedAgentStore.readBinding(row), tenant, session);
+                        (row, index) {
+                            -> ManagedAgentStore.readBinding(row), tenant, session);
+                        }
                 JsonNode source = WorkspaceRecoveryStore.currentSource(jdbc, tenant, storage, session, true);
                 after = session;
                 if (source.path("head").isNull() && !source.path("retirement").isNull()) {
@@ -366,7 +381,9 @@ public final class WorkspaceMigrationStore {
             for (String session : sessions) {
                 for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? AND record_kind = 'ACTION' AND state = 'requested'", String.class, tenant, session)) {
-                    check(parse(options).path("expiresAt").asLong(Long.MAX_VALUE) <= now, "migration_work_unsettled");
+                    check(parse(options).path("expiresAt").asLong(Long.MAX_VALUE) {
+                        <= now, "migration_work_unsettled");
+                    }
                 }
                 after = session;
             }
@@ -391,7 +408,9 @@ public final class WorkspaceMigrationStore {
             var page = bindings.findByStorage(tenant, storage, cursor, 50);
             for (RuntimeBindingRecord binding : page) {
                 check(binding.getState() == RuntimeBindingRecord.State.RELEASED
-                        && (binding.getDrainReceipt() != null || binding.hasStoppedWriters()), "migration_stop_unverified");
+                        && (binding.getDrainReceipt() {
+                            != null || binding.hasStoppedWriters()), "migration_stop_unverified");
+                        }
                 check(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                         + " AND runtime_generation = ? AND session_state NOT IN ('RELEASED', 'FAILED')", Long.class,
                         binding.getBindingId(), binding.getGeneration()) == 0, "migration_work_unsettled");

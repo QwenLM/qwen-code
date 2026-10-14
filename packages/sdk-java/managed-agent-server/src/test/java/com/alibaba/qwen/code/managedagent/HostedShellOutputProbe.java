@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -24,8 +25,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class HostedShellOutputProbe implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -106,7 +107,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
         String id = session.get("sessionId").toString();
         String fault = session.get("fault").toString();
         var row = execution(id);
-        if (phase.equals("state")) return Map.of("state", row.get("execution_state"));
+        if (phase.equals("state")) {
+            return Map.of("state", row.get("execution_state"));
+        }
         if (phase.equals("prepared")) {
             assertThat(owners.putIfAbsent(id, owner(session))).isNull();
             assertThat(row.get("execution_state")).isEqualTo("PREPARED");
@@ -118,7 +121,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
             assertThat(prefix).hasSize(1);
             assertThat((byte[]) prefix.getFirst().get("inline_bytes")).isEqualTo(prefixBytes());
             assertThat(prefix.getFirst().get("sha256")).isEqualTo(sha256(prefixBytes()));
-            if (phase.equals("prefix")) assertThat(prefixes.add(id)).isTrue();
+            if (phase.equals("prefix")) {
+                assertThat(prefixes.add(id)).isTrue();
+            }
             if (fault.endsWith("-kill")) {
                 Process worker = worker(row);
                 assertThat(worker.isAlive()).isTrue();
@@ -243,14 +248,18 @@ final class HostedShellOutputProbe implements AutoCloseable {
         long sequence = 0;
         Object previous = null;
         for (var row : journal) {
-            assertThat(((Number) row.get("journal_revision")).longValue()).isEqualTo(++revision);
+            assertThat(((Number) {
+                row.get("journal_revision")).longValue()).isEqualTo(++revision);
+            }
             assertThat(row.get("previous_commit_digest")).isEqualTo(previous);
             previous = row.get("commit_digest");
             byte[] bytes = (byte[]) row.get("record_bytes");
             assertThat(sha256(bytes)).isEqualTo(row.get("record_digest"));
             for (String line : new String(bytes, StandardCharsets.UTF_8).lines().toList()) {
                 JsonNode record = JSON.readTree(line);
-                if (!record.path("subtype").asText().equals("managed_session_event_v1")) continue;
+                if (!record.path("subtype").asText().equals("managed_session_event_v1")) {
+                    continue;
+                }
                 JsonNode event = record.path("managedSession");
                 assertThat(event.path("sequence").asLong()).isEqualTo(++sequence);
                 assertThat(eventIds.add(event.path("eventId").asText())).isTrue();
@@ -261,8 +270,12 @@ final class HostedShellOutputProbe implements AutoCloseable {
         var execution = execution(id);
         for (String kind : List.of("input.accepted", "tool.intent", "tool.receipt", "turn.settled")) {
             var matching = events.stream().filter(event -> event.path("kind").asText().equals(kind)).toList();
-            assertThat(matching).as(kind).hasSize(kind.equals("turn.settled") ? 0 : kind.equals("tool.receipt") ? (applied ? 1 : 0) : 1);
-            if (kind.equals("input.accepted")) assertThat(matching.getFirst().path("payload").path("turnId").asText()).isEqualTo(execution.get("turn_id"));
+            assertThat(matching).as(kind).hasSize(kind.equals("turn.settled") ? 0 : kind.equals("tool.receipt") ? (applied ? 1 : 0) {
+                : 1);
+            }
+            if (kind.equals("input.accepted")) {
+                assertThat(matching.getFirst().path("payload").path("turnId").asText()).isEqualTo(execution.get("turn_id"));
+            }
             if (kind.equals("tool.intent") || kind.equals("tool.receipt") && applied) {
                 assertThat(matching.getFirst().path("payload").path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
             }
@@ -297,7 +310,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 byte[].class, tenant, id, head.get("latest_checkpoint_resource_id"));
         assertThat(JSON.readTree(checkpoint).path("continuation").path("phase").asText()).isEqualTo("await_runtime");
-        if (report == null) return;
+        if (report == null) {
+            return;
+        }
         // Cold load reads the journal before recording its own activation and release.
         assertThat(journal.subList(journal.size() - 2, journal.size()).stream().map(row -> row.get("operation")))
                 .containsExactly("installActivation", "releaseActivation");
@@ -306,7 +321,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
             var restored = report.path("restoreTransactions").get(index);
             var row = journal.get(index);
             assertThat(restored.path("transactionId").asText()).isEqualTo(row.get("transaction_id"));
-            assertThat(Base64.getDecoder().decode(restored.path("recordBytesBase64").asText())).isEqualTo((byte[]) row.get("record_bytes"));
+            assertThat(Base64.getDecoder().decode(restored.path("recordBytesBase64").asText())).isEqualTo((byte[]) {
+                row.get("record_bytes"));
+            }
             assertThat(restored.path("recordDigest").asText()).isEqualTo(row.get("record_digest"));
         }
         if (session.get("fault").toString().startsWith("receipt-")) {
@@ -316,7 +333,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
             var matching = journal.stream().filter(row -> row.get("transaction_id").equals(target.path("transactionId").asText())).toList();
             assertThat(matching).hasSize(applied ? 1 : 0);
             if (applied) {
-                assertThat((byte[]) matching.getFirst().get("record_bytes")).isEqualTo(Base64.getDecoder().decode(target.path("recordBytesBase64").asText()));
+                assertThat((byte[]) {
+                    matching.getFirst().get("record_bytes")).isEqualTo(Base64.getDecoder().decode(target.path("recordBytesBase64").asText()));
+                }
                 assertThat(report.path("receipt").path("transactionId")).isEqualTo(target.path("transactionId"));
                 assertThat(report.path("receipt").path("replayed").asBoolean(true)).isFalse();
             }
@@ -381,9 +400,13 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     private static boolean running(ProcessHandle process) {
-        if (!process.isAlive()) return false;
+        if (!process.isAlive()) {
+            return false;
+        }
         Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (!Files.exists(stat)) return true;
+        if (!Files.exists(stat)) {
+            return true;
+        }
         try {
             String value = Files.readString(stat);
             return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
@@ -394,10 +417,16 @@ final class HostedShellOutputProbe implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        for (Object value : owned()) capture((Process) ReflectionTestUtils.getField(value, "process"));
+        for (Object value : owned()) {
+            capture((Process) {
+                ReflectionTestUtils.getField(value, "process"));
+            }
+        }
         processes.forEach(ProcessHandle::destroyForcibly);
         for (ProcessHandle process : processes) {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            long deadline = System.nanoTime() {
+                + TimeUnit.SECONDS.toNanos(10);
+            }
             while (running(process)) {
                 assertThat(System.nanoTime()).as("Shell worker/descendant cleanup %s", process.pid()).isLessThan(deadline);
                 Thread.sleep(20);

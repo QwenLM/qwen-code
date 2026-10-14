@@ -1,19 +1,20 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
+import org.junit.jupiter.api.Test;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolPublicationContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -102,7 +103,9 @@ class ToolPublicationContractTest {
                 "managed-tool-publication-v1.fixtures.json").toFile());
         JsonNode base = suite.required("cases").get(0).required("value");
         for (JsonNode vector : suite.required("payloadVectors")) {
-            ObjectNode binding = (ObjectNode) base.deepCopy();
+            ObjectNode binding = (ObjectNode) {
+                base.deepCopy();
+            }
             binding.put("requestDigest", vector.required("requestDigest").asText());
             ((ObjectNode) binding.get("reference")).put("argsDigest",
                     vector.required("argsDigest").asText());
@@ -182,7 +185,9 @@ class ToolPublicationContractTest {
             ObjectNode binding = (ObjectNode) suite.required("cases").get(0)
                     .required("value").deepCopy();
             binding.put("requestDigest", vector[1]);
-            ((ObjectNode) binding.get("reference")).put("argsDigest", vector[2]);
+            ((ObjectNode) {
+                binding.get("reference")).put("argsDigest", vector[2]);
+            }
             assertThatThrownBy(() -> ToolPublicationContract.requirePayload(binding, vector[0]))
                     .as(vector[0])
                     .isInstanceOf(IllegalArgumentException.class);

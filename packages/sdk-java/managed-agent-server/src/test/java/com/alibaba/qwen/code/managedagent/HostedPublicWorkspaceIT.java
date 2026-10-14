@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
@@ -16,6 +13,22 @@ import com.sun.net.httpserver.HttpServer;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -42,21 +55,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.api.io.CleanupMode;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -156,15 +157,20 @@ class HostedPublicWorkspaceIT {
                     Map.of("sessionId", session, "idempotencyKey", "shell-turn", "input", List.of(input)),
                     "shell-turn", "actor", 202);
             await().atMost(Duration.ofSeconds(35)).failFast(() -> {
-                        if (modelFailure.get() != null) throw new AssertionError("Model fixture failed", modelFailure.get());
+                        if (modelFailure.get() != null) {
+                            throw new AssertionError("Model fixture failed", modelFailure.get());
+                        }
                     }).untilAsserted(() -> {
                         answerActions(session, web);
                         assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
                                 String.class, session)).isEqualTo("COMPLETED");
                     });
             Path marker = roots.get(index).resolve("child/shell-proof.txt");
-            if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
-            else assertThat(marker).doesNotExist();
+            if ("allow".equals(decision)) {
+                assertThat(Files.readString(marker)).isEqualTo("once\n");
+            } else {
+                assertThat(marker).doesNotExist();
+            }
             assertThat(decoy.resolve("shell-proof.txt")).doesNotExist();
             assertThat(roots.get(index).resolve("child/monitor-proof.txt")).doesNotExist();
             assertThat(roots.get(index).resolve("child/background-proof.txt")).doesNotExist();
@@ -177,7 +183,9 @@ class HostedPublicWorkspaceIT {
                     boolean restDelete = !web && "delete".equals(kind);
                     String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
                             : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
-                    Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
+                    Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) {
+                        : null;
+                    }
                     assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE session_id = ?"
@@ -185,8 +193,11 @@ class HostedPublicWorkspaceIT {
             }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE session_id = ?",
                     Integer.class, session)).isEqualTo(1);
-            if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
-            else assertThat(marker).doesNotExist();
+            if ("allow".equals(decision)) {
+                assertThat(Files.readString(marker)).isEqualTo("once\n");
+            } else {
+                assertThat(marker).doesNotExist();
+            }
         }
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
@@ -206,7 +217,9 @@ class HostedPublicWorkspaceIT {
         for (var object : output) {
             assertThat(object.get("state")).isEqualTo("VERIFIED");
             byte[] bytes = publicationObjects.get(object.get("object_key").toString());
-            assertThat(bytes).hasSize(((Number) object.get("byte_length")).intValue());
+            assertThat(bytes).hasSize(((Number) {
+                object.get("byte_length")).intValue());
+            }
             assertThat(java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)))
                     .isEqualTo(object.get("sha256"));
             stdout |= object.get("slot_key").toString().startsWith("segment:stdout:")
@@ -285,7 +298,9 @@ class HostedPublicWorkspaceIT {
             String turn = request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message", "input", input),
                     "fault-turn", "actor", 202).path("turn_id").asText();
             await().atMost(Duration.ofSeconds(60)).failFast(() -> {
-                if (modelFailure.get() != null) throw new AssertionError("Fault fixture failed", modelFailure.get());
+                if (modelFailure.get() != null) {
+                    throw new AssertionError("Fault fixture failed", modelFailure.get());
+                }
             }).untilAsserted(() -> {
                 answerActions(session, false);
                 assertThat(receiptRequests).hasSize(3);
@@ -300,7 +315,9 @@ class HostedPublicWorkspaceIT {
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.
             await().atMost(Duration.ofSeconds(15)).failFast(() -> {
-                if (modelFailure.get() != null) throw new AssertionError("Fault fixture failed", modelFailure.get());
+                if (modelFailure.get() != null) {
+                    throw new AssertionError("Fault fixture failed", modelFailure.get());
+                }
             }).untilAsserted(() -> {
                 var status = client.getStatus(attached);
                 assertThat(status.hasActivePrompt()).isFalse();
@@ -315,7 +332,9 @@ class HostedPublicWorkspaceIT {
             assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_session WHERE session_id = ?",
                     String.class, session)).isEqualTo("default");
             var original = json.readTree(receiptRequests.getFirst());
-            for (byte[] retry : receiptRequests) assertThat(retry).isEqualTo(receiptRequests.getFirst());
+            for (byte[] retry : receiptRequests) {
+                assertThat(retry).isEqualTo(receiptRequests.getFirst());
+            }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE tenant_id = ?"
                     + " AND session_id = ? AND transaction_id = ?", Integer.class, tenant, session,
                     original.path("transactionId").asText())).isEqualTo("receipt-reply".equals(fault) ? 1 : 0);
@@ -333,7 +352,9 @@ class HostedPublicWorkspaceIT {
             System.out.println("PUBLIC_FG6F " + fault + " session=" + session + " turn=" + turn
                     + " receiptAttempts=" + receiptRequests.size() + " effect=once");
         } finally {
-            if ("receipt-failure".equals(fault)) jdbc.execute("DROP TRIGGER " + trigger);
+            if ("receipt-failure".equals(fault)) {
+                jdbc.execute("DROP TRIGGER " + trigger);
+            }
         }
     }
 
@@ -370,7 +391,9 @@ class HostedPublicWorkspaceIT {
                     + " AND isolation_key = ?", String.class, tenant, session);
             JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM ma_runtime_binding"
                     + " WHERE binding_id = ?", String.class, binding));
-            Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json");
+            Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() {
+                + ".json");
+            }
             long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
             var worker = ProcessHandle.of(pid).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
@@ -767,7 +790,9 @@ class HostedPublicWorkspaceIT {
                             modelRequests.size(), Files.readString(temporary.resolve("harness.log"))));
                 }
             }).untilAsserted(() -> {
-                if (approvals) answerActions(session, webShell);
+                if (approvals) {
+                    answerActions(session, webShell);
+                }
                 assertThat(modelFailure.get()).isNull();
                 assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
                         String.class, session)).isEqualTo("COMPLETED");
@@ -834,7 +859,9 @@ class HostedPublicWorkspaceIT {
                             + Files.readString(temporary.resolve("harness.log")));
                 }
             }).untilAsserted(() -> {
-                if (approvals) answerActions(session, webShell);
+                if (approvals) {
+                    answerActions(session, webShell);
+                }
                 assertThat(modelFailure.get()).isNull();
                 assertThat(jdbc.queryForObject("SELECT status FROM ma_turn"
                         + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn))
@@ -848,7 +875,9 @@ class HostedPublicWorkspaceIT {
             // The cancel and rename probes below keep a held model reply, so they stay in
             // the files run to fit the method timeout; the approvals run has already pinned
             // that a later Turn under approval-mode=default is admitted and completes.
-            if (approvals) continue;
+            if (approvals) {
+                continue;
+            }
 
             // An OPERATOR can cancel a running later Turn; the Hosted Harness aborts it before
             // any tool runs. The READER keeps the refusal.
@@ -1083,8 +1112,12 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode="
-                + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
-        if (shell) arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
+                + (shell && "deny".equals(shellDecision) {
+                    ? "auto-edit" : "default"));
+                }
+        if (shell) {
+            arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
+        }
         if (shellLifecycleV2) {
             arguments.add("--qwen.managed-agent.tool-publication.enabled=true");
             arguments.add("--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com");
@@ -1123,7 +1156,9 @@ class HostedPublicWorkspaceIT {
                             case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
                             case "getBucketAcl" -> acl;
                             case "putObject" -> {
-                                var put = (com.aliyun.oss.model.PutObjectRequest) invocation.getArgument(0);
+                                var put = (com.aliyun.oss.model.PutObjectRequest) {
+                                    invocation.getArgument(0);
+                                }
                                 byte[] bytes = put.getInputStream().readAllBytes();
                                 if (publicationObjects.putIfAbsent(put.getKey(), bytes) != null) {
                                     throw new com.aliyun.oss.OSSException("Object already exists", "FileAlreadyExists",
@@ -1218,7 +1253,9 @@ class HostedPublicWorkspaceIT {
         assertThat(page.path("data").size()).isLessThanOrEqualTo(1);
         for (JsonNode action : page.path("data")) {
             String id = action.path(web ? "actionId" : "id").asText();
-            if (!answered.add(id)) continue;
+            if (!answered.add(id)) {
+                continue;
+            }
             String route = web ? "/api/agent/web-shell/v1/actions/respond"
                     : "/v1/agents/sessions/" + session + "/actions/" + id + "/responses";
             Map<String, Object> response = web ? Map.of("kind", "permission", "optionId", shellDecision,
@@ -1269,7 +1306,9 @@ class HostedPublicWorkspaceIT {
         Map<String, String> environment = builder.environment();
         environment.clear();
         for (String name : List.of("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT")) {
-            if (System.getenv(name) != null) environment.put(name, System.getenv(name));
+            if (System.getenv(name) != null) {
+                environment.put(name, System.getenv(name));
+            }
         }
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
@@ -1281,7 +1320,9 @@ class HostedPublicWorkspaceIT {
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
         for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) environment.put(name, temporary.resolve(name + ".json").toString());
+                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
+                    environment.put(name, temporary.resolve(name + ".json").toString());
+                }
         harness = builder.start();
         await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> {
             if (!harness.isAlive()) {
@@ -1299,8 +1340,11 @@ class HostedPublicWorkspaceIT {
             modelRequests.add(body);
             List<String> tools = new ArrayList<>();
             body.path("tools").forEach(tool -> tools.add(tool.path("function").path("name").asText()));
-            if (shell) assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
-            else assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            if (shell) {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "run_shell_command", "monitor");
+            } else {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            }
             // Count only this Turn's tool results, after the latest fixture prompt, so a later
             // Turn in the same Session runs the same write, edit and read sequence. Other user
             // messages the Harness may add do not restart the count.
@@ -1325,9 +1369,15 @@ class HostedPublicWorkspaceIT {
             int step = results.size();
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
             boolean foregroundOnly = runShell && shellLifecycleV2;
-            if (!runShell && step == 3) assertThat(results.get(2).toString()).contains("after");
-            if (runShell && shellFault == null && !foregroundOnly && step >= 1) assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
-            if (runShell && shellFault == null && !foregroundOnly && step >= 2) assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            if (!runShell && step == 3) {
+                assertThat(results.get(2).toString()).contains("after");
+            }
+            if (runShell && shellFault == null && !foregroundOnly && step >= 1) {
+                assertThat(results.get(0).toString()).contains("Hosted Monitor is unavailable");
+            }
+            if (runShell && shellFault == null && !foregroundOnly && step >= 2) {
+                assertThat(results.get(1).toString()).contains("Hosted Shell requires a foreground command");
+            }
             if (runShell && shellFault == null && step >= (foregroundOnly ? 1 : 3) && "allow".equals(shellDecision)) {
                 assertThat(results.get(foregroundOnly ? 0 : 2).toString()).contains("G0_SHELL_STDOUT");
             }
@@ -1352,12 +1402,16 @@ class HostedPublicWorkspaceIT {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
-                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
+                    args = Map.of("command", shellQuote(node) {
+                        + " -e " + shellQuote(producer), "timeout", 60000);
+                    }
                 }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
                         .put("arguments", json.writeValueAsString(args));
-            } else delta.put("content", "G0_DONE");
+            } else {
+                delta.put("content", "G0_DONE");
+            }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
             choice.putObject("delta");
@@ -1382,8 +1436,11 @@ class HostedPublicWorkspaceIT {
             String records = fields.has("recordBytesBase64")
                     ? new String(Base64.getDecoder().decode(fields.path("recordBytesBase64").asText()), StandardCharsets.UTF_8) : "";
             receipt = records.lines().anyMatch(line -> {
-                try { return "tool.receipt".equals(json.readTree(line).path("managedSession").path("kind").asText()); }
-                catch (IOException error) { throw new IllegalStateException(error); }
+                try {
+                    return "tool.receipt".equals(json.readTree(line).path("managedSession").path("kind").asText());
+                } catch (IOException error) {
+                    throw new IllegalStateException(error);
+                }
             });
             if (receipt) {
                 receiptRequests.add(body);
@@ -1394,12 +1451,18 @@ class HostedPublicWorkspaceIT {
                             ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body));
             exchange.getRequestHeaders().forEach((name, values) -> {
                 if (!List.of("host", "connection", "content-length", "upgrade", "expect").contains(name.toLowerCase(java.util.Locale.ROOT)))
+                {
                     values.forEach(value -> forwarded.header(name, value));
+                }
             });
             var response = http.send(forwarded.build(), HttpResponse.BodyHandlers.ofByteArray());
             if (receipt) {
-                assertThat(response.statusCode()).isEqualTo("receipt-failure".equals(shellFault) ? 500 : 200);
-                if ("receipt-reply".equals(shellFault)) return;
+                assertThat(response.statusCode()).isEqualTo("receipt-failure".equals(shellFault) {
+                    ? 500 : 200);
+                }
+                if ("receipt-reply".equals(shellFault)) {
+                    return;
+                }
             } else if ("managed-tool-result-content".equals(fields.path("kind").asText()) && fields.path("byteLength").asInt() == 1024 * 1024) {
                 assertThat(response.statusCode()).as("%s: %s", exchange.getRequestURI(), new String(response.body(), StandardCharsets.UTF_8)).isEqualTo(200);
                 shellProbe.observePublicPrefix(faultSession);
@@ -1415,7 +1478,9 @@ class HostedPublicWorkspaceIT {
             modelFailure.compareAndSet(null, error);
         } finally {
             exchange.close();
-            if (receipt) receiptResponses.incrementAndGet();
+            if (receipt) {
+                receiptResponses.incrementAndGet();
+            }
         }
     }
 
@@ -1430,8 +1495,12 @@ class HostedPublicWorkspaceIT {
                 .header("Accept", "application/json").header("Content-Type", "application/json")
                 .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                         : HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)));
-        if (key != null) request.header("Idempotency-Key", key);
-        if (actor != null) request.header("X-G0-Fixture-Actor", actor);
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
+        if (actor != null) {
+            request.header("X-G0-Fixture-Actor", actor);
+        }
         var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
@@ -1441,8 +1510,6 @@ class HostedPublicWorkspaceIT {
     private static void assertUnavailable(JsonNode refusal) {
         assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
     }
-
-
 
     @AfterEach
     void stop() throws Exception {
@@ -1465,11 +1532,18 @@ class HostedPublicWorkspaceIT {
             try {
                 step.execute();
             } catch (Throwable error) {
-                if (failure == null) failure = error;
-                else failure.addSuppressed(error);
+                if (failure == null) {
+                    failure = error;
+                } else {
+                    failure.addSuppressed(error);
+                }
             }
         }
-        if (failure instanceof Exception error) throw error;
-        if (failure instanceof Error error) throw error;
+        if (failure instanceof Exception error) {
+            throw error;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
     }
 }

@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -18,21 +15,12 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.Base64;
-import java.util.HexFormat;
-import java.util.List;
-import java.util.UUID;
-import java.util.stream.Stream;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,6 +31,19 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceLifecycleStoreTest {
     @ParameterizedTest
@@ -79,19 +80,25 @@ class WorkspaceLifecycleStoreTest {
             journal.committed(request);
         }
         var operation = fixture.admit(OperationKind.DELETE);
-        if (draining) fixture.jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING'");
+        if (draining) {
+            fixture.jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING'");
+        }
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = ?",
                 granted ? "OPERATOR" : "READER");
         ObjectNode next = execution.deepCopy();
         hookState(next, after, registration.get("catalogRef"));
-        if (replacement && !batch) next.withObject("/run/runtime").put("generation", "2");
+        if (replacement && !batch) {
+            next.withObject("/run/runtime").put("generation", "2");
+        }
         assertThat(ManagedHookRecords.isExecutionSuccessor(execution, next)).isTrue();
         var first = journal.requestDomain("fenced", "hook_execution", next, List.of(), 1000);
         var request = first;
         if (batch) {
             ObjectNode resumed = next.deepCopy();
             hookState(resumed, "running_attached", registration.get("catalogRef"));
-            if (replacement) resumed.withObject("/run/runtime").put("generation", "2");
+            if (replacement) {
+                resumed.withObject("/run/runtime").put("generation", "2");
+            }
             assertThat(ManagedHookRecords.isExecutionSuccessor(next, resumed)).isTrue();
             var second = journal.requestDomain("fenced", "hook_execution", resumed, List.of(), 1000);
             String[] firstLines = new String(Base64.getDecoder().decode(first.recordBytesBase64()), StandardCharsets.UTF_8).split("\n");
@@ -122,7 +129,9 @@ class WorkspaceLifecycleStoreTest {
                 assertThat(error.getCode()).isEqualTo(accepted && batch ? "managed_session_extension_record_rejected"
                         : draining ? "workspace_lifecycle_claim_fenced" : authority && !replacement
                         ? "workspace_lifecycle_authorization_revoked" : "workspace_lifecycle_admission_closed");
-                if (accepted && batch) assertThat(error.getMessage()).contains("at most one Stage H record");
+                if (accepted && batch) {
+                    assertThat(error.getMessage()).contains("at most one Stage H record");
+                }
             });
             assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(revision);
             assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(resources);
@@ -160,7 +169,9 @@ class WorkspaceLifecycleStoreTest {
     private static void hookState(ObjectNode record, String execution, JsonNode result) {
         var run = record.withObject("/run").put("execution", execution).putNull("reason");
         if (List.of("outcome_unknown", "corrupt").contains(execution)) {
-            run.put("state", "recovery_blocked").put("reason", "corrupt".equals(execution) ? "execution_corrupt" : execution);
+            run.put("state", "recovery_blocked").put("reason", "corrupt".equals(execution) {
+                ? "execution_corrupt" : execution);
+            }
         } else if ("settled".equals(execution)) {
             run.put("state", "settled");
             record.set("resultRef", result);
@@ -286,7 +297,9 @@ class WorkspaceLifecycleStoreTest {
         for (String event : kind == OperationKind.CLOSE ? List.of("SessionEnd") : List.of("SessionEnd", "SessionDelete")) {
             // These bytes are JSON.stringify([event, operationId]) on the Harness wire.
             String id = "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
-                    ("[\"" + event + "\",\"" + operation.operationId() + "\"]").getBytes(StandardCharsets.UTF_8)));
+                    ("[\"" + event + "\",\"" + operation.operationId() {
+                        + "\"]").getBytes(StandardCharsets.UTF_8)));
+                    }
             var plan = fixture.json.createObjectNode();
             plan.putObject("input").put("hook_event_name", event).put("session_id", fixture.session);
             var planRef = fixture.resource(event + "-plan", "hook-data", plan);

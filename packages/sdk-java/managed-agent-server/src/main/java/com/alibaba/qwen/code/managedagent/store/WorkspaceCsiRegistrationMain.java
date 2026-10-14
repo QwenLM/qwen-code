@@ -4,11 +4,12 @@ import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 public final class WorkspaceCsiRegistrationMain {
     private WorkspaceCsiRegistrationMain() {
@@ -16,7 +17,9 @@ public final class WorkspaceCsiRegistrationMain {
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2 || (!"register".equals(args[0]) && !"inspect".equals(args[0]))) {
-            throw new IllegalArgumentException("Usage: (register|inspect) <reviewed-registration-json>");
+            throw new IllegalArgumentException("Usage: (register|inspect) {
+                <reviewed-registration-json>");
+            }
         }
         String url = System.getenv("K2_JDBC_URL");
         String user = System.getenv("K2_JDBC_USER");

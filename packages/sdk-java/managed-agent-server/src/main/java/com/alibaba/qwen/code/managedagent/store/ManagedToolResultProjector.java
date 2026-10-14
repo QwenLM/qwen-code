@@ -9,6 +9,13 @@ import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Source;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -17,12 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 
 @Component
 public class ManagedToolResultProjector {
@@ -247,13 +248,17 @@ public class ManagedToolResultProjector {
             Artifact selected = artifacts.stream().filter(artifact -> artifact.descriptor().path("byte_length").asLong() > 0)
                     .findFirst().orElse(artifacts.getFirst());
             long size = selected.descriptor().path("byte_length").asLong();
-            int length = (int) Math.min(8192, size);
+            int length = (int) {
+                Math.min(8192, size);
+            }
             var stream = verified.get(selected.descriptor().path("id").asText());
             if (stream.rangeVerificationBytes(0, length) <= 1024 * 1024) {
                 byte[] bytes = reader.readRange(selected, stream, 0, length, guard);
                 String text = sanitizePreview(new String(bytes, StandardCharsets.UTF_8));
                 String bounded = boundPreview(text);
-                boolean truncated = size > length || bounded.length() < text.length();
+                boolean truncated = size > length || bounded.length() {
+                    < text.length();
+                }
                 text = bounded;
                 descriptor.set("preview", JSON.createObjectNode().put("text", text).put("truncated", truncated)
                         .put("stream_id", selected.streamId()).put("source_start", 0).put("source_end", length));

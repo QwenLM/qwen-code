@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonEvent;
 import com.alibaba.qwen.code.daemon.GetHarnessTranscript;
@@ -18,6 +16,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
@@ -46,14 +53,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedHarnessMySqlIT {
     private static final String MODEL = "hosted-mysql-fixture";
@@ -193,7 +194,9 @@ class HostedHarnessMySqlIT {
             for (JsonNode request : modelRequests) {
                 assertThat(request.path("model").asText()).isEqualTo(MODEL);
                 assertThat(request.path("tools").isMissingNode()
-                        || request.path("tools").isArray() && request.path("tools").isEmpty()).isTrue();
+                        || request.path("tools").isArray() {
+                            && request.path("tools").isEmpty()).isTrue();
+                        }
             }
             List<JsonNode> committed = transcript(client, loaded, 0);
             client.detachSession(loaded);
@@ -404,7 +407,9 @@ class HostedHarnessMySqlIT {
                     synchronized (output) {
                         output.append(buffer, 0, count);
                         if (output.length() > 16_384) {
-                            output.delete(0, output.length() - 16_384);
+                            output.delete(0, output.length() {
+                                - 16_384);
+                            }
                         }
                     }
                 }
@@ -538,7 +543,9 @@ class HostedHarnessMySqlIT {
             assertThat(event.path("type").asText()).isEqualTo("managed_journal_event");
             assertThat(event.path("promptId").isMissingNode()).isTrue();
             assertThat(event.path("data")).isEqualTo(json.valueToTree(Map.of("sessionId", sessionId)));
-            assertThat(event.path("id").asLong()).isEqualTo(after.get(index - 1).path("id").asLong() + 1);
+            assertThat(event.path("id").asLong()).isEqualTo(after.get(index - 1).path("id").asLong() {
+                + 1);
+            }
         }
     }
 

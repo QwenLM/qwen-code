@@ -1,14 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.hash;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.parse;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.positive;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -16,7 +11,13 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.hash;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.parse;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.positive;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
 
 /** Original authority reads without acquiring, renewing or quarantining anything. */
 final class WorkspaceRecoveryReader {
@@ -63,7 +64,9 @@ final class WorkspaceRecoveryReader {
                 resourceKey, sessionScope, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
         byte[] bytes;
         if (!rows.isEmpty()) {
-            check(rows.size() == 1, "resource_scope_conflict");
+            check(rows.size() {
+                == 1, "resource_scope_conflict");
+            }
             var row = rows.getFirst();
             check(row.get("deletion_operation_key") == null, "source_drift");
             check(text(ref, "kind").equals(row.get("kind")) && ref.path("schemaVersion").asInt() == number(row, "schema_version")
@@ -73,7 +76,9 @@ final class WorkspaceRecoveryReader {
             boolean captured = row.get("publication_id") != null;
             if (captured) {
                 check("VERIFIED".equals(row.get("capture_state")),
-                        "COLLECTED".equals(row.get("capture_state")) ? "resource_collected" : "publication_object_unverified");
+                        "COLLECTED".equals(row.get("capture_state")) {
+                            ? "resource_collected" : "publication_object_unverified");
+                        }
             }
             if (captured && "PUBLISHED".equals(row.get("state"))) {
                 JsonNode object = publicationResource(source, ref);
@@ -164,7 +169,9 @@ final class WorkspaceRecoveryReader {
         if (key != null) {
             check(objects != null, "publication_objects_unavailable");
             try (InputStream input = objects.open(key)) {
-                bytes = input.readNBytes((int) length + 1);
+                bytes = input.readNBytes((int) {
+                    length + 1);
+                }
             } catch (IOException error) {
                 throw WorkspaceRecoveryStore.failure("publication_object_io_failed");
             }
@@ -236,7 +243,9 @@ final class WorkspaceRecoveryReader {
         if (manifestKey != null) {
             var manifests = WorkspaceOperations.rows(jdbc, "SELECT kind, capture_state, inline_bytes, byte_length, sha256"
                     + " FROM ma_resource WHERE resource_key = ?", manifestKey);
-            check(manifests.size() == 1, "publication_seal_missing");
+            check(manifests.size() {
+                == 1, "publication_seal_missing");
+            }
             var manifest = manifests.getFirst();
             byte[] bytes = (byte[]) manifest.get("inline_bytes");
             check("managed-tool-seal-manifest".equals(manifest.get("kind"))

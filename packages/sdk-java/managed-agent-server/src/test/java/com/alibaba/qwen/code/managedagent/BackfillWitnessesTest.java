@@ -1,11 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedSchemaConfiguration;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -14,6 +10,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Fresh-baseline admission replaces the retired upgrade/backfill witnesses. */
 class BackfillWitnessesTest {
@@ -62,7 +61,9 @@ class BackfillWitnessesTest {
             var jdbc = new JdbcTemplate(source);
             jdbc.execute("CREATE TABLE " + table + " (witness INT)");
             jdbc.update("INSERT INTO " + table + " VALUES (42)");
-            assertThatThrownBy(() -> activate(source)).isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() {
+                -> activate(source)).isInstanceOf(IllegalStateException.class);
+            }
             assertThat(jdbc.queryForObject("SELECT witness FROM " + table, Integer.class))
                     .isEqualTo(42);
             assertThat(

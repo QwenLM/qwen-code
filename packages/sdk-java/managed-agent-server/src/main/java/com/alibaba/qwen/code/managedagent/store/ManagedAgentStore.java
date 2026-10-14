@@ -41,7 +41,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
@@ -2729,7 +2728,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!pendingStatus(operation.kind()).equals(session.status())) {
             throw new IllegalStateException("Session " + sessionId + " is "
                     + session.status() + " during its "
-                    + operation.kind() + " operation");
+                    + operation.kind() {
+                        + " operation");
+                    }
         }
         if (WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion())) {
             if (lifecycle == null) {

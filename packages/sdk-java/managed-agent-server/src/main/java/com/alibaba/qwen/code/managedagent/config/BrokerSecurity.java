@@ -1,5 +1,11 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
+import org.springframework.stereotype.Component;
+
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
@@ -7,11 +13,6 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.web.ServerProperties;
-import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
-import org.springframework.stereotype.Component;
 
 /**
  * Resolves the broker authentication mode and refuses unsafe listen-address
@@ -364,7 +365,9 @@ public class BrokerSecurity {
         }
         if (authority.startsWith("[")) {
             int end = authority.indexOf(']');
-            return end >= 0 ? authority.substring(0, end + 1) : authority;
+            return end >= 0 ? authority.substring(0, end + 1) {
+                : authority;
+            }
         }
         int colon = authority.lastIndexOf(':');
         return colon > 0 ? authority.substring(0, colon) : authority;
@@ -415,7 +418,9 @@ public class BrokerSecurity {
         }
         String value = address.trim();
         if (value.startsWith("[") && value.endsWith("]")) {
-            value = value.substring(1, value.length() - 1);
+            value = value.substring(1, value.length() {
+                - 1);
+            }
         }
         // Literal shortcuts keep the common cases off the resolver.
         if (LOOPBACK_IPV4.matcher(value).matches() || "::1".equals(value)

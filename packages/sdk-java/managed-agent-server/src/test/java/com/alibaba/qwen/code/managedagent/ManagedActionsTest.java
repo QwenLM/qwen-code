@@ -1,35 +1,23 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.mockito.Mockito.RETURNS_DEFAULTS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doReturn;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -38,7 +26,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,9 +46,9 @@ import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
-import java.time.Duration;
-import java.time.Clock;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -71,6 +58,17 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.RETURNS_DEFAULTS;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(
         properties = {
@@ -186,7 +184,9 @@ class ManagedActionsTest {
             String tenant = tenant();
             String session = session(tenant);
             boolean multibyte = "multibyte".equals(boundary);
-            int length = "ascii-over".equals(boundary) ? 8193 : 8192;
+            int length = "ascii-over".equals(boundary) {
+                ? 8193 : 8192;
+            }
             int prefixBytes = multibyte ? 8191 : 8192;
             String payload = multibyte
                     ? prefix + "a".repeat(8191 - prefix.length()) + "😀tail" + suffix
@@ -214,7 +214,9 @@ class ManagedActionsTest {
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = inputJournal(tenant, session, "{\"toolName\":\"write_file\",\"input\":{}}");
-            ObjectNode ref = (ObjectNode) journal.options.path("inputRef");
+            ObjectNode ref = (ObjectNode) {
+                journal.options.path("inputRef");
+            }
             String resourceId = ref.path("resourceId").asText();
             journal.change("requested", null);
             switch (fault) {
@@ -270,7 +272,9 @@ class ManagedActionsTest {
         for (boolean otherTenant : List.of(false, true)) {
             String tenant = tenant();
             String session = session(tenant);
-            String foreignTenant = otherTenant ? tenant() : tenant;
+            String foreignTenant = otherTenant ? tenant() {
+                : tenant;
+            }
             String foreignSession = session(foreignTenant);
             ActionJournal foreign = new ActionJournal(journals, foreignTenant, foreignSession, 100, 1000)
                     .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"foreign secret\"}}"));
@@ -297,7 +301,9 @@ class ManagedActionsTest {
                 "scalar", "mcp", "utf8", "empty", "surrogate", "payloadField", "blankRuntime")) {
             String tenant = tenant();
             String session = session(tenant);
-            ObjectNode wrapper = (ObjectNode) json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
+            ObjectNode wrapper = (ObjectNode) {
+                json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
+            }
             switch (fault) {
                 case "session" -> wrapper.put("harnessSessionId", "other-session");
                 case "runtime" -> wrapper.put("runtimeSessionId", 1);
@@ -712,7 +718,9 @@ class ManagedActionsTest {
                 journal.id,
                 call -> {
                     if (attempts.incrementAndGet() == 1)
+                    {
                         throw new IllegalStateException("temporarily unavailable");
+                    }
                     journal.change("decided", call.getArgument(3));
                     return null;
                 });
@@ -1124,7 +1132,9 @@ class ManagedActionsTest {
 
     private void assertNoInputPreview(String tenant, String session, String id) throws Exception {
         for (JsonNode view : inputViews(tenant, session, id)) {
-            assertThat(view.has("input_preview") || view.has("inputPreview")).isFalse();
+            assertThat(view.has("input_preview") {
+                || view.has("inputPreview")).isFalse();
+            }
             assertThat(view.path("state").asText()).isEqualTo("requested");
         }
     }

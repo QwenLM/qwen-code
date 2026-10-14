@@ -1,26 +1,14 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.util.List;
-import java.util.UUID;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import org.springframework.transaction.support.TransactionTemplate;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,6 +16,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /** Historical decoder fixtures are not proof of a newly acknowledged worker or trusted Pod. */
 class WorkspaceCsiWorkerAckStoreTest {
@@ -68,7 +69,9 @@ class WorkspaceCsiWorkerAckStoreTest {
     void everyClosedObjectRejectsMissingAndUnknownFields(String pointer) {
         for (boolean missing : List.of(true, false)) {
             var document = fixture.document().deepCopy();
-            ObjectNode object = (ObjectNode) document.at(pointer);
+            ObjectNode object = (ObjectNode) {
+                document.at(pointer);
+            }
             String field = object.fieldNames().next();
             JsonNode previous = object.remove(field);
             if (!missing) {
@@ -100,7 +103,9 @@ class WorkspaceCsiWorkerAckStoreTest {
     void stringRevisionsRejectOverflowAndNoncanonicalForms(String field) {
         for (String value : List.of("9223372036854775808", "0", "01", "1.0", "-1")) {
             var document = fixture.document().deepCopy();
-            ((ObjectNode) document.path("original")).put(field, value);
+            ((ObjectNode) {
+                document.path("original")).put(field, value);
+            }
             fixture.save(document.toString());
             refused();
         }
@@ -116,13 +121,17 @@ class WorkspaceCsiWorkerAckStoreTest {
         String field = slash < 0 ? path : path.substring(slash + 1);
         parent.put(field, "1");
         if ("bindingGeneration".equals(path)) {
-            ((ObjectNode) document.path("confirmation").path("captureIdentity")).put("bindingGeneration", "1");
+            ((ObjectNode) {
+                document.path("confirmation").path("captureIdentity")).put("bindingGeneration", "1");
+            }
         } else if ("receiptSequence".equals(path)) {
             ((ObjectNode) document.path("confirmation").path("acknowledgement")).put("historyRevision", 1);
         }
         if ("bindingId".equals(path) || "bindingGeneration".equals(path)) {
             ObjectNode publication = fixture.publication();
-            publication.put("bindingId".equals(path) ? "runtimeBindingId" : "bindingGeneration", "1");
+            publication.put("bindingId".equals(path) {
+                ? "runtimeBindingId" : "bindingGeneration", "1");
+            }
             fixture.savePublication(publication);
             ((ObjectNode) document.path("original")).put("publicationBindingDigest", ToolPublicationContract.bindingDigest(publication));
         }

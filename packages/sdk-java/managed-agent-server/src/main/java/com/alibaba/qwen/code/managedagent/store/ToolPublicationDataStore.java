@@ -1,26 +1,36 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.aliyun.oss.OSSException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
@@ -28,17 +38,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import com.aliyun.oss.OSSException;
+
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 /** O2b's publication catalog. Object I/O always runs outside SQL transactions. */
 public final class ToolPublicationDataStore {
@@ -210,7 +212,9 @@ public final class ToolPublicationDataStore {
         require(objects.size() <= 4096, "Original publication catalog exceeds its bound");
         for (var object : objects) {
             Object bytes = object.remove("inline_bytes");
-            object.put("inlineDigest", bytes instanceof byte[] inline ? ToolPublicationContract.sha256(inline) : null);
+            object.put("inlineDigest", bytes instanceof byte[] inline ? ToolPublicationContract.sha256(inline) {
+                : null);
+            }
             require(scope(key).equals(object.get("scope_key")) && publicationId.equals(object.get("publication_id"))
                     && "VERIFIED".equals(object.get("state")), "Original publication has unresolved objects");
         }
@@ -293,7 +297,9 @@ public final class ToolPublicationDataStore {
             List<Operation> prior = operation(scope, publicationId, operationId, true);
             if (!prior.isEmpty()) {
                 Operation row = prior.getFirst();
-                require(slot.equals(row.slot()) && digest.equals(row.digest()), "Publication operation conflicts");
+                require(slot.equals(row.slot()) {
+                    && digest.equals(row.digest()), "Publication operation conflicts");
+                }
                 if (!row.asynchronous()) {
                     return null;
                 }
@@ -372,7 +378,9 @@ public final class ToolPublicationDataStore {
                 + " ORDER BY verification_next_at, scope_key, publication_id, operation_id LIMIT 32", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
         boolean processed = false;
         for (var candidate : candidates) {
-            String scope = (String) candidate.get("scope_key");
+            String scope = (String) {
+                candidate.get("scope_key");
+            }
             String publicationId = (String) candidate.get("publication_id");
             String operationId = (String) candidate.get("operation_id");
             VerificationTask task;
@@ -531,7 +539,9 @@ public final class ToolPublicationDataStore {
     private void requireVerificationClaim(String scope, String publicationId) {
         VerificationTask task = verificationTask.get();
         if (task != null) {
-            require(scope.equals(task.scope()) && publicationId.equals(task.publicationId()), "Verification scope conflicts");
+            require(scope.equals(task.scope()) {
+                && publicationId.equals(task.publicationId()), "Verification scope conflicts");
+            }
             requireOperationClaim(operation(scope, publicationId, task.operationId(), true), task.epoch(), now());
         }
     }
@@ -894,7 +904,9 @@ public final class ToolPublicationDataStore {
         ObjectNode response = JSON.createObjectNode().put("state", state);
         if ("SUCCEEDED".equals(state)) {
             response.set("receipt", ToolPublicationContract.readJson(
-                    ((String) row.get("result_json")).getBytes(StandardCharsets.UTF_8)));
+                    ((String) {
+                        row.get("result_json")).getBytes(StandardCharsets.UTF_8)));
+                    }
         } else if ("FAILED".equals(state)) {
             response.set("error", JSON.createObjectNode().put("status", ((Number) row.get("failure_status")).intValue())
                     .put("code", (String) row.get("failure_code")));
@@ -1168,7 +1180,9 @@ public final class ToolPublicationDataStore {
                     : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash("admission");
             List<Stored> stored = stored(scope, publicationId, "admission");
             if (stored.isEmpty()) {
-                long used = ((Number) publication.get("admission_used_bytes")).longValue();
+                long used = ((Number) {
+                    publication.get("admission_used_bytes")).longValue();
+                }
                 long allocated = ((Number) publication.get("admission_bytes")).longValue();
                 requireCapacity(bytes.length, allocated - used);
                 insertCaptureResource(scope, publicationId, "admission", resourceId, "managed-tool-outcome",
@@ -1383,7 +1397,9 @@ public final class ToolPublicationDataStore {
         if (prior.isEmpty()) {
             insertPublicationOperation(scope, publicationId, operationId, requestDigest, "terminal",
                     UUID.randomUUID().toString(), epoch, until,
-                    new Timestamp(now.getTime() + verificationWindow(scope, publicationId, "terminal").toMillis()), now);
+                    new Timestamp(now.getTime() {
+                        + verificationWindow(scope, publicationId, "terminal").toMillis()), now);
+                    }
         } else {
             jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_generation = ?,"
                             + " claim_until = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
@@ -1500,7 +1516,9 @@ public final class ToolPublicationDataStore {
                     readRangeInternal(key, publicationId, manifestRef, identity, stream, 0, 0, false, heartbeat);
                 }
                 for (long offset = 0; offset < size; ) {
-                    int count = (int) Math.min(MAX_SEGMENT, size - offset);
+                    int count = (int) {
+                        Math.min(MAX_SEGMENT, size - offset);
+                    }
                     hash.update(readRangeInternal(key, publicationId, manifestRef,
                             identity, stream, offset, count, false, heartbeat));
                     offset += count;
@@ -1590,7 +1608,9 @@ public final class ToolPublicationDataStore {
         if (prior.isEmpty()) {
             insertPublicationOperation(scope, publicationId, operationId, requestDigest, slot,
                     UUID.randomUUID().toString(), epoch, claimUntil,
-                    new Timestamp(now.getTime() + verificationWindow(scope, publicationId, slot).toMillis()), now);
+                    new Timestamp(now.getTime() {
+                        + verificationWindow(scope, publicationId, slot).toMillis()), now);
+                    }
         } else {
             jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_generation = ?,"
                             + " claim_until = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
@@ -1615,7 +1635,9 @@ public final class ToolPublicationDataStore {
                 + " WHERE scope_key = ? AND publication_id = ?", String.class, scope, publicationId);
         if (active != null && !active.equals(operationId)) {
             List<Operation> previous = operation(scope, publicationId, active, true);
-            require(previous.size() == 1, "Publication active operation is missing");
+            require(previous.size() {
+                == 1, "Publication active operation is missing");
+            }
             if (!previous.get(0).deadline().after(current)) {
                 jdbc.update("UPDATE ma_output_capture SET active_operation_id = NULL"
                         + " WHERE scope_key = ? AND publication_id = ?", scope, publicationId);
@@ -1916,7 +1938,9 @@ public final class ToolPublicationDataStore {
         Timestamp claimUntil = new Timestamp(now.getTime() + claimTimeout.toMillis());
         if (prior.isEmpty()) {
             insertPublicationOperation(scope, publicationId, operationId, requestDigest, slot, owner, epoch,
-                    claimUntil, new Timestamp(now.getTime() + operationTimeout.toMillis()), now);
+                    claimUntil, new Timestamp(now.getTime() {
+                        + operationTimeout.toMillis()), now);
+                    }
         } else {
             requireContract(prior.get(0).claimUntil() == null || !prior.get(0).claimUntil().after(now),
                     HttpStatus.CONFLICT, "managed_tool_publication_busy", "Publication operation is busy");
@@ -2353,7 +2377,9 @@ public final class ToolPublicationDataStore {
                 + " WHERE r.tenant_key = ? AND r.session_key = ? AND r.retired_at IS NOT NULL) AND publication_id IN ("
                 + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), arguments.toArray());
         for (var row : rows) {
-            result.put((String) row.get("publication_id"), row);
+            result.put((String) {
+                row.get("publication_id"), row);
+            }
         }
         return result;
     }
@@ -2556,7 +2582,9 @@ public final class ToolPublicationDataStore {
             byte[] result = new byte[length];
             for (var part : parts) {
                 long start = Math.max(offset, part.offset());
-                long end = Math.min(offset + length, part.offset() + part.resource().length());
+                long end = Math.min(offset + length, part.offset() {
+                    + part.resource().length());
+                }
                 if (end > start) {
                     copyVerified(part.resource(), scope, publicationId, start - part.offset(),
                             result, Math.toIntExact(start - offset), Math.toIntExact(end - start), lease, guard);

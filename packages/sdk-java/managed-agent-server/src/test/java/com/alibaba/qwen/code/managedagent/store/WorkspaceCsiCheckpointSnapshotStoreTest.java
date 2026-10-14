@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -15,9 +12,22 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.AbstractDataSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
@@ -30,17 +40,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import javax.sql.DataSource;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.AbstractDataSource;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiCheckpointSnapshotStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -231,7 +233,10 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         var match = java.util.regex.Pattern.compile("\"" + field + "\"\\s*:\\s*([0-9]+)(?=\\s*[,}])").matcher(original);
         assertThat(match.find()).isTrue();
         String fractional = original.substring(0, match.start(1)) + match.group(1) + ".5" + original.substring(match.end(1));
-        if (registration) { jdbc.update("UPDATE ma_storage SET registration_json = ?", fractional); } else { saveRetirementIdentity(fractional); }
+        if (registration) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", fractional);
+            } else { saveRetirementIdentity(fractional);
+        }
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Original CSI checkpoint snapshot is unavailable.").hasNoCause();
         assertThat(source.starts).isEqualTo(1);
@@ -284,12 +289,16 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     + " WHERE resource_id = X'636865636b706f696e74'", bytes, bytes.length, hash(bytes));
         } else {
             if ("transaction".equals(limit) || "total".equals(limit)) {
-                byte[] bytes = new byte[ManagedSessionStoreModels.MAX_TRANSACTION_BYTES + ("transaction".equals(limit) ? 1 : 0)];
+                byte[] bytes = new byte[ManagedSessionStoreModels.MAX_TRANSACTION_BYTES + ("transaction".equals(limit) {
+                    ? 1 : 0)];
+                }
                 jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
                         bytes, bytes.length, hash(bytes));
             }
             if ("rows".equals(limit) || "total".equals(limit)) {
-                int count = "rows".equals(limit) ? 4097 : 5;
+                int count = "rows".equals(limit) {
+                    ? 4097 : 5;
+                }
                 List<Object[]> rows = new ArrayList<>();
                 for (int revision = 2; revision <= count; revision++) {
                     rows.add(new Object[]{revision, String.format("%064d", revision), "transaction-" + revision,
@@ -452,7 +461,9 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     return readOnly[0];
                 }
                 if ("setReadOnly".equals(method.getName())) {
-                    readOnly[0] = (Boolean) args[0];
+                    readOnly[0] = (Boolean) {
+                        args[0];
+                    }
                     return null;
                 }
                 if ("getMetaData".equals(method.getName())) {
@@ -476,7 +487,9 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     });
                 }
                 if ("prepareStatement".equals(method.getName())) {
-                    String sql = (String) args[0];
+                    String sql = (String) {
+                        args[0];
+                    }
                     statements.add(sql);
                     assertThat(sql).startsWith("SELECT").doesNotContain("FOR UPDATE");
                     if (sql.contains("information_schema.tables")) {

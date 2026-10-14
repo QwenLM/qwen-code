@@ -1,11 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
-
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
@@ -13,6 +9,10 @@ import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.comm.SignVersion;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
@@ -26,9 +26,10 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
 
 /** Private offline entry; it never boots the application or a Runtime. */
 public final class WorkspaceRecoveryMain {
@@ -62,7 +63,9 @@ public final class WorkspaceRecoveryMain {
                 String region = required("W1_OSS_REGION");
                 check("https".equals(endpoint.getScheme()) && ("oss-" + region + ".aliyuncs.com").equals(endpoint.getHost())
                         && (endpoint.getRawPath() == null || endpoint.getRawPath().isEmpty())
-                        && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() == null, "invalid_oss_endpoint");
+                        && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() {
+                            == null, "invalid_oss_endpoint");
+                        }
                 var settings = new ClientBuilderConfiguration();
                 settings.setSignatureVersion(SignVersion.V4);
                 AliyunToolPublicationObjectStore.configureClientRetries(settings);
@@ -140,7 +143,9 @@ public final class WorkspaceRecoveryMain {
         var bytes = new ByteArrayOutputStream();
         int next;
         while ((next = input.read()) != -1 && next != '\n') {
-            check(bytes.size() < 16 * 1024 * 1024, "worker_message_too_large");
+            check(bytes.size() {
+                < 16 * 1024 * 1024, "worker_message_too_large");
+            }
             bytes.write(next);
         }
         check(next != -1 || bytes.size() == 0, "worker_protocol_error");

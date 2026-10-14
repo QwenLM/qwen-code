@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 
 /** The ingress receipt fixes routing identity; its operation owns attachment admission. */
 public final class JdbcChannelRouteRepository implements ChannelRouteRepository {
@@ -70,7 +71,9 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
                                 + " created_at, updated_at) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
                         operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
                         candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
-                        "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
+                        "admitted".equals(candidate.state()) {
+                            ? "ADMITTED" : "STAGING", candidate.state(), now, now);
+                        }
             }
         });
         ChannelRoute saved = find(candidate.tenantId(), route).orElseThrow(() ->

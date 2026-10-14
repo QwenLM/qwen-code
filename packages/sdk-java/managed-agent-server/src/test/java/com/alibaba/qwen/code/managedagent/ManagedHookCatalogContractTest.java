@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.util.List;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedHookCatalogContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
@@ -22,7 +23,9 @@ class ManagedHookCatalogContractTest {
         assertThat(CONTRACT.validate("/components/schemas/PublicHookCatalog", catalog)).isEmpty();
         for (String field : List.of("prompt", "command", "headers", "env", "modulePath", "handler", "runtimeSessionId", "onceKey")) {
             ObjectNode leaked = catalog.deepCopy();
-            ((ObjectNode) leaked.at("/catalogs/0/hooks/0")).put(field, "secret");
+            ((ObjectNode) {
+                leaked.at("/catalogs/0/hooks/0")).put(field, "secret");
+            }
             assertThat(CONTRACT.validate("/components/schemas/PublicHookCatalog", leaked)).as(field).isNotEmpty();
         }
         ObjectNode invalid = catalog.deepCopy();

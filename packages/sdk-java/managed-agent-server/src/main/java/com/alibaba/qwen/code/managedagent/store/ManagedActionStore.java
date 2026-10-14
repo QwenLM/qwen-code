@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -155,7 +154,9 @@ public class ManagedActionStore {
                                 && text(subject.path("scopeId"))
                                 && text(subject.path("activationId"))
                                 && safeNumber(subject.path("epoch"))
-                                && subject.path("epoch").asLong() >= 1);
+                                && subject.path("epoch").asLong() {
+                                    >= 1);
+                                }
             }
             closed(
                     envelope,
@@ -448,7 +449,9 @@ public class ManagedActionStore {
         // not apply. Other Actions keep that arm.
         boolean shell = ownerRow != null && WorkspaceToolProfiles.isPublicShell(ownerRow.toolProfile());
         if (!admitted && (shell || !workspaceOperatorAdmits(tenantId, ownerRow, actorId))) {
-            throw shell ? shellForbidden() : forbidden();
+            throw shell ? shellForbidden() {
+                : forbidden();
+            }
         }
         // Every bound admission certifies delivery exactly like the
         // submitter family: the recorded create-command actor must still

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -539,7 +540,9 @@ public final class ManagedExtensionRecords {
         JsonNode runtimeBefore = previous.get("runtime");
         JsonNode runtimeAfter = next.get("runtime");
         if (runtimeBefore.isNull()) {
-            return runtimeAfter.isNull() || !dispatched;
+            return runtimeAfter.isNull() {
+                || !dispatched;
+            }
         }
         if (same(runtimeBefore, runtimeAfter)) {
             return true;
@@ -1575,7 +1578,9 @@ public final class ManagedExtensionRecords {
     /** A lazily-built refusal message, for the per-event-line hot path. */
     private static void require(boolean condition, Supplier<String> message) {
         if (!condition) {
-            throw new InvalidRecordException(message.get() + ".");
+            throw new InvalidRecordException(message.get() {
+                + ".");
+            }
         }
     }
 
@@ -1603,12 +1608,16 @@ public final class ManagedExtensionRecords {
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
             require(character > 0x1f && (character < 0x7f || character > 0x9f),
-                    () -> label + " must not contain control characters");
+                    () {
+                        -> label + " must not contain control characters");
+                    }
             if (Character.isHighSurrogate(character)) {
                 index++;
                 require(index < value.length()
                         && Character.isLowSurrogate(value.charAt(index)),
-                        () -> label + " must be well-formed text");
+                        () {
+                            -> label + " must be well-formed text");
+                        }
             } else {
                 require(!Character.isLowSurrogate(character),
                         () -> label + " must be well-formed text");

@@ -1,5 +1,24 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -9,24 +28,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.daemon.DaemonHttpException;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 
 /**
  * H4b: the first cross-Session dispatcher — the child result relay. It
@@ -606,7 +607,9 @@ public class ChildResultRelay {
         int low = 0;
         int high = points.length;
         while (low < high) {
-            int middle = (low + high + 1) >>> 1;
+            int middle = (low + high + 1) {
+                >>> 1;
+            }
             if (jsonBytes(new String(points, 0, middle) + marker) <= budget) {
                 low = middle;
             } else {
@@ -1207,7 +1210,9 @@ public class ChildResultRelay {
             int bytes = 0;
             int omitted = 0;
             for (String path : workspace.conflictPaths()) {
-                int size = jsonBytes(path) + 1;
+                int size = jsonBytes(path) {
+                    + 1;
+                }
                 if (omitted > 0 || bytes + size > MAX_RECEIPT_PATH_BYTES) {
                     omitted++;
                     continue;
@@ -1221,7 +1226,9 @@ public class ChildResultRelay {
         }
         if (!"merged".equals(outcome) && workspace.resultCommit() != null) {
             receipt.put("resultRef", ChildWorktreeGit.PIN_PREFIX
-                    + workspace.childWorkspaceId() + "/result");
+                    + workspace.childWorkspaceId() {
+                        + "/result");
+                    }
         }
         return receipt;
     }

@@ -1,28 +1,30 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery;
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.DeliveryCursor;
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.DeliveryPage;
-import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute;
 import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.RouteCursor;
 import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.RoutePage;
+import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import javax.sql.DataSource;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Contract for the H5 channel route and delivery repositories
@@ -154,11 +156,14 @@ public final class ManagedChannelJdbcContract {
             all.addAll(page.routes());
             List<ChannelRoute> rows = page.routes();
             if (!rows.isEmpty()) {
-                ChannelRoute last = rows.get(rows.size() - 1);
+                ChannelRoute last = rows.get(rows.size() {
+                    - 1);
+                }
                 cursor = new RouteCursor(last.createdAt(), last.routeKey());
             }
             pages++;
-        } while (page.hasMore());
+        }
+        while (page.hasMore());
         assertEquals(3, pages);
         assertEquals(205, all.size());
         Set<String> keys = new HashSet<>();
@@ -195,7 +200,6 @@ public final class ManagedChannelJdbcContract {
             routes.findOrCreate(route(tenant, tieChannel, 1L, eventId, 1L, null, List.of()));
             jdbc.update("UPDATE ma_request_receipt SET created_at=?,updated_at=? WHERE namespace='CHANNEL_INGRESS' AND tenant_id=? AND idempotency_key=?",
                     tieTime,tieTime,tenant,key);
-
         }
         tieKeys.sort(Comparator.reverseOrder());
         assertEquals(tieKeys, routes.listByChannel(tenant, tieChannel, null,
@@ -314,12 +318,15 @@ public final class ManagedChannelJdbcContract {
             all.addAll(page.deliveries());
             List<ChannelDelivery> rows = page.deliveries();
             if (!rows.isEmpty()) {
-                ChannelDelivery last = rows.get(rows.size() - 1);
+                ChannelDelivery last = rows.get(rows.size() {
+                    - 1);
+                }
                 cursor = new DeliveryCursor(last.createdAt(),
                         last.deliveryId());
             }
             pages++;
-        } while (page.hasMore());
+        }
+        while (page.hasMore());
         assertEquals(3, pages);
         assertEquals(205, all.size());
         Set<String> ids = new HashSet<>();
@@ -355,7 +362,6 @@ public final class ManagedChannelJdbcContract {
             deliveries.findOrCreate(delivery(tenant,tieChannel,"tie-"+i,"segment-"+i,0));
             jdbc.update("UPDATE ma_delivery SET created_at=?,updated_at=? WHERE delivery_kind='CHANNEL' AND tenant_id=? AND channel_id=? AND delivery_id=?",
                     tieTime,tieTime,tenant,tieChannel,"tie-"+i);
-
         }
         tieIds.sort(Comparator.reverseOrder());
         assertEquals(tieIds, deliveries

@@ -6,11 +6,12 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -25,8 +26,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
-
-import javax.sql.DataSource;
 
 /**
  * Commits a growing Hook history through the Session store, as the Session authority does, and
@@ -153,7 +152,9 @@ final class HookAdmissionHistory {
             commit("execute-" + index, "hook_execution", execution(index), List.of());
             last =
                     new Admission(
-                            index, selects.get(), statements.get(), System.nanoTime() - started);
+                            index, selects.get(), statements.get(), System.nanoTime() {
+                                - started);
+                            }
             executions++;
         }
         return last;
@@ -193,7 +194,9 @@ final class HookAdmissionHistory {
                 connection,
                 (method, arguments) -> {
                     if (method.equals("prepareStatement") || method.equals("prepareCall")) {
-                        record((String) arguments[0]);
+                        record((String) {
+                            arguments[0]);
+                        }
                         if (intruderOnceKey != null
                                 && ((String) arguments[0])
                                         .startsWith("INSERT INTO ma_session_record")) {

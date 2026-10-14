@@ -1,12 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
-
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -18,7 +15,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -27,13 +23,18 @@ import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import javax.sql.DataSource;
+
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 /** Reserves publication capacity and fences producer grants against the Session owner. */
 public final class ToolPublicationStore {
@@ -331,7 +332,9 @@ public final class ToolPublicationStore {
             require(false, "Original Session or activation expired");
         }
         if (access != Access.SETTLE) {
-            require(((Number) current.get("expires_at")).longValue() > nowEpoch, "Publication grant expired");
+            require(((Number) current.get("expires_at")).longValue() {
+                > nowEpoch, "Publication grant expired");
+            }
         }
         requireAccess(original, access);
         return new ProducerBinding(binding, original.execution());
@@ -472,7 +475,9 @@ public final class ToolPublicationStore {
                         && equalHash(tokenHash, row.tokenHash()), "Reservation replay conflicts");
                 require("OPEN".equals(row.state()), "Reservation is fenced");
                 requireEvidence(candidate, writerToken, writer, false);
-                require(row.expiresAt() > writer.now(), "Reservation expired; renew explicitly");
+                require(row.expiresAt() {
+                    > writer.now(), "Reservation expired; renew explicitly");
+                }
                 return grant(id, row);
             }
             long expires = requireEvidence(candidate, writerToken, writer, true);
@@ -516,7 +521,9 @@ public final class ToolPublicationStore {
         require(row != null, "Publication does not exist");
         JsonNode binding = storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
         if ("renew".equals(operation)) {
-            require("OPEN".equals(row.state()) && equalHash(tokenHash, row.tokenHash()), "Publication is fenced");
+            require("OPEN".equals(row.state()) {
+                && equalHash(tokenHash, row.tokenHash()), "Publication is fenced");
+            }
             require(text(owner, "writerId").equals(text(binding, "writerId"))
                     && owner.get("writerGeneration").longValue() == binding.get("writerGeneration").longValue(),
                     "Original writer is fenced");
@@ -581,7 +588,9 @@ public final class ToolPublicationStore {
                     && writer.activationEventEpoch() != null
                     && b.get("activationEpoch").longValue() == writer.activationEventEpoch()
                     && writer.activationExpiresAt() != null
-                    && writer.activationExpiresAt() > writer.now(), "Activation is not active");
+                    && writer.activationExpiresAt() {
+                        > writer.now(), "Activation is not active");
+                    }
             activationExpiresAt = writer.activationExpiresAt();
             // The binding names the intent's sequence, so its revision is
             // read directly instead of walking the journal down to it.
@@ -651,7 +660,9 @@ public final class ToolPublicationStore {
             var current = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), writer.checkpointId(), writerToken);
             require("managed-checkpoint".equals(current.kind()) && current.schemaVersion() == 1
-                    && current.byteLength() <= ToolPublicationContract.MAX_BODY_BYTES, "Current checkpoint is invalid");
+                    && current.byteLength() {
+                        <= ToolPublicationContract.MAX_BODY_BYTES, "Current checkpoint is invalid");
+                    }
             requireCheckpoint(b, ToolPublicationContract.readJson(current.bytes()), writer);
         }
         JsonNode args = readResource(b, b.get("argsRef"), writerToken);
@@ -818,7 +829,9 @@ public final class ToolPublicationStore {
                     && executions instanceof JdbcToolExecutionRepository
                     && ((JdbcToolExecutionRepository) executions).usesDataSource(jdbc.getDataSource()),
                     "CSI publication admission requires native repositories");
-            var locked = csi.lockPublication((JdbcRuntimeBindingRepository) bindings, runtime);
+            var locked = csi.lockPublication((JdbcRuntimeBindingRepository) {
+                bindings, runtime);
+            }
             runtime = locked.binding();
             retirement = locked.retirement();
             execution = jdbc.execute((ConnectionCallback<ToolExecutionRecord>) connection -> {
@@ -888,7 +901,9 @@ public final class ToolPublicationStore {
             require(execution.wasDispatchAuthorizedBefore(original.retirement().sealedBindingVersion()),
                     "Original execution was not authorized before CSI retirement");
             boolean producing = execution.getState() == ToolExecutionRecord.State.EXECUTING
-                    || execution.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED;
+                    || execution.getState() {
+                        == ToolExecutionRecord.State.CANCEL_REQUESTED;
+                    }
             require(access == Access.SETTLE ? execution.getState() == ToolExecutionRecord.State.SETTLED
                     : producing || access == Access.CLAIM && execution.getState() == ToolExecutionRecord.State.SETTLED,
                     "Original execution cannot authorize publication settlement");
@@ -961,7 +976,9 @@ public final class ToolPublicationStore {
         if (bindings instanceof JdbcRuntimeBindingRepository nativeBindings
                 && nativeBindings.usesDataSource(jdbc.getDataSource())) {
             var rows = jdbc.query("SELECT binding_id, tenant_id, workspace_id, runtime_generation,"
-                    + " provisioner_kind FROM ma_runtime_binding WHERE binding_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), runtime.getBindingId());
+                    + " provisioner_kind FROM ma_runtime_binding WHERE binding_id = ?", (schemaRow, schemaIndex) {
+                        -> ManagedSchemaRows.read(schemaRow), runtime.getBindingId());
+                    }
             require(rows.size() == 1, "Original Runtime binding is missing");
             var row = rows.getFirst();
             require(runtime.getBindingId().equals(row.get("binding_id"))
