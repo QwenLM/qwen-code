@@ -244,6 +244,53 @@ describe('NativeLspService disk document synchronization', () => {
     expect(connection.request).not.toHaveBeenCalled();
   });
 
+  it.each(
+    ['EACCES', 'ELOOP', 'ESTALE', 'EIO'].flatMap((code) =>
+      [false, true].map((typescript) => ({ code, typescript })),
+    ),
+  )(
+    'rejects primary-root resolution failure before querying workspace symbols %j',
+    async ({ code, typescript }) => {
+      if (typescript) useTypescriptManager();
+      const failure = Object.assign(new Error('primary unavailable'), {
+        code,
+        path: directory,
+      });
+      const realpath = fs.realpathSync;
+      const resolve = vi
+        .spyOn(fs, 'realpathSync')
+        .mockImplementation((target) => {
+          if (target === directory) throw failure;
+          return realpath(target);
+        });
+      try {
+        await expect(run(service.workspaceSymbols('fn'))).rejects.toMatchObject(
+          {
+            message: expect.stringMatching(/workspace root|scope discovery/),
+            cause: failure,
+          },
+        );
+        expect(connection.send).not.toHaveBeenCalled();
+        expect(connection.request).not.toHaveBeenCalled();
+        const result = await execute(lspTool(), {
+          operation: 'workspaceSymbol',
+          query: 'fn',
+        });
+        for (const content of [result.llmContent, result.returnDisplay]) {
+          expect(content).toContain('failed');
+          expect(content).not.toContain('No symbols found');
+        }
+        expect(connection.request).not.toHaveBeenCalled();
+      } finally {
+        resolve.mockRestore();
+      }
+      expect(await run(service.workspaceSymbols('fn'))).toEqual([]);
+      expect(connection.request).toHaveBeenCalledWith('workspace/symbol', {
+        query: 'fn',
+      });
+    },
+  );
+
   it.each(['EACCES', 'ELOOP', 'ESTALE', 'EIO'])(
     'rejects unresolved tracked-file scope with %s before querying diagnostics',
     async (code) => {

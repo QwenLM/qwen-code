@@ -1584,9 +1584,18 @@ export class NativeLspService {
     const extGlob =
       extensions.length === 1 ? extensions[0]! : `{${extensions.join(',')}}`;
     const pattern = `**/*.${extGlob}`;
+    let primaryRoot: string;
+    try {
+      primaryRoot = resolveWorkspacePath(this.workspaceRoot);
+    } catch (error) {
+      throw new LspDocumentScopeError(
+        `Cannot resolve the primary workspace root for LSP server ${handle.config.name}`,
+        { cause: error },
+      );
+    }
     const roots = getLspWorkspaceRoots(
       handle.config,
-      resolveWorkspacePath(this.workspaceRoot),
+      primaryRoot,
       this.workspaceContext.getDirectories(),
     );
 
@@ -1654,18 +1663,25 @@ export class NativeLspService {
     const connectedHandle = handle as LspServerHandle & {
       connection: LspConnectionInterface;
     };
-    await this.serverManager.warmupTypescriptServer(
-      handle,
-      (uri, languageId) =>
-        this.synchronizeDocument(
-          serverName,
-          connectedHandle,
-          uri,
-          languageId,
-          force,
-        ).sent,
-      force,
-    );
+    try {
+      await this.serverManager.warmupTypescriptServer(
+        handle,
+        (uri, languageId) =>
+          this.synchronizeDocument(
+            serverName,
+            connectedHandle,
+            uri,
+            languageId,
+            force,
+          ).sent,
+        force,
+      );
+    } catch (error) {
+      throw new LspDocumentScopeError(
+        `LSP warmup scope discovery failed for ${serverName}: ${getErrorMessage(error)}`,
+        { cause: error },
+      );
+    }
   }
 
   /**

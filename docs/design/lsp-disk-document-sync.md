@@ -81,7 +81,9 @@ the [file routing contract](lsp-file-routing.md).
 
 ## Boundaries
 
-- Workspace symbols remain warmup-only. Optional warmup failures log and do not
+- Workspace symbols remain warmup-only. Primary-root resolution failures during
+  TypeScript or generic warmup discovery propagate as explicit refusals rather
+  than empty symbol results. Optional candidate read/send failures log and do not
   cancel symbol search. Successful disk-reader discovery is connection-local;
   readability is rechecked without retaining delivered text, removed candidates
   trigger rediscovery and missing candidates are not negatively cached. Workspace diagnostics additionally
