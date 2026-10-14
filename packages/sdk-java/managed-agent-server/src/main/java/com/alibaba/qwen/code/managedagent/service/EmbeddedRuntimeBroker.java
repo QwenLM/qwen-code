@@ -299,6 +299,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
+    public CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return service.drainHarnessResources(tenantId, sessionId, authority, false);
+    }
+
+    @Override
+    public CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return service.drainHarnessResources(tenantId, sessionId, authority, true);
+    }
+
+    @Override
     public ChildWorkspaceProvider childWorkspaces() {
         return childWorkspaces;
     }

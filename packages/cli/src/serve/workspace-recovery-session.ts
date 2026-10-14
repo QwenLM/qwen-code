@@ -5,6 +5,11 @@
  */
 
 import path from 'node:path';
+import {
+  HOSTED_RECOVERY_RESOURCE_KINDS,
+  parseHostedRecoveryResource,
+  hostedRecoveryReferences,
+} from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -91,6 +96,7 @@ export interface RecoverySessionSource {
     readonly retiredAt: number;
     readonly recoveryProtected: boolean;
   } | null;
+  readonly retiredHead?: RecoverySessionSource['head'];
   readonly head: {
     readonly tenantId: string;
     readonly workspaceId: string;
@@ -180,6 +186,7 @@ const RESOURCE_KINDS = new Set([
   'managed-tool-args',
   'managed-tool-outcome',
   'managed-action-options',
+  ...HOSTED_RECOVERY_RESOURCE_KINDS,
   'managed-action-decision',
   'managed-message',
   'managed-message-part',
@@ -319,6 +326,36 @@ export async function verifyRecoverySession(
             head.writerLeaseUntil === null))),
     'invalid pinned retirement',
   );
+  const retiredHead = source.retiredHead;
+  requireValue(
+    retiredHead == null ||
+      (head === null &&
+        retirement != null &&
+        retiredHead.tenantId === source.binding.tenantId &&
+        retiredHead.sessionId === source.sessionId &&
+        typeof retiredHead.workspaceId === 'string' &&
+        retiredHead.workspaceId.length > 0 &&
+        retiredHead.state === 'DELETED' &&
+        [1, 2].includes(retiredHead.storageVersion) &&
+        retiredHead.writerId === null &&
+        retiredHead.writerLeaseUntil === null &&
+        retiredHead.latestCheckpointResourceId === null &&
+        retiredHead.recoveryStatus === 'READY' &&
+        Number.isSafeInteger(retiredHead.writerGeneration) &&
+        retiredHead.writerGeneration >= 0 &&
+        Number.isSafeInteger(retiredHead.journalRevision) &&
+        retiredHead.journalRevision >= 0 &&
+        retiredHead.compactedThroughRevision === retiredHead.journalRevision &&
+        Number.isSafeInteger(retiredHead.committedSequence) &&
+        retiredHead.committedSequence >= 0 &&
+        Number.isSafeInteger(retiredHead.activationEpoch) &&
+        retiredHead.activationEpoch >= 0 &&
+        ((retiredHead.lastCommitDigest === null &&
+          retiredHead.committedSequence === 0) ||
+          (typeof retiredHead.lastCommitDigest === 'string' &&
+            /^[0-9a-f]{64}$/u.test(retiredHead.lastCommitDigest)))),
+    'invalid collected retirement head',
+  );
   if (purpose === 'migration') {
     requireValue(Boolean(head || retirement), 'uninitialized migration member');
   }
@@ -332,6 +369,7 @@ export async function verifyRecoverySession(
     boundary: unknown;
     state: HarnessCheckpointV1;
   } | null = null;
+  const cleanupDebt = new Map<string, unknown>();
   let activeTurn: string | null = null;
   let hasContinuation = false;
   let lastWorkSequence = 0;
@@ -351,7 +389,7 @@ export async function verifyRecoverySession(
     !head ||
       (head.sessionId === source.sessionId &&
         head.tenantId === source.binding.tenantId &&
-        head.storageVersion === 1 &&
+        [1, 2].includes(head.storageVersion) &&
         head.journalRevision >= 1 &&
         head.compactedThroughRevision === 0 &&
         head.recoveryStatus === 'READY'),
@@ -831,6 +869,11 @@ export async function verifyRecoverySession(
         event.sequence === sequence + 1,
         'noncontiguous event sequence',
       );
+      if (event.kind === 'hosted.cleanup')
+        cleanupDebt.set(
+          event.payload['cleanupId'] as string,
+          event.payload['state'],
+        );
       if (event.kind === 'input.accepted') {
         requireValue(activeTurn === null, 'overlapping unresolved inputs');
         activeTurn = event.payload['turnId'] as string;
@@ -966,6 +1009,7 @@ export async function verifyRecoverySession(
   );
   requireValue(
     activeTurn === null &&
+      ![...cleanupDebt.values()].some((state) => state !== 'confirmed') &&
       !latestHistoryPending &&
       (latestCheckpoint
         ? (latestCheckpoint.boundary === HARNESS_TURN_COMPLETE_BOUNDARY ||
@@ -996,6 +1040,11 @@ export async function verifyRecoverySession(
         'checkpoint closure owner conflicts',
       );
       await enqueueRefs(state, io);
+    } else if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
+      for (const nested of hostedRecoveryReferences(
+        parseHostedRecoveryResource(bytes, key ?? undefined),
+      ))
+        await io.enqueue(nested);
     } else if (ref.kind === 'managed-agent-instructions') {
       requireValue(
         bytes.byteLength <= 64 * 1024,

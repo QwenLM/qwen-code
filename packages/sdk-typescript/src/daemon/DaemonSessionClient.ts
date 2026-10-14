@@ -89,6 +89,8 @@ import type {
 export interface DaemonReplaySnapshot {
   compactedReplay: DaemonEvent[];
   liveJournal: DaemonEvent[];
+  lifecycleReplay?: DaemonEvent[];
+  lifecycleReplayIncomplete?: boolean;
 }
 
 export interface DaemonSessionClientOptions {
@@ -198,6 +200,8 @@ function createStandaloneRestoredClient(
     hasActivePrompt,
     compactedReplay,
     liveJournal,
+    lifecycleReplay,
+    lifecycleReplayIncomplete,
     historyHasMore,
     historyAnchorRecordId,
     replayDegraded,
@@ -219,6 +223,10 @@ function createStandaloneRestoredClient(
           replaySnapshot: {
             compactedReplay: compactedReplay ?? [],
             liveJournal: liveJournal ?? [],
+            ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+            ...(lifecycleReplayIncomplete !== undefined
+              ? { lifecycleReplayIncomplete }
+              : {}),
           },
           replaySnapshotComplete:
             Array.isArray(compactedReplay) && Array.isArray(liveJournal),
@@ -407,6 +415,8 @@ export class DaemonSessionClient {
       hasActivePrompt,
       compactedReplay,
       liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
@@ -426,6 +436,10 @@ export class DaemonSessionClient {
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
       },
       replaySnapshotComplete,
       replayPartial: partial === true,
@@ -690,15 +704,24 @@ export class DaemonSessionClient {
    * register the prompt in `_pendingPrompts`, or wait for the matching
    * `turn_complete` / `turn_error` SSE event. Callers that need final turn
    * results should use `prompt()` or manage SSE terminal events themselves.
+   * `beforeDispatch` can reject a stale caller before each HTTP attempt,
+   * including the retry after client registration recovery.
    */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
+    beforeDispatch?: (clientId: string | undefined) => void,
   ): Promise<NonBlockingPromptAccepted> {
-    signal?.throwIfAborted();
-    const accepted = await this.withClientIdSelfHeal(() =>
-      this.client.promptNonBlocking(this.sessionId, req, signal, this.clientId),
-    );
+    const accepted = await this.withClientIdSelfHeal(() => {
+      signal?.throwIfAborted();
+      beforeDispatch?.(this.clientId);
+      return this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+    });
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
     }

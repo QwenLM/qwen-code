@@ -35,6 +35,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final InternalServer internalServer = new InternalServer();
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
+    private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -63,6 +64,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public Channels getChannels() {
         return channels;
+    }
+
+    public EventTransport getEventTransport() {
+        return eventTransport;
     }
 
     public SessionStore getSessionStore() {
@@ -131,6 +136,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
+        runtimeBroker.getRetention().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
             throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h;"
@@ -634,6 +640,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
+        private boolean asyncVerificationEnabled;
+        private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
         // Off by default: the head's activation columns are only trustworthy
@@ -642,6 +650,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean journalHeadAuthorization;
 
         public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
+        public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
+        public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
+        public int getVerificationConcurrency() { return verificationConcurrency; }
+        public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
         public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }
@@ -864,6 +876,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public static class RuntimeBroker {
         private boolean enabled;
+        private final Retention retention = new Retention();
         private String host = "127.0.0.1";
         private int port = 4182;
         private boolean allowNonLoopback;
@@ -895,6 +908,38 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
+
+        public Retention getRetention() {
+            return retention;
+        }
+
+        public static class Retention {
+            private boolean enabled;
+            @DurationUnit(ChronoUnit.DAYS)
+            private Duration maxAge = Duration.ofDays(30);
+            private int batchSize = 100;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration scanDelay = Duration.ofMinutes(1);
+
+            public boolean isEnabled() { return enabled; }
+            public void setEnabled(boolean value) { enabled = value; }
+            public Duration getMaxAge() { return maxAge; }
+            public void setMaxAge(Duration value) { maxAge = value; }
+            public int getBatchSize() { return batchSize; }
+            public void setBatchSize(int value) { batchSize = value; }
+            public Duration getScanDelay() { return scanDelay; }
+            public void setScanDelay(Duration value) { scanDelay = value; }
+
+            void validate() {
+                if (maxAge == null || maxAge.isZero() || maxAge.isNegative()
+                        || maxAge.compareTo(Duration.ofMillis(1)) < 0
+                        || scanDelay == null || scanDelay.isZero() || scanDelay.isNegative()
+                        || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
+                    throw new IllegalStateException("Runtime Broker retention requires positive max-age and scan-delay"
+                            + " (at least 1ms), and batch-size between 1 and 1000");
+                }
+            }
+        }
 
         public boolean isEnabled() {
             return enabled;
@@ -1237,6 +1282,107 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
+        }
+    }
+
+    /**
+     * Broker-backed EventTransport (design
+     * 2026-10-04-managed-agent-event-transport): the authoritative journal
+     * wire (phase MQ2b), and the public-event wire and the wake and
+     * materialization consumers (phase MQ2c). Default off, so a flag-off
+     * deployment creates no transport, producer or consumer bean and stays
+     * byte-identical. The topic must be a LITE topic, and the
+     * capability-probe, wake-bootstrap and owner groups must be pre-created
+     * as LITE groups bound to it — see EventTransportConfiguration for the
+     * deployment prerequisites.
+     */
+    public static class EventTransport {
+        private boolean enabled;
+        // The RocketMQ proxy gRPC endpoint (e.g. "host:8081").
+        private String endpoints = "";
+        // The parent topic the per-Session LiteTopics (journal and public
+        // envelopes alike) and the wake bootstrap LiteTopic live under.
+        private String topic = "";
+        // The group the startup capability probe subscribes in; pre-created
+        // as a LITE group bound to the topic like the lane groups.
+        private String capabilityProbeGroup =
+                "qwen-managed-journal-capability-probe";
+        // The one LiteTopic every wake.requested envelope is also sent to, so
+        // a node can learn of a wake nobody owns yet. Session ids are UUIDs,
+        // so this name cannot collide with a Session's LiteTopic.
+        private String wakeBootstrapLiteTopic = "qwen-wake-bootstrap";
+        // Shared by every node; one dispatch reaches one member.
+        private String wakeBootstrapGroup = "qwen-managed-wake-bootstrap";
+        // Shared by every node; each subscribes it to the Sessions it holds.
+        private String ownerGroup = "qwen-managed-session-owner";
+        // How often the owner subscriptions follow this node's held Sessions.
+        // Unit-less operator overrides must bind in the annotated unit.
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration ownerReconcileInterval = Duration.ofSeconds(1);
+
+        public String getCapabilityProbeGroup() {
+            return capabilityProbeGroup;
+        }
+
+        public void setCapabilityProbeGroup(String capabilityProbeGroup) {
+            this.capabilityProbeGroup = capabilityProbeGroup;
+        }
+
+        public String getWakeBootstrapLiteTopic() {
+            return wakeBootstrapLiteTopic;
+        }
+
+        public void setWakeBootstrapLiteTopic(String wakeBootstrapLiteTopic) {
+            this.wakeBootstrapLiteTopic = wakeBootstrapLiteTopic;
+        }
+
+        public String getWakeBootstrapGroup() {
+            return wakeBootstrapGroup;
+        }
+
+        public void setWakeBootstrapGroup(String wakeBootstrapGroup) {
+            this.wakeBootstrapGroup = wakeBootstrapGroup;
+        }
+
+        public String getOwnerGroup() {
+            return ownerGroup;
+        }
+
+        public void setOwnerGroup(String ownerGroup) {
+            this.ownerGroup = ownerGroup;
+        }
+
+        public Duration getOwnerReconcileInterval() {
+            return ownerReconcileInterval;
+        }
+
+        public void setOwnerReconcileInterval(
+                Duration ownerReconcileInterval) {
+            this.ownerReconcileInterval = ownerReconcileInterval;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getEndpoints() {
+            return endpoints;
+        }
+
+        public void setEndpoints(String endpoints) {
+            this.endpoints = endpoints;
+        }
+
+        public String getTopic() {
+            return topic;
+        }
+
+        public void setTopic(String topic) {
+            this.topic = topic;
         }
     }
 }

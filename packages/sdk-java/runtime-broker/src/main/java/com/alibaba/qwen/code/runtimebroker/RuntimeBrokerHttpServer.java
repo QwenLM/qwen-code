@@ -110,8 +110,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 requireProtocol(body);
                 JsonCodec.requiredString(body, "requestId", "warm request");
                 String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "warm request");
-                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), ignored -> Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true));
+                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), record -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true,
+                        "scope", Map.of("tenantId", record.getRequest().getScope().getTenantId(),
+                                "workspaceId", record.getRequest().getScope().getWorkspaceId(),
+                                "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
+                                "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
+                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
@@ -181,7 +186,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         if (body.containsKey("recoveryBindingId")) {
             acquisition = service.acquireRecovery(harnessSessionId, runtimeSessionId,
                     JsonCodec.requiredString(body, "recoveryBindingId", "acquire request"),
-                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")));
+                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")), lifecycleAuthority(exchange));
         } else {
             acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind, lifecycleAuthority(exchange));
         }
@@ -246,12 +251,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             JsonCodec.requiredString(body, "requestId", "release request");
             String harnessSessionId = JsonCodec.requiredString(body,
                     "harnessSessionId", "release request");
-            // `drain` is the close arm: it stops the Session's live
-            // background holds before releasing. A routine release omits it
-            // and is refused `runtime_session_held` while a run is live.
             boolean drain = Boolean.TRUE.equals(body.get("drain"));
-            complete(exchange, service.release(harnessSessionId,
-                    runtimeSessionId, drain), released -> envelope(harnessSessionId,
+            CompletionStage<Boolean> release = body.containsKey("cleanupBindingId")
+                    ? service.releaseOriginal(harnessSessionId, runtimeSessionId,
+                            JsonCodec.requiredString(body, "cleanupBindingId", "release request"),
+                            Long.parseLong(JsonCodec.requiredString(body, "cleanupGeneration", "release request")), lifecycleAuthority(exchange), drain)
+                    : service.release(harnessSessionId, runtimeSessionId, drain, lifecycleAuthority(exchange));
+            complete(exchange, release, released -> envelope(harnessSessionId,
                             runtimeSessionId, "released", released));
             return;
         }

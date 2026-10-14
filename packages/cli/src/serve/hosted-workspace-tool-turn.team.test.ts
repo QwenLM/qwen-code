@@ -59,7 +59,11 @@ import {
 // H4e-b1: team_state and team_task are enabled, so the flags close the
 // real gate per test; with either closed the turn keeps the H4b surface
 // exactly, which is what a rollback of the enablement restores.
-const enablement = vi.hoisted(() => ({ teamState: true, teamTask: true }));
+const enablement = vi.hoisted(() => ({
+  teamState: true,
+  teamTask: true,
+  teamPlan: false,
+}));
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
   async (importOriginal) => {
@@ -79,6 +83,7 @@ vi.mock(
           throw new actual.ManagedSessionRecordError(
             `domain ${domain} is registered but not enabled for submission.`,
           );
+        if (domain === 'team_plan' && enablement.teamPlan) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
     };
@@ -237,6 +242,99 @@ const member = (name: string, callId: string, extra = {}) =>
     callId,
   );
 
+it('gates plan launch declarations and propagates the named member requirement', async () => {
+  const signal = new AbortController().signal;
+  expect(JSON.stringify(await createTurn().declarations(signal))).not.toContain(
+    'plan_mode_required',
+  );
+  enablement.teamPlan = true;
+  const tools = await createTurn().declarations(signal);
+  expect(tools.map((tool) => tool.name)).toContain('team_plan_approval');
+  expect(JSON.stringify(tools.find((tool) => tool.name === 'agent'))).toContain(
+    'plan_mode_required',
+  );
+  await execute(createTurn(), [
+    call('team_create', { team_name: 'review' }, 'create-plan-team'),
+  ]);
+  expect(
+    await execute(createTurn(), [
+      member('alice', 'launch-plan', { plan_mode_required: true }),
+    ]),
+  ).toContain('joined');
+  expect(roster()[0]?.planModeRequired).toBe(true);
+  const run = children.record(hostedCallKey('prompt', 'launch-plan'));
+  expect(run).toBeDefined();
+  const envelope = await session.resources.read(run!.inputRef);
+  expect(envelope.toString()).toContain('plan-mode=');
+  expect(
+    await execute(createTurn(), [
+      call(
+        'agent',
+        { description: 'plain', prompt: 'work', plan_mode_required: true },
+        'plain-plan',
+      ),
+    ]),
+  ).toContain('unsupported argument');
+});
+
+it.each([false, true])(
+  'executes plan approval through the tool turn with closing=%s',
+  async (closing) => {
+    enablement.teamPlan = true;
+    await execute(createTurn(), [
+      call('team_create', { team_name: 'review' }, 'create'),
+    ]);
+    await execute(createTurn(), [
+      member('alice', 'launch-plan', { plan_mode_required: true }),
+    ]);
+    const childRunId = hostedCallKey('prompt', 'launch-plan');
+    await teams.submitPlan('submitted-plan', childRunId, 'Read the source');
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-plan',
+      runtime: { runtimeBindingId: 'binding', generation: '1' },
+    });
+    await children.attach(childRunId, 'alice-session');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from('plan ready'),
+      receipt: Buffer.from('{"outcome":"settled"}'),
+    });
+    const activation = session.authority.currentActivation!;
+    const context = closing
+      ? vi
+          .spyOn(session.authority, 'currentActivation', 'get')
+          .mockReturnValue({ ...activation, phase: 'closing' })
+      : undefined;
+    try {
+      const answer = await execute(createTurn(), [
+        call(
+          'team_plan_approval',
+          { request_id: 'submitted-plan', action: 'approve' },
+          'decide',
+        ),
+      ]);
+      const continuation = children.record(hostedCallKey('prompt', 'decide'));
+      if (closing) {
+        expect(answer).toContain('closing');
+        expect(teams.plan('submitted-plan')?.run.state).toBe('waiting');
+        expect(continuation).toBeUndefined();
+      } else {
+        expect(answer).toContain('member was continued');
+        expect(teams.plan('submitted-plan')?.decision).toBe('approved');
+        expect(continuation?.predecessorChildRunId).toBe(childRunId);
+        expect(continuation).toBeDefined();
+        expect(
+          session.authority.committedExtensionOperation(
+            'decideTeamPlan',
+            hostedCallKey('prompt', 'decide'),
+          ),
+        ).toBeDefined();
+      }
+    } finally {
+      context?.mockRestore();
+    }
+  },
+);
+
 function roster() {
   return session.authority
     .extensionRecordsInDomain('team_state')
@@ -246,6 +344,7 @@ function roster() {
 beforeEach(async () => {
   enablement.teamState = true;
   enablement.teamTask = true;
+  enablement.teamPlan = false;
   vi.resetAllMocks();
   broker.warm.mockResolvedValue(undefined);
   broker.acquire.mockResolvedValue(undefined);
@@ -464,7 +563,9 @@ it('keeps team tools out of a foreground child batch', async () => {
       'call-child',
     ),
   ]);
-  expect(answer).toContain('cannot share a batch with a non-agent tool');
+  expect(answer).toContain(
+    'cannot share a batch with a tool other than agent or workflow',
+  );
   expect(children.record('prompt:call-child')).toBeUndefined();
 });
 
