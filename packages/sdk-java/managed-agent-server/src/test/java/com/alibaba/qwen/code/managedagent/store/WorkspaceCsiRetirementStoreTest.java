@@ -22,7 +22,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -42,8 +43,8 @@ class WorkspaceCsiRetirementStoreTest {
     @BeforeEach
     void setUp() {
         source = dataSource();
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         bindings = bindings(source);
         store = store(source);
         registration = WorkspaceCsiReservationStoreTest.registration("tenant", "storage", "backend", "handle", 1);
@@ -64,7 +65,7 @@ class WorkspaceCsiRetirementStoreTest {
         assertThat(draining.retirement()).isEqualTo(intent);
         assertThat(draining.binding().getVersion()).isEqualTo(intent.sealedBindingVersion());
         assertThat(store.inspect(registration).phase()).isEqualTo("DRAINING");
-        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM qwen_runtime_binding_slot", String.class))
+        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class))
                 .isEqualTo(original.getBindingId());
     }
 
@@ -72,17 +73,17 @@ class WorkspaceCsiRetirementStoreTest {
     void publicationRefusesMissingIntentAndMalformedRegistrationWithoutMutation() {
         ready();
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-        String encoded = jdbc.queryForObject("SELECT registration_json FROM managed_workspace_csi_registration", String.class);
-        jdbc.update("UPDATE managed_workspace_csi_registration SET registration_json = '{}' ");
+        String encoded = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
+        jdbc.update("UPDATE ma_storage SET registration_json = '{}' ");
         assertUnavailable(() -> transaction.execute(status -> store.lockPublication(bindings, original)));
-        jdbc.update("UPDATE managed_workspace_csi_registration SET registration_json = ?", encoded);
+        jdbc.update("UPDATE ma_storage SET registration_json = ?", encoded);
         store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
-        jdbc.update("DELETE FROM managed_workspace_csi_retirement");
-        var holder = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
-        var binding = jdbc.queryForMap("SELECT * FROM qwen_runtime_binding");
+        jdbc.update("DELETE FROM ma_operation");
+        var holder = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var binding = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
         assertUnavailable(() -> transaction.execute(status -> store.lockPublication(bindings, original)));
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(holder);
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_runtime_binding")).isEqualTo(binding);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(holder);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(binding);
     }
 
     @Test
@@ -118,7 +119,7 @@ class WorkspaceCsiRetirementStoreTest {
         }
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
         transaction.executeWithoutResult(status -> {
-            jdbc.update("UPDATE qwen_tool_execution SET cancel_requested = TRUE WHERE execution_call_id = 'reader'");
+            jdbc.update("UPDATE ma_tool_execution SET cancel_requested = TRUE WHERE execution_call_id = X'726561646572'");
             var locked = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<ToolExecutionRecord>) connection ->
                     executions.findByExecutionCallIdForUpdate(connection, "reader"));
             assertThat(locked.getExecutionCallId()).isEqualTo(execution.getExecutionCallId());
@@ -145,9 +146,9 @@ class WorkspaceCsiRetirementStoreTest {
         assertThat(intent.reservation()).isEqualTo(reservation);
         assertThat(store.inspect(registration).phase()).isEqualTo("DRAINING");
         assertThat(store.inspect(registration).revision()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM qwen_runtime_binding_slot", String.class))
+        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class))
                 .isEqualTo(original.getBindingId());
-        assertThat(jdbc.queryForObject("SELECT binding_id FROM managed_workspace_execution_lease", String.class))
+        assertThat(jdbc.queryForObject("SELECT binding_id FROM ma_storage_owner", String.class))
                 .isEqualTo(original.getBindingId());
         var restored = store(source);
         assertThat(restored.beginRetirement(registration, bindings(source), original, reservation, operation)).isEqualTo(intent);
@@ -213,40 +214,40 @@ class WorkspaceCsiRetirementStoreTest {
         String operation = UUID.randomUUID().toString();
         var intent = store.beginRetirement(registration, bindings, original, reservation, operation);
         assertThat(intent.leaseDigest()).matches("[0-9a-f]{64}");
-        assertThat(jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement", String.class))
+        assertThat(retirementIdentity())
                 .doesNotContain(original.getLease().getToken());
-        jdbc.update("UPDATE qwen_runtime_binding SET runtime_endpoint = 'http://127.0.0.1:10'");
+        jdbc.update("UPDATE ma_runtime_binding SET runtime_endpoint = 'http://127.0.0.1:10'");
         assertUnavailable(() -> store.inspectRetirement(registration, bindings, original));
         assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, operation));
-        jdbc.update("UPDATE qwen_runtime_binding SET runtime_endpoint = ?", original.getLease().getEndpoint().toString());
+        jdbc.update("UPDATE ma_runtime_binding SET runtime_endpoint = ?", original.getLease().getEndpoint().toString());
         assertThat(store.inspectRetirement(registration, bindings, original)).isEqualTo(intent);
     }
 
     @Test
     void duplicateJournalKeyRollsBackBindingAndPhysicalChanges() {
         String operation = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_workspace_csi_retirement VALUES (?, 'foreign', 1, ?, 'DRAINING', '{}')",
-                operation, "f".repeat(64));
-        var before = jdbc.queryForMap("SELECT * FROM qwen_runtime_binding WHERE binding_id = ?", original.getBindingId());
-        var physical = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        new WorkspaceOperations(jdbc, "tenant").create(WorkspaceOperations.Kind.CSI_RETIREMENT, operation,
+                WorkspaceOperations.values("binding_id", "foreign", "runtime_generation", 1L, "state", "DRAINING", "identity_json", "{}"));
+        var before = jdbc.queryForMap("SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
+        var physical = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         assertThatThrownBy(() -> store.beginRetirement(registration, bindings, original, reservation, operation))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
-        assertThat(jdbc.queryForMap("SELECT * FROM qwen_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(before);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(physical);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_retirement", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(physical);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isEqualTo(1);
     }
 
     @Test
     void conflictingOperationOrRevisionCannotChangeTheOriginalJournal() {
         String operation = UUID.randomUUID().toString();
         var intent = store.beginRetirement(registration, bindings, original, reservation, operation);
-        var before = jdbc.queryForMap("SELECT * FROM managed_workspace_csi_retirement");
+        var before = jdbc.queryForMap("SELECT * FROM ma_operation");
         assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString()));
         var stale = new WorkspaceCsiReservationStore.Reservation("RESERVED", 1, UUID.randomUUID().toString(),
                 reservation.registrationKey(), reservation.registrationRevision(), reservation.bindingId(),
                 reservation.runtimeGeneration(), reservation.provisionRequestId());
         assertUnavailable(() -> store.beginRetirement(registration, bindings, original, stale, operation));
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_csi_retirement")).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_operation")).isEqualTo(before);
         assertThat(store.inspectRetirement(registration, bindings, original)).isEqualTo(intent);
     }
 
@@ -269,12 +270,12 @@ class WorkspaceCsiRetirementStoreTest {
 
     @Test
     void lapsedOriginalClaimCannotSealOrCreateAnIntent() {
-        jdbc.update("UPDATE qwen_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        jdbc.update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
         var expired = bindings.findById(original.getBindingId());
         assertUnavailable(() -> store.beginRetirement(registration, bindings, expired, reservation, UUID.randomUUID().toString()));
         assertThat(bindings.findById(original.getBindingId()).isDrainRequested()).isFalse();
         assertThat(store.inspect(registration)).isEqualTo(reservation);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_retirement", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
     }
 
     @Test
@@ -288,7 +289,7 @@ class WorkspaceCsiRetirementStoreTest {
         });
         var foreignSource = new DriverManagerDataSource(source.getUrl(), "sa", "");
         assertUnavailable(() -> store.beginRetirement(registration, bindings(foreignSource), renewed, reservation, UUID.randomUUID().toString()));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_retirement", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
         assertThat(store.inspect(registration)).isEqualTo(reservation);
     }
 
@@ -296,36 +297,47 @@ class WorkspaceCsiRetirementStoreTest {
     void corruptJournalOrChangedPinsBlockInspectionAndRetry() {
         String operation = UUID.randomUUID().toString();
         store.beginRetirement(registration, bindings, original, reservation, operation);
-        String encoded = jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement", String.class);
+        String encoded = retirementIdentity();
         for (String corrupt : new String[] {"{}", encoded + " {}", encoded.substring(0, encoded.length() - 1) + ",\"extra\":true}"}) {
-            jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", corrupt);
+            updateRetirementIdentity(corrupt);
             assertUnavailable(() -> store.inspectRetirement(registration, bindings, original));
             assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, operation));
         }
-        jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", encoded);
-        jdbc.update("UPDATE qwen_runtime_binding SET drain_requested = FALSE");
+        updateRetirementIdentity(encoded);
+        jdbc.update("UPDATE ma_runtime_binding SET drain_requested = FALSE");
         assertUnavailable(() -> store.inspectRetirement(registration, bindings, original));
         assertThat(store.inspect(registration).phase()).isEqualTo("DRAINING");
     }
 
     @Test
-    void migrationPreservesOriginalLocalHolderAndHookSequence() {
+    void freshBaselineRefusesLegacyHoldersWithoutChangingTheirEvidence() {
         var legacy = dataSource();
-        Flyway.configure().dataSource(legacy).locations("classpath:db/migration").target("34").load().migrate();
-        var db = new JdbcTemplate(legacy);
-        db.update("INSERT INTO managed_workspace_execution_lease (storage_key, holder_key, binding_id, runtime_generation, runtime_session_id) VALUES (?, ?, 'original-binding', 9, 'original-session')",
+        var db = new ManagedSchemaJdbcTemplate(legacy);
+        db.execute("CREATE TABLE managed_workspace_execution_lease (storage_key CHAR(64) PRIMARY KEY,"
+                + " holder_key CHAR(64), binding_id VARCHAR(64), runtime_generation BIGINT, runtime_session_id VARCHAR(64))");
+        db.execute("CREATE TABLE qwen_managed_session_extension_record (record_id VARCHAR(64) PRIMARY KEY, first_sequence BIGINT)");
+        db.update("INSERT INTO managed_workspace_execution_lease VALUES (?, ?, 'original-binding', 9, 'original-session')",
                 "1".repeat(64), "2".repeat(64));
-        db.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, created_at, first_sequence)"
-                + " VALUES (?, ?, 'tenant', 'workspace', 'session', 'hook', 'hook-1', ?, 3, 'resource', 'hook', 'running', 1, 83)",
-                "3".repeat(64), "4".repeat(64), "5".repeat(64));
+        db.update("INSERT INTO qwen_managed_session_extension_record VALUES ('hook-1', 83)");
         var holder = db.queryForMap("SELECT * FROM managed_workspace_execution_lease");
         var hook = db.queryForMap("SELECT * FROM qwen_managed_session_extension_record");
-        Flyway.configure().dataSource(legacy).locations("classpath:db/migration").load().migrate();
-        var after = db.queryForMap("SELECT * FROM managed_workspace_execution_lease");
-        holder.forEach((key, value) -> assertThat(after.get(key)).isEqualTo(value));
-        assertThat(after.get("storage_kind")).isEqualTo("LOCAL");
+        assertThatThrownBy(() -> ManagedSchema.initialize(legacy)).isInstanceOf(IllegalStateException.class);
+        assertThat(db.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(holder);
         assertThat(db.queryForMap("SELECT * FROM qwen_managed_session_extension_record")).isEqualTo(hook);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'ma_runtime_slot'", Integer.class))
+                .isZero();
+    }
+
+    private String retirementIdentity() {
+        String id = jdbc.queryForObject("SELECT operation_id FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'", String.class);
+        return (String) new WorkspaceOperations(jdbc, "tenant").find(WorkspaceOperations.Kind.CSI_RETIREMENT, id, false).get("identity_json");
+    }
+
+    private void updateRetirementIdentity(String identity) {
+        String id = jdbc.queryForObject("SELECT operation_id FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'", String.class);
+        new TransactionTemplate(new DataSourceTransactionManager(source)).executeWithoutResult(ignored ->
+                new WorkspaceOperations(jdbc, "tenant").update(WorkspaceOperations.Kind.CSI_RETIREMENT, id,
+                        WorkspaceOperations.values("identity_json", identity)));
     }
 
     private void ready() {
@@ -362,7 +374,7 @@ class WorkspaceCsiRetirementStoreTest {
     }
 
     private static WorkspaceCsiReservationStore store(DriverManagerDataSource dataSource) {
-        return new WorkspaceCsiReservationStore(new JdbcTemplate(dataSource), new DataSourceTransactionManager(dataSource), new ObjectMapper());
+        return new WorkspaceCsiReservationStore(new ManagedSchemaJdbcTemplate(dataSource), new DataSourceTransactionManager(dataSource), new ObjectMapper());
     }
 
     private static void assertUnavailable(Runnable action) {

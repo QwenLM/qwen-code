@@ -97,7 +97,7 @@ class HostedChannelProcessCrashIT {
             assertThat(cases).contains(selected);
             cases = List.of(selected);
         }
-        jdbc = new JdbcTemplate(new DriverManagerDataSource(
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(
                 required("mysql.url"), required("mysql.user"),
                 System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);

@@ -2,88 +2,121 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
-import org.h2.jdbcx.JdbcDataSource;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Pins the admission stage written when an ACTION_RESPONSE operation
- * completes: a completion the Harness answered is harness_confirmed; one the
- * retry budget terminated without an answer (issue #13182 finding 3) must
- * stay java_durable.
+ * completes (a completion the Harness answered is harness_confirmed; one
+ * the retry budget terminated without an answer stays java_durable), and
+ * the replay re-admission arms of a terminally failed delivery (issue
+ * #13182 finding 3): resurrect while the Action still waits, heal when the
+ * projection shows this response's own decision committed, and the mutable
+ * gates that keep a stale failure replaying.
  */
 class ManagedActionStoreTest {
-    private static final String TENANT = "action-store";
-    private static final String ACTION_ID =
-            "tool_approval_" + "a".repeat(32);
-    private final AtomicLong now = new AtomicLong(1_000);
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String TENANT = "tenant";
+    private static final String SESSION = "session";
+    private static final String ACTION = "tool_approval_" + "a".repeat(32);
+    private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
+    private ManagedActionStore actions;
+    private AgentStateStore agents;
+    private TransactionTemplate transactions;
+    private String scope;
+
+    @BeforeEach
+    void initialize() throws Exception {
+        fixture = ConsolidatedStoreFixture.open("action-store");
+        var source = fixture.source();
+        ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
+        transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(source));
+        scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,created_at,updated_at)"
+                + " VALUES (?,?,'agent','ACTIVE','manual',0,0)", TENANT, SESSION);
+        agents = mock(AgentStateStore.class);
+        when(agents.findOperation(anyString(), anyString(), anyString())).thenAnswer(call -> jdbc.query(
+                "SELECT * FROM ma_operation WHERE tenant_id=? AND session_id=? AND operation_id=? AND operation_kind='ACTION_RESPONSE'",
+                (row, n) -> new OperationRecord(row.getString("tenant_id"), row.getString("session_id"), row.getString("operation_id"),
+                        OperationKind.ACTION_RESPONSE, row.getString("request_digest"), row.getString("state"), row.getString("admission_stage"),
+                        row.getString("delivery_state"), row.getString("session_status_before"), row.getString("receipt_id"),
+                        row.getString("claim_owner"), row.getLong("claim_generation"), row.getInt("attempt_count")),
+                call.getArgument(0), call.getArgument(1), call.getArgument(2)).stream().findFirst());
+        when(agents.hasExecutionRegistryFacts(anyString(), anyString())).thenReturn(true);
+        actions = new ManagedActionStore(jdbc, agents);
+    }
+
+    @AfterEach
+    void closeFixture() {
+        if (fixture != null) fixture.close();
+    }
 
     @Test
     void anUnansweredCompletionStaysJavaDurable() {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        insertLeasedActionOperation(sessionId);
-        OperationRecord op = operation(sessionId);
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        lease(admitted.operation().operationId());
+        OperationRecord op = operation(admitted.operation().operationId());
 
-        actions.complete(op, "owner", "action_response_delivery_failed", null,
-                false, now.get());
-        // The fixture inserts RUNNING/JAVA_DURABLE, so the stage assertion
+        actions.complete(op, "owner", "action_response_delivery_failed", null, false, 20);
+
+        // The fixture leases RUNNING/JAVA_DURABLE, so the stage assertion
         // alone cannot tell a write apart from a no-op; only complete()
         // writes FAILED.
-        assertThat(state(sessionId)).isEqualTo("FAILED");
-        assertThat(stage(sessionId)).isEqualTo("JAVA_DURABLE");
+        assertThat(stringColumn("state", op.operationId())).isEqualTo("FAILED");
+        assertThat(stringColumn("admission_stage", op.operationId())).isEqualTo("JAVA_DURABLE");
     }
 
     @Test
     void anAnsweredCompletionIsHarnessConfirmed() {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        insertLeasedActionOperation(sessionId);
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        lease(admitted.operation().operationId());
 
-        actions.complete(operation(sessionId), "owner", null, "rcpt-1", true,
-                now.get());
-        assertThat(stage(sessionId)).isEqualTo("HARNESS_CONFIRMED");
+        actions.complete(operation(admitted.operation().operationId()), "owner", null, "rcpt-1", true, 20);
+
+        assertThat(stringColumn("admission_stage", admitted.operation().operationId()))
+                .isEqualTo("HARNESS_CONFIRMED");
     }
 
     @Test
     void anAnsweredFailureIsStillHarnessConfirmed() {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        insertLeasedActionOperation(sessionId);
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        lease(admitted.operation().operationId());
 
         // The 400 arm: the Harness answered with a definitive refusal.
-        actions.complete(operation(sessionId), "owner",
-                "invalid_action_response", null, true, now.get());
-        assertThat(state(sessionId)).isEqualTo("FAILED");
-        assertThat(stage(sessionId)).isEqualTo("HARNESS_CONFIRMED");
+        actions.complete(operation(admitted.operation().operationId()), "owner",
+                "invalid_action_response", null, true, 20);
+
+        assertThat(stringColumn("state", admitted.operation().operationId())).isEqualTo("FAILED");
+        assertThat(stringColumn("admission_stage", admitted.operation().operationId()))
+                .isEqualTo("HARNESS_CONFIRMED");
     }
 
     // A delivery that failed past its retry budget is not the end of the
@@ -92,66 +125,31 @@ class ManagedActionStoreTest {
     // same operation row instead of returning the stale failure receipt
     // forever (issue #13182 finding 3, review).
     @Test
-    void aReplayedFailedResponseIsReadmittedWhileTheActionIsStillRequested()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
+    void aReplayedFailedResponseIsReadmittedWhileTheActionIsStillRequested() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
         // The first delivery of the answer failed past its retry budget,
         // with the budget-exempt watermark left over from answered attempts.
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " budget_exempt_attempt, available_at, created_at,"
-                        + " updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 7, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+        markFailed(operationId, "action_response_delivery_failed", 10, 7);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID,
-                new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
-                now.get());
+        var replayed = admit("idem", "digest", response("allow"), 20);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().operationId()).isEqualTo("op-action");
-        assertThat(admission.operation().state()).isEqualTo("PENDING");
-        assertThat(admission.operation().deliveryState()).isEqualTo("PENDING");
-        assertThat(admission.operation().attemptCount()).isEqualTo(0);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().operationId()).isEqualTo(operationId);
+        assertThat(replayed.operation().state()).isEqualTo("PENDING");
+        assertThat(replayed.operation().deliveryState()).isEqualTo("PENDING");
+        assertThat(intColumn("attempt_count", operationId)).isZero();
         // The watermark resets with the attempt count: the re-admitted
         // delivery is a fresh answer whose budget must be able to terminate
         // (review round 7, R7-3).
-        assertThat(admission.operation().budgetExemptAttempt()).isEqualTo(0);
-        assertThat(admission.operation().receiptId()).isNull();
-        assertThat(admission.operation().failureCode()).isNull();
+        assertThat(intColumn("budget_exempt_attempt", operationId)).isZero();
+        assertThat(stringColumn("receipt_id", operationId)).isNull();
+        assertThat(stringColumn("failure_code", operationId)).isNull();
         // The re-admitted row is deliverable again — no recovery path could
         // see the FAILED/CONFIRMED row.
         assertThat(actions.deliverable(Long.MAX_VALUE))
-                .anySatisfy(target -> assertThat(target.operationId())
-                        .isEqualTo("op-action"));
+                .anySatisfy(target -> assertThat(target.operationId()).isEqualTo(operationId));
     }
 
     // A migration fence on the Session's storage holds the resurrection
@@ -160,69 +158,26 @@ class ManagedActionStoreTest {
     // re-admissibility — until the fence lifts, instead of resurrecting a
     // delivery the migration needs quiesced (review round 7, R7-4).
     @Test
-    void aReplayedFailedResponseIsNotReadmittedWhileTheStorageIsFenced()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
-        // Bind the Session to a storage, then fence the storage for a
-        // migration — the resurrection arm's evidence that a new delivery
-        // must wait.
-        jdbc.update("UPDATE managed_agent_session SET workspace_id ="
-                        + " 'workspace', workspace_generation = 1,"
-                        + " workspace_storage_id = 'storage', cwd_relative ="
-                        + " '.', context_config_ref = ?, context_revision ="
-                        + " 1, workspace_config_ref = ?,"
-                        + " workspace_policy_ref = ? WHERE tenant_id = ? AND"
-                        + " session_id = ?",
-                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
-                WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF, TENANT, sessionId);
-        new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                new AesGcmSecretProtector("test", new byte[32]))
-                .requestStorageFence(TENANT, "storage",
-                        UUID.randomUUID().toString());
+    void aReplayedFailedResponseIsNotReadmittedWhileTheStorageIsFenced() {
+        bindWorkspace();
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
+        // The resurrection arm's evidence that a new delivery must wait.
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage"),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+                TENANT, "storage", "op-fence");
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID,
-                new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
-                now.get());
+        var replayed = admit("idem", "digest", response("allow"), 20);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("FAILED");
-        assertThat(admission.operation().failureCode())
-                .isEqualTo("action_response_delivery_failed");
-        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("FAILED");
+        assertThat(replayed.operation().failureCode()).isEqualTo("action_response_delivery_failed");
+        assertThat(intColumn("attempt_count", operationId)).isEqualTo(10);
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
@@ -232,112 +187,36 @@ class ManagedActionStoreTest {
     // operation, it would wedge every later lifecycle command on the
     // Session (review round 3, R3-5).
     @Test
-    void aReplayedFailedResponseIsNotReadmittedOnceTheActionExpired()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        // The Action is still 'requested' but past its expiry: the expiry
-        // sweep has not marked it yet (hasDecidableAction gates on
-        // now < expiresAt the same way).
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":500}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+    void aReplayedFailedResponseIsNotReadmittedOnceTheActionExpired() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID,
-                new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
-                now.get());
+        var replayed = admit("idem", "digest", response("allow"), 2000);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("FAILED");
-        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("FAILED");
+        assertThat(intColumn("attempt_count", operationId)).isEqualTo(10);
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
-
-        // The terminal row must not wedge lifecycle admission: a CLOSE on
-        // this Session is admitted. While the replay resurrects the row to
-        // PENDING, requireNoOpenOperation counts it and refuses with 409
-        // session_operation_active.
-        var close = agents.beginOperation(TENANT, sessionId,
-                OperationKind.CLOSE, "digest", "close-key", "digest");
-        assertThat(close.replayed()).isFalse();
-        assertThat(close.operation().kind()).isEqualTo(OperationKind.CLOSE);
     }
 
     // The same replay against an Action that already ended must not re-open
     // the delivery: the recorded decision is final.
     @Test
-    void aReplayedFailedResponseIsNotReadmittedOnceTheActionEnded()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'decided', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+    void aReplayedFailedResponseIsNotReadmittedOnceTheActionEnded() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
+        // The Action ended with a different decision than this response.
+        project("decided", response("deny"), 2, 1000);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID,
-                new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
-                now.get());
+        var replayed = admit("idem", "digest", response("allow"), 20);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("FAILED");
-        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("FAILED");
+        assertThat(intColumn("attempt_count", operationId)).isEqualTo(10);
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
@@ -348,60 +227,22 @@ class ManagedActionStoreTest {
     // failure forever; the row is never resurrected to PENDING, so a second
     // vote stays impossible (review round 5, R3-5).
     @Test
-    void aReplayedFailedResponseSettlesWhenTheActionDecidedWithThisResponse()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json,"
-                        + " decision_receipt_id, decision_digest, created_at)"
-                        + " VALUES (?, ?, ?, 'decided', ?, 'rcpt-decision-1',"
-                        + " ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}",
-                ManagedActionStore.decisionDigest(body));
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+    void aReplayedFailedResponseSettlesWhenTheActionDecidedWithThisResponse() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
+        project("decided", response("allow"), 2, 1000);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID, body, now.get());
+        var replayed = admit("idem", "digest", response("allow"), 20);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("COMPLETED");
-        assertThat(admission.operation().admissionStage())
-                .isEqualTo("HARNESS_CONFIRMED");
-        assertThat(admission.operation().failureCode()).isNull();
-        assertThat(admission.operation().receiptId()).isNotNull()
-                .isNotEqualTo("rcpt-1");
-        assertThat(jdbc.queryForObject("SELECT decision_receipt_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId)).isEqualTo("rcpt-decision-1");
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("COMPLETED");
+        assertThat(replayed.operation().admissionStage()).isEqualTo("HARNESS_CONFIRMED");
+        assertThat(stringColumn("failure_code", operationId)).isNull();
+        assertThat(stringColumn("receipt_id", operationId)).isNotNull().isNotEqualTo("rcpt-1");
+        assertThat(stringColumn("decision_receipt_id", operationId))
+                .isEqualTo(actions.find(TENANT, SESSION, ACTION).orElseThrow().decisionReceiptId());
         // The settled row stays out of the outbox: it is terminal, not
         // re-deliverable.
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
@@ -411,66 +252,24 @@ class ManagedActionStoreTest {
     // already corrects for a delivery failure: the Harness committed the
     // decision before the Action's deadline ran out and only Java's record
     // is wrong, so the replay settles the row in place with the decision
-    // receipt. The fixture's deadline is already past, which also pins that
-    // the heal — never the resurrection — is what fires for this code
+    // receipt. The replay is past the deadline, which also pins that the
+    // heal — never the resurrection — is what fires for this code
     // (review R2-4).
     @Test
-    void aReplayedDecisionExpiredResponseSettlesWhenTheActionDecidedWithThisResponse()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json,"
-                        + " decision_receipt_id, decision_digest, created_at)"
-                        + " VALUES (?, ?, ?, 'decided', ?, 'rcpt-decision-1',"
-                        + " ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":500}",
-                ManagedActionStore.decisionDigest(body));
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_decision_expired')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+    void aReplayedDecisionExpiredResponseSettlesWhenTheActionDecidedWithThisResponse() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_decision_expired", 10, 0);
+        project("decided", response("allow"), 2, 1000);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID, body, now.get());
+        var replayed = admit("idem", "digest", response("allow"), 2000);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("COMPLETED");
-        assertThat(admission.operation().admissionStage())
-                .isEqualTo("HARNESS_CONFIRMED");
-        assertThat(admission.operation().failureCode()).isNull();
-        assertThat(admission.operation().receiptId()).isNotNull()
-                .isNotEqualTo("rcpt-1");
-        assertThat(jdbc.queryForObject("SELECT decision_receipt_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId)).isEqualTo("rcpt-decision-1");
-        // The settled row stays out of the outbox: it is terminal, not
-        // re-deliverable.
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("COMPLETED");
+        assertThat(replayed.operation().admissionStage()).isEqualTo("HARNESS_CONFIRMED");
+        assertThat(stringColumn("failure_code", operationId)).isNull();
+        assertThat(stringColumn("receipt_id", operationId)).isNotNull().isNotEqualTo("rcpt-1");
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
@@ -478,53 +277,19 @@ class ManagedActionStoreTest {
     // longer accepts responses the replay returns the recorded failure
     // instead of re-admitting deliveries that can never land.
     @Test
-    void aReplayedFailedResponseIsNotReadmittedOnAnInactiveSession()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'"
-                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
-                sessionId);
+    void aReplayedFailedResponseIsNotReadmittedOnAnInactiveSession() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, SESSION);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID,
-                new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
-                now.get());
+        var replayed = admit("idem", "digest", response("allow"), 20);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("FAILED");
-        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("FAILED");
+        assertThat(intColumn("attempt_count", operationId)).isEqualTo(10);
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
@@ -532,51 +297,18 @@ class ManagedActionStoreTest {
     // the identical body would only repeat the refusal, so the replay keeps
     // returning the recorded row even while the Action is still requested.
     @Test
-    void aDefinitiveHarnessRefusalIsNotReadmitted() throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'HARNESS_CONFIRMED',"
-                        + " 'CONFIRMED', 'ACTIVE', 'rcpt-1', 1, 0, 0, 0, 0,"
-                        + " ?, ?, 'invalid_action_response')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+    void aDefinitiveHarnessRefusalIsNotReadmitted() {
+        project("requested", null, 1, 1000);
+        var admitted = admit("idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "invalid_action_response", 1, 0);
 
-        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID,
-                new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
-                now.get());
+        var replayed = admit("idem", "digest", response("allow"), 20);
 
-        assertThat(admission.replayed()).isTrue();
-        assertThat(admission.operation().state()).isEqualTo("FAILED");
-        assertThat(admission.operation().failureCode())
-                .isEqualTo("invalid_action_response");
-        assertThat(admission.operation().receiptId()).isEqualTo("rcpt-1");
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.operation().state()).isEqualTo("FAILED");
+        assertThat(replayed.operation().failureCode()).isEqualTo("invalid_action_response");
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo("rcpt-1");
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
@@ -586,76 +318,32 @@ class ManagedActionStoreTest {
     // make — while the read-only replay of the recorded failure stays open
     // to it (review round 10, R10-1).
     @Test
-    void aReplayedFailedResponseIsNotReadmittedOnceTheOperatorRoleWasRevoked()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        admitThroughWorkspaceRole(sessionId);
-        // The resurrect arm now also certifies the bound Session's
-        // execution facts (review round 12, R12-2), so the creator keeps
-        // its own grant while the role arm is exercised.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, role) VALUES (?,"
-                        + " 'workspace', ?, 'OWNER')",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"));
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " budget_exempt_attempt, available_at, created_at,"
-                        + " updated_at, completed_at, action_id,"
-                        + " response_json, error_code) VALUES (?, ?,"
-                        + " 'op-action', 'ACTION_RESPONSE', 'digest',"
-                        + " 'idem-key', 'digest', 'FAILED', 'JAVA_DURABLE',"
-                        + " 'CONFIRMED', 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0,"
-                        + " 0, ?, ?, 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
-        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
+    void aReplayedFailedResponseIsNotReadmittedOnceTheOperatorRoleWasRevoked() {
+        bindWorkspace();
+        grantRole("operator", "OPERATOR");
+        project("requested", null, 1, 1000);
+        var admitted = admitAs("operator", "idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
 
         // The role arm admits the resurrect while the role stands.
-        var readmitted = actions.admit(TENANT, sessionId, "operator",
-                "digest", "idem-key", "digest", ACTION_ID, body, now.get());
+        var readmitted = admitAs("operator", "idem", "digest", response("allow"), 20);
         assertThat(readmitted.replayed()).isTrue();
         assertThat(readmitted.operation().state()).isEqualTo("PENDING");
 
-        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
-                        + " delivery_state = 'CONFIRMED', receipt_id ="
-                        + " 'rcpt-1', error_code ="
-                        + " 'action_response_delivery_failed', attempt_count ="
-                        + " 10, completed_at = 0 WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                TENANT, sessionId);
-        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?"
-                        + " AND workspace_id = 'workspace'", TENANT);
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
+        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?"
+                + " AND workspace_id = 'workspace'", TENANT);
 
-        assertThatThrownBy(() -> actions.admit(TENANT, sessionId, "operator",
-                "digest", "idem-key", "digest", ACTION_ID, body, now.get()))
+        assertThatThrownBy(() -> admitAs("operator", "idem", "digest", response("allow"), 30))
                 .isInstanceOf(ApiException.class)
                 .satisfies(error -> {
                     var refusal = (ApiException) error;
-                    assertThat(refusal.getStatus())
-                            .isEqualTo(HttpStatus.FORBIDDEN);
-                    assertThat(refusal.getCode())
-                            .isEqualTo("action_forbidden");
+                    assertThat(refusal.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(refusal.getCode()).isEqualTo("action_forbidden");
                 });
-        assertThat(state(sessionId)).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT receipt_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId)).isEqualTo("rcpt-1");
+        assertThat(stringColumn("state", operationId)).isEqualTo("FAILED");
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo("rcpt-1");
     }
 
     // The resurrect arm re-arms a delivery, so it must certify delivery
@@ -665,238 +353,176 @@ class ManagedActionStoreTest {
     // reach, and the recorded failure keeps its re-admissibility for when
     // the facts are restored (review round 12, R12-2).
     @Test
-    void aReplayedFailedResponseIsNotReadmittedOnceTheExecutionFactsLapsed()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        admitThroughWorkspaceRole(sessionId);
-        // The caller answers through the owner-identity arm, so the
-        // execution facts stand only while the creator's own grant does.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, role) VALUES (?,"
-                        + " 'workspace', ?, 'OWNER')",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"));
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json, created_at)"
-                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":9999999999999}");
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " budget_exempt_attempt, available_at, created_at,"
-                        + " updated_at, completed_at, action_id,"
-                        + " response_json, error_code) VALUES (?, ?,"
-                        + " 'op-action', 'ACTION_RESPONSE', 'digest',"
-                        + " 'idem-key', 'digest', 'FAILED', 'JAVA_DURABLE',"
-                        + " 'CONFIRMED', 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0,"
-                        + " 0, ?, ?, 'action_response_delivery_failed')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
-        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
+    void aReplayedFailedResponseIsNotReadmittedOnceTheExecutionFactsLapsed() {
+        bindWorkspace();
+        project("requested", null, 1, 1000);
+        var admitted = admitAs("owner", "idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
 
         // The owner arm admits the resurrect while the facts stand.
-        var readmitted = actions.admit(TENANT, sessionId, "owner", "digest",
-                "idem-key", "digest", ACTION_ID, body, now.get());
+        var readmitted = admitAs("owner", "idem", "digest", response("allow"), 20);
         assertThat(readmitted.replayed()).isTrue();
         assertThat(readmitted.operation().state()).isEqualTo("PENDING");
 
-        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
-                        + " delivery_state = 'CONFIRMED', receipt_id ="
-                        + " 'rcpt-1', error_code ="
-                        + " 'action_response_delivery_failed', attempt_count ="
-                        + " 10, completed_at = 0 WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                TENANT, sessionId);
-        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?"
-                        + " AND workspace_id = 'workspace'", TENANT);
+        markFailed(operationId, "action_response_delivery_failed", 10, 0);
+        when(agents.hasExecutionRegistryFacts(anyString(), anyString())).thenReturn(false);
 
-        assertThatThrownBy(() -> actions.admit(TENANT, sessionId, "owner",
-                "digest", "idem-key", "digest", ACTION_ID, body, now.get()))
+        assertThatThrownBy(() -> admitAs("owner", "idem", "digest", response("allow"), 30))
                 .isInstanceOf(ApiException.class)
                 .satisfies(error -> {
                     var refusal = (ApiException) error;
-                    assertThat(refusal.getStatus())
-                            .isEqualTo(HttpStatus.CONFLICT);
-                    assertThat(refusal.getCode())
-                            .isEqualTo("workspace_unavailable");
+                    assertThat(refusal.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(refusal.getCode()).isEqualTo("workspace_unavailable");
                 });
-        assertThat(state(sessionId)).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT receipt_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId)).isEqualTo("rcpt-1");
+        assertThat(stringColumn("state", operationId)).isEqualTo("FAILED");
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo("rcpt-1");
     }
 
     // The digest-match heal settles the row too, so it answers the revoked
     // role the same way.
     @Test
-    void aReplayedDecisionExpiredResponseIsNotSettledOnceTheOperatorRoleWasRevoked()
-            throws Exception {
-        ManagedAgentStore agents = agents();
-        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
-        String sessionId = agents.insertSessionCommand(TENANT,
-                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
-                List.of(), null).sessionId();
-        admitThroughWorkspaceRole(sessionId);
-        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
-                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
-        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
-                        + " action_id, state, options_json,"
-                        + " decision_receipt_id, decision_digest, created_at)"
-                        + " VALUES (?, ?, ?, 'decided', ?, 'rcpt-decision-1',"
-                        + " ?, 0)",
-                TENANT, sessionId, ACTION_ID,
-                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
-                        + "\"expiresAt\":500}",
-                ManagedActionStore.decisionDigest(body));
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
-                        + " completed_at, action_id, response_json,"
-                        + " error_code) VALUES (?, ?, 'op-action',"
-                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
-                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
-                        + " 'action_response_decision_expired')",
-                TENANT, sessionId, ACTION_ID,
-                "{\"optionId\":\"allow\",\"inputRevision\":1,"
-                        + "\"policyRevision\":\"p/1\"}");
+    void aReplayedDecisionExpiredResponseIsNotSettledOnceTheOperatorRoleWasRevoked() {
+        bindWorkspace();
+        grantRole("operator", "OPERATOR");
+        project("requested", null, 1, 1000);
+        var admitted = admitAs("operator", "idem", "digest", response("allow"), 10);
+        String operationId = admitted.operation().operationId();
+        markFailed(operationId, "action_response_decision_expired", 10, 0);
+        project("decided", response("allow"), 2, 1000);
 
         // The role arm admits the heal while the role stands.
-        var settled = actions.admit(TENANT, sessionId, "operator", "digest",
-                "idem-key", "digest", ACTION_ID, body, now.get());
+        var settled = admitAs("operator", "idem", "digest", response("allow"), 2000);
         assertThat(settled.operation().state()).isEqualTo("COMPLETED");
 
-        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
-                        + " delivery_state = 'CONFIRMED', receipt_id ="
-                        + " 'rcpt-1', error_code ="
-                        + " 'action_response_decision_expired',"
-                        + " decision_receipt_id = NULL, completed_at = 0"
-                        + " WHERE tenant_id = ? AND session_id = ? AND"
-                        + " operation_id = 'op-action'",
-                TENANT, sessionId);
-        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?"
-                        + " AND workspace_id = 'workspace'", TENANT);
+        markFailed(operationId, "action_response_decision_expired", 10, 0);
+        jdbc.update("UPDATE ma_operation SET decision_receipt_id = NULL"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                TENANT, SESSION, operationId);
+        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?"
+                + " AND workspace_id = 'workspace'", TENANT);
 
-        assertThatThrownBy(() -> actions.admit(TENANT, sessionId, "operator",
-                "digest", "idem-key", "digest", ACTION_ID, body, now.get()))
+        assertThatThrownBy(() -> admitAs("operator", "idem", "digest", response("allow"), 3000))
                 .isInstanceOf(ApiException.class)
                 .satisfies(error -> {
                     var refusal = (ApiException) error;
-                    assertThat(refusal.getStatus())
-                            .isEqualTo(HttpStatus.FORBIDDEN);
-                    assertThat(refusal.getCode())
-                            .isEqualTo("action_forbidden");
+                    assertThat(refusal.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(refusal.getCode()).isEqualTo("action_forbidden");
                 });
-        assertThat(state(sessionId)).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT decision_receipt_id FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId)).isNull();
+        assertThat(stringColumn("state", operationId)).isEqualTo("FAILED");
+        assertThat(stringColumn("decision_receipt_id", operationId)).isNull();
     }
 
-    // A Session whose answer admits only through the mutable Workspace role:
-    // the owner arms never match the operator (the recorded create command
-    // names another actor), the Workspace grant does.
-    private void admitThroughWorkspaceRole(String sessionId) {
-        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
-                        + " actor_id, idempotency_key, request_digest,"
-                        + " session_id, created_at) VALUES (?, ?, 'create',"
-                        + " 'digest', ?, 0)",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
-                sessionId);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
-                        + " workspace_id, workspace_generation, storage_id,"
-                        + " display_name, config_ref, policy_ref, state)"
-                        + " VALUES (?, 'workspace', 1, 'storage',"
-                        + " 'Workspace', ?, ?, 'ACTIVE')",
-                TENANT, WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("UPDATE managed_agent_session SET workspace_id ="
-                        + " 'workspace', workspace_generation = 1,"
-                        + " workspace_storage_id = 'storage', cwd_relative ="
-                        + " '.', context_config_ref = ?, context_revision ="
-                        + " 1, workspace_config_ref = ?,"
-                        + " workspace_policy_ref = ? WHERE tenant_id = ? AND"
-                        + " session_id = ?",
-                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
-                WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF, TENANT, sessionId);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, role) VALUES (?,"
-                        + " 'workspace', ?, 'OPERATOR')",
-                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "operator"));
+    private OperationAdmission admit(String key, String digest, JsonNode body, long now) {
+        return admitAs(null, key, digest, body, now);
     }
 
-    private String stage(String sessionId) {
-        return jdbc.queryForObject("SELECT admission_stage FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId);
+    private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
+        return transactions.execute(status -> actions.admit(TENANT, SESSION, actor,
+                actor == null ? "anonymous" : actor + "-digest", key, digest, ACTION, body, now));
     }
 
-    private String state(String sessionId) {
-        return jdbc.queryForObject("SELECT state FROM"
-                        + " managed_agent_operation WHERE tenant_id = ? AND"
-                        + " session_id = ? AND operation_id = 'op-action'",
-                String.class, TENANT, sessionId);
+    // The terminally failed first delivery: budget spent, receipt written,
+    // out of every recovery scan.
+    private void markFailed(String operationId, String failureCode, int attempts, int exempt) {
+        jdbc.update("UPDATE ma_operation SET state = 'FAILED', phase = 'FAILED',"
+                        + " delivery_state = 'CONFIRMED', admission_stage = 'JAVA_DURABLE',"
+                        + " session_status_before = 'ACTIVE', receipt_id = 'rcpt-1',"
+                        + " attempt_count = ?, budget_exempt_attempt = ?, available_at = 0,"
+                        + " completed_at = 0, failure_code = ? WHERE tenant_id = ?"
+                        + " AND session_id = ? AND operation_id = ?",
+                attempts, exempt, failureCode, TENANT, SESSION, operationId);
     }
 
-    private void insertLeasedActionOperation(String sessionId) {
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                        + " session_id, operation_id, operation_kind,"
-                        + " actor_digest, idempotency_key, request_digest,"
-                        + " state, admission_stage, delivery_state,"
-                        + " session_status_before, lease_owner,"
-                        + " claim_generation, attempt_count, available_at,"
-                        + " created_at, updated_at) VALUES (?, ?,"
-                        + " 'op-action', 'ACTION_RESPONSE', 'digest',"
-                        + " 'idem-key', 'digest', 'RUNNING', 'JAVA_DURABLE',"
-                        + " 'LEASED', 'ACTIVE', 'owner', 1, 0, 0, 0, 0)",
-                TENANT, sessionId);
+    private void lease(String operationId) {
+        jdbc.update("UPDATE ma_operation SET claim_owner = 'owner', claim_generation = 2,"
+                        + " claim_until = TIMESTAMPADD(MICROSECOND, 100000000, CURRENT_TIMESTAMP(6)),"
+                        + " state = 'RUNNING', delivery_state = 'LEASED' WHERE tenant_id = ?"
+                        + " AND session_id = ? AND operation_id = ?",
+                TENANT, SESSION, operationId);
     }
 
-    private static OperationRecord operation(String sessionId) {
-        return new OperationRecord(TENANT, sessionId, "op-action",
-                OperationKind.ACTION_RESPONSE, "digest", "RUNNING",
-                "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1, 0);
+    private OperationRecord operation(String operationId) {
+        return agents.findOperation(TENANT, SESSION, operationId).orElseThrow();
     }
 
-    private ManagedAgentStore agents() {
-        JdbcDataSource dataSource = new JdbcDataSource();
-        dataSource.setURL("jdbc:h2:mem:action-store-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(dataSource);
-        return new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
-            @Override
-            public ZoneId getZone() {
-                return ZoneOffset.UTC;
-            }
+    // A bound Session: the Workspace row, the binding columns the contract
+    // requires, and the recorded owner the identity arm matches.
+    private void bindWorkspace() {
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
+                        + " workspace_generation, storage_id, display_name, config_ref,"
+                        + " policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
+                        + " 'Workspace', 'config', 'policy', 'ACTIVE')", TENANT);
+        jdbc.update("UPDATE ma_session SET workspace_id = 'workspace',"
+                        + " workspace_generation = 1, workspace_storage_id = 'storage',"
+                        + " cwd_relative = '.', context_config_ref = 'config',"
+                        + " context_revision = 1, workspace_config_ref = 'config',"
+                        + " workspace_policy_ref = 'policy', owner_actor_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                ManagedWorkspaceRegistry.actorKey(TENANT, "owner"), TENANT, SESSION);
+    }
 
-            @Override
-            public Clock withZone(ZoneId zone) {
-                return this;
-            }
+    private void grantRole(String actor, String role) {
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id,"
+                        + " actor_id, role) VALUES (?, 'workspace', ?, ?)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, actor), role);
+    }
 
-            @Override
-            public Instant instant() {
-                return Instant.ofEpochMilli(now.get());
-            }
-        }, ignored -> {
-        }, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+    private String stringColumn(String name, String operationId) {
+        return jdbc.queryForObject("SELECT " + name + " FROM ma_operation"
+                        + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                String.class, TENANT, SESSION, operationId);
+    }
+
+    private Integer intColumn(String name, String operationId) {
+        return jdbc.queryForObject("SELECT " + name + " FROM ma_operation"
+                        + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                Integer.class, TENANT, SESSION, operationId);
+    }
+
+    private void project(String state, JsonNode answer, long sequence, long expiresAt) {
+        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+                .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
+                .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
+        options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
+        options.withArray("options").addObject().put("id", "deny").put("label", "Deny");
+        ObjectNode optionsRef = storeBody("options", "managed-action-options", options);
+        ObjectNode decision = null;
+        if (answer != null) {
+            ObjectNode body = JSON.createObjectNode().put("v", 1).put("optionId", answer.path("optionId").asText())
+                    .put("inputRevision", 1).put("policyRevision", "hosted-tool-approval/1");
+            decision = storeBody("decision", "managed-action-decision", body);
+        }
+        ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:" + sequence)
+                .put("kind", "action.changed").put("occurredAt", sequence);
+        envelope.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", "workspace").put("sessionId", SESSION);
+        ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
+                .put("inputRevision", 1).put("state", state);
+        payload.set("optionsRef", optionsRef);
+        if (decision == null) payload.putNull("decisionRef"); else payload.set("decisionRef", decision);
+        ObjectNode record = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
+        record.set("managedSession", envelope);
+        transactions.executeWithoutResult(status -> actions.apply(TENANT, "workspace", SESSION, sequence, 1,
+                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT * FROM ma_resource WHERE resource_key=?",
+                        (row, n) -> new StoredResource(id, row.getString("kind"), row.getInt("schema_version"), row.getLong("byte_length"),
+                                row.getString("sha256"), row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope, id))));
+    }
+
+    private ObjectNode storeBody(String id, String kind, JsonNode body) {
+        try {
+            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+                            + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
+                            + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                    ManagedSchemaKeys.key(scope, id), scope, TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
+            return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
+        } catch (java.security.NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private JsonNode response(String option) {
+        return JSON.createObjectNode().put("optionId", option).put("inputRevision", 1).put("policyRevision", "hosted-tool-approval/1");
     }
 }

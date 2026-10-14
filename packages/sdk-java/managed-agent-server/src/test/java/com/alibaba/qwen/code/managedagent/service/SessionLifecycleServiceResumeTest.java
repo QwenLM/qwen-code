@@ -10,15 +10,16 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -27,7 +28,6 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
@@ -71,7 +71,7 @@ class SessionLifecycleServiceResumeTest {
         assertThat(store.requireSession(TENANT, sessionId).status())
                 .isEqualTo("CLOSING");
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isNull();
 
         ManagedAgentService sessions = mock(ManagedAgentService.class);
@@ -98,10 +98,10 @@ class SessionLifecycleServiceResumeTest {
         assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1);
         assertThat(operation.sessionStatusBefore()).isEqualTo("ACTIVE");
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo(readmitted.id());
         assertThat(jdbc.queryForObject("SELECT phase FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("LIFECYCLE_ONLY");
     }
 
@@ -157,7 +157,7 @@ class SessionLifecycleServiceResumeTest {
         assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1);
         assertThat(operation.sessionStatusBefore()).isEqualTo("ACTIVE");
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo(readmitted.id());
         // The resumed delete is open, so a second live lifecycle operation
         // is still refused by the open-operation barrier.
@@ -202,7 +202,7 @@ class SessionLifecycleServiceResumeTest {
         JsonNode effects = lifecycle.recoverEffects(claimed);
         assertThat(effects.path("neverInitialized").asBoolean()).isTrue();
         assertThat(jdbc.queryForObject("SELECT phase FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("DRAINING");
         assertThat(store.failOperation(TENANT, sessionId, firstOperation,
                 "worker", claimed.claimGeneration(),
@@ -210,7 +210,7 @@ class SessionLifecycleServiceResumeTest {
         // The terminal write could not release the DRAINING fence: it still
         // names the dead operation.
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo(firstOperation);
 
         ManagedAgentService sessions = mock(ManagedAgentService.class);
@@ -235,14 +235,14 @@ class SessionLifecycleServiceResumeTest {
         assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1);
         assertThat(operation.sessionStatusBefore()).isEqualTo("ACTIVE");
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo(readmitted.id());
         assertThat(jdbc.queryForObject("SELECT phase FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("DRAINING");
         assertThat(jdbc.queryForObject(
                 "SELECT lifecycle_effects_receipt_json FROM"
-                        + " managed_agent_operation WHERE operation_id = ?",
+                        + " ma_operation WHERE operation_id = ?",
                 String.class, readmitted.id()))
                 .isEqualTo(effects.toString());
 
@@ -268,17 +268,17 @@ class SessionLifecycleServiceResumeTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore store = store(properties);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'workspace', 1, 'storage',"
                         + " 'Workspace', ?, ?, 'ACTIVE')",
                 TENANT, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'workspace', ?, 'OPERATOR')",
-                TENANT, "owner".getBytes(StandardCharsets.UTF_8));
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"));
         return store;
     }
 
@@ -286,9 +286,8 @@ class SessionLifecycleServiceResumeTest {
         dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:lifecycle-resume-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         return new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {

@@ -22,7 +22,10 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,7 +65,7 @@ class ManagedSessionOperationStoreTest {
         // newer claim may finish.
         now.addAndGet(200);
         assertThat(targets(store)).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET lease_until = 0 WHERE operation_id = ?", operationId);
+        jdbc.update("UPDATE ma_operation SET claim_until = ? WHERE operation_id = ?", new java.sql.Timestamp(0), operationId);
         assertThat(targets(store)).containsExactly(operationId);
         OperationRecord second = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
@@ -79,7 +82,7 @@ class ManagedSessionOperationStoreTest {
         store.retryOperation(TENANT, sessionId, operationId, "worker",
                 second.claimGeneration(), now.get() + retryDelay);
         long after = databaseTime();
-        assertThat(jdbc.queryForObject("SELECT available_at FROM managed_agent_operation WHERE operation_id = ?",
+        assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_id = ?",
                 Long.class, operationId)).isBetween(before + retryDelay, after + retryDelay);
         OperationRecord waiting = operation(store, sessionId, operationId);
         assertThat(waiting.deliveryState()).isEqualTo("PENDING");
@@ -90,7 +93,7 @@ class ManagedSessionOperationStoreTest {
 
         now.addAndGet(retryDelay);
         assertThat(targets(store)).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE operation_id = ?", operationId);
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_id = ?", operationId);
         OperationRecord third = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.completeOperation(TENANT, sessionId, operationId,
@@ -127,13 +130,14 @@ class ManagedSessionOperationStoreTest {
         assertThat(store.failOperation(TENANT, sessionId, operationId,
                 "worker", claimed.claimGeneration() + 1, "some_code"))
                 .isFalse();
-        jdbc.update("UPDATE managed_agent_operation SET lease_until = 0"
+        jdbc.update("UPDATE ma_operation SET claim_until ="
+                + " TIMESTAMPADD(MICROSECOND, -1000000, CURRENT_TIMESTAMP(6))"
                 + " WHERE operation_id = ?", operationId);
         assertThat(store.failOperation(TENANT, sessionId, operationId,
                 "worker", claimed.claimGeneration(), "some_code")).isFalse();
-        jdbc.update("UPDATE managed_agent_operation SET lease_until = ?"
-                + " WHERE operation_id = ?", databaseTime() + 60_000,
-                operationId);
+        jdbc.update("UPDATE ma_operation SET claim_until ="
+                + " TIMESTAMPADD(MICROSECOND, 60000000, CURRENT_TIMESTAMP(6))"
+                + " WHERE operation_id = ?", operationId);
 
         assertThat(store.failOperation(TENANT, sessionId, operationId,
                 "worker", claimed.claimGeneration(),
@@ -151,7 +155,7 @@ class ManagedSessionOperationStoreTest {
         assertThat(store.requireSession(TENANT, sessionId).status())
                 .isEqualTo("CLOSING");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND event_type = 'session.closed'",
                 Integer.class, TENANT, sessionId)).isZero();
         assertThat(targets(store)).isEmpty();
@@ -226,7 +230,7 @@ class ManagedSessionOperationStoreTest {
                 "worker", claimed.claimGeneration(),
                 "workspace_lifecycle_protocol_unavailable")).isTrue();
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isNull();
 
         var readmitted = store.beginWorkspaceLifecycle(TENANT, sessionId,
@@ -236,17 +240,17 @@ class ManagedSessionOperationStoreTest {
         assertThat(readmitted.operation().operationId())
                 .isNotEqualTo(operationId);
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo(readmitted.operation().operationId());
         assertThat(jdbc.queryForObject("SELECT phase FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("LIFECYCLE_ONLY");
         assertThat(readmitted.operation().sessionStatusBefore())
                 .isEqualTo("ACTIVE");
     }
 
     // A protocol-v1 admission raises a LIFECYCLE_ONLY claim mirror in
-    // qwen_runtime_harness_drain, and every rescheduling mutator keeps that
+    // ma_session_head, and every rescheduling mutator keeps that
     // mirror in step. The terminal write must release the dead operation's
     // claim on it: nothing drives the failed operation again. The phase
     // itself stays LIFECYCLE_ONLY — only the completion path writes
@@ -271,14 +275,14 @@ class ManagedSessionOperationStoreTest {
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
         assertThat(jdbc.queryForObject("SELECT phase FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("LIFECYCLE_ONLY");
 
         OperationRecord claimed = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
         // The claim mirrors the operation lease onto the fence row.
         assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM"
-                        + " qwen_runtime_harness_drain", Long.class))
+                        + " ma_session_head", Long.class))
                 .isNotNull();
 
         assertThat(store.failOperation(TENANT, sessionId, operationId,
@@ -294,13 +298,13 @@ class ManagedSessionOperationStoreTest {
         // isHarnessDraining stays false for a Session whose worker stop was
         // never verified.
         assertThat(jdbc.queryForObject("SELECT phase FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isEqualTo("LIFECYCLE_ONLY");
         assertThat(jdbc.queryForObject("SELECT operation_id FROM"
-                        + " qwen_runtime_harness_drain", String.class))
+                        + " ma_session_head", String.class))
                 .isNull();
         assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM"
-                        + " qwen_runtime_harness_drain", Long.class))
+                        + " ma_session_head", Long.class))
                 .isNull();
     }
 
@@ -388,57 +392,6 @@ class ManagedSessionOperationStoreTest {
                 .isPresent();
     }
 
-    // The upgrade backfill: an operation already retrying when the budget
-    // column arrived accumulated its attempt_count under a regime with no
-    // terminal budget at all, so none of those attempts was ever classified
-    // against one. V69 marks the in-flight rows' existing attempts exempt —
-    // each starts with a full budget instead of terminating on its first
-    // post-upgrade failure (review round 7, R7-5). An ACTION_RESPONSE row is
-    // excluded: there a nonzero watermark is the durable "the Harness
-    // already answered" latch, not a budget fact.
-    @Test
-    void theUpgradeBackfillExemptsAttemptsTheOldRegimeAlreadyCharged() {
-        dataSource = new JdbcDataSource();
-        dataSource.setURL("jdbc:h2:mem:operation-store-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").target("53").load()
-                .migrate();
-        jdbc = new JdbcTemplate(dataSource);
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                + " session_id, agent_id, status, created_at, updated_at)"
-                + " VALUES (?, 'session', 'qwen-code', 'CLOSING', 0, 0)",
-                TENANT);
-        // In flight at upgrade time: 40 attempts the pre-budget regime
-        // charged without classifying any of them.
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state, admission_stage,"
-                + " delivery_state, session_status_before, attempt_count,"
-                + " available_at, created_at, updated_at) VALUES (?,"
-                + " 'session', 'op-close', 'CLOSE', 'digest', 'close',"
-                + " 'digest', 'RUNNING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE',"
-                + " 40, 0, 0, 0)", TENANT);
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
-                + " session_id, operation_id, operation_kind, actor_digest,"
-                + " idempotency_key, request_digest, state, admission_stage,"
-                + " delivery_state, session_status_before, attempt_count,"
-                + " available_at, created_at, updated_at) VALUES (?,"
-                + " 'session', 'op-action', 'ACTION_RESPONSE', 'digest',"
-                + " 'answer', 'digest', 'RUNNING', 'JAVA_DURABLE', 'PENDING',"
-                + " 'ACTIVE', 40, 0, 0, 0)", TENANT);
-
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-
-        assertThat(jdbc.queryForObject("SELECT budget_exempt_attempt FROM"
-                        + " managed_agent_operation WHERE operation_id ="
-                        + " 'op-close'", Integer.class)).isEqualTo(40);
-        assertThat(jdbc.queryForObject("SELECT budget_exempt_attempt FROM"
-                        + " managed_agent_operation WHERE operation_id ="
-                        + " 'op-action'", Integer.class)).isZero();
-    }
-
     // A delete admitted on an ACTIVE Session publishes its writer wait like
     // a close, so the recovery scan must re-drive it from BLOCKED: blocking
     // the shape would otherwise strand it forever (review round 6, R6-2).
@@ -482,6 +435,42 @@ class ManagedSessionOperationStoreTest {
                                 .isEqualTo("idempotency_conflict"));
     }
 
+    @Test
+    void unrelatedOperationKindsCannotBeScannedOrClaimed() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+                null, null, List.of(), null).sessionId();
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String target = ManagedSchemaKeys.key(sessionId);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
+                        + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_until,"
+                        + " created_at, updated_at) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
+                        + " 'digest', '{}', 'RUNNING', 'CAPTURING', 'LEASED', ?, 0, 0)",
+                ManagedSchemaKeys.key("background"), scope, TENANT, sessionId, target, new java.sql.Timestamp(0));
+        assertThat(targets(store)).isEmpty();
+        assertThat(store.findOperation(TENANT, sessionId, "background")).isEmpty();
+        assertThat(store.claimOperation(TENANT, sessionId, "background", "worker", Duration.ofMinutes(1))).isEmpty();
+        assertThat(store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").replayed()).isFalse();
+    }
+
+    @Test
+    void unknownOutcomeBlocksAdmissionAndAutomaticReplay() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+                null, null, List.of(), null).sessionId();
+        var operation = store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").operation();
+        var claim = store.claimOperation(TENANT, sessionId, operation.operationId(), "worker", Duration.ofMinutes(1)).orElseThrow();
+        jdbc.update("UPDATE ma_operation SET state = 'UNKNOWN', phase = 'UNKNOWN', claim_until = ? WHERE operation_id = ?",
+                new java.sql.Timestamp(0), operation.operationId());
+        assertThat(targets(store)).isEmpty();
+        assertThat(store.claimOperation(TENANT, sessionId, operation.operationId(), "replacement", Duration.ofMinutes(1))).isEmpty();
+        store.retryOperation(TENANT, sessionId, operation.operationId(), "worker", claim.claimGeneration(), 0);
+        assertThat(operation(store, sessionId, operation.operationId()).state()).isEqualTo("UNKNOWN");
+        assertThat(store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").replayed()).isTrue();
+        assertThatThrownBy(() -> store.beginOperation(TENANT, sessionId, OperationKind.DELETE, "", "delete", "digest"))
+                .isInstanceOf(ApiException.class);
+    }
+
     private ManagedAgentStore store() {
         return store(new ManagedAgentProperties());
     }
@@ -510,9 +499,8 @@ class ManagedSessionOperationStoreTest {
         dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:operation-store-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        Flyway.configure().dataSource(dataSource)
-                .locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(dataSource);
+        ManagedSchema.initialize(dataSource);
+        jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         return new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
