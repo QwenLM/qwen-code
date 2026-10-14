@@ -3479,9 +3479,23 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     'diff a.txt <(cat .env)',
     'cat .env&>out.txt',
     '(cat .env)>out.txt',
+    `env -S 'cat .env'`,
+    'env -u FOO cat .env',
+    'sudo -Eu root cat .env',
   ])('denies %s under Read(.env)', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Read(.env)'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('denies a read in the directory `env -C` moves to', async () => {
+    const pm = repoPm({ permissionsDeny: ['Read(/sub/.env)'] });
+    const ctx = sh('env -C sub cat .env', '/repo');
+    expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
+  it('asks when `env -C` moves to a directory only known at run time', async () => {
+    const pm = repoPm({ permissionsDeny: ['Read(/sub/.env)'] });
+    expect(await pm.evaluate(sh('env -C "$X" cat .env', '/repo'))).toBe('ask');
   });
 
   it.each([

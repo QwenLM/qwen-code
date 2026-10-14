@@ -2048,7 +2048,86 @@ const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
     ]),
   ],
   ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
+  [
+    'env',
+    new Set([
+      '-u',
+      '--unset',
+      '-C',
+      '--chdir',
+      '-S',
+      '--split-string',
+      '-a',
+      '--argv0',
+      '-P',
+      '-L',
+      '-U',
+    ]),
+  ],
 ]);
+
+/** An option given to a prefix command, with its value if it takes one. */
+interface PrefixOption {
+  name: string;
+  value?: string;
+}
+
+/**
+ * Read a prefix command's options from `tokens[start]` on, the way getopt
+ * does: short options group (`-Eu root` is `-E -u root`) and take their value
+ * glued or from the next word, long options as `--name=value` or from the next
+ * word, and `--` ends them. Returns the options, where the words after them
+ * start, and whether `--` ended them.
+ */
+function readPrefixOptions(
+  tokens: readonly string[],
+  start: number,
+  withValue: ReadonlySet<string>,
+): { options: PrefixOption[]; end: number; ended: boolean } {
+  const options: PrefixOption[] = [];
+  let i = start;
+  while (i < tokens.length) {
+    const word = tokens[i]!;
+    if (word === '--') return { options, end: i + 1, ended: true };
+    if (!word.startsWith('-') || word === '-') break;
+    i++;
+    if (word.startsWith('--')) {
+      const eq = word.indexOf('=');
+      const name = eq === -1 ? word : word.slice(0, eq);
+      const value =
+        eq !== -1
+          ? word.slice(eq + 1)
+          : withValue.has(name) && i < tokens.length
+            ? tokens[i++]
+            : undefined;
+      options.push({ name, value });
+      continue;
+    }
+    for (let k = 1; k < word.length; k++) {
+      const name = `-${word[k]}`;
+      if (!withValue.has(name)) {
+        options.push({ name });
+        continue;
+      }
+      const glued = word.slice(k + 1);
+      const value = glued || (i < tokens.length ? tokens[i++] : undefined);
+      options.push({ name, value });
+      break;
+    }
+  }
+  return { options, end: i, ended: false };
+}
+
+/** Write options back as words that read the same again. */
+function prefixOptionWords(options: readonly PrefixOption[]): string[] {
+  return options.flatMap(({ name, value }) =>
+    value === undefined
+      ? [name]
+      : name.startsWith('--')
+        ? [quoteShellWord(`${name}=${value}`)]
+        : [name, quoteShellWord(value)],
+  );
+}
 
 /**
  * Commands that act as transparent wrappers around the actual command.
@@ -2125,29 +2204,60 @@ export function extractShellOperations(
 
   // ── Transparent prefix commands ───────────────────────────────────────────
   if (PREFIX_COMMANDS.has(cmdName)) {
-    const flagsWithVal = PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName);
+    const flagsWithVal =
+      PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName) ?? new Set<string>();
     // Find where the actual command starts (after flags, flag-values, and env
     // variable assignments).  For example:
     //   sudo -u root cat /file  →  startIdx skips '-u' AND 'root'
+    const options: PrefixOption[] = [];
     let startIdx = 1;
-    while (startIdx < commandTokens.length) {
-      const t = commandTokens[startIdx]!;
-      if (t.startsWith('-')) {
-        // Skip the flag itself
-        startIdx++;
-        // If this flag takes a separate value argument, skip that too
-        if (
-          flagsWithVal?.has(t) &&
-          startIdx < commandTokens.length &&
-          !commandTokens[startIdx]!.startsWith('-')
-        ) {
-          startIdx++;
-        }
-      } else if (isEnvAssignmentToken(t)) {
-        // Environment variable assignment: skip
-        startIdx++;
+    for (;;) {
+      const read = readPrefixOptions(commandTokens, startIdx, flagsWithVal);
+      options.push(...read.options);
+      let next = read.end;
+      while (
+        next < commandTokens.length &&
+        isEnvAssignmentToken(commandTokens[next]!)
+      ) {
+        next++;
+      }
+      if (next === startIdx) break;
+      startIdx = next;
+      if (read.ended) break;
+    }
+
+    // Re-quote the inner command so its words survive tokenizing again,
+    // and walk it so a wrapped shell (`sudo bash -c '…'`) is unwrapped.
+    const quotedRest = (from: number) =>
+      commandTokens.slice(from).map(quoteShellWord);
+    let innerCommand: string[] | undefined;
+    let innerCwd = cwd;
+    let innerCwdUnknown = false;
+    if (cmdName === 'env') {
+      // `env -S STRING` splits STRING into more words for env itself, in
+      // place of the option: options, assignments and the command. Analyse
+      // that env command instead, which also applies its `-C`.
+      const at = options.findIndex(
+        (o) =>
+          (o.name === '-S' || o.name === '--split-string') &&
+          o.value !== undefined,
+      );
+      if (at !== -1) {
+        innerCommand = [
+          'env',
+          ...prefixOptionWords(options.slice(0, at)),
+          options[at]!.value!,
+          ...prefixOptionWords(options.slice(at + 1)),
+          ...quotedRest(startIdx),
+        ];
       } else {
-        break;
+        // `env -C DIR` runs the command in DIR; the last one wins.
+        for (const { name, value } of options) {
+          if ((name === '-C' || name === '--chdir') && value !== undefined) {
+            innerCwdUnknown = isDynamicShellPath(value);
+            innerCwd = innerCwdUnknown ? cwd : resolvePath(value, cwd);
+          }
+        }
       }
     }
     // `timeout DURATION command` — the duration is a numeric positional that
@@ -2159,14 +2269,18 @@ export function extractShellOperations(
     ) {
       startIdx++;
     }
-    if (startIdx < commandTokens.length) {
-      // Re-quote the inner command so its words survive tokenizing again,
-      // and walk it so a wrapped shell (`sudo bash -c '…'`) is unwrapped.
-      const innerCommand = commandTokens
-        .slice(startIdx)
-        .map(quoteShellWord)
-        .join(' ');
-      ops.push(...walkCompoundCommand(innerCommand, cwd, 1, false));
+    if (!innerCommand && startIdx < commandTokens.length) {
+      innerCommand = quotedRest(startIdx);
+    }
+    if (innerCommand) {
+      ops.push(
+        ...walkCompoundCommand(
+          innerCommand.join(' '),
+          innerCwd,
+          1,
+          innerCwdUnknown,
+        ),
+      );
     }
   } else {
     // ── Dispatch to the known-command handler ─────────────────────────────

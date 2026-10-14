@@ -15,7 +15,7 @@ Implemented. This is the first of three changes for #10196; the other two resolv
 - fd plumbing counted as a file: `2>&1` became a write to a file named `&1`, and `> /dev/null` a write to `/dev/null`.
 - `#` comments, the comparisons in `[[ a > b ]]`, `(( a > b ))` and `$(( a > b ))`, and a `>` inside `${…}` produced writes.
 - The compound-command splitter read `>|` as a pipe and cut `printf X >| p.txt` into `printf X >` and `p.txt`.
-- Prefix commands (`sudo`, `env`, `timeout`, …) joined their words back with spaces, so `sudo cat "my notes.txt"` read two files, and `sudo bash -c '…'` was not unwrapped.
+- Prefix commands (`sudo`, `env`, `timeout`, …) joined their words back with spaces, so `sudo cat "my notes.txt"` read two files, and `sudo bash -c '…'` was not unwrapped. Their options were matched as whole words, so a grouped option (`sudo -Eu root cat .env`) or an `env` option value (`env -u FOO cat .env`, `env -C dir …`) was taken for the command.
 
 ## Goals
 
@@ -51,7 +51,7 @@ A process substitution word (`<(cmd)`) is a pipe, so it is not a path argument e
 
 ### Prefix commands
 
-The words after a prefix command are quoted again before they are parsed a second time, and the inner command is walked like any compound command, so a wrapped `bash -c '…'` is unwrapped.
+The words after a prefix command are quoted again before they are parsed a second time, and the inner command is walked like any compound command, so a wrapped `bash -c '…'` is unwrapped. Options are read the way getopt reads them: short options group, a value is glued or the next word, a long option takes `--name=value`, and `--` ends them. `env -C DIR` runs the command in DIR. `env -S STRING` splits STRING into more words for env, so they are analysed as env runs them; quoting the words again would otherwise keep `env -S 'cat .env'` as one word that names no command.
 
 ### Compound splitting
 

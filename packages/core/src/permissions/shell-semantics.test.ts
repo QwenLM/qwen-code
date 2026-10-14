@@ -773,3 +773,62 @@ describe('prefix commands and substitutions', () => {
     ]);
   });
 });
+
+describe('prefix command options', () => {
+  it.each<Row>([
+    ['grouped short options', 'sudo -Eu root cat .env', [read('/repo/.env')]],
+    [
+      'a value glued to its option',
+      'sudo -uroot cat .env',
+      [read('/repo/.env')],
+    ],
+    ['`--` ends the options', 'sudo -- cat .env', [read('/repo/.env')]],
+    ['`env -u` takes a value', 'env -u FOO cat .env', [read('/repo/.env')]],
+    ['`env -S` runs its string', `env -S 'cat .env'`, [read('/repo/.env')]],
+    ['`env -S` glued', `env -S'cat .env'`, [read('/repo/.env')]],
+    [
+      '`env --split-string=`',
+      `env --split-string='cat .env'`,
+      [read('/repo/.env')],
+    ],
+    ['`env -S` in a group', `env -iS 'cat .env'`, [read('/repo/.env')]],
+    [
+      '`env -S` keeps the words after it',
+      `env -S 'cat a.txt' b.txt`,
+      [read('/repo/a.txt'), read('/repo/b.txt')],
+    ],
+    [
+      '`env -S` can hold env options',
+      `env -S '-C sub cat .env'`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      '`env -C` changes directory',
+      'env -C sub cat .env',
+      [read('/repo/sub/.env')],
+    ],
+    ['`env --chdir=`', 'env --chdir=/etc cat passwd', [read('/etc/passwd')]],
+    [
+      'the last `env -C` wins',
+      'env -C a -C b cat .env',
+      [read('/repo/b/.env')],
+    ],
+    [
+      "a split string's `-C` comes after the earlier one",
+      `env -C sub -S '-C x cat .env'`,
+      [read('/repo/x/.env')],
+    ],
+    [
+      "a later `-C` comes after the split string's",
+      `env -S '-C x' -C sub cat .env`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      '`env -C` applies to a split string',
+      `env -C sub -S 'cat .env'`,
+      [read('/repo/sub/.env')],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+});
