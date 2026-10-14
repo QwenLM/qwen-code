@@ -136,6 +136,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
+        runtimeBroker.getRetention().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
             throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h;"
@@ -875,6 +876,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public static class RuntimeBroker {
         private boolean enabled;
+        private final Retention retention = new Retention();
         private String host = "127.0.0.1";
         private int port = 4182;
         private boolean allowNonLoopback;
@@ -906,6 +908,38 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
+
+        public Retention getRetention() {
+            return retention;
+        }
+
+        public static class Retention {
+            private boolean enabled;
+            @DurationUnit(ChronoUnit.DAYS)
+            private Duration maxAge = Duration.ofDays(30);
+            private int batchSize = 100;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration scanDelay = Duration.ofMinutes(1);
+
+            public boolean isEnabled() { return enabled; }
+            public void setEnabled(boolean value) { enabled = value; }
+            public Duration getMaxAge() { return maxAge; }
+            public void setMaxAge(Duration value) { maxAge = value; }
+            public int getBatchSize() { return batchSize; }
+            public void setBatchSize(int value) { batchSize = value; }
+            public Duration getScanDelay() { return scanDelay; }
+            public void setScanDelay(Duration value) { scanDelay = value; }
+
+            void validate() {
+                if (maxAge == null || maxAge.isZero() || maxAge.isNegative()
+                        || maxAge.compareTo(Duration.ofMillis(1)) < 0
+                        || scanDelay == null || scanDelay.isZero() || scanDelay.isNegative()
+                        || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
+                    throw new IllegalStateException("Runtime Broker retention requires positive max-age and scan-delay"
+                            + " (at least 1ms), and batch-size between 1 and 1000");
+                }
+            }
+        }
 
         public boolean isEnabled() {
             return enabled;

@@ -270,7 +270,7 @@ class TakeoverReconciliationTest {
                 var source = new JdbcDataSource();
                 source.setURL("jdbc:h2:mem:takeover-" + UUID.randomUUID()
                         + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-                JdbcRuntimeBrokerSchema.initialize(source);
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
                 bindings = new JdbcRuntimeBindingRepository(source,
                         new AesGcmSecretProtector("test-key", new byte[32]));
                 sessions = new JdbcRuntimeSessionRepository(source);

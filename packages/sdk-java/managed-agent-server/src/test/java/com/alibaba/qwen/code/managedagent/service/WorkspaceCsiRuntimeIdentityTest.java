@@ -43,7 +43,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import org.flywaydb.core.Flyway;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -75,9 +76,9 @@ class WorkspaceCsiRuntimeIdentityTest {
     void setUp() {
         source = new DriverManagerDataSource("jdbc:h2:mem:provenance-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        ManagedSchema.initialize(source);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
-        storage = new WorkspaceCsiReservationStore(new JdbcTemplate(source), new DataSourceTransactionManager(source), new ObjectMapper());
+        storage = new WorkspaceCsiReservationStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), new ObjectMapper());
         storage.register(registration);
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace"), null, "kubernetes-workspace", "storage");
@@ -358,7 +359,7 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = provider()) {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             provider.reserveResource(original);
-            new JdbcTemplate(source).update("UPDATE qwen_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(api.creates).isZero();
         }

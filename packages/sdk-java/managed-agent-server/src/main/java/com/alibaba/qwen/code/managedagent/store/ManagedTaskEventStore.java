@@ -3,14 +3,19 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-import org.springframework.dao.DuplicateKeyException;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.function.Supplier;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -20,12 +25,12 @@ import org.springframework.stereotype.Repository;
  * {@code listSessionTaskEvents} and {@code queryWebShellTaskEvents} (H3 of
  * #12827). Producers write an event in the transaction that commits what
  * produces it, so a read never passes a concurrently committing event; the
- * per-task sequence is allocated under the Session's journal head lock, in
+ * per-task sequence is allocated under its event-stream row lock, in
  * commit order. One event is one logical cursor position, and a cursor names
  * only durable state, so identity survives restarts, projection rebuilds and
  * archival.
  *
- * <p>The durable retention floor lives in the per-task cursor row, so it
+ * <p>The durable retention floor lives in the per-task event-stream row, so it
  * survives an empty retained set. Only an oldest prefix expires, and the
  * visibility barrier pins the floor behind every output event whose full
  * text is not yet archived and discoverable; an archival failure therefore
@@ -60,9 +65,12 @@ public class ManagedTaskEventStore {
             "managed_task_event_segment_conflict";
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
 
     public ManagedTaskEventStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+        this.transactions = new TransactionTemplate(new DataSourceTransactionManager(
+                java.util.Objects.requireNonNull(jdbc.getDataSource(), "dataSource")));
     }
 
     /** One committed task event, as the journal row holds it. */
@@ -86,34 +94,29 @@ public class ManagedTaskEventStore {
                 List.of());
     }
 
-    /**
-     * The opaque cursor naming the position after {@code sequence}. It
-     * encodes only the task and the position, so any rebuild derives the
-     * identical string.
-     */
-    public static String encodeCursor(String taskId, long sequence) {
+    /** Scoped durable task positions; raw identity delimiters never enter the encoding. */
+    public static String encodeCursor(String tenantId, String sessionId, String taskId, long sequence) {
+        if (sequence < 0) {
+            throw new IllegalArgumentException("A task cursor requires a nonnegative sequence");
+        }
         return Base64.getUrlEncoder().withoutPadding().encodeToString(
-                ("tev1:" + taskId + ":" + sequence).getBytes(
-                        StandardCharsets.UTF_8));
+                ("tev2:" + ManagedSchemaKeys.key(tenantId, sessionId, taskId) + ":" + sequence)
+                        .getBytes(StandardCharsets.US_ASCII));
     }
 
-    /**
-     * The position a cursor names for this task.
-     *
-     * @throws ApiException {@code 400 invalid_event_cursor} when the cursor
-     *         is malformed or belongs to another task
-     */
-    public static long decodeCursor(String expectedTaskId, String cursor) {
+    public static long decodeCursor(String tenantId, String sessionId, String taskId, String cursor) {
+        if (cursor == null || cursor.length() > 128) {
+            throw invalidCursor();
+        }
         String decoded;
         try {
-            decoded = new String(Base64.getUrlDecoder().decode(cursor),
-                    StandardCharsets.UTF_8);
+            decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.US_ASCII);
         } catch (IllegalArgumentException error) {
             throw invalidCursor();
         }
-        String[] parts = decoded.split(":");
-        if (parts.length != 3 || !"tev1".equals(parts[0])
-                || !expectedTaskId.equals(parts[1])) {
+        String[] parts = decoded.split(":", -1);
+        if (parts.length != 3 || !"tev2".equals(parts[0])
+                || !ManagedSchemaKeys.key(tenantId, sessionId, taskId).equals(parts[1])) {
             throw invalidCursor();
         }
         try {
@@ -127,425 +130,324 @@ public class ManagedTaskEventStore {
         }
     }
 
-    /** Reads the durable positions of a task that has no cursor row. */
-    public CursorPositions positions(String tenantId, String sessionId,
-            String taskId) {
-        return jdbc.query("SELECT last_sequence, expired_through,"
-                        + " artifact_refs FROM qwen_managed_session_task_journal_cursor"
-                        + " WHERE session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?",
-                (result, row) -> new CursorPositions(
-                        result.getLong("last_sequence"),
-                        result.getLong("expired_through"),
-                        refs(result.getString("artifact_refs"))),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId).stream().findFirst()
-                .orElse(CursorPositions.EMPTY);
+    /** Operational positions survive an empty event set and projection rebuilds. */
+    public CursorPositions positions(String tenantId, String sessionId, String taskId) {
+        return jdbc.query("SELECT last_sequence, replay_floor_sequence, artifact_refs_resource_key"
+                        + " FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                        + " AND stream_kind = 'TASK' AND stream_id = ?",
+                (row, index) -> new CursorPositions(row.getLong("last_sequence"),
+                        row.getLong("replay_floor_sequence"),
+                        cursorState(tenantId, sessionId, row.getString("artifact_refs_resource_key")).artifactRefs()),
+                tenantId, sessionId, taskId).stream().findFirst().orElse(CursorPositions.EMPTY);
     }
 
-    /**
-     * Reads the retained events strictly after {@code after}, oldest first.
-     * The caller resolves the floor itself, so an omitted {@code after} and
-     * an explicit cursor share this one path.
-     */
-    public EventPage read(String tenantId, String sessionId, String taskId,
-            long after, int limit) {
-        List<TaskEvent> events = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_task_journal WHERE"
-                        + " session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?"
-                        + " AND event_sequence > ?"
-                        + " ORDER BY event_sequence LIMIT ?",
-                ManagedTaskEventStore::eventRow,
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId, after, limit + 1);
-        boolean hasMore = events.size() > limit;
-        return new EventPage(hasMore ? events.subList(0, limit) : events,
-                hasMore);
+    public EventPage read(String tenantId, String sessionId, String taskId, long after, int limit) {
+        List<TaskEvent> events = jdbc.query("SELECT sequence_id AS event_sequence, event_type,"
+                        + " created_at AS occurred_at, schema_version, projection_version, state, runtime_state,"
+                        + " text, truncated, artifact_id, capture_id, output_stream_id AS stream_id,"
+                        + " first_ordinal, end_ordinal, archived FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?"
+                        + " AND sequence_id > ? ORDER BY sequence_id LIMIT ?",
+                ManagedTaskEventStore::eventRow, tenantId, sessionId, taskId, after, limit + 1);
+        return new EventPage(events.size() > limit ? events.subList(0, limit) : events, events.size() > limit);
     }
 
-    /**
-     * Journals a task view change, from the record revision that commits it.
-     * A revision that changes nothing observable produces no event.
-     */
-    public void appendStateChange(String tenantId, String sessionId,
-            String taskId, String state, String runtimeState,
-            long occurredAt) {
-        long sequence = advance(tenantId, sessionId, taskId);
-        jdbc.update("INSERT INTO qwen_managed_session_task_journal"
-                        + " (session_scope_key, tenant_id, session_id,"
-                        + " task_id, event_sequence, event_type,"
-                        + " occurred_at, schema_version, projection_version,"
-                        + " state, runtime_state) VALUES"
-                        + " (?, ?, ?, ?, ?, 'state_changed', ?, ?, ?, ?, ?)",
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId, sequence, occurredAt,
-                SCHEMA_VERSION, PROJECTION_VERSION, state, runtimeState);
-        expireBeyondRetain(tenantId, sessionId, taskId);
+    public void appendStateChange(String tenantId, String sessionId, String taskId, String state,
+            String runtimeState, long occurredAt) {
+        transaction(() -> {
+            lockStream(tenantId, sessionId, taskId, occurredAt);
+            long sequence = advance(tenantId, sessionId, taskId);
+            jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
+                            + "event_id,event_type,created_at,schema_version,projection_version,state,runtime_state)"
+                            + " VALUES (?,?,'TASK',?,?,?,'state_changed',?,?,?,?,?)",
+                    tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
+                    occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, state, runtimeState);
+            expireBeyondRetain(tenantId, sessionId, taskId);
+            return null;
+        });
     }
 
-    /**
-     * Journals a chunk of durable task output. Output requires the Session
-     * to serve artifacts (the durable half of {@code
-     * capabilities.artifacts}: workspace-bound and not being deleted),
-     * because its own expiry and every later event's waits on archival. The
-     * segment identity, when given, must continue the stream's published
-     * ranges exactly: an overlapping or duplicated range is a refusal, so a
-     * recovered reader never joins the same output twice. The event is
-     * accepted unarchived; {@link #markOutputArchived} lifts its barrier
-     * once the full text is durably readable and discoverable.
-     */
-    public long appendOutput(String tenantId, String sessionId, String taskId,
-            String text, boolean truncated, String captureId, String streamId,
-            Long firstOrdinal, Long endOrdinal, long occurredAt) {
-        requireOutputAdmission(tenantId, sessionId);
-        int length = text == null ? 0 : text.codePointCount(0, text.length());
-        if (length < 1 || length > MAX_OUTPUT_CHARS) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_SEGMENT_CONFLICT,
-                    "An output event chunk holds 1 to " + MAX_OUTPUT_CHARS
-                            + " characters.");
-        }
-        boolean segmented = captureId != null;
-        if (segmented != (streamId != null)
-                || segmented != (firstOrdinal != null)
-                || segmented != (endOrdinal != null)
-                || segmented && endOrdinal <= firstOrdinal) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_SEGMENT_CONFLICT,
-                    "An output event's segment identity is all or nothing,"
-                            + " and its range is half-open.");
-        }
-        if (segmented) {
-            Long published = jdbc.queryForObject("SELECT MAX(end_ordinal)"
-                            + " FROM qwen_managed_session_task_journal WHERE"
-                            + " session_scope_key = ? AND tenant_id = ?"
-                            + " AND session_id = ? AND task_id = ?"
-                            + " AND capture_id = ? AND stream_id = ?",
-                    Long.class,
-                    ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                    tenantId, sessionId, taskId, captureId, streamId);
+    /** Segment ends are cursor facts, so expiry cannot make a duplicate segment admissible. */
+    public long appendOutput(String tenantId, String sessionId, String taskId, String text, boolean truncated,
+            String captureId, String streamId, Long firstOrdinal, Long endOrdinal, long occurredAt) {
+        return transaction(() -> {
+            requireOutputAdmission(tenantId, sessionId);
+            int length = text == null ? 0 : text.codePointCount(0, text.length());
+            if (length < 1 || length > MAX_OUTPUT_CHARS) {
+                throw conflict(CODE_SEGMENT_CONFLICT, "An output chunk must fit the task event bound.");
+            }
+            boolean segmented = captureId != null;
+            if (segmented != (streamId != null) || segmented != (firstOrdinal != null)
+                    || segmented != (endOrdinal != null) || segmented && (firstOrdinal < 0 || endOrdinal <= firstOrdinal)) {
+                throw conflict(CODE_SEGMENT_CONFLICT, "The segment identity must name one nonnegative half-open range.");
+            }
+            lockStream(tenantId, sessionId, taskId, occurredAt);
+            CursorState cursor = state(tenantId, sessionId, taskId);
+            String streamKey = segmented ? ManagedSchemaKeys.key(captureId, streamId) : null;
+            Long published = streamKey == null ? null : cursor.outputEnds().get(streamKey);
             if (published != null && published.longValue() != firstOrdinal) {
-                throw new ApiException(HttpStatus.CONFLICT,
-                        CODE_SEGMENT_CONFLICT,
-                        "The segment range overlaps or leaves a gap against"
-                                + " the published ordinal space.");
+                throw conflict(CODE_SEGMENT_CONFLICT, "The output range overlaps or leaves a gap.");
             }
-        }
-        long sequence = advance(tenantId, sessionId, taskId);
-        jdbc.update("INSERT INTO qwen_managed_session_task_journal"
-                        + " (session_scope_key, tenant_id, session_id,"
-                        + " task_id, event_sequence, event_type,"
-                        + " occurred_at, schema_version, projection_version,"
-                        + " text, truncated, capture_id, stream_id,"
-                        + " first_ordinal, end_ordinal) VALUES"
-                        + " (?, ?, ?, ?, ?, 'output', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?)",
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId, sequence, occurredAt,
-                SCHEMA_VERSION, PROJECTION_VERSION, text, truncated,
-                captureId, streamId, firstOrdinal, endOrdinal);
-        expireBeyondRetain(tenantId, sessionId, taskId);
-        return sequence;
+            long sequence = advance(tenantId, sessionId, taskId);
+            if (segmented) {
+                Map<String, Long> ends = new TreeMap<>(cursor.outputEnds());
+                ends.put(streamKey, endOrdinal);
+                ObjectNode ranges = JSON.createObjectNode();
+                ends.forEach(ranges::put);
+                jdbc.update("UPDATE ma_event_stream SET output_ranges_json = ?, updated_at = ? WHERE tenant_id = ?"
+                                + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?",
+                        ranges.toString(), occurredAt, tenantId, sessionId, taskId);
+            }
+            jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
+                            + "event_id,event_type,created_at,schema_version,projection_version,text,truncated,capture_id,"
+                            + "output_stream_id,first_ordinal,end_ordinal) VALUES (?,?,'TASK',?,?,?,'output',?,?,?,?,?,?,?,?,?)",
+                    tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
+                    occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, text, truncated,
+                    captureId, streamId, firstOrdinal, endOrdinal);
+            expireBeyondRetain(tenantId, sessionId, taskId);
+            return sequence;
+        });
     }
 
-    /**
-     * Journals the first visibility of an output Artifact on the task. The
-     * reference joins the view's newest unique hundred; a duplicate or a
-     * 101st is a refusal, so no reference ever ages out silently.
-     */
-    public long appendArtifact(String tenantId, String sessionId,
-            String taskId, String artifactId, long occurredAt) {
-        requireOutputAdmission(tenantId, sessionId);
-        // The ref list moves by compare-and-set on its snapshot: two
-        // writers that read the same list see only one's row count change,
-        // the other retries against what actually stands — a lost-write
-        // can never age an Artifact out while its event lives below.
-        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-            RefsView view = artifactRefsOf(tenantId, sessionId, taskId);
-            if (view.refs().contains(artifactId)) {
-                throw new ApiException(HttpStatus.CONFLICT,
-                        CODE_ADMISSION_REFUSED,
-                        "The task already references Artifact " + artifactId
-                                + ".");
+    public long appendArtifact(String tenantId, String sessionId, String taskId, String artifactId, long occurredAt) {
+        return transaction(() -> {
+            requireOutputAdmission(tenantId, sessionId);
+            lockStream(tenantId, sessionId, taskId, occurredAt);
+            CursorState cursor = state(tenantId, sessionId, taskId);
+            if (cursor.artifactRefs().contains(artifactId)) {
+                throw conflict(CODE_ADMISSION_REFUSED, "The task already references the Artifact.");
             }
-            if (view.refs().size() >= ARTIFACT_REF_BOUND) {
-                throw new ApiException(HttpStatus.CONFLICT,
-                        CODE_ADMISSION_REFUSED,
-                        "The task already references " + ARTIFACT_REF_BOUND
-                                + " Artifacts; rotating past the bound is a"
-                                + " refusal, never a silent eviction.");
+            if (cursor.artifactRefs().size() >= ARTIFACT_REF_BOUND) {
+                throw conflict(CODE_ADMISSION_REFUSED, "The task's Artifact references reached their bound.");
             }
-            ArrayNode refs = JSON.createArrayNode();
-            view.refs().forEach(refs::add);
+            List<String> refs = new ArrayList<>(cursor.artifactRefs());
             refs.add(artifactId);
-            String next = refs.toString();
-            if (view.text() == null) {
-                try {
-                    jdbc.update("INSERT INTO"
-                                    + " qwen_managed_session_task_journal_cursor"
-                                    + " (session_scope_key, tenant_id, session_id,"
-                                    + " task_id, last_sequence, artifact_refs)"
-                                    + " VALUES (?, ?, ?, ?, 0, ?)",
-                            ManagedSessionStore.sessionScopeKey(tenantId,
-                                    sessionId),
-                            tenantId, sessionId, taskId, next);
-                } catch (DuplicateKeyException raced) {
-                    continue;
-                }
-                break;
-            }
-            int updated = jdbc.update("UPDATE"
-                            + " qwen_managed_session_task_journal_cursor"
-                            + " SET artifact_refs = ? WHERE session_scope_key = ?"
-                            + " AND tenant_id = ? AND session_id = ?"
-                            + " AND task_id = ? AND artifact_refs = ?",
-                    next, ManagedSessionStore.sessionScopeKey(tenantId,
-                            sessionId),
-                    tenantId, sessionId, taskId, view.text());
-            if (updated == 1) {
-                break;
-            }
-            if (attempt + 1 == MAX_CAS_ATTEMPTS) {
-                throw new ApiException(HttpStatus.CONFLICT,
-                        CODE_ADMISSION_REFUSED,
-                        "The task's artifact references changed concurrently;"
-                                + " retry the whole append.");
-            }
-        }
-        long sequence = advance(tenantId, sessionId, taskId);
-        jdbc.update("INSERT INTO qwen_managed_session_task_journal"
-                        + " (session_scope_key, tenant_id, session_id,"
-                        + " task_id, event_sequence, event_type,"
-                        + " occurred_at, schema_version, projection_version,"
-                        + " artifact_id) VALUES (?, ?, ?, ?, ?, 'artifact',"
-                        + " ?, ?, ?, ?)",
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId, sequence, occurredAt,
-                SCHEMA_VERSION, PROJECTION_VERSION, artifactId);
-        expireBeyondRetain(tenantId, sessionId, taskId);
-        return sequence;
+            long sequence = advance(tenantId, sessionId, taskId);
+            publishCursorState(tenantId, sessionId, taskId, sequence,
+                    new CursorState(refs, cursor.outputEnds()), occurredAt);
+            jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
+                            + "event_id,event_type,created_at,schema_version,projection_version,artifact_id)"
+                            + " VALUES (?,?,'TASK',?,?,?,'artifact',?,?,?,?)",
+                    tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
+                    occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, artifactId);
+            expireBeyondRetain(tenantId, sessionId, taskId);
+            return sequence;
+        });
     }
 
-    /**
-     * Marks every output event through {@code throughSequence} archived: its
-     * full text is durably readable in an Artifact and discoverable through
-     * the task view's references. Only this call lets the floor cross them.
-     */
-    public int markOutputArchived(String tenantId, String sessionId,
-            String taskId, long throughSequence) {
-        return jdbc.update("UPDATE qwen_managed_session_task_journal SET"
-                        + " archived = 1 WHERE session_scope_key = ?"
-                        + " AND tenant_id = ? AND session_id = ?"
-                        + " AND task_id = ? AND event_type = 'output'"
-                        + " AND archived = 0 AND event_sequence <= ?",
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId, throughSequence);
+    public int markOutputArchived(String tenantId, String sessionId, String taskId, long throughSequence) {
+        return transaction(() -> {
+            lockStream(tenantId, sessionId, taskId, 0);
+            return jdbc.update("UPDATE ma_public_event SET archived = TRUE WHERE tenant_id = ? AND session_id = ?"
+                            + " AND stream_kind = 'TASK' AND stream_id = ? AND event_type = 'output'"
+                            + " AND archived = FALSE AND sequence_id <= ?",
+                    tenantId, sessionId, taskId, throughSequence);
+        });
     }
 
-    /**
-     * Expires the retained prefix through {@code throughSequence} and raises
-     * the durable floor to it. An expiry at or below the floor is a no-op.
-     * The request may not cross an output event whose full text is not
-     * archived, because that event and every later one hold their expiry
-     * until archival; crossing is a refusal, so an archival failure pins the
-     * floor and loses nothing. The floor survives the retained set emptying.
-     */
-    public long expireThrough(String tenantId, String sessionId, String taskId,
-            long throughSequence) {
-        CursorPositions positions = positions(tenantId, sessionId, taskId);
-        if (throughSequence <= positions.expiredThrough()) {
-            return positions.expiredThrough();
-        }
-        if (throughSequence > positions.lastSequence()) {
-            throughSequence = positions.lastSequence();
-        }
-        Long pinned = jdbc.queryForObject("SELECT MIN(event_sequence) FROM"
-                        + " qwen_managed_session_task_journal WHERE"
-                        + " session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?"
-                        + " AND event_type = 'output' AND archived = 0",
-                Long.class,
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId);
-        if (pinned != null && throughSequence >= pinned) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_FLOOR_PINNED,
-                    "An unarchived output event at sequence " + pinned
-                            + " holds back its own and every later event's"
-                            + " expiry.");
-        }
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
-                sessionId);
-        jdbc.update("DELETE FROM qwen_managed_session_task_journal WHERE"
-                        + " session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?"
-                        + " AND event_sequence <= ?",
-                scopeKey, tenantId, sessionId, taskId, throughSequence);
-        jdbc.update("UPDATE qwen_managed_session_task_journal_cursor SET"
-                        + " expired_through = ? WHERE session_scope_key = ?"
-                        + " AND tenant_id = ? AND session_id = ?"
-                        + " AND task_id = ?",
-                throughSequence, scopeKey, tenantId, sessionId, taskId);
-        return throughSequence;
+    /** Floor movement and prefix deletion share the stream lock and the producer transaction. */
+    public long expireThrough(String tenantId, String sessionId, String taskId, long throughSequence) {
+        return transaction(() -> {
+            lockStream(tenantId, sessionId, taskId, 0);
+            CursorPositions positions = positions(tenantId, sessionId, taskId);
+            long through = Math.min(throughSequence, positions.lastSequence());
+            if (through <= positions.expiredThrough()) {
+                return positions.expiredThrough();
+            }
+            Long pinned = oldestUnarchived(tenantId, sessionId, taskId);
+            if (pinned != null && through >= pinned) {
+                throw conflict(CODE_FLOOR_PINNED, "An unarchived output event pins the retention floor.");
+            }
+            jdbc.update("DELETE FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                            + " AND stream_kind = 'TASK' AND stream_id = ? AND sequence_id <= ?",
+                    tenantId, sessionId, taskId, through);
+            jdbc.update("UPDATE ma_event_stream SET replay_floor_sequence = ? WHERE tenant_id = ? AND session_id = ?"
+                            + " AND stream_kind = 'TASK' AND stream_id = ?",
+                    through, tenantId, sessionId, taskId);
+            return through;
+        });
     }
 
-    /** Allocates the task's next committed sequence, in commit order. */
+    private void lockStream(String tenantId, String sessionId, String taskId, long occurredAt) {
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,updated_at)"
+                        + " VALUES (?,?,'TASK',?,?) ON DUPLICATE KEY UPDATE stream_id = stream_id",
+                tenantId, sessionId, taskId, occurredAt);
+        jdbc.queryForObject("SELECT last_sequence FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                        + " AND stream_kind = 'TASK' AND stream_id = ? FOR UPDATE",
+                Long.class, tenantId, sessionId, taskId);
+    }
+
     private long advance(String tenantId, String sessionId, String taskId) {
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
-                sessionId);
         CursorPositions positions = positions(tenantId, sessionId, taskId);
-        if (positions.lastSequence() >= positions.expiredThrough()
-                + BACKLOG_BOUND) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_BACKLOG_FULL,
-                    "The task's event journal holds " + BACKLOG_BOUND
-                            + " retained events; the next event is refused"
-                            + " rather than accepted and lost.");
+        if (positions.lastSequence() - positions.expiredThrough() >= BACKLOG_BOUND) {
+            throw conflict(CODE_BACKLOG_FULL, "The retained task event backlog reached its bound.");
         }
-        int updated = jdbc.update(
-                "UPDATE qwen_managed_session_task_journal_cursor SET"
-                        + " last_sequence = last_sequence + 1 WHERE"
-                        + " session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?",
-                scopeKey, tenantId, sessionId, taskId);
-        if (updated == 0) {
-            try {
-                jdbc.update("INSERT INTO"
-                                + " qwen_managed_session_task_journal_cursor"
-                                + " (session_scope_key, tenant_id, session_id,"
-                                + " task_id, last_sequence, artifact_refs)"
-                                + " VALUES (?, ?, ?, ?, 1, '[]')",
-                        scopeKey, tenantId, sessionId, taskId);
-            } catch (DuplicateKeyException raced) {
-                jdbc.update("UPDATE qwen_managed_session_task_journal_cursor"
-                                + " SET last_sequence = last_sequence + 1"
-                                + " WHERE session_scope_key = ?"
-                                + " AND tenant_id = ? AND session_id = ?"
-                                + " AND task_id = ?",
-                        scopeKey, tenantId, sessionId, taskId);
-            }
-        }
-        Long sequence = jdbc.queryForObject("SELECT last_sequence FROM"
-                        + " qwen_managed_session_task_journal_cursor"
-                        + " WHERE session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?",
-                Long.class, scopeKey, tenantId, sessionId, taskId);
-        if (sequence == null) {
-            throw new IllegalStateException(
-                    "The task's journal cursor row vanished mid-commit.");
-        }
+        long sequence = positions.lastSequence() + 1;
+        jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE tenant_id = ? AND session_id = ?"
+                        + " AND stream_kind = 'TASK' AND stream_id = ?",
+                sequence, tenantId, sessionId, taskId);
         return sequence;
     }
 
-    /**
-     * The automatic retention pass behind every append: only the rows over
-     * the retain target expire, and only as far as the barrier allows, so a
-     * non-output journal stays bounded on its own and a pinned floor simply
-     * stops the pass until archival catches up.
-     */
-    private void expireBeyondRetain(String tenantId, String sessionId,
-            String taskId) {
+    private void expireBeyondRetain(String tenantId, String sessionId, String taskId) {
         CursorPositions positions = positions(tenantId, sessionId, taskId);
-        long retained = positions.lastSequence() - positions.expiredThrough();
-        if (retained <= RETAIN_TARGET) {
-            return;
-        }
         long through = positions.lastSequence() - RETAIN_TARGET;
-        Long pinned = jdbc.queryForObject("SELECT MIN(event_sequence) FROM"
-                        + " qwen_managed_session_task_journal WHERE"
-                        + " session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?"
-                        + " AND event_type = 'output' AND archived = 0",
-                Long.class,
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId);
-        if (pinned != null && through >= pinned) {
-            through = pinned - 1;
+        Long pinned = oldestUnarchived(tenantId, sessionId, taskId);
+        if (pinned != null) {
+            through = Math.min(through, pinned - 1);
         }
         if (through > positions.expiredThrough()) {
             expireThrough(tenantId, sessionId, taskId, through);
         }
     }
 
-    /**
-     * The durable half of the task output admission gate: output-producing
-     * flows require the Session to serve artifacts, which its durable row
-     * narrows to workspace-bound and not being deleted.
-     */
+    private Long oldestUnarchived(String tenantId, String sessionId, String taskId) {
+        return jdbc.queryForObject("SELECT MIN(sequence_id) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND stream_kind = 'TASK' AND stream_id = ? AND event_type = 'output' AND archived = FALSE",
+                Long.class, tenantId, sessionId, taskId);
+    }
+
+    private record CursorState(List<String> artifactRefs, Map<String, Long> outputEnds) {
+        private CursorState {
+            artifactRefs = List.copyOf(artifactRefs);
+            outputEnds = Map.copyOf(outputEnds);
+        }
+    }
+
+    private CursorState state(String tenantId, String sessionId, String taskId) {
+        return jdbc.query("SELECT artifact_refs_resource_key,output_ranges_json FROM ma_event_stream"
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?",
+                (row, index) -> {
+                    Map<String, Long> ends = new TreeMap<>();
+                    String encoded = row.getString("output_ranges_json");
+                    if (encoded != null) {
+                        try {
+                            JsonNode ranges = JSON.readTree(encoded);
+                            if (!ranges.isObject()) {
+                                throw new IllegalStateException("The task's output range cursor is corrupt");
+                            }
+                            ranges.fields().forEachRemaining(entry -> {
+                                if (!entry.getValue().isIntegralNumber() || !entry.getValue().canConvertToLong()
+                                        || entry.getValue().longValue() < 0) {
+                                    throw new IllegalStateException("The task's output range cursor is corrupt");
+                                }
+                                ends.put(entry.getKey(), entry.getValue().longValue());
+                            });
+                        } catch (java.io.IOException exception) {
+                            throw new IllegalStateException("The task's output range cursor is corrupt", exception);
+                        }
+                    }
+                    return new CursorState(cursorState(tenantId, sessionId,
+                            row.getString("artifact_refs_resource_key")).artifactRefs(), ends);
+                }, tenantId, sessionId, taskId).getFirst();
+    }
+
+    private CursorState cursorState(String tenantId, String sessionId, String resourceKey) {
+        if (resourceKey == null) {
+            return new CursorState(List.of(), Map.of());
+        }
+        return jdbc.query("SELECT inline_bytes,sha256,byte_length FROM ma_resource WHERE resource_key = ?"
+                        + " AND session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " AND storage_kind = 'MYSQL_INLINE' AND state = 'REFERENCED' AND kind = ? AND schema_version = 1",
+                (row, index) -> {
+                    byte[] bytes = row.getBytes("inline_bytes");
+                    if (bytes == null || bytes.length != row.getLong("byte_length")
+                            || !ToolPublicationContract.sha256(bytes).equals(row.getString("sha256"))) {
+                        throw new IllegalStateException("The task cursor resource failed integrity validation");
+                    }
+                    try {
+                        JsonNode node = JSON.readTree(bytes);
+                        if (node.path("schemaVersion").asInt() != 1 || !node.path("artifactRefs").isArray()) {
+                            throw new IllegalStateException("The task cursor resource has an unsupported shape");
+                        }
+                        List<String> refs = new ArrayList<>();
+                        node.path("artifactRefs").forEach(ref -> refs.add(ref.textValue()));
+                        return new CursorState(refs, Map.of());
+                    } catch (java.io.IOException exception) {
+                        throw new IllegalStateException("The task cursor resource is corrupt", exception);
+                    }
+                }, resourceKey, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, "task-artifact-refs/1")
+                .stream().findFirst().orElseThrow(() -> new IllegalStateException("The task cursor resource is missing"));
+    }
+
+    private void publishCursorState(String tenantId, String sessionId, String taskId, long revision,
+            CursorState state, long occurredAt) {
+        ObjectNode body = JSON.createObjectNode().put("schemaVersion", 1);
+        state.artifactRefs().forEach(body.putArray("artifactRefs")::add);
+        if (!body.has("artifactRefs")) {
+            body.putArray("artifactRefs");
+        }
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String digest = ToolPublicationContract.sha256(bytes);
+        String resourceId = "task-cursor:" + ManagedSchemaKeys.key(taskId, digest);
+        String resourceKey = ManagedSchemaKeys.key(scope, resourceId);
+        String ownerKey = ManagedSchemaKeys.key(scope, "TASK", taskId);
+        String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenantId, sessionId);
+        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
+                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
+                        + " VALUES (?,?,?,?,?,?,'task-artifact-refs/1',1,?,?,'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6))"
+                        + " ON DUPLICATE KEY UPDATE resource_key = resource_key",
+                resourceKey, scope, tenantId, workspace, sessionId, resourceId, bytes.length, digest, bytes);
+        Boolean same = jdbc.queryForObject("SELECT inline_bytes,sha256,byte_length,kind,schema_version,state FROM ma_resource"
+                        + " WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ? AND session_id = ?",
+                (row, index) -> java.util.Arrays.equals(bytes, row.getBytes("inline_bytes"))
+                        && digest.equals(row.getString("sha256")) && bytes.length == row.getLong("byte_length")
+                        && "task-artifact-refs/1".equals(row.getString("kind")) && row.getInt("schema_version") == 1
+                        && "REFERENCED".equals(row.getString("state")),
+                resourceKey, scope, tenantId, sessionId);
+        if (!Boolean.TRUE.equals(same)) {
+            throw new IllegalStateException("The task Artifact reference resource identity conflicts");
+        }
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'EVENT_STREAM' AND owner_key = ?",
+                scope, ownerKey);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,"
+                        + "tenant_id,workspace_id,session_id,created_at) VALUES (?,'EVENT_STREAM',?,?,?,?,?,?,CURRENT_TIMESTAMP(6))",
+                scope, ownerKey, revision, resourceKey, tenantId, workspace, sessionId);
+        jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key = ?, updated_at = ? WHERE tenant_id = ?"
+                        + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?",
+                resourceKey, occurredAt, tenantId, sessionId, taskId);
+    }
+
     private void requireOutputAdmission(String tenantId, String sessionId) {
-        record SessionShape(String workspaceId, String status) {
+        record Shape(String workspaceId, String status, Long retiredAt) {
         }
-        SessionShape session = jdbc.query("SELECT workspace_id, status FROM"
-                        + " managed_agent_session WHERE tenant_id = ?"
-                        + " AND session_id = ?",
-                (result, row) -> new SessionShape(
-                        result.getString("workspace_id"),
-                        result.getString("status")),
-                tenantId, sessionId).stream().findFirst()
-                .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT,
-                        CODE_ADMISSION_REFUSED,
-                        "The Session does not serve task output."));
-        if (session.workspaceId() == null
-                || "DELETING".equals(session.status())
-                || "DELETED".equals(session.status())) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_ADMISSION_REFUSED,
-                    "A Session without capabilities.artifacts admits no"
-                            + " output-producing task flow.");
+        Shape session = jdbc.query("SELECT workspace_id,status,retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                (row, index) -> new Shape(row.getString("workspace_id"), row.getString("status"),
+                        row.getObject("retired_at", Long.class)), tenantId, sessionId).stream().findFirst()
+                .orElseThrow(() -> conflict(CODE_ADMISSION_REFUSED, "The Session does not serve task output."));
+        if (session.workspaceId() == null || session.retiredAt() != null
+                || "DELETING".equals(session.status()) || "DELETED".equals(session.status())) {
+            throw conflict(CODE_ADMISSION_REFUSED, "The Session does not serve task output.");
         }
     }
 
-    private static final int MAX_CAS_ATTEMPTS = 5;
-
-    /** The raw artifact reference list and its exact stored text, which is
-     * what a compare-and-set must match byte for byte. */
-    private record RefsView(List<String> refs, String text) {
-    }
-
-    private RefsView artifactRefsOf(String tenantId, String sessionId,
-            String taskId) {
-        return jdbc.query("SELECT artifact_refs FROM"
-                        + " qwen_managed_session_task_journal_cursor"
-                        + " WHERE session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND task_id = ?",
-                (result, row) -> new RefsView(
-                        refs(result.getString("artifact_refs")),
-                        result.getString("artifact_refs")),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId).stream().findFirst()
-                .orElse(new RefsView(List.of(), null));
-    }
-
-    private static List<String> refs(String json) {
-        try {
-            JsonNode node = JSON.readTree(json);
-            List<String> refs = new ArrayList<>();
-            if (node.isArray()) {
-                node.forEach(ref -> refs.add(ref.asText()));
-            }
-            return List.copyOf(refs);
-        } catch (Exception error) {
-            throw new IllegalStateException(
-                    "The task's journal cursor references are corrupt.",
-                    error);
+    private <T> T transaction(Supplier<T> action) {
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+            return action.get();
         }
+        return transactions.execute(status -> action.get());
     }
 
-    private static TaskEvent eventRow(ResultSet result, int row)
-            throws SQLException {
-        return new TaskEvent(result.getLong("event_sequence"),
-                result.getString("event_type"), result.getLong("occurred_at"),
-                result.getInt("schema_version"),
-                result.getInt("projection_version"),
-                result.getString("state"), result.getString("runtime_state"),
-                result.getString("text"),
-                result.getObject("truncated", Boolean.class),
-                result.getString("artifact_id"),
-                result.getString("capture_id"), result.getString("stream_id"),
-                result.getObject("first_ordinal", Long.class),
-                result.getObject("end_ordinal", Long.class),
-                result.getBoolean("archived"));
+    private static String eventId(String tenantId, String sessionId, String taskId, long sequence) {
+        return ManagedSchemaKeys.key("task-event", tenantId, sessionId, taskId, Long.toString(sequence));
+    }
+
+    private static ApiException conflict(String code, String message) {
+        return new ApiException(HttpStatus.CONFLICT, code, message);
+    }
+
+    private static TaskEvent eventRow(ResultSet result, int row) throws SQLException {
+        return new TaskEvent(result.getLong("event_sequence"), result.getString("event_type"),
+                result.getLong("occurred_at"), result.getInt("schema_version"), result.getInt("projection_version"),
+                result.getString("state"), result.getString("runtime_state"), result.getString("text"),
+                result.getObject("truncated", Boolean.class), result.getString("artifact_id"),
+                result.getString("capture_id"), result.getString("stream_id"), result.getObject("first_ordinal", Long.class),
+                result.getObject("end_ordinal", Long.class), result.getBoolean("archived"));
     }
 
     private static ApiException invalidCursor() {
-        return new ApiException(HttpStatus.BAD_REQUEST,
-                "invalid_event_cursor",
-                "The task event cursor is invalid.");
+        return new ApiException(HttpStatus.BAD_REQUEST, "invalid_event_cursor", "The task event cursor is invalid.");
     }
 }
