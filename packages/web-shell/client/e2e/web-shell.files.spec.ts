@@ -16,10 +16,23 @@ async function openFiles(
   workspaceCwd = '/tmp/qwen-web-shell-e2e',
   afterOpen?: () => Promise<void>,
   primary = true,
+  creationEnabled = false,
+  deletionEnabled = false,
 ) {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd,
     capabilities: {
+      ...(creationEnabled || deletionEnabled
+        ? {
+            features: [
+              ...(creationEnabled
+                ? ['workspace_file_write', 'workspace_directory_create']
+                : []),
+              ...(deletionEnabled ? ['workspace_directory_delete'] : []),
+              'workspace_qualified_rest_core',
+            ],
+          }
+        : {}),
       workspaceCwd: primary ? workspaceCwd : '/tmp/primary',
       workspaces: [
         {
@@ -1058,4 +1071,586 @@ test('scrolls the entire deep tree horizontally without squeezing names', async 
   ).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(leaf).toBeFocused();
+});
+
+test('@smoke creates root files and folders with toolbar actions', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    false,
+    true,
+  );
+  await expect(
+    browser
+      .getByRole('button', { name: 'Refresh', exact: true })
+      .locator('svg'),
+  ).toHaveClass(/lucide-rotate-cw/);
+  await expect(
+    browser
+      .getByRole('button', { name: 'New file', exact: true })
+      .locator('svg'),
+  ).toHaveClass(/lucide-sticky-note-plus/);
+  await browser.getByRole('treeitem', { name: 'deep', exact: true }).click();
+  const calls: { url: string; body: unknown }[] = [];
+  for (const endpoint of ['file/write', 'directory/create'])
+    await page.route(`**/${endpoint}`, async (route) => {
+      calls.push({
+        url: new URL(route.request().url()).pathname,
+        body: route.request().postDataJSON(),
+      });
+      await route.fulfill({
+        status: 201,
+        json: { path: route.request().postDataJSON().path },
+      });
+    });
+  for (const [label, name] of [
+    ['New file', 'root.txt'],
+    ['New folder', 'root-folder'],
+  ]) {
+    await browser.getByRole('button', { name: label, exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: label, exact: true });
+    await expect(
+      dialog.getByRole('textbox', { name: 'Name', exact: true }),
+    ).toBeFocused();
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill(name);
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(
+      browser.getByRole('treeitem', { name, exact: true }),
+    ).toBeVisible();
+  }
+  expect(calls).toEqual([
+    {
+      url: '/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/file/write',
+      body: { path: 'root.txt', content: '', mode: 'create' },
+    },
+    {
+      url: '/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/directory/create',
+      body: { path: 'root-folder' },
+    },
+  ]);
+  await expect(
+    browser.getByRole('treeitem', { name: 'level-0', exact: true }),
+  ).toBeVisible();
+  await browser.screenshot({
+    path: test.info().outputPath('create-toolbar-completed.png'),
+  });
+});
+
+test('@smoke folder trailing menu creates inside that folder', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const folder = browser.getByRole('treeitem', { name: 'src', exact: true });
+  const calls: string[] = [];
+  for (const endpoint of ['file/write', 'directory/create'])
+    await page.route(`**/${endpoint}`, async (route) => {
+      calls.push(route.request().postDataJSON().path);
+      await route.fulfill({ status: 201, json: { path: calls.at(-1) } });
+    });
+  for (const [label, name] of [
+    ['New file', 'nested.txt'],
+    ['New folder', 'nested-folder'],
+  ]) {
+    await folder.hover();
+    await browser.getByRole('button', { name: 'Options', exact: true }).click();
+    await expect(
+      page.getByRole('menuitem', { name: label, exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole('menu')
+      .screenshot({ path: test.info().outputPath('create-folder-menu.png') });
+    await page.getByRole('menuitem', { name: label, exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: label, exact: true });
+    await expect(dialog).toContainText('/tmp/qwen-web-shell-e2e/src');
+    await dialog.screenshot({
+      path: test.info().outputPath('create-dialog.png'),
+    });
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill(name);
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const filter = browser.getByRole('textbox', { name: 'Filter files…' });
+    await filter.fill(name);
+    await expect(
+      browser.getByRole('treeitem', { name, exact: true }),
+    ).toBeVisible();
+    await filter.fill('');
+  }
+  expect(calls).toEqual(['src/nested.txt', 'src/nested-folder']);
+  const filter = browser.getByRole('textbox', { name: 'Filter files…' });
+  await filter.fill('app.ts');
+  await expect(
+    browser.getByRole('treeitem', { name: 'app.ts', exact: true }),
+  ).toBeVisible();
+  await filter.fill('');
+  await folder.focus();
+  await page.keyboard.press('Shift+F10');
+  await expect(
+    page.getByRole('menuitem', { name: 'New file', exact: true }),
+  ).toBeVisible();
+});
+
+test('@smoke validates names, cancels and keeps creation errors retryable', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  let calls = 0;
+  let finish!: () => void;
+  await page.route('**/file/write', async (route) => {
+    calls++;
+    if (calls === 1) {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      await route.fulfill({
+        status: 409,
+        json: { error: 'File already exists' },
+      });
+    } else
+      await route.fulfill({
+        status: 201,
+        json: { path: route.request().postDataJSON().path },
+      });
+  });
+  await browser.getByRole('button', { name: 'New file', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'New file', exact: true });
+  await dialog
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('../escape.txt');
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('single name');
+  expect(calls).toBe(0);
+  await dialog.getByRole('button', { name: /^cancel$/i }).click();
+  await expect(dialog).toBeHidden();
+  expect(calls).toBe(0);
+  await browser.getByRole('button', { name: 'New file', exact: true }).click();
+  await dialog
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('README.md');
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect.poll(() => calls).toBe(1);
+  await expect(
+    dialog.getByRole('button', { name: 'Creating…', exact: true }),
+  ).toBeDisabled();
+  await expect(
+    dialog.getByRole('button', { name: /^cancel$/i }),
+  ).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  finish();
+  await expect(dialog.getByRole('alert')).toContainText('File already exists');
+  await dialog
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('retry.txt');
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(calls).toBe(2);
+  await expect(
+    browser.getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeVisible();
+  await expect(
+    browser.getByRole('treeitem', { name: 'retry.txt', exact: true }),
+  ).toBeVisible();
+});
+
+test('@smoke does not offer creation without capabilities', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(page, baseURL!);
+  await expect(
+    browser.getByRole('button', { name: 'New file', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    browser.getByRole('button', { name: 'New folder', exact: true }),
+  ).toHaveCount(0);
+  await browser
+    .getByRole('treeitem', { name: 'src', exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'New file', exact: true }),
+  ).toHaveCount(0);
+});
+
+test('@smoke merges a late empty listing after creating in a folder', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  let release!: () => void;
+  let listingPending = false;
+  await page.route('**/list?path=empty', async (route) => {
+    listingPending = true;
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await route.fulfill({
+      json: { kind: 'list', path: 'empty', entries: [], truncated: false },
+    });
+  });
+  await page.route('**/file/write', (route) =>
+    route.fulfill({ status: 201, json: { path: 'empty/new.txt' } }),
+  );
+  const folder = browser.getByRole('treeitem', { name: 'empty', exact: true });
+  await folder.click();
+  await expect.poll(() => listingPending).toBe(true);
+  await folder.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'New file', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'New file', exact: true });
+  await dialog
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('new.txt');
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  const listingResponse = page.waitForResponse(
+    (response) => new URL(response.url()).searchParams.get('path') === 'empty',
+  );
+  release();
+  await (await listingResponse).finished();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
+  await expect(
+    browser.getByRole('treeitem', { name: 'new.txt', exact: true }),
+  ).toBeVisible();
+  await expect(
+    browser.getByText('empty: Empty folder', { exact: true }),
+  ).toHaveCount(0);
+});
+
+test('@smoke restores folder focus after cancelling or completing creation', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const folder = browser.getByRole('treeitem', { name: 'empty', exact: true });
+  const open = async () => {
+    await folder.hover();
+    await browser.getByRole('button', { name: 'Options', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'New file', exact: true }).click();
+  };
+  await open();
+  const dialog = page.getByRole('dialog', { name: 'New file', exact: true });
+  await dialog.getByRole('button', { name: /^cancel$/i }).click();
+  await expect(dialog).toBeHidden();
+  await expect(folder).toBeFocused();
+  await page.route('**/file/write', (route) =>
+    route.fulfill({ status: 201, json: { path: 'empty/focus.txt' } }),
+  );
+  await open();
+  await dialog
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('focus.txt');
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(folder).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(
+    browser.getByRole('treeitem', { name: 'focus.txt', exact: true }),
+  ).toBeVisible();
+});
+
+async function openFolderDelete(
+  page: Page,
+  browser: ReturnType<Page['getByTestId']>,
+  name: string,
+) {
+  const folder = browser.getByRole('treeitem', { name, exact: true });
+  await folder.hover();
+  await browser.getByRole('button', { name: 'Options', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  return page.getByRole('alertdialog', { name: 'Delete folder?', exact: true });
+}
+
+test('@smoke confirms recursive folder deletion and preserves other expansion', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    false,
+    true,
+    true,
+  );
+  const calls: { url: string; body: unknown }[] = [];
+  await page.route('**/directory/delete', async (route) => {
+    calls.push({
+      url: new URL(route.request().url()).pathname,
+      body: route.request().postDataJSON(),
+    });
+    await route.fulfill({ json: { kind: 'directory_delete', path: 'deep' } });
+  });
+  const src = browser.getByRole('treeitem', { name: 'src', exact: true });
+  await src.click();
+  await expect(src).toHaveAttribute('aria-expanded', 'true');
+  const deep = browser.getByRole('treeitem', { name: 'deep', exact: true });
+  await deep.click();
+  await expect(
+    browser.getByRole('treeitem', { name: 'level-0', exact: true }),
+  ).toBeVisible();
+  const dialog = await openFolderDelete(page, browser, 'deep');
+  await expect(dialog).toContainText(
+    'all its contents will be permanently deleted',
+  );
+  await expect(dialog).toContainText('This action cannot be undone');
+  await expect(dialog.getByText('deep', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /^cancel$/i })).toBeFocused();
+  await expect(dialog).toHaveCSS('opacity', '1');
+  await page.screenshot({
+    path: test.info().outputPath('folder-delete-confirmation.png'),
+  });
+  await dialog.getByRole('button', { name: /^cancel$/i }).click();
+  await expect(deep).toBeFocused();
+  expect(calls).toHaveLength(0);
+  await openFolderDelete(page, browser, 'deep');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  expect(calls).toHaveLength(0);
+  await openFolderDelete(page, browser, 'deep');
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(deep).toHaveCount(0);
+  await expect(
+    browser.getByRole('treeitem', { name: 'level-0', exact: true }),
+  ).toHaveCount(0);
+  await expect(src).toHaveAttribute('aria-expanded', 'true');
+  expect(calls).toEqual([
+    {
+      url: '/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/directory/delete',
+      body: { path: 'deep' },
+    },
+  ]);
+  await page.screenshot({
+    path: test.info().outputPath('folder-delete-completed.png'),
+  });
+});
+
+test('@smoke keeps folder deletion busy and failures retryable', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    false,
+    true,
+  );
+  let release!: () => void;
+  let calls = 0;
+  await page.route('**/directory/delete', async (route) => {
+    calls++;
+    if (calls === 1) {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await route.fulfill({
+        status: 500,
+        json: { error: 'Folder could not be removed' },
+      });
+    } else await route.fulfill({ json: { path: 'empty' } });
+  });
+  const dialog = await openFolderDelete(page, browser, 'empty');
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(
+    dialog.getByRole('button', { name: 'Deleting…', exact: true }),
+  ).toBeDisabled();
+  await expect(
+    dialog.getByRole('button', { name: /^cancel$/i }),
+  ).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  expect(calls).toBe(1);
+  release();
+  await expect(dialog.getByRole('alert')).toContainText(
+    'Folder could not be removed',
+  );
+  await expect(
+    browser.getByRole('treeitem', {
+      name: 'empty',
+      exact: true,
+      includeHidden: true,
+    }),
+  ).toHaveCount(1);
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(
+    browser.getByRole('treeitem', { name: 'empty', exact: true }),
+  ).toHaveCount(0);
+  expect(calls).toBe(2);
+});
+
+test('@smoke drops a late descendant listing after folder deletion', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    false,
+    true,
+  );
+  let release!: () => void;
+  let pending = false;
+  await page.route('**/list?path=empty', async (route) => {
+    pending = true;
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await route.fulfill({
+      json: {
+        kind: 'list',
+        path: 'empty',
+        entries: [{ name: 'ghost.txt', kind: 'file', ignored: false }],
+        truncated: false,
+      },
+    });
+  });
+  await page.route('**/directory/delete', (route) =>
+    route.fulfill({ json: { path: 'empty' } }),
+  );
+  await browser.getByRole('treeitem', { name: 'empty', exact: true }).click();
+  await expect.poll(() => pending).toBe(true);
+  const dialog = await openFolderDelete(page, browser, 'empty');
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  const response = page.waitForResponse(
+    (r) => new URL(r.url()).searchParams.get('path') === 'empty',
+  );
+  release();
+  await (await response).finished();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
+  await expect(
+    browser.getByRole('treeitem', { name: 'empty', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    browser.getByRole('treeitem', { name: 'ghost.txt', exact: true }),
+  ).toHaveCount(0);
+});
+
+test('@smoke only offers folder deletion with its capability', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  await browser
+    .getByRole('treeitem', { name: 'empty', exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'Delete', exact: true }),
+  ).toHaveCount(0);
+});
+
+test('@smoke centers the initial Files loading label horizontally', async ({
+  page,
+  baseURL,
+}) => {
+  let release!: () => void;
+  await page.route('**/WorkspaceFileBrowser.tsx*', async (route) => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await route.continue();
+  });
+  await openFiles(page, baseURL!, undefined, async () => {
+    const loading = page
+      .getByRole('status')
+      .filter({ hasText: /^Loading(?:\.\.\.|…)$/ });
+    await expect(loading).toBeVisible();
+    expect(
+      await loading.evaluate((node) => getComputedStyle(node).textAlign),
+    ).toBe('center');
+    await page.screenshot({
+      path: test.info().outputPath('files-loading-centered.png'),
+    });
+    release();
+  });
+});
+
+test('@smoke closes the preview of a deleted folder descendant', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+    true,
+  );
+  await page.route('**/directory/delete', (route) =>
+    route.fulfill({ json: { path: 'src' } }),
+  );
+  const src = browser.getByRole('treeitem', { name: 'src', exact: true });
+  await src.click();
+  const filter = browser.getByRole('textbox', {
+    name: 'Filter files…',
+    exact: true,
+  });
+  await filter.fill('app.ts');
+  await browser.getByRole('treeitem', { name: 'app.ts', exact: true }).click();
+  await expect(browser.getByTestId('workspace-file-content')).toBeVisible();
+  await filter.clear();
+  const dialog = await openFolderDelete(page, browser, 'src');
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(src).toHaveCount(0);
+  await expect(browser.getByTestId('workspace-file-content')).toBeHidden();
+  await expect(browser.getByRole('separator')).toBeHidden();
 });
