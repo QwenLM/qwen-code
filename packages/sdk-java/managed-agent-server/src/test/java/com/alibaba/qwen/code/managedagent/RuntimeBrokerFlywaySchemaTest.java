@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 
 import org.assertj.core.api.SoftAssertions;
 import org.flywaydb.core.Flyway;
@@ -65,6 +67,29 @@ class RuntimeBrokerFlywaySchemaTest {
     @Test
     void brokerRepositoriesKeepTheirContractOnTheFlywaySchema() throws Exception {
         JdbcRepositoryContract.verify(migrate(dataSource(), MigrationVersion.LATEST), "flyway");
+    }
+
+    @Test
+    void canonicalRetentionIndexesPreserveTerminalReceiptsOnRepeatedInitialization() throws Exception {
+        DataSource source = migrate(dataSource(), MigrationVersion.LATEST);
+        var executions = new JdbcToolExecutionRepository(source);
+        var prepared = executions.findOrCreate(ToolExecutionRecord.prepared("retention-receipt", "retention-key",
+                "binding", 1, "harness", "runtime", "turn", "call", "digest",
+                Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+        var settled = executions.settlePrepared(prepared, Map.of("executionStatus", "success"),
+                java.time.Instant.parse("2000-01-01T00:00:00Z"));
+        JdbcRuntimeBrokerSchema.initialize(source);
+        JdbcRuntimeBrokerSchema.initialize(source);
+        assertThat(executions.findByIdempotencyKey("retention-key")).usingRecursiveComparison().isEqualTo(settled);
+        Map<String, TableShape> shape = describe(source);
+        assertThat(shape).hasSize(32);
+        assertThat(shape.get("ma_runtime_binding").indexes()).contains(
+                "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
+        assertThat(shape.get("ma_storage_owner").indexes())
+                .contains("INDEX [binding_id, runtime_generation, storage_key]");
+        assertThat(shape.get("ma_output_capture").indexes()).contains("INDEX [execution_key]");
+        assertThat(shape.get("ma_operation_work").indexes())
+                .contains("INDEX [work_kind, target_key, operation_key]");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
