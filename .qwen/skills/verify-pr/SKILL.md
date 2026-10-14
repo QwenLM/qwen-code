@@ -1041,11 +1041,16 @@ workspace roles and dropped `can_read` / `can_create`; the PR's new SQL
 still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database
 migration, also run `scripts/check-flyway-migrations.js` on the trial-merge
-tree. Fetch current `main` with
-`git fetch --depth=1 --filter=blob:none origin main` and capture
-`BASE_SHA=$(git rev-parse FETCH_HEAD)`. Run
+tree, using the branch the PR targets as the baseline, including `release/**`.
+Read it with `gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName` and set
+`BASE_REF` to that branch. Fetch it with
+`git fetch origin "refs/heads/${BASE_REF}"` and capture
+`BASE_SHA=$(git rev-parse FETCH_HEAD)`. Then run from the root of that trial-merge tree:
 `FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js <modules>`,
-using the module list `sdk-java.yml` passes it. Omitting `FLYWAY_BASE_REF`
+using the module list `sdk-java.yml` passes it.
+Those module paths are repo-root-relative. Keep the fetch full and unfiltered:
+shallow history and partial-clone configuration affect all linked worktrees.
+Omitting `FLYWAY_BASE_REF`
 checks uniqueness only; the script reports that ordering was not checked.
 The PR's own green check is only as fresh as the `main` it ran against.
 One such check finished at 13:20 UTC; another PR merged its own `V36` at 13:57.

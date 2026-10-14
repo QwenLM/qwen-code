@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const script = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -29,7 +29,10 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'check-flyway-migrations-'));
   baseRef = '';
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(root, { recursive: true, force: true });
+});
 
 // A Maven module holding the two migration locations that share one Flyway
 // version sequence: SQL under resources, BaseJavaMigration classes under the
@@ -59,8 +62,18 @@ function check(...args) {
 }
 
 function snapshot() {
+  const gitConfig = join(root, 'fixture-gitconfig');
+  writeFileSync(gitConfig, '');
   const git = (...args) =>
-    execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: gitConfig,
+      },
+    }).trim();
   git('init', '-q');
   git('add', '.');
   git(
@@ -156,6 +169,35 @@ describe('check-flyway-migrations', () => {
     snapshot();
     module('server', { java: ['V1__first.java'] });
     expect(check('server').status).toBe(0);
+  });
+
+  it('ordering rejects a baseline with no files under the requested modules', () => {
+    writeFileSync(join(root, 'README.md'), '');
+    snapshot();
+    module('server', { sql: ['V1__first.sql'] });
+    module('broker', { java: ['V2__first.java'] });
+    const result = check('server', 'broker');
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('has no files under');
+    expect(result.output).toContain('server');
+    expect(result.output).toContain('broker');
+    expect(result.output).not.toContain('all versions unique');
+  });
+
+  it('ordering fixtures ignore ambient Git signing configuration', () => {
+    const gitConfig = join(root, 'ambient-gitconfig');
+    writeFileSync(
+      gitConfig,
+      '[commit]\n  gpgsign = true\n[gpg]\n  program = missing-flyway-test-signer\n',
+    );
+    vi.stubEnv('GIT_CONFIG_GLOBAL', gitConfig);
+    module('server', { sql: ['V1__historical.sql'] });
+    module('broker', { java: ['V64__published.java'] });
+    snapshot();
+    module('server', { sql: ['V58__new.sql'] });
+    const result = check('server', 'broker');
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('V58 is not above V64 (newest on base)');
   });
 
   it('passes when every version is claimed once across both locations', () => {

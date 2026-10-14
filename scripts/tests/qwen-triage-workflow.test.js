@@ -4893,6 +4893,14 @@ describe('qwen-triage verify hardening round 2', () => {
       'FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js',
     );
     expect(flat).toContain('checks uniqueness only');
+    expect(flat).toContain('run from the root of that trial-merge tree');
+    expect(flat).toContain('the branch the PR targets');
+    expect(flat).toContain(
+      'gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName',
+    );
+    const fetchCommand = verifySkill.match(/`git fetch [^`]+`/)?.[0];
+    expect(fetchCommand).toContain('origin "refs/heads/${BASE_REF}"');
+    expect(fetchCommand).not.toMatch(/--depth(?:=|\s)|--filter(?:=|\s)/);
     expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
       'node scripts/check-flyway-migrations.js packages/sdk-java/',
     );

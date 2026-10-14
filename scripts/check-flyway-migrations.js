@@ -200,21 +200,31 @@ if (baseRef) {
         .split(path.sep)
         .join('/') || '.',
   );
-  let baseFiles;
+  let baseEntries;
   try {
-    baseFiles = execFileSync(
+    baseEntries = execFileSync(
       'git',
       ['ls-tree', '-r', '--name-only', '-z', baseRef, '--', ...relativeModules],
       { encoding: 'utf8' },
     )
       .split('\0')
-      .filter((file) => isMigrationPath(relativeModules, file));
+      .filter(Boolean);
   } catch {
     console.error(
       `::error::could not read migration baseline ${boundWorkflowPath(baseRef)}`,
     );
     process.exit(1);
   }
+  if (baseEntries.length === 0) {
+    console.error(
+      `::error::baseline ${boundWorkflowPath(baseRef)} has no files under ` +
+        `${relativeModules.map(boundWorkflowPath).join(', ')}; ordering not enforced`,
+    );
+    process.exit(1);
+  }
+  const baseFiles = baseEntries.filter((file) =>
+    isMigrationPath(relativeModules, file),
+  );
   const onBase = new Set(baseFiles.map((file) => path.resolve(file)));
   const newestVersion = baseFiles
     .map((file) => migrationVersion(path.posix.basename(file)))
