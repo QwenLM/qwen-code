@@ -5126,6 +5126,59 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('model.allowedBaseUrls scope handling', () => {
+    it('should let the system-scope allowlist win over a user-scope list', () => {
+      const systemSettingsPath = '/mock/system/settings.json';
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
+      try {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                model: {
+                  allowedBaseUrls: [
+                    'https://user-llm.example/v1',
+                    'https://external-llm.example/v1',
+                  ],
+                },
+              });
+            if (p === systemSettingsPath)
+              return JSON.stringify({
+                model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.model?.allowedBaseUrls).toEqual([
+          'https://corp-llm.example/v1',
+        ]);
+      } finally {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      }
+    });
+
+    it('should apply a user-scope allowlist when the system scope defines none', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { allowedBaseUrls: ['https://my-gateway.example/v1'] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.allowedBaseUrls).toEqual([
+        'https://my-gateway.example/v1',
+      ]);
+    });
+  });
+
   describe('getSystemHooks', () => {
     const hook = (command: string) => [
       { hooks: [{ type: 'command', command }] },

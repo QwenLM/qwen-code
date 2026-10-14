@@ -1588,6 +1588,12 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`). Only models whose
+   * resolved baseUrl matches an entry register; `undefined` disables the
+   * filter.
+   */
+  allowedModelBaseUrls?: readonly string[];
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2871,6 +2877,7 @@ export class Config {
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
+  private readonly allowedModelBaseUrls?: readonly string[];
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -3615,6 +3622,7 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
     this.providerProtocolConfig = params.providerProtocolConfig;
+    this.allowedModelBaseUrls = params.allowedModelBaseUrls;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -3758,6 +3766,7 @@ export class Config {
       initialAuthType: this.initialAuthType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
+      allowedModelBaseUrls: this.allowedModelBaseUrls,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -5738,14 +5747,18 @@ export class Config {
    * @param modelProvidersConfig - The updated model providers configuration
    * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
    *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
+   * @param allowedModelBaseUrls - Updated managed endpoint allowlist;
+   *   `undefined` preserves the existing policy (boot-frozen).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    allowedModelBaseUrls?: readonly string[],
   ): void {
     this.modelsConfig.reloadModelProvidersConfig(
       modelProvidersConfig,
       providerProtocolConfig,
+      allowedModelBaseUrls,
     );
     this.captureLatestReasoning();
     this.baseLlmClient?.clearPerModelGeneratorCache();

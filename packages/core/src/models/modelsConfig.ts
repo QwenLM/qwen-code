@@ -64,6 +64,13 @@ export interface ModelsConfigOptions {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType). */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`). When an array is
+   * provided (including an empty one), only models whose resolved baseUrl
+   * matches an entry register; `undefined` keeps today's unfiltered
+   * behavior. See {@link ModelRegistry}.
+   */
+  allowedModelBaseUrls?: readonly string[];
   /** Generation config from CLI/settings */
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
@@ -163,6 +170,7 @@ export class ModelsConfig {
     this.modelRegistry = new ModelRegistry(
       options.modelProvidersConfig,
       options.providerProtocolConfig,
+      options.allowedModelBaseUrls,
     );
     this.onModelChange = options.onModelChange;
 
@@ -1501,14 +1509,18 @@ export class ModelsConfig {
    * @param modelProvidersConfig - The updated model providers configuration
    * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
    *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
+   * @param allowedModelBaseUrls - Updated managed endpoint allowlist;
+   *   `undefined` preserves the existing policy (boot-frozen).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    allowedModelBaseUrls?: readonly string[],
   ): void {
     this.modelRegistry.reloadModels(
       modelProvidersConfig,
       providerProtocolConfig,
+      allowedModelBaseUrls,
     );
   }
 

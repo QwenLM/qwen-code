@@ -2425,6 +2425,11 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
   const providerProtocolConfig = settings.providerProtocol;
+  // Managed endpoint allowlist. The merge gives the system scope senior
+  // priority, so a system-defined list cannot be overridden or widened by
+  // user/workspace settings; a lower-scope list applies only when the
+  // system scope defines none (self-restriction).
+  const allowedModelBaseUrls = settings.model?.allowedBaseUrls;
   const restoreSessionId = sessionId;
   const boundSessionRestoreProjectionSource =
     sessionRestoreProjectionSource && restoreSessionId
@@ -2761,6 +2766,7 @@ export async function loadCliConfig(
     includePartialMessages,
     modelProvidersConfig,
     providerProtocolConfig,
+    allowedModelBaseUrls,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,

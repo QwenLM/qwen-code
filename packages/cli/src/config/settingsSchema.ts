@@ -1776,6 +1776,17 @@ const SETTINGS_SCHEMA = {
           'Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.',
         showInDialog: false,
       },
+      allowedBaseUrls: {
+        type: 'array',
+        label: 'Allowed Model Base URLs',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        items: { type: 'string' },
+        description:
+          'Managed allowlist of model endpoint base URLs. When set, only models whose resolved baseUrl matches an entry — exactly, or under it across a path boundary (so https://corp.example also covers https://corp.example/v1, but not https://corp.example.evil.com) — register for any provider, built-in or custom. Matching is case-insensitive and ignores trailing slashes. A model without an explicit baseUrl is checked against its protocol default endpoint, so omitting that default from the list blocks such models; an empty list registers no models at all. The system scope takes precedence, so a system-defined list cannot be overridden or widened by user or workspace settings; a lower scope may define its own list only when the system scope defines none. Changes take effect after restart.',
+        showInDialog: false,
+      },
       reasoningEffort: {
         type: 'enum',
         label: 'Reasoning Effort',

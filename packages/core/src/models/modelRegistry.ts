@@ -127,6 +127,38 @@ export function validateModelProvidersConfig(
   }
 }
 
+/**
+ * Normalize a base URL for allowlist comparison: trim whitespace and
+ * trailing slashes, then lowercase (hostnames are case-insensitive).
+ */
+function normalizeBaseUrlForMatch(url: string): string {
+  return url.trim().replace(/\/+$/, '').toLowerCase();
+}
+
+/**
+ * Decide whether a resolved model baseUrl passes a managed allowlist.
+ *
+ * A baseUrl passes when it equals an entry or extends one across a path
+ * boundary: `https://corp.example` matches `https://corp.example/v1` but
+ * not `https://corp.example.evil.com`. An empty or missing baseUrl never
+ * passes — fail closed, so a model whose protocol default endpoint is
+ * external cannot slip through an allowlist that omits it.
+ */
+export function isBaseUrlAllowed(
+  baseUrl: string | undefined,
+  allowedBaseUrls: readonly string[],
+): boolean {
+  if (typeof baseUrl !== 'string') return false;
+  const target = normalizeBaseUrlForMatch(baseUrl);
+  if (target.length === 0) return false;
+  return allowedBaseUrls.some((entry) => {
+    if (typeof entry !== 'string') return false;
+    const allowed = normalizeBaseUrlForMatch(entry);
+    if (allowed.length === 0) return false;
+    return target === allowed || target.startsWith(`${allowed}/`);
+  });
+}
+
 /** Resolve the startup wire, including checks before persisting a selection. */
 export function resolveModelSelectionAuthType(
   authType: AuthType,
@@ -203,6 +235,14 @@ export class ModelRegistry {
   /** Raw providers config this registry was last built from. */
   private modelProvidersConfig?: ModelProvidersConfig;
 
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`). `undefined` means
+   * no policy — every model registers as before. Any array, including an
+   * empty one, filters: a model registers only when its resolved baseUrl
+   * matches an entry (see {@link isBaseUrlAllowed}).
+   */
+  private allowedModelBaseUrls?: readonly string[];
+
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
@@ -217,14 +257,24 @@ export class ModelRegistry {
   constructor(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    allowedModelBaseUrls?: readonly string[],
   ) {
     validateModelProvidersConfig(modelProvidersConfig, providerProtocolConfig);
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelProvidersConfig = modelProvidersConfig;
+    this.allowedModelBaseUrls = allowedModelBaseUrls;
 
-    // Always register qwen-oauth models (hard-coded, cannot be overridden)
-    this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    // Register the hard-coded qwen-oauth models unless the providers config
+    // pins the qwen-oauth list explicitly empty — an empty list is an
+    // operator signal to disable the built-in provider, not "unconfigured"
+    // (a missing key keeps the built-ins, preserving today's default).
+    const qwenOAuthModels = modelProvidersConfig?.[AuthType.QWEN_OAUTH];
+    const qwenOAuthListedEmpty =
+      Array.isArray(qwenOAuthModels) && qwenOAuthModels.length === 0;
+    if (!qwenOAuthListedEmpty) {
+      this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    }
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
@@ -323,6 +373,23 @@ export class ModelRegistry {
         config,
         providerId ? this.providerProtocolConfig : undefined,
       )!;
+      // Managed endpoint allowlist: a model only registers when its resolved
+      // baseUrl (explicit, or the protocol default) is on the list. An
+      // `undefined` allowlist keeps today's behavior; an empty list blocks
+      // everything, including protocol-default endpoints.
+      const resolvedBaseUrl =
+        config.baseUrl || this.getDefaultBaseUrl(modelAuthType);
+      if (
+        this.allowedModelBaseUrls !== undefined &&
+        !isBaseUrlAllowed(resolvedBaseUrl, this.allowedModelBaseUrls)
+      ) {
+        debugLogger.warn(
+          `Model "${config.id}" for protocol "${modelAuthType}" (resolved ` +
+            `baseUrl "${resolvedBaseUrl}") is not in the ` +
+            `model.allowedBaseUrls allowlist; not registered.`,
+        );
+        continue;
+      }
       const modelMap =
         this.modelsByAuthType.get(modelAuthType) ??
         new Map<string, ResolvedModelConfig>();
@@ -497,25 +564,32 @@ export class ModelRegistry {
   /**
    * Reload models from updated configuration.
    * Clears existing user-configured models and re-registers from new config.
-   * Preserves hard-coded qwen-oauth models.
+   * Preserves hard-coded qwen-oauth models unless the new config pins an
+   * explicit empty list.
    *
    * @param providerProtocolConfig - Updated provider->protocol map. `undefined`
    *   PRESERVES the existing map (so a reload carrying only modelProviders does
    *   not lose the mapping); any object value REPLACES it, so passing `{}`
    *   clears the mapping. Callers that want to preserve must omit the argument,
    *   not pass `settings.providerProtocol ?? {}`.
+   * @param allowedModelBaseUrls - Updated managed endpoint allowlist.
+   *   `undefined` PRESERVES the existing policy (boot-frozen, like
+   *   providerProtocol); any array value REPLACES it.
    */
   reloadModels(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    allowedModelBaseUrls?: readonly string[],
   ): void {
     const reloaded = new ModelRegistry(
       modelProvidersConfig,
       providerProtocolConfig ?? this.providerProtocolConfig,
+      allowedModelBaseUrls ?? this.allowedModelBaseUrls,
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
+    this.allowedModelBaseUrls = reloaded.allowedModelBaseUrls;
   }
 
   /** The raw providers config this registry was last built from. */
