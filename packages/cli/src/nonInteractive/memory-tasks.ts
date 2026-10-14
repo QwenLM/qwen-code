@@ -15,6 +15,7 @@ export async function waitForPendingMemoryTasks(
     'getPendingMemoryTaskPromises' | 'removePendingMemoryTaskPromises'
   >,
   signal: AbortSignal,
+  memoryWaitStopSignal?: AbortSignal,
 ): Promise<void> {
   const promises = client.getPendingMemoryTaskPromises();
   if (promises.length === 0) return;
@@ -33,20 +34,24 @@ export async function waitForPendingMemoryTasks(
     ),
   );
   let stopWaiting!: () => void;
-  const aborted = new Promise<void>((resolve) => {
+  const stopped = new Promise<void>((resolve) => {
     stopWaiting = resolve;
   });
   signal.addEventListener('abort', stopWaiting, { once: true });
+  memoryWaitStopSignal?.addEventListener('abort', stopWaiting, { once: true });
   try {
-    if (!signal.aborted) {
+    if (signal.aborted || memoryWaitStopSignal?.aborted) {
+      stopWaiting();
+    } else {
       debugLogger.debug(
         `[runNonInteractive] Waiting for ${promises.length} tracked memory task(s)`,
       );
-      await Promise.race([settled, aborted]);
     }
+    await Promise.race([settled, stopped]);
   } finally {
     signal.removeEventListener('abort', stopWaiting);
-    // A cancelled waiter leaves unfinished tasks available to the next owner.
+    memoryWaitStopSignal?.removeEventListener('abort', stopWaiting);
+    // Stopping a wait does not cancel its unfinished tasks.
     client.removePendingMemoryTaskPromises(
       promises.filter((promise) => !pending.has(promise)),
     );
@@ -56,6 +61,12 @@ export async function waitForPendingMemoryTasks(
       '[runNonInteractive] Abandoned memory wait after abort; tasks may still be running',
     );
     signal.throwIfAborted();
+  }
+  if (pending.size > 0 && memoryWaitStopSignal?.aborted) {
+    debugLogger.debug(
+      `[runNonInteractive] Stopped waiting at the session EOF deadline; ${pending.size} tracked memory task(s) may still be running`,
+    );
+    return;
   }
   debugLogger.debug('[runNonInteractive] Tracked memory tasks settled');
 }

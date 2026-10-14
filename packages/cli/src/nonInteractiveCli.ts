@@ -466,6 +466,8 @@ export interface RunNonInteractiveOptions {
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
+  /** Stop memory waiting at the session EOF deadline without cancelling a turn. */
+  memoryWaitStopSignal?: AbortSignal;
   /**
    * Emit a terminal result and return from this turn when its controller is
    * aborted with {@link TurnInterruptedError}, instead of exiting the process.
@@ -613,7 +615,11 @@ export async function runNonInteractive(
       return chatRecordingSettlement;
     };
     const drainPendingMemoryTasks = (): Promise<void> =>
-      waitForPendingMemoryTasks(config.getLlmClient(), abortController.signal);
+      waitForPendingMemoryTasks(
+        config.getLlmClient(),
+        abortController.signal,
+        options.memoryWaitStopSignal,
+      );
     let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
