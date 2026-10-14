@@ -262,12 +262,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (35 + 9x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (45 + 9x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(195);
+    expect(summed).toBe(205);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(210);
+    expect(job['timeout-minutes']).toBe(220);
   });
 
   it.each([
@@ -374,19 +374,25 @@ describe('Hosted real-process gates', () => {
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
       );
-      // The hosted fork bump was deliberate (FG7a,b,d–f plus the FG7c crash
-      // class, ~150 s of wall clock at 2x headroom): the relational check
-      // above tolerates anything up to step*60, so the value is pinned
-      // literally here — an unnoticed raise has no other red to land on.
+      // The hosted fork bumps were deliberate (FG7a,b,d–f plus the FG7c
+      // crash class, ~150 s of wall clock at 2x headroom; then the L4
+      // recovery class's four real-process cuts, ~300 s more the FG7
+      // sizing never covered — #14125's per-commit kill): the relational
+      // check above tolerates anything up to step*60, so the value is
+      // pinned literally here — an unnoticed raise has no other red to
+      // land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1200);
+        expect(forkSeconds).toBe(1800);
       }
     },
   );
 
-  // Retain the conservative 650s healthy-run allowance when checking each
-  // class's timeout ceilings. Isolated forks remove time spent in earlier
-  // classes; a stalled class must still report before its fork is killed.
+  // The Hosted*IT classes share one failsafe fork, so a case stalled to its
+  // @Timeout must still leave the fork its healthy runtime: on main the
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
+  // the fork itself ~14s, so 650s covers them. A larger ceiling lets
+  // failsafe kill the fork mid-run, and the classes left unrun never report,
+  // failing the gate undiagnosably (#13780).
   const hostedForkHealthySeconds = 650;
   const hostedForkSeconds = () =>
     Number(
@@ -413,7 +419,7 @@ describe('Hosted real-process gates', () => {
       Number(m[1]),
     );
 
-  it('keeps the HostedHarnessMySqlIT ceilings inside the class fork budget', () => {
+  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
     const ceilings = ceilingsOf(hostedTestSource('HostedHarnessMySqlIT'));
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
@@ -423,7 +429,7 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the class fork budget', () => {
+  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
     const source = hostedTestSource('HostedTeamLeadMySqlIT');
     const cases = [
       ...source.matchAll(
@@ -447,10 +453,11 @@ describe('Hosted real-process gates', () => {
     );
   });
 
-  // Retain explicit Spring context cleanup even with isolated class forks.
-  // Recovery scans cover every tenant in the shared MySQL schema, so they
-  // must stop during class teardown. No context is inherited from a base
-  // class or a meta-annotation here.
+  // The Hosted*IT classes share one fork, and Spring caches a test context
+  // for the rest of it. A Managed Agent context's recovery scans cover
+  // every tenant of its schema, so one left open on the shared MySQL schema
+  // claims the work of the classes that run after it. A context inherited
+  // from a base class or a meta-annotation is not seen here; none exists.
   it('closes the Spring test context each Hosted IT class declares', () => {
     const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
     const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
