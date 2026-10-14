@@ -8,7 +8,7 @@ Status: implemented in this change, with the follow-up to its review deferrals (
 
 Issue #13753 asks of I2: "The relay creates a `worktree` child in its own Workspace; the close and settle paths run the merge policy; `MANAGED_CHILD_ADMITTED_WORKSPACE_MODES` admits `worktree`." Its exit check: "A worktree child's writes do not appear in the parent's tree until its merge policy runs, and a cancelled child's worktree is discarded."
 
-I1 delivered the capability with no caller. This change wires the one producer, the hosted Agent tool, through the child agent pipeline H4b built. `workflow` stays disabled (H4c decisions 5 and 6): the relay and the cascade still act on `child_agent` runs only, so admitting `worktree` changes nothing for workflows until their runtime slice widens both.
+I1 delivered the capability with no caller. This change wires the one producer, the hosted Agent tool, through the child agent pipeline H4b built. `workflow` stays disabled (H4c decisions 5 and 6): the relay and the cascade still act on `child_agent` runs only, so admitting `worktree` changes nothing for workflows until their runtime slice widens both. _(Superseded by the [workflow runtime slice](2026-10-10-managed-workflow-child-runtime.md), which enables `workflow` and widens the relay and the cascade to it; a workflow launch is still admitted with `workspaceMode: shared` only, so `worktree` stays a child agent capability.)_
 
 ## Current state
 
@@ -62,7 +62,7 @@ The facts below are from `main` at `1136a51a68`.
 ## Non-goals
 
 - `snapshot`, and the serialization decision (I3).
-- `workflow` children: the kind stays disabled; its runtime slice widens the relay and the cascade.
+- `workflow` children: the kind stays disabled; its runtime slice widens the relay and the cascade. _(Superseded: the runtime slice enables the kind and widens both; workflow launches are `shared` only.)_
 - A hosted producer of continuations (H4d). A continuation keeps its predecessor's mode, so a continued `worktree` run would prepare a Workspace of its own from the parent's tree as it then is.
 - Choosing a merge strategy per launch, resolving conflicts automatically, or committing the merged changes for the parent.
 - Concurrency between parent and child: one storage lease still serializes their tool turns (I1 decision 1).
@@ -95,7 +95,7 @@ The facts below are from `main` at `1136a51a68`.
 - A `worktree` child's writes do not appear in the parent's tree until its merge runs; a completed child's merge lands as uncommitted changes before the parent sees the result, and a conflict reaches the parent's model with its paths and the ref that keeps the child's work.
 - A failed or cancelled `worktree` child's worktree is discarded, and a parent's close never waits for that discard.
 - A host without child Workspaces refuses `isolation: "worktree"` before anything commits.
-- `shared` children behave exactly as before, and `workflow` stays disabled.
+- `shared` children behave exactly as before, and `workflow` stays disabled _(superseded: the workflow runtime slice enables it, `shared` only)_.
 
 ## Follow-up to the review deferrals
 

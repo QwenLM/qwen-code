@@ -58,14 +58,16 @@ if (modules.length === 0) {
 // location whose files moved while its sibling stayed populated.
 const outOfPlaceFiles = (module, location) => {
   const sourceRoot = path.join(module, ...location.dir.slice(0, -2));
-  const configured = path.join(module, ...location.dir);
+  const configured = LOCATIONS.filter(
+    (entry) => entry.suffix === location.suffix,
+  ).map((entry) => path.join(module, ...entry.dir));
   const found = [];
   const walk = (dir) => {
     if (!existsSync(dir)) return;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (file !== configured) walk(file);
+        if (!configured.includes(file)) walk(file);
       } else if (isMigrationFile(entry.name, location.suffix)) {
         found.push(file);
       }
@@ -78,7 +80,7 @@ const outOfPlaceFiles = (module, location) => {
 // A db/migration* sibling under the location's OWN db root — including an
 // emptied rename such as db/migrations — marks the location as moved even
 // when nothing migration-shaped survives anywhere. A module with no such
-// directory at all (runtime-broker today) simply has no sequence to check,
+// directory at all simply has no sequence to check,
 // which is what lets one invocation cover every module that shares the
 // classpath namespace below.
 const hasMigrationDir = (module, location) => {
@@ -114,6 +116,7 @@ for (const module of modules) {
   }
   let errored = false;
   let count = 0;
+  const probedRoots = new Set();
   for (const location of LOCATIONS) {
     const files = migrationFiles(
       path.join(module, ...location.dir),
@@ -122,7 +125,11 @@ for (const module of modules) {
     // Out-of-place files must not join the claimants: invisible to Flyway,
     // they cannot collide at runtime — they are the moved location's error,
     // not a second claimant for their version.
-    const misplaced = outOfPlaceFiles(module, location);
+    const rootKey = `${location.dir.slice(0, -2).join('/')}:${location.suffix}`;
+    const misplaced = probedRoots.has(rootKey)
+      ? []
+      : outOfPlaceFiles(module, location);
+    probedRoots.add(rootKey);
     if (misplaced.length > 0 && files.length > 0) {
       // The location IS populated, so nothing moved: a stray file sits
       // outside the only place Flyway scans. Say that — claiming the

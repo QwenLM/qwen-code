@@ -37,6 +37,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
 });
 
 import { ManagedAgentWebShell } from './ManagedAgentWebShell';
+import shellStyles from './App.module.css';
 import { artifact } from './components/managed/managed-tool-result.test-fixtures';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 
@@ -86,6 +87,28 @@ describe('ManagedAgentWebShell', () => {
     expect(props.sessionId).toBe('session-1');
   });
 
+  it('scopes the standalone root with the shell frame and theme classes', async () => {
+    for (const [theme, themeClass] of [
+      ['dark', shellStyles.themeDark],
+      ['light', shellStyles.themeLight],
+    ] as const) {
+      await act(async () => {
+        root.render(
+          <ManagedAgentWebShell
+            baseUrl="https://product.example"
+            theme={theme}
+          />,
+        );
+      });
+      const classes = container.querySelector(
+        '[data-web-shell-root]',
+      )!.classList;
+      expect(shellStyles.app).toBeTruthy();
+      expect(classes.contains(shellStyles.app)).toBe(true);
+      expect(classes.contains(themeClass)).toBe(true);
+    }
+  });
+
   it('does not pass the previous identity Session ID to a new provider', async () => {
     await act(async () => {
       root.render(
@@ -93,10 +116,15 @@ describe('ManagedAgentWebShell', () => {
           baseUrl="https://product.example"
           productScope="tenant-a:actor-a"
           enableWorkspaceBinding
+          modelPresets={[{ agentId: 'agent-a', label: 'Model A' }]}
           sessionId="old-session"
         />,
       );
     });
+    expect(
+      (captured.props as { managedAgentProvider: ManagedAgentProvider })
+        .managedAgentProvider.workspaceBinding?.modelPresets,
+    ).toEqual([{ agentId: 'agent-a', label: 'Model A' }]);
     await act(async () => {
       root.render(
         <ManagedAgentWebShell

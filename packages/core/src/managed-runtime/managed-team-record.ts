@@ -114,7 +114,7 @@ export interface TeamMessage {
 /** The body of a `managed-team_plan` schema version 1 record. */
 export interface TeamPlan {
   readonly teamId: string;
-  /** The D6 action that asks the leader to decide. */
+  /** The member's plan_submit command id, not a D6 Action. */
   readonly requestId: string;
   readonly member: string;
   readonly planRevision: number;

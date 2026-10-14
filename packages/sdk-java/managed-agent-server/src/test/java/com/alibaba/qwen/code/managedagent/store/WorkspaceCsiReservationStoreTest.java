@@ -28,7 +28,6 @@ import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,12 +43,16 @@ class WorkspaceCsiReservationStoreTest {
 
     @BeforeEach
     void setUp() {
-        source = new DriverManagerDataSource("jdbc:h2:mem:k2-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
-        jdbc = new JdbcTemplate(source);
+        source = dataSource();
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
         store = store(source);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test-key", new byte[32]));
+    }
+
+    protected DriverManagerDataSource dataSource() {
+        return new DriverManagerDataSource("jdbc:h2:mem:k2-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
     }
 
     @Test
@@ -57,16 +60,16 @@ class WorkspaceCsiReservationStoreTest {
         var first = registration("tenant", "storage", "backend", "opaque-handle", 1);
         var alias = registration("other-tenant", "other-storage", "backend", "opaque-handle", 7);
         store.register(first);
-        Map<String, Object> original = jdbc.queryForMap("SELECT * FROM managed_workspace_csi_registration");
+        Map<String, Object> original = jdbc.queryForMap("SELECT * FROM ma_storage");
         store(source).register(first);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_csi_registration")).isEqualTo(original);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage")).isEqualTo(original);
         assertUnavailable(() -> store.register(registration("tenant", "storage", "backend", "replacement", 1)));
         assertUnavailable(() -> store.register(registration("tenant", "storage", "backend", "opaque-handle", 2)));
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_csi_registration")).isEqualTo(original);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage")).isEqualTo(original);
         store.register(alias);
         assertThat(alias.aliasKey()).isNotEqualTo(first.aliasKey());
         assertThat(alias.physicalKey()).isEqualTo(first.physicalKey());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
         assertThat(store(source).inspect(first).phase()).isEqualTo("RELEASED");
     }
 
@@ -86,25 +89,21 @@ class WorkspaceCsiReservationStoreTest {
     void corruptedRegistrationRefusesAdmissionWithoutMutatingOwnership() {
         var registration = registration("tenant", "storage", "backend", "sensitive-handle", 1);
         store.register(registration);
-        Map<String, Object> original = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        Map<String, Object> original = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         for (String change : new String[] {"registration_revision = 2", "physical_key = 'wrong'",
                 "tenant_id = 'wrong'", "registration_json = '{}'"}) {
-            var row = jdbc.queryForMap("SELECT * FROM managed_workspace_csi_registration");
-            jdbc.update("UPDATE managed_workspace_csi_registration SET " + change);
+            jdbc.update("UPDATE ma_storage SET " + change);
             assertUnavailable(() -> store.inspect(registration));
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(original);
-            jdbc.update("DELETE FROM managed_workspace_csi_registration");
-            jdbc.update("INSERT INTO managed_workspace_csi_registration"
-                    + " (alias_key, tenant_id, storage_id, physical_key, registration_revision, registration_json)"
-                    + " VALUES (?, ?, ?, ?, ?, ?)", row.get("alias_key"), row.get("tenant_id"), row.get("storage_id"),
-                    row.get("physical_key"), row.get("registration_revision"), row.get("registration_json"));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(original);
+            jdbc.update("DELETE FROM ma_storage");
+            store.register(registration);
         }
-        String encoded = jdbc.queryForObject("SELECT registration_json FROM managed_workspace_csi_registration", String.class);
+        String encoded = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
         for (String corrupt : new String[] {encoded + " {}", encoded.substring(0, encoded.length() - 1) + ",\"extra\":true}",
                 "{\"tenantId\":\"wrong\"," + encoded.substring(1)}) {
-            jdbc.update("UPDATE managed_workspace_csi_registration SET registration_json = ?", corrupt);
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", corrupt);
             assertUnavailable(() -> store.inspect(registration));
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(original);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(original);
         }
     }
 
@@ -123,13 +122,13 @@ class WorkspaceCsiReservationStoreTest {
         assertThat(reserved.provisionRequestId()).isEqualTo(binding.getProvisionSeed().getProvisionRequestId());
         assertThat(store(source).reserve(first, bindings, binding, reservationId)).isEqualTo(reserved);
         var competing = binding(alias, "different-workspace", "different-session");
-        var rows = jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease");
+        var rows = jdbc.queryForList("SELECT * FROM ma_storage_owner");
         assertThatThrownBy(() -> store.reserve(alias, bindings, competing, UUID.randomUUID().toString()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_csi_busy");
                     assertThat(error.isRetryable()).isTrue();
                 });
-        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(rows);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner")).isEqualTo(rows);
     }
 
     @Test
@@ -144,9 +143,9 @@ class WorkspaceCsiReservationStoreTest {
         assertThat(renewed.getOperationLeaseUntil()).isAfter(original.getOperationLeaseUntil());
         String reservationId = UUID.randomUUID().toString();
         var reserved = store.reserve(registration, bindings, original, reservationId);
-        var before = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var before = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         assertThat(store.reserve(registration, bindings, original, reservationId)).isEqualTo(reserved);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(before);
     }
 
     @Test
@@ -156,19 +155,19 @@ class WorkspaceCsiReservationStoreTest {
         var original = binding(registration, "workspace", "session");
         String reservationId = UUID.randomUUID().toString();
         var reserved = store.reserve(registration, bindings, original, reservationId);
-        var before = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var before = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         for (String change : new String[] {"operation_owner = 'another'",
                 "operation_generation = operation_generation + 1", "operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'",
                 "runtime_generation = runtime_generation + 1", "workspace_generation = '2'",
                 "provision_request_id = 'changed'", "drain_requested = TRUE", "binding_state = 'READY'"}) {
-            var snapshot = jdbc.queryForMap("SELECT * FROM qwen_runtime_binding WHERE binding_id = ?", original.getBindingId());
-            jdbc.update("UPDATE qwen_runtime_binding SET " + change + " WHERE binding_id = ?", original.getBindingId());
+            var snapshot = jdbc.queryForMap("SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
+            jdbc.update("UPDATE ma_runtime_binding SET " + change + " WHERE binding_id = ?", original.getBindingId());
             assertUnavailable(() -> store.reserve(registration, bindings, original, reservationId));
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(before);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(before);
             for (String field : new String[] {"record_version", "operation_owner", "operation_generation",
                     "operation_lease_until", "runtime_generation", "workspace_generation", "provision_request_id",
                     "drain_requested", "binding_state"}) {
-                jdbc.update("UPDATE qwen_runtime_binding SET " + field + " = ? WHERE binding_id = ?",
+                jdbc.update("UPDATE ma_runtime_binding SET " + field + " = ? WHERE binding_id = ?",
                         snapshot.get(field), original.getBindingId());
             }
         }
@@ -183,7 +182,7 @@ class WorkspaceCsiReservationStoreTest {
         store.register(alias);
         var firstBinding = binding(first, "workspace", "first-session");
         var secondBinding = binding(alias, "workspace", "second-session");
-        var secondSource = new DriverManagerDataSource(source.getUrl(), "sa", "");
+        var secondSource = new DriverManagerDataSource(source.getUrl(), source.getUsername(), source.getPassword());
         var barrier = new CyclicBarrier(2);
         try (var executor = Executors.newFixedThreadPool(2)) {
             var one = executor.submit(() -> contend(store, bindings, first, firstBinding, barrier));
@@ -191,7 +190,7 @@ class WorkspaceCsiReservationStoreTest {
                     new AesGcmSecretProtector("test-key", new byte[32])), alias, secondBinding, barrier));
             assertThat(one.get(10, TimeUnit.SECONDS) + two.get(10, TimeUnit.SECONDS)).isEqualTo(1);
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner"
                 + " WHERE csi_phase = 'RESERVED'", Integer.class)).isEqualTo(1);
     }
 
@@ -203,14 +202,14 @@ class WorkspaceCsiReservationStoreTest {
         var local = new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source));
         var session = localSession(context);
         var original = bindings.findById(session.getBindingId());
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Long.class)).isZero();
         store.register(registration);
         var other = registration("other", "other-storage", "backend", "handle", 1);
         store.register(other);
         var csiBinding = binding(other, "other-workspace", "other-session");
         store.reserve(other, bindings, csiBinding, UUID.randomUUID().toString());
-        var registrationRows = jdbc.queryForList("SELECT * FROM managed_workspace_csi_registration ORDER BY alias_key");
-        var csiOwner = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var registrationRows = jdbc.queryForList("SELECT * FROM ma_storage ORDER BY alias_key");
+        var csiOwner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         assertThat(csiOwner.get("csi_phase")).isEqualTo("RESERVED");
         var seed = original.getProvisionSeed();
         var loss = new RuntimeRecoveryEvidence(UUID.randomUUID().toString(),
@@ -235,13 +234,13 @@ class WorkspaceCsiReservationStoreTest {
         var released = bindings.finishLostRecovery(sessions, executions, drained);
         assertThat(released.getState()).isEqualTo(RuntimeBindingRecord.State.RELEASED);
         assertThat(bindings.findById(original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.RELEASED);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(csiOwner);
-        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_csi_registration ORDER BY alias_key"))
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(csiOwner);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_storage ORDER BY alias_key"))
                 .isEqualTo(registrationRows);
         assertThatThrownBy(() -> local.claim(context, session)).isInstanceOfSatisfying(RuntimeBrokerException.class,
                 error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> local.isHeld(context, session)).isInstanceOf(RuntimeBrokerException.class);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(csiOwner);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(csiOwner);
     }
 
     @Test
@@ -250,27 +249,29 @@ class WorkspaceCsiReservationStoreTest {
         var context = new ContextBinding("tenant", "workspace", 1, "storage", ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         var local = new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source));
+        WorkspaceTestStorage.register(jdbc, context.getTenantId(), context.getStorageId());
         var session = localSession(context);
         local.claim(context, session);
-        var original = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var original = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         assertUnavailable(() -> store.register(registration));
         local.assertHeld(context, session);
-        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(original);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(original);
         local.release(context, session);
         assertUnavailable(() -> store.register(registration));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_registration", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE storage_kind = 'CSI'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE storage_kind = 'LOCAL'", Integer.class)).isEqualTo(1);
 
         var csi = registration("other", "alias", "backend", "handle", 1);
         store.register(csi);
         var otherContext = new ContextBinding("other", "workspace", 1, "alias", ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         var otherSession = localSession(otherContext);
-        var before = jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease");
+        var before = jdbc.queryForList("SELECT * FROM ma_storage_owner");
         assertThatThrownBy(() -> local.claim(otherContext, otherSession))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
                         error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThatThrownBy(() -> local.isHeld(otherContext, otherSession)).isInstanceOf(RuntimeBrokerException.class);
-        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner")).isEqualTo(before);
     }
 
     @Test
@@ -278,7 +279,7 @@ class WorkspaceCsiReservationStoreTest {
         var registration = registration("tenant", "storage", "backend", "handle", 1);
         store.register(registration);
         var original = binding(registration, "workspace", "session");
-        var before = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var before = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         var seed = original.getProvisionSeed();
         var forged = new RuntimeProvisionSeed(seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
                 seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), "different-token");
@@ -294,13 +295,13 @@ class WorkspaceCsiReservationStoreTest {
                 original.getOperationLeaseUntil(), original.getOperationGeneration(), original.getVersion(),
                 null, original.getLastActiveAt());
         assertUnavailable(() -> store.reserve(registration, bindings, wrongKind, UUID.randomUUID().toString()));
-        var snapshot = jdbc.queryForMap("SELECT provision_seed_ciphertext, credential_key_id FROM qwen_runtime_binding");
+        var snapshot = jdbc.queryForMap("SELECT provision_seed_ciphertext, credential_key_id FROM ma_runtime_binding");
         for (String change : new String[] {"provision_seed_ciphertext = NULL", "credential_key_id = NULL",
                 "provision_seed_ciphertext = 'corrupt'", "credential_key_id = 'different'"}) {
-            jdbc.update("UPDATE qwen_runtime_binding SET " + change);
+            jdbc.update("UPDATE ma_runtime_binding SET " + change);
             assertUnavailable(() -> store.reserve(registration, bindings, original, UUID.randomUUID().toString()));
-            assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(before);
-            jdbc.update("UPDATE qwen_runtime_binding SET provision_seed_ciphertext = ?, credential_key_id = ?",
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(before);
+            jdbc.update("UPDATE ma_runtime_binding SET provision_seed_ciphertext = ?, credential_key_id = ?",
                     snapshot.get("provision_seed_ciphertext"), snapshot.get("credential_key_id"));
         }
         assertThat(store.reserve(registration, bindings, original, UUID.randomUUID().toString()).phase()).isEqualTo("RESERVED");
@@ -320,8 +321,8 @@ class WorkspaceCsiReservationStoreTest {
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_registration", Integer.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isZero();
         store.register(registration);
         assertThat(store.inspect(registration).phase()).isEqualTo("RELEASED");
     }
@@ -370,7 +371,7 @@ class WorkspaceCsiReservationStoreTest {
     }
 
     private static WorkspaceCsiReservationStore store(DriverManagerDataSource source) {
-        return new WorkspaceCsiReservationStore(new JdbcTemplate(source),
+        return new WorkspaceCsiReservationStore(new ManagedSchemaJdbcTemplate(source),
                 new DataSourceTransactionManager(source), new ObjectMapper());
     }
 

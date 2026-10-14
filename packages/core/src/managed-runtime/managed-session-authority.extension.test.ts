@@ -50,7 +50,9 @@ vi.mock('./managed-extension-projection.js', async (importOriginal) => {
   };
 });
 
-// monitor_run is enabled by H3; this suite runs the H0c path ahead of it.
+// monitor_run is enabled by H3's slice (#13856), so this suite commits
+// through the real gate. A test that needs the gate shut closes it per
+// test — never the other way around.
 vi.mock('./managed-session-records.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./managed-session-records.js')>();
@@ -59,9 +61,12 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
     assertManagedSessionDomainEnabled: (
       domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
     ) => {
-      if (domain !== 'monitor_run' || !enablement.monitorRun) {
-        actual.assertManagedSessionDomainEnabled(domain);
+      if (domain === 'monitor_run' && !enablement.monitorRun) {
+        throw new actual.ManagedSessionRecordError(
+          'domain monitor_run is registered but not enabled for submission.',
+        );
       }
+      actual.assertManagedSessionDomainEnabled(domain);
     },
   };
 });
