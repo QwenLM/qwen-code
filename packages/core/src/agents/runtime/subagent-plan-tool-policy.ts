@@ -141,8 +141,9 @@ export function hasAgentSkillExecBinding(
  * be loaded — the disagreement #12424 reports.
  *
  * Callers supply whether exec bindings are reachable in the current mode and
- * registry. A finite list naming exec can therefore reach Skill without
- * naming it directly. CodeModeOnly retains eager-deferred nested targets;
+ * registry, and whether the Skill factory is registered there at all. A
+ * finite list naming exec can therefore reach Skill without naming it
+ * directly. CodeModeOnly retains eager-deferred nested targets;
  * The eager-hidden input vetoes every route in Hybrid, including wildcards
  * and explicit Skill entries. Other permission bounds stay in prepareTools().
  * Registry deny/exclude rules remain the bundled-reference resolver's concern;
@@ -152,11 +153,15 @@ export function hasAgentSkillExecBinding(
  * gate (`AgentCore.canInvokeSkill`) never counts a direct Skill declaration
  * there — so when that route is closed no `toolConfig` shape reaches Skill:
  * not the wildcard, not registry inheritance, not an explicit entry. The
- * route is closed when `exec` itself is missing from the registry (a deny
- * rule or a legacy coreTools allowlist keeps it out), when the agent
- * blocklists `exec` (`prepareTools()` drops it from the declarations), or
- * when an execution allowlist names neither `skill` nor `exec` (`skill`
- * stays out of `codeModeAllowedToolNames`).
+ * route is closed when `skill` itself is missing from the registry — `exec`
+ * binds only registered tools, and a deny rule, a legacy coreTools allowlist,
+ * or a skill-withheld parent Config keeps the factory out (Config registers
+ * it for a subagent only when that subagent holds a SkillManager) — when
+ * `exec` itself is missing from the registry (a deny rule or a legacy
+ * coreTools allowlist keeps it out), when the agent blocklists `exec`
+ * (`prepareTools()` drops it from the declarations), or when an execution
+ * allowlist names neither `skill` nor `exec` (`skill` stays out of
+ * `codeModeAllowedToolNames`).
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
@@ -172,11 +177,16 @@ export function toolConfigAllowsSkill(
   execBindingsAvailable = false,
   skillEagerHidden = false,
   codeModeOnly = false,
+  skillRegistered = true,
 ): boolean {
   if (skillEagerHidden || EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
     return false;
   }
-  if (codeModeOnly && !execBindingsAvailable) {
+  // exec binds only registered tools, so a registry without the Skill
+  // factory (a deny rule or a legacy coreTools allowlist keeps it out, or a
+  // skill-withheld parent's Config never registered it) closes the gateway
+  // just as a missing exec does.
+  if (codeModeOnly && !(execBindingsAvailable && skillRegistered)) {
     return false;
   }
   // No per-agent config inherits the whole registry.

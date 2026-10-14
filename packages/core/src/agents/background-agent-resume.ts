@@ -146,6 +146,7 @@ function subagentWillHaveSkillTool(
   execBindingsAvailable = false,
   skillEagerHidden = false,
   codeModeOnly = false,
+  skillRegistered = true,
 ): boolean {
   // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
   // and `resolveToolNames`' `for...of` walks a bare string per character,
@@ -176,6 +177,7 @@ function subagentWillHaveSkillTool(
     execBindingsAvailable,
     skillEagerHidden,
     codeModeOnly,
+    skillRegistered,
   );
 }
 
@@ -1037,6 +1039,10 @@ export class BackgroundAgentResumeService {
                   hasAgentSkillExecBinding(activeAgentConfig),
                   isAgentSkillEagerHidden(activeAgentConfig),
                   activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly,
+                  activeAgentConfig
+                    .getToolRegistry()
+                    .getAllToolNames()
+                    .includes(ToolNames.SKILL),
                 ),
               })
             )[0],

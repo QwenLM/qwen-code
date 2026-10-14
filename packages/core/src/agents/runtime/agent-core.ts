@@ -666,12 +666,13 @@ export class AgentCore {
    * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
+    const skillRegistered = this.runtimeContext
+      .getToolRegistry()
+      .getAllToolNames()
+      .includes(ToolNames.SKILL);
     if (
       this.runtimeContext.getToolMode?.() === ToolMode.CodeMode &&
-      !this.runtimeContext
-        .getToolRegistry()
-        .getAllToolNames()
-        .includes(ToolNames.SKILL)
+      !skillRegistered
     ) {
       return false;
     }
@@ -680,6 +681,7 @@ export class AgentCore {
       hasAgentSkillExecBinding(this.runtimeContext),
       isAgentSkillEagerHidden(this.runtimeContext),
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+      skillRegistered,
     );
   }
 

@@ -345,14 +345,20 @@ describe('subagent plan tool policy', () => {
   });
 
   describe('hasAgentSkillExecBinding', () => {
-    const contextWith = (mode: ToolMode, registerExec: boolean) => {
+    const contextWith = (
+      mode: ToolMode,
+      registerExec: boolean,
+      registerSkill = true,
+    ) => {
       const config = makeFakeConfig({ toolMode: mode });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
       if (registerExec) {
         registry.registerTool(new ExecTool(config));
       }
-      registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      if (registerSkill) {
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      }
       return config;
     };
 
@@ -401,6 +407,37 @@ describe('subagent plan tool policy', () => {
             hasAgentSkillExecBinding(context),
             isAgentSkillEagerHidden(context),
             context.getToolMode?.() === ToolMode.CodeModeOnly,
+          ),
+        ).toBe(false);
+      },
+    );
+
+    // In CodeModeOnly the exec gateway reaches only registered tools, so a
+    // Skill the registry never registered (a deny rule, a legacy coreTools
+    // allowlist, or a skill-withheld parent's Config keeps the factory out)
+    // closes every route even while exec itself is registered — including the
+    // wildcard and an explicit Skill entry, the two arms that bypass
+    // execRouteOpen. Removing the skillRegistered term from the predicate's
+    // codeModeOnly veto turns each row red.
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit Skill entry', { tools: [ToolNames.SKILL] }],
+      ['no tool config', undefined],
+    ])(
+      'closes every CodeModeOnly Skill route when skill is unregistered: %s',
+      (_label, toolConfig) => {
+        const context = contextWith(ToolMode.CodeModeOnly, true, false);
+        expect(hasAgentSkillExecBinding(context)).toBe(true);
+        expect(
+          toolConfigAllowsSkill(
+            toolConfig,
+            hasAgentSkillExecBinding(context),
+            isAgentSkillEagerHidden(context),
+            context.getToolMode?.() === ToolMode.CodeModeOnly,
+            context
+              .getToolRegistry()
+              .getAllToolNames()
+              .includes(ToolNames.SKILL),
           ),
         ).toBe(false);
       },

@@ -1195,29 +1195,34 @@ export class SubagentManager {
         runtimeContext,
         skillRegistryWillBeRebuilt,
       );
-      if (
-        skillRegistryWillBeRebuilt &&
-        runtimeContext.getToolMode?.() === ToolMode.CodeMode &&
-        !runtimeContext
-          .getToolRegistry()
-          .getAllToolNames()
-          .includes(ToolNames.SKILL)
-      ) {
+      let skillRegistered = runtimeContext
+        .getToolRegistry()
+        .getAllToolNames()
+        .includes(ToolNames.SKILL);
+      if (skillRegistryWillBeRebuilt && !skillRegistered) {
         // A parent without a SkillManager omits the Skill factory entirely.
-        // Recover its registration policy before restoring skills to a child.
+        // Recover its registration policy before restoring skills to a child:
+        // when policy allows, a child granted skills here holds the session's
+        // manager, so its rebuilt registry re-registers the factory (Config
+        // gates it on the child's own SkillManager).
         const status = await runtimeContext
           .getPermissionManager?.()
           ?.getToolRegistrationStatus(ToolNames.SKILL);
-        skillEagerHidden =
-          status === 'disabled' ||
-          (status === 'deferred' &&
-            !runtimeContext.getVisibleTools().has(ToolNames.SKILL));
+        if (runtimeContext.getToolMode?.() === ToolMode.CodeMode) {
+          skillEagerHidden =
+            status === 'disabled' ||
+            (status === 'deferred' &&
+              !runtimeContext.getVisibleTools().has(ToolNames.SKILL));
+        }
+        skillRegistered =
+          status !== 'disabled' && sessionSkillManager(runtimeContext) != null;
       }
       const skillsAvailable = toolConfigAllowsSkill(
         toolConfig,
         hasAgentSkillExecBinding(runtimeContext, skillRegistryWillBeRebuilt),
         skillEagerHidden,
         runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
+        skillRegistered,
       );
       const { context: subagentContext, cleanup } =
         await this.buildSubagentContextOverride(
