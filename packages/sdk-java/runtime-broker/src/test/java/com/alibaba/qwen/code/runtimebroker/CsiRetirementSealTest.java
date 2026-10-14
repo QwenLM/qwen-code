@@ -55,7 +55,7 @@ class CsiRetirementSealTest {
         assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(original.getBindingId()).getState());
         try (var connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            try (var sql = connection.prepareStatement("UPDATE qwen_runtime_binding_slot SET active_binding_id = 'foreign'")) {
+            try (var sql = connection.prepareStatement("UPDATE ma_runtime_slot SET active_binding_id = 'foreign'")) {
                 sql.executeUpdate();
             }
             assertThrows(IllegalStateException.class, () -> bindings.sealForRetirement(connection, original));
@@ -102,7 +102,7 @@ class CsiRetirementSealTest {
     private static JdbcDataSource source() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:seal-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return source;
     }
 }

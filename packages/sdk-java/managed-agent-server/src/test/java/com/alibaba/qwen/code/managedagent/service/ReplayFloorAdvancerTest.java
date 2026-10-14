@@ -48,6 +48,9 @@ class ReplayFloorAdvancerTest {
     @Autowired
     private ManagedAgentStore store;
 
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
+
     @Test
     void scheduledPassRaisesTheFloorToTheSnapshotCoverage() {
         String tenant = tenant();
@@ -57,6 +60,10 @@ class ReplayFloorAdvancerTest {
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .snapshotThroughSequence() == last);
+        // This pass runs after any earlier page cursors have expired.
+        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
+                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .floorSequence() == last);
@@ -67,6 +74,10 @@ class ReplayFloorAdvancerTest {
         String tenant = tenant();
         String sessionId = session(tenant);
         long last = append(tenant, sessionId, 3);
+        await().atMost(Duration.ofSeconds(10)).until(() -> store.findReplayWindow(tenant, sessionId).snapshotThroughSequence() == last);
+        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
+                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .floorSequence() == last);

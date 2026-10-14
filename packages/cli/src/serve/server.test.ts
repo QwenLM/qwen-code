@@ -12388,7 +12388,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-xyz')
-        .send({ prompt: 'must not appear in logs' });
+        .send({
+          prompt: 'must not appear in logs',
+          confirmCancellation: 'legacy-daemon',
+        });
 
       expect(res.status).toBe(200);
       // The originator + a generated promptId must reach the bridge so the
@@ -17721,6 +17724,7 @@ describe('createServeApp', () => {
           clientId: 'client-load',
           state: {},
           compactedReplay: [commandsEvent],
+          lifecycleReplay: [commandsEvent],
         }),
       });
       const app = createServeApp(
@@ -17747,6 +17751,9 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.compactedReplay[0].data.update.availableCommands).toEqual(
+        [{ name: 'help', description: 'Help' }],
+      );
+      expect(res.body.lifecycleReplay[0].data.update.availableCommands).toEqual(
         [{ name: 'help', description: 'Help' }],
       );
       expect(commandsEvent.data.update.availableCommands).toHaveLength(2);
@@ -31630,6 +31637,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(204);
       expect(bridge.closeCalls).toHaveLength(1);
       expect(bridge.closeCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.closeCalls[0]?.closeOpts).toEqual({ cancelReason: 'user' });
     });
 
     it('passes client identity context', async () => {

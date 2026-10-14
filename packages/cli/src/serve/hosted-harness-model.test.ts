@@ -1429,6 +1429,32 @@ it.each([
   },
 );
 
+it('refuses an unauthenticated pinned model before inference', async () => {
+  // The matched model exists and is unambiguous, but switching to it fails
+  // (for example missing credentials): the Turn must fail with
+  // model_unavailable and zero inference requests, per design §5.6.
+  const mocks = config([]);
+  state.config['getAllConfiguredModels'] = () => [
+    { id: 'pinned', authType: 'openai' },
+  ];
+  state.config['switchModel'] = vi.fn(async () => {
+    throw new Error('no cached credentials');
+  });
+  await expect(
+    runHostedHarnessTextTurn({
+      ...input,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        model: { id: 'pinned' },
+      },
+    }),
+  ).rejects.toThrow('model_unavailable');
+  expect(mocks.initialize).not.toHaveBeenCalled();
+  expect(mocks.requests).toHaveLength(0);
+});
+
 it('preserves model_unavailable when early config cleanup fails', async () => {
   const mocks = config([]);
   state.config['getAllConfiguredModels'] = () => [];
