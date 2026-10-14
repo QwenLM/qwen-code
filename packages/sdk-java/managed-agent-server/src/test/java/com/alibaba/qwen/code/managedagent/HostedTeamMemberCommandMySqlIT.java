@@ -143,10 +143,12 @@ class HostedTeamMemberCommandMySqlIT {
      * session_command it did not receipt.
      */
     @Test
-    // Above the ~295 s its bounded waits add up to (boot 30, lead 30,
-    // reports 180, close 55) plus the Spring start, so a stall fails on
-    // its own phase's atMost instead of a bare timeout.
-    @Timeout(360)
+    // Kept below the ~295 s its waits add up to: every Hosted*IT class
+    // runs in one failsafe fork, and this class's ceilings together must
+    // leave that fork its budget (scripts/tests/hosted-process-ci.test.js).
+    // A case cut here still reports the wait it was in, because every
+    // wait goes through waiting(), which fails on the @Timeout's interrupt.
+    @Timeout(240)
     void membersReadAndWriteTheBoardTheirLeadReads() throws Exception {
         boot();
         String lead = createLead("H4EB3_CMD_LIFECYCLE");
@@ -201,11 +203,9 @@ class HostedTeamMemberCommandMySqlIT {
      * generation parked.
      */
     @Test
-    // Above the ~465 s its bounded waits add up to (boot 30, hold 30,
-    // lead 30, park 60, kill 20, restart 30, takeover 100, consumed 110,
-    // close 55) plus the Spring start, so a stall fails on its own
-    // phase's atMost instead of a bare timeout.
-    @Timeout(540)
+    // Kept below the ~465 s its waits add up to, for the fork budget
+    // described on the board case.
+    @Timeout(180)
     void memberHarnessRestartDuringCommandWait() throws Exception {
         boot();
         CountDownLatch releaseRelay = holdMessageRelay();
@@ -273,31 +273,9 @@ class HostedTeamMemberCommandMySqlIT {
      * handover, from running until the latch is released.
      */
     private CountDownLatch holdMessageRelay() throws InterruptedException {
-        ThreadPoolTaskScheduler scheduler = spring.getBean(
-                "messageRelayScheduler", ThreadPoolTaskScheduler.class);
-        CountDownLatch held = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        scheduler.execute(() -> {
-            held.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        boolean taken = false;
-        try {
-            taken = held.await(30, TimeUnit.SECONDS);
-        } finally {
-            // A hold that never took is still queued: released here, it
-            // returns as soon as it runs instead of parking the relay's
-            // only thread with no caller left to let it go.
-            if (!taken) release.countDown();
-        }
-        assertThat(taken)
-                .as("the message relay's scheduler takes the hold")
-                .isTrue();
-        return release;
+        return SchedulerHold.hold(spring.getBean(
+                "messageRelayScheduler", ThreadPoolTaskScheduler.class),
+                Duration.ofSeconds(30));
     }
 
     /** The writer generation of a Session's journal head. */
