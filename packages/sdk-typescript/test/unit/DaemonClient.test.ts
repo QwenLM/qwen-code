@@ -262,46 +262,55 @@ describe('DaemonClient', () => {
   });
 
   describe('continueSession', () => {
-    it('admits continuation over REST with identity and replay anchors', async () => {
-      const body = {
-        accepted: true,
-        interruption: 'interrupted_prompt',
-        promptId: 'continue-1',
-        lastEventId: 17,
-        eventEpoch: 'epoch-1',
-      };
-      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
-      const transportFetch = vi.fn();
-      const transport: DaemonTransport = {
-        type: 'acp-http',
-        supportsReplay: true,
-        connected: true,
-        fetch: transportFetch,
-        async *subscribeEvents() {},
-        dispose() {},
-      };
-      const client = new DaemonClient({
-        baseUrl: 'http://daemon',
-        token: 'token-1',
-        fetch,
-        transport,
-      });
+    it.each([undefined, 'legacy-daemon'])(
+      'admits continuation over REST with identity, replay anchors, and confirmation %s',
+      async (confirmCancellation) => {
+        const body = {
+          accepted: true,
+          interruption: 'interrupted_prompt',
+          promptId: 'continue-1',
+          lastEventId: 17,
+          eventEpoch: 'epoch-1',
+        };
+        const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+        const transportFetch = vi.fn();
+        const transport: DaemonTransport = {
+          type: 'acp-http',
+          supportsReplay: true,
+          connected: true,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        };
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'token-1',
+          fetch,
+          transport,
+        });
 
-      await expect(
-        client.continueSession('with/slash', { clientId: 'client-1' }),
-      ).resolves.toEqual(body);
-      expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({
-        url: 'http://daemon/session/with%2Fslash/continue',
-        method: 'POST',
-        body: null,
-        headers: {
-          authorization: 'Bearer token-1',
-          'x-qwen-client-id': 'client-1',
-        },
-      });
-      expect(transportFetch).not.toHaveBeenCalled();
-    });
+        await expect(
+          client.continueSession('with/slash', {
+            clientId: 'client-1',
+            confirmCancellation,
+          }),
+        ).resolves.toEqual(body);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          url: 'http://daemon/session/with%2Fslash/continue',
+          method: 'POST',
+          body:
+            confirmCancellation === undefined
+              ? null
+              : JSON.stringify({ confirmCancellation }),
+          headers: {
+            authorization: 'Bearer token-1',
+            'x-qwen-client-id': 'client-1',
+          },
+        });
+        expect(transportFetch).not.toHaveBeenCalled();
+      },
+    );
 
     it('returns clean no-ops and preserves rejection errors without retry', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -4615,7 +4624,7 @@ describe('DaemonClient', () => {
     });
 
     it.each([
-      { reason: 'qwen:user-cancel', expected: 'user' },
+      { reason: 'caller stopped', expected: 'interrupted' },
       { reason: undefined, expected: 'interrupted' },
       { reason: new Error('caller stopped'), expected: 'interrupted' },
     ])(
@@ -4696,7 +4705,7 @@ describe('DaemonClient', () => {
         )
         .catch((error: unknown) => error);
       await vi.waitFor(() => expect(reading).toBe(true));
-      controller.abort('qwen:user-cancel');
+      controller.abort('caller stopped');
       expect(await result).toMatchObject({ name: 'AbortError' });
       await vi.waitFor(() =>
         expect(
@@ -4705,7 +4714,7 @@ describe('DaemonClient', () => {
       );
       expect(
         JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
-      ).toEqual({ _meta: { 'qwen.cancelReason': 'user' } });
+      ).toEqual({ _meta: { 'qwen.cancelReason': 'interrupted' } });
     });
 
     it('releases the local pending prompt slot after caller abort', async () => {

@@ -273,7 +273,11 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import { getLastApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  getLastApiHistoryPromptId,
+  getLastApiPromptCancellation,
+  markApiHistoryPrompt,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -1383,7 +1387,7 @@ interface InFlightTurnRecording {
   cancelledAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
-  finalAnswer: { finalText: string };
+  finalAnswer: { finalText: string; historyPromptId?: string };
   /**
    * Captured at turn start; settle writes against this instance (pinned to
    * the turn-start session by `Config.startNewSession`) instead of
@@ -1742,6 +1746,7 @@ interface AgentResponseCapture {
   };
   turnResult?: {
     finalText: string;
+    historyPromptId?: string;
   };
   recordingService?: ChatRecordingService;
   agentOutput: AgentOutputMessageCapture;
@@ -2227,11 +2232,6 @@ export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
   private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
-  /** Turn signal -> the admission signal whose abort it copied. */
-  private readonly promptCancellationSources = new WeakMap<
-    AbortSignal,
-    AbortSignal
-  >();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
@@ -5086,10 +5086,7 @@ export class Session implements SessionContext {
     ) {
       return true;
     }
-    // A user cancel that upgrades an already-aborted admission lands only on
-    // the admission signal; the turn signal copied its first reason.
-    const source = this.promptCancellationSources.get(signal);
-    return source !== undefined && this.#isUserPromptCancellation(source);
+    return false;
   }
 
   async cancelPendingPrompt(
@@ -5216,11 +5213,11 @@ export class Session implements SessionContext {
       throw managedOutcomeUnknownError(managedSessionBlock);
     }
     if (params._meta?.[DAEMON_CONTINUE_META_KEY] === true) {
-      const recoveryPlan = this.#getRecoveryPlan(true);
       if (
-        !recoveryPlan?.continuation ||
-        params._meta?.['qwen.daemon.confirmCancellation'] !==
-          recoveryPlan.cancellationConfirmationId
+        (await this.#isContinueBlocked(
+          params._meta?.['qwen.daemon.confirmCancellation'],
+        )) ||
+        !this.#getRecoveryPlan(true)?.continuation
       ) {
         return { stopReason: 'end_turn' };
       }
@@ -5455,18 +5452,6 @@ export class Session implements SessionContext {
       );
     }
     await this.assertCanStartTurn();
-    const recordsRetryAttempt =
-      (params as { retry?: boolean }).retry === true ||
-      params._meta?.[DAEMON_RETRY_META_KEY] === true;
-    if (invocationContext?.promptId && recordsRetryAttempt) {
-      await turnRecording?.recordingService?.recordTurnAttempt(
-        getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
-        invocationContext.promptId,
-      );
-      this.config
-        .getLlmClient()
-        .acceptTurnInput(invocationContext.promptId, true);
-    }
     if (
       this.liveScreenContextTool ||
       this.liveTaskTools.length > 0 ||
@@ -5544,15 +5529,8 @@ export class Session implements SessionContext {
     pendingSend.signal.addEventListener('abort', recordCancellation, {
       once: true,
     });
-    const cancelPendingSend = () => {
-      if (admissionCancellation && !pendingSend.signal.aborted) {
-        this.promptCancellationSources.set(
-          pendingSend.signal,
-          admissionCancellation,
-        );
-      }
+    const cancelPendingSend = () =>
       pendingSend.abort(admissionCancellation?.reason);
-    };
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -5711,7 +5689,9 @@ export class Session implements SessionContext {
       ...(channelTask ? { channelTask } : {}),
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
-      recordingService: turnRecording?.recordingService,
+      recordingService:
+        turnRecording?.recordingService ??
+        this.config.getChatRecordingService(),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
     // One server-side channel classification, consumed by both the
@@ -5807,15 +5787,25 @@ export class Session implements SessionContext {
         !turnRecording &&
         result.stopReason === 'cancelled' &&
         responseCapture.turnId &&
-        this.#isUserPromptCancellation(pendingSend.signal)
+        (this.#isUserPromptCancellation(pendingSend.signal) ||
+          this.#isUserPromptCancellation(admissionCancellation))
       ) {
-        this.config.getLlmClient().settleTurn({
+        const payload: TurnResultRecordPayload = {
           promptId: responseCapture.turnId,
           state: 'cancelled',
           cancelledAt: Date.now(),
           cancelReason: 'user',
           endedAt: Date.now(),
-        });
+        };
+        responseCapture.recordingService?.recordTurnResult(
+          payload,
+          responseCapture.turnId,
+        );
+        try {
+          await responseCapture.recordingService?.flush();
+        } catch (error) {
+          debugLogger.warn(`Failed to flush cancellation: ${error}`);
+        }
       }
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -5926,6 +5916,24 @@ export class Session implements SessionContext {
     }
   }
 
+  async #getTurnCancellation() {
+    const recorder = this.config.getChatRecordingService();
+    if (!recorder) throw new Error('Recovery requires a session transcript');
+    return getLastApiPromptCancellation(
+      this.#getCurrentChat().getHistoryShallow(),
+      await recorder.readActiveTranscriptChain(),
+    );
+  }
+
+  async #isContinueBlocked(confirmCancellation?: unknown): Promise<boolean> {
+    const cancellation = await this.#getTurnCancellation();
+    return (
+      (cancellation !== undefined &&
+        cancellation.confirmationId === undefined) ||
+      confirmCancellation !== cancellation?.confirmationId
+    );
+  }
+
   #getRecoveryPlan(fullHistory: boolean) {
     const llmClient = this.config.getLlmClient();
     if (!llmClient || !llmClient.isInitialized()) {
@@ -5954,7 +5962,6 @@ export class Session implements SessionContext {
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
-      turnCancellation: llmClient.getTurnCancellation?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
@@ -5985,15 +5992,27 @@ export class Session implements SessionContext {
     // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
-      ...(recoveryPlan?.cancellationConfirmationId
-        ? {
-            cancellationConfirmationId: recoveryPlan.cancellationConfirmationId,
-          }
-        : {}),
       canContinue:
         recoveryPlan?.canContinue === true &&
         !this.closing &&
         !this.#hasActiveTurn(),
+    };
+  }
+
+  async getRecoveryStatusForClient(): Promise<
+    NonNullable<ServeSessionContextStatus['recovery']>
+  > {
+    if (!this.getRecoveryStatus().canContinue) return this.getRecoveryStatus();
+    const cancellation = await this.#getTurnCancellation();
+    const status = this.getRecoveryStatus();
+    if (cancellation && !cancellation.confirmationId) {
+      return { kind: 'clean', canContinue: false };
+    }
+    return {
+      ...status,
+      ...(status.canContinue && cancellation?.confirmationId
+        ? { cancellationConfirmationId: cancellation.confirmationId }
+        : {}),
     };
   }
 
@@ -6015,7 +6034,7 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
     cancellationConfirmationId?: string;
   }> {
-    const recovery = this.getRecoveryStatus();
+    const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
       // ten `#hasActiveTurn()` members into one boolean and the only UI
@@ -6344,7 +6363,6 @@ export class Session implements SessionContext {
           await this.config.getLlmClient().setTools();
         }
         const daemonPromptId = getInvocationContext()?.promptId;
-        responseCapture.turnId = daemonPromptId ?? promptId;
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
         const continuesCurrentWorkChain =
@@ -6352,6 +6370,14 @@ export class Session implements SessionContext {
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
           promptMetadata?.[DAEMON_CONTINUE_META_KEY] === true ||
           promptMetadata?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+        responseCapture.turnId = continuesCurrentWorkChain
+          ? getLastApiHistoryPromptId(
+              this.#getCurrentChat().getHistoryShallow(),
+            )
+          : promptId;
+        if (responseCapture.turnResult) {
+          responseCapture.turnResult.historyPromptId = responseCapture.turnId;
+        }
         // Bind the prompt ID for the remainder of this turn, mirroring the
         // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
         // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
@@ -6454,8 +6480,7 @@ export class Session implements SessionContext {
               return { stopReason: 'end_turn' };
             }
             if (
-              isRestoreAskUserQuestion &&
-              !isRetry &&
+              (isRetry || isRestoreAskUserQuestion) &&
               !isContinue &&
               daemonPromptId
             ) {
@@ -6463,7 +6488,6 @@ export class Session implements SessionContext {
                 continuedPromptId,
                 daemonPromptId,
               );
-              this.config.getLlmClient().acceptTurnInput(daemonPromptId, true);
             }
             if (
               !isRetry &&
@@ -6505,12 +6529,12 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = this.#getRecoveryPlan(true);
-              if (
-                !recoveryPlan?.continuation ||
-                promptMetadata?.['qwen.daemon.confirmCancellation'] !==
-                  recoveryPlan.cancellationConfirmationId
-              ) {
+              const recoveryPlan = (await this.#isContinueBlocked(
+                promptMetadata?.['qwen.daemon.confirmCancellation'],
+              ))
+                ? undefined
+                : this.#getRecoveryPlan(true);
+              if (!recoveryPlan?.continuation) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -6534,9 +6558,6 @@ export class Session implements SessionContext {
                   continuedPromptId,
                   daemonPromptId,
                 );
-                this.config
-                  .getLlmClient()
-                  .acceptTurnInput(daemonPromptId, true);
               }
               void recordDaemonSessionApprovalModeFromConfig(this.config);
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
@@ -7130,10 +7151,8 @@ export class Session implements SessionContext {
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   const chat = this.#getCurrentChat();
+                  markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                   chat.addHistory(nextMessage);
-                  this.config
-                    .getLlmClient()
-                    .acceptTurnInput(responseCapture.turnId!);
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
@@ -7213,15 +7232,13 @@ export class Session implements SessionContext {
                     // user never got an answer to.
                     const preserveFullMessage =
                       isContinue || sendResult.stopReason === 'cancelled';
+                    if (preserveFullMessage && nextMessage) {
+                      markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                    }
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,
                     );
-                    if (preserveFullMessage) {
-                      this.config
-                        .getLlmClient()
-                        .acceptTurnInput(responseCapture.turnId!);
-                    }
                     if (
                       preserveFullMessage &&
                       restorePostAnswerNoticesAttached
@@ -9076,9 +9093,11 @@ export class Session implements SessionContext {
         ? { originatorClientId: recording.originatorClientId }
         : {}),
     };
-    this.config.getLlmClient().settleTurn(payload);
     try {
-      recording.recordingService?.recordTurnResult(payload);
+      recording.recordingService?.recordTurnResult(
+        payload,
+        recording.finalAnswer.historyPromptId,
+      );
       if (state === 'cancelled') {
         await recording.recordingService?.flush();
       }

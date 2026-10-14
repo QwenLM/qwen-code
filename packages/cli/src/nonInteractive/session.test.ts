@@ -11,6 +11,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -358,21 +359,25 @@ describe('runNonInteractiveStreamJson', () => {
     const getHistoryTail = vi.fn().mockReturnValue(historyTail);
     const llmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
-      getTurnCancellation: vi
-        .fn<
-          () => { reason: 'user' | 'unknown'; promptId: string } | undefined
-        >()
-        .mockReturnValue(undefined),
       getChat: vi
         .fn<
           () => {
             getHistoryTail: ReturnType<typeof vi.fn>;
+            getHistoryShallow: ReturnType<typeof vi.fn>;
           }
         >()
-        .mockReturnValue({ getHistoryTail }),
+        .mockReturnValue({
+          getHistoryTail,
+          getHistoryShallow: vi.fn(() => historyTail),
+        }),
     };
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(llmClient),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
+        flush: vi.fn().mockResolvedValue(undefined),
+        finalize: vi.fn(),
+      }),
     });
     return { llmClient, getHistoryTail };
   }
@@ -562,46 +567,112 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
 
-  it('requires the legacy boundary confirmation before scheduling stream-json continuation', async () => {
+  it('requires the current legacy record confirmation before scheduling continuation', async () => {
     const { continueResults } = installContinueDispatch();
-    const { llmClient } = createInitializedLlmClient([
-      { role: 'user', parts: [{ text: 'resume me' }] },
+    const content: Content = { role: 'user', parts: [{ text: 'resume me' }] };
+    markApiHistoryPrompt(content, 'client-legacy');
+    createInitializedLlmClient([content]);
+    vi.mocked(
+      config.getChatRecordingService()!.readActiveTranscriptChain,
+    ).mockResolvedValue([
+      {
+        ...createResumedUserRecord('resume me'),
+        promptId: 'client-legacy',
+        daemonPromptId: 'daemon-legacy',
+      },
+      {
+        ...createResumedTelemetryRecord('daemon-legacy'),
+        uuid: 'legacy-terminal',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'daemon-legacy',
+          state: 'cancelled',
+          cancelledAt: 1,
+          endedAt: 2,
+        },
+      },
     ]);
-    llmClient.getTurnCancellation.mockReturnValue({
-      reason: 'unknown',
-      promptId: 'legacy-daemon',
-    });
-    const confirmation = createContinueRequest('confirmed');
-    confirmation.request = {
+    const confirmed = createContinueRequest('confirmed');
+    confirmed.request = {
       subtype: 'continue_last_turn',
-      confirmCancellation: 'legacy-daemon',
+      confirmCancellation: 'legacy-terminal',
     };
     mockInputReader.read = async function* () {
       yield createControlRequest('initialize');
       yield createContinueRequest('unconfirmed');
       await vi.waitFor(() => expect(continueResults).toHaveLength(1));
-      expect(runNonInteractiveMock).not.toHaveBeenCalled();
-      yield confirmation;
+      yield confirmed;
     };
     await runNonInteractiveStreamJson(config, '');
     expect(continueResults).toEqual([
       {
         accepted: false,
         interruption: 'interrupted_prompt',
-        cancellationConfirmationId: 'legacy-daemon',
+        cancellationConfirmationId: 'legacy-terminal',
       },
       { accepted: true, interruption: 'interrupted_prompt' },
     ]);
-    expect(runNonInteractiveMock).toHaveBeenCalledExactlyOnceWith(
+    expect(runNonInteractiveMock).toHaveBeenCalledWith(
       config,
       expect.anything(),
       '',
       expect.any(String),
       expect.objectContaining({
         continueInterrupted: true,
-        confirmCancellation: 'legacy-daemon',
+        confirmCancellation: 'legacy-terminal',
       }),
     );
+  });
+
+  it('rejects a stale confirmation after the cancelled boundary has disappeared', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedLlmClient([
+      { role: 'user', parts: [{ text: 'new task' }] },
+    ]);
+    const stale = createContinueRequest();
+    stale.request = {
+      subtype: 'continue_last_turn',
+      confirmCancellation: 'old-terminal',
+    };
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield stale;
+    };
+    await runNonInteractiveStreamJson(config, '');
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses stream-json continuation of an unknown legacy cancellation', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedLlmClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    vi.mocked(
+      config.getChatRecordingService()!.readActiveTranscriptChain,
+    ).mockResolvedValue([
+      {
+        ...createResumedTelemetryRecord('legacy-daemon'),
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'legacy-daemon',
+          state: 'cancelled',
+          cancelledAt: 1,
+          endedAt: 2,
+        },
+      },
+    ]);
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createContinueRequest();
+    };
+    await runNonInteractiveStreamJson(config, '');
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
 
   it('deduplicates continue_last_turn while a continuation is pending or running', async () => {
@@ -833,6 +904,7 @@ describe('runNonInteractiveStreamJson', () => {
         return vi.fn();
       },
       getChatRecordingService: () => ({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         finalize: () => order.push('finalize'),
         flush: async () => {
           order.push('flush');

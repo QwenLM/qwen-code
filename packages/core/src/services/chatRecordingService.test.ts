@@ -1664,6 +1664,25 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual(payload);
     });
 
+    it('persists client history identity beside the daemon terminal identity', async () => {
+      user('stop me', undefined, undefined, 'client-1', 'daemon-1');
+      svc.recordTurnResult(
+        {
+          promptId: 'daemon-1',
+          state: 'cancelled',
+          cancelledAt: 0,
+          cancelReason: 'user',
+          endedAt: 1,
+        },
+        'client-1',
+      );
+      const [original, terminal] = await flushedAll();
+      expect(terminal).toMatchObject({
+        promptId: original.promptId,
+        systemPayload: { promptId: original.daemonPromptId },
+      });
+    });
+
     it('persists a resumed turn attempt without duplicating its user message', async () => {
       user('retry me', undefined, undefined, 'client-1', 'daemon-1');
       await svc.recordTurnAttempt('client-1', 'daemon-2');

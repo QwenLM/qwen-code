@@ -100,6 +100,9 @@ describe('SessionRecoveryBanner', () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     render();
     expect(container.textContent).toContain('reason was not recorded');
+    expect(container.querySelector('button')?.textContent).toBe(
+      'Confirm and continue',
+    );
     await act(async () => container.querySelector('button')!.click());
     expect(confirm).toHaveBeenCalledWith(
       'This turn may have been stopped intentionally. Do you want to continue it?',
@@ -110,6 +113,21 @@ describe('SessionRecoveryBanner', () => {
     expect(state.continueSession).toHaveBeenCalledExactlyOnceWith({
       confirmCancellation: 'legacy-daemon',
     });
+    confirm.mockRestore();
+  });
+
+  it('does not reuse a confirmation after the recovery identity changes', async () => {
+    state.connection.context!.recovery!.cancellationConfirmationId =
+      'old-cancellation';
+    const confirm = vi.spyOn(window, 'confirm').mockImplementation(() => {
+      state.recoveryGeneration++;
+      state.connection.context!.recovery!.cancellationConfirmationId =
+        'new-cancellation';
+      return true;
+    });
+    render();
+    await act(async () => container.querySelector('button')!.click());
+    expect(state.continueSession).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
 
@@ -133,6 +151,7 @@ describe('SessionRecoveryBanner', () => {
   it.each([
     'unsupported',
     'clean',
+    'cancelled',
     'busy',
     'disconnected',
     'loading',
@@ -147,6 +166,8 @@ describe('SessionRecoveryBanner', () => {
         kind: 'clean',
         canContinue: false,
       };
+    if (condition === 'cancelled')
+      state.connection.context!.recovery!.canContinue = false;
     if (condition === 'busy') state.streaming = 'responding';
     if (condition === 'disconnected') state.connection.status = 'disconnected';
     if (condition === 'loading') state.connection.loadingTranscript = true;

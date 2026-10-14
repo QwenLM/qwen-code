@@ -12399,7 +12399,6 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts).toHaveLength(1);
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
-        confirmCancellation: 'legacy-daemon',
       });
       const promptId = bridge.continueSessionContexts[0]?.promptId;
       expect(typeof promptId).toBe('string');
@@ -17725,6 +17724,7 @@ describe('createServeApp', () => {
           clientId: 'client-load',
           state: {},
           compactedReplay: [commandsEvent],
+          lifecycleReplay: [commandsEvent],
         }),
       });
       const app = createServeApp(
@@ -17751,6 +17751,9 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.compactedReplay[0].data.update.availableCommands).toEqual(
+        [{ name: 'help', description: 'Help' }],
+      );
+      expect(res.body.lifecycleReplay[0].data.update.availableCommands).toEqual(
         [{ name: 'help', description: 'Help' }],
       );
       expect(commandsEvent.data.update.availableCommands).toHaveLength(2);

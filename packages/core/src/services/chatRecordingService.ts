@@ -3738,7 +3738,7 @@ export class ChatRecordingService {
    * recording failure must never break turn settlement, so this uses the
    * non-strict append path (inactive/failed writers skip silently).
    */
-  recordTurnResult(payload: TurnResultRecordPayload): void {
+  recordTurnResult(payload: TurnResultRecordPayload, promptId?: string): void {
     if (!isTurnResultRecordPayload(payload)) {
       debugLogger.error(
         'Skipping turn result record that violates the bounded contract:',
@@ -3751,6 +3751,11 @@ export class ChatRecordingService {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'turn_result',
+        ...(typeof promptId === 'string' &&
+        promptId.length > 0 &&
+        promptId.length <= TURN_RESULT_IDENTIFIER_MAX_CHARS
+          ? { promptId }
+          : {}),
         systemPayload: payload,
       };
       this.appendRecord(record);

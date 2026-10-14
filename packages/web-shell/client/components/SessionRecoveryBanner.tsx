@@ -113,7 +113,9 @@ export function SessionRecoveryBanner({
           {t(
             pending
               ? 'session.recovery.continuing'
-              : 'session.recovery.continue',
+              : recovery.cancellationConfirmationId
+                ? 'session.recovery.confirmContinue'
+                : 'session.recovery.continue',
           )}
         </Button>
       )}

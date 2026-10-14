@@ -986,7 +986,7 @@ export function transcriptBlocksToDaemonMessages(
           };
           needsNewContentMessage = false;
           currentThinkingIdx = null;
-        } else if (!isTextBlockEmpty(textBlock)) {
+        } else if (textBlock.text.trim().length > 0) {
           messages.push({
             id: block.id,
             role: 'assistant',

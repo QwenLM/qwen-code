@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import type {
   Config,
   ConfigInitializeOptions,
@@ -73,8 +75,7 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private monitorStartedQueue: MonitorStartedQueueItem[] = [];
   private monitorQueue: MonitorQueueItem[] = [];
-  private pendingContinueTurn: boolean = false;
-  private continueCancellationConfirmation?: string;
+  private pendingContinueTurn: { confirmCancellation?: string } | undefined;
   private continueTurnInProgress: boolean = false;
   private readonly sessionAbortController: AbortController;
   private activeTurnAbortController: AbortController | null = null;
@@ -562,11 +563,14 @@ class Session {
     const historyTail =
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+    const cancellation = getLastApiPromptCancellation(
+      chat.getHistoryShallow(),
+      await this.config.getChatRecordingService()!.readActiveTranscriptChain(),
+    );
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory: historyTail,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
-      turnCancellation: llmClient.getTurnCancellation?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
       sessionId: this.sessionId,
@@ -590,20 +594,20 @@ class Session {
       return { accepted: false, interruption };
     }
 
-    if (confirmCancellation !== recoveryPlan.cancellationConfirmationId) {
+    if (
+      (cancellation && !cancellation.confirmationId) ||
+      confirmCancellation !== cancellation?.confirmationId
+    ) {
       return {
         accepted: false,
-        interruption,
-        ...(recoveryPlan.cancellationConfirmationId
-          ? {
-              cancellationConfirmationId:
-                recoveryPlan.cancellationConfirmationId,
-            }
-          : {}),
+        interruption: cancellation?.confirmationId ? interruption : 'none',
+        ...(cancellation?.confirmationId && {
+          cancellationConfirmationId: cancellation.confirmationId,
+        }),
       };
     }
-    this.continueCancellationConfirmation = confirmCancellation;
-    this.pendingContinueTurn = true;
+
+    this.pendingContinueTurn = { confirmCancellation };
     this.ensureProcessingStarted();
     debugLogger.info('[Session] continue_last_turn accepted', {
       sessionId: this.sessionId,
@@ -618,7 +622,9 @@ class Session {
    * since the request was accepted); a turn that became clean by then is
    * a no-op result message.
    */
-  private async processContinueTurn(): Promise<void> {
+  private async processContinueTurn(
+    confirmCancellation?: string,
+  ): Promise<void> {
     this.continueTurnInProgress = true;
     let resultAlreadyEmitted = false;
     let turnAbortController: AbortController | null = null;
@@ -633,7 +639,7 @@ class Session {
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         continueInterrupted: true,
-        confirmCancellation: this.continueCancellationConfirmation,
+        confirmCancellation,
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
         recoverableCancellation: true,
@@ -731,9 +737,10 @@ class Session {
       !this.sessionAbortController.signal.aborted
     ) {
       if (this.pendingContinueTurn) {
-        this.pendingContinueTurn = false;
+        const { confirmCancellation } = this.pendingContinueTurn;
+        this.pendingContinueTurn = undefined;
         try {
-          await this.processContinueTurn();
+          await this.processContinueTurn(confirmCancellation);
         } catch (error) {
           debugLogger.error('[Session] Error processing continue turn:', error);
           await this.emitErrorResult(error);
@@ -903,7 +910,7 @@ class Session {
     // consumer that received `{ accepted: true }` would wait forever. Emit a
     // terminal error result so it learns the continuation was abandoned.
     if (this.pendingContinueTurn) {
-      this.pendingContinueTurn = false;
+      this.pendingContinueTurn = undefined;
       await this.emitErrorResult(
         new Error('Continuation abandoned: session shut down before it ran'),
       );

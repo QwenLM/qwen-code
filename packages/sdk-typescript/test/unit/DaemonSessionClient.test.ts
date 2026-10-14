@@ -181,15 +181,10 @@ describe('DaemonSessionClient', () => {
       eventEpoch: 'epoch-1',
     });
 
-    await expect(
-      session.continueSession(undefined, {
-        confirmCancellation: 'legacy-daemon',
-      }),
-    ).resolves.toEqual(body);
+    await expect(session.continueSession()).resolves.toEqual(body);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       url: 'http://daemon/session/s-1/continue',
-      body: JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
       headers: { 'x-qwen-client-id': 'client-1' },
     });
     expect(session.lastEventId).toBe(20);
@@ -223,7 +218,11 @@ describe('DaemonSessionClient', () => {
       },
     });
 
-    await expect(session.continueSession()).resolves.toEqual({
+    await expect(
+      session.continueSession(undefined, {
+        confirmCancellation: 'legacy-daemon',
+      }),
+    ).resolves.toEqual({
       accepted: false,
       interruption: 'none',
     });
@@ -233,6 +232,10 @@ describe('DaemonSessionClient', () => {
       '/session/s-1/continue',
     ]);
     expect(calls[2]?.headers['x-qwen-client-id']).toBe('fresh-client');
+    expect([calls[0]?.body, calls[2]?.body]).toEqual([
+      JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+      JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+    ]);
   });
 
   it('does not retry an unknown continuation admission outcome', async () => {
@@ -882,6 +885,19 @@ describe('DaemonSessionClient', () => {
           lastEventId: 7,
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 7, v: 1, type: 'session_update', data: {} }],
+          lifecycleReplay: [
+            {
+              id: 6,
+              v: 1,
+              type: 'session_update',
+              data: {
+                _meta: {
+                  executionLifecycle: { executionId: 'only-lifecycle' },
+                },
+              },
+            },
+          ],
+          lifecycleReplayIncomplete: true,
         });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -892,7 +908,12 @@ describe('DaemonSessionClient', () => {
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
 
+    expect(session.replaySnapshot.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplayIncomplete).toBe(true);
+    expect(JSON.stringify(session.session)).not.toContain('only-lifecycle');
     const consumed = session.consumeReplaySnapshot();
+    expect(consumed.lifecycleReplay).toHaveLength(1);
+    expect(session.replaySnapshot.lifecycleReplay).toBeUndefined();
     expect(consumed.compactedReplay).toHaveLength(1);
     expect(consumed.liveJournal).toHaveLength(1);
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
@@ -2515,90 +2536,108 @@ describe('DaemonSessionClient', () => {
     }
   });
 
-  it.each(['qwen:user-cancel', undefined] as const)(
-    'keeps prompt abort provenance separate from a later explicit cancel (%s)',
-    async (reason) => {
-      let eventsController:
-        | ReadableStreamDefaultController<Uint8Array>
-        | undefined;
-      let resolveCancel!: (response: Response) => void;
-      const cancelResponse = new Promise<Response>((resolve) => {
-        resolveCancel = resolve;
-      });
-      const { fetch, calls } = recordingFetch((req) => {
-        if (requestPathEndsWith(req, '/session/s-1/events')) {
-          return pendingSseResponse(
-            () => {},
-            (controller) => {
-              eventsController = controller;
-            },
-          );
-        }
-        if (req.url.endsWith('/session/s-1/prompt')) {
-          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
-        }
-        if (req.url.endsWith('/session/s-1/cancel')) {
-          return cancelResponse;
-        }
-        return jsonResponse(500, { error: `unexpected ${req.url}` });
-      });
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      const session = new DaemonSessionClient({
-        client,
-        session: {
-          sessionId: 's-1',
-          workspaceCwd: '/work/a',
-          attached: true,
-        },
-      });
-      const eventsAbort = new AbortController();
-      const eventPump = (async () => {
-        for await (const _event of session.events({
-          signal: eventsAbort.signal,
-        })) {
-          /* keep subscription active */
-        }
-      })().catch(() => {});
+  it('keeps a mechanical prompt abort separate from a later explicit cancel', async () => {
+    let eventsController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    let resolveCancel!: (response: Response) => void;
+    const cancelResponse = new Promise<Response>((resolve) => {
+      resolveCancel = resolve;
+    });
+    const { fetch, calls } = recordingFetch((req) => {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
+        return pendingSseResponse(
+          () => {},
+          (controller) => {
+            eventsController = controller;
+          },
+        );
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+      }
+      if (req.url.endsWith('/session/s-1/cancel')) {
+        return cancelResponse;
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+    const eventsAbort = new AbortController();
+    const eventPump = (async () => {
+      for await (const _event of session.events({
+        signal: eventsAbort.signal,
+      })) {
+        /* keep subscription active */
+      }
+    })().catch(() => {});
 
-      await vi.waitFor(() => {
-        expect(
-          calls.filter((call) => requestPathEndsWith(call, '/events')),
-        ).toHaveLength(1);
-      });
-      const promptAbort = new AbortController();
-      const prompt = session
-        .prompt(
-          { prompt: [{ type: 'text', text: 'cancel me' }] },
-          promptAbort.signal,
-        )
-        .catch((error: unknown) => error);
-      await waitForPendingPrompt(session, 'p-1');
-
-      promptAbort.abort(reason);
-      const explicitCancel = session.cancel();
-      await vi.waitFor(() => {
-        expect(
-          calls.filter((call) => call.url.endsWith('/cancel')),
-        ).toHaveLength(reason === 'qwen:user-cancel' ? 1 : 2);
-      });
-
+    await vi.waitFor(() => {
       expect(
-        calls
-          .filter((call) => call.url.endsWith('/cancel'))
-          .map((call) => JSON.parse(call.body!)),
-      ).toEqual(
-        reason === 'qwen:user-cancel'
-          ? [{}]
-          : [{ _meta: { 'qwen.cancelReason': 'interrupted' } }, {}],
+        calls.filter((call) => requestPathEndsWith(call, '/events')),
+      ).toHaveLength(1);
+    });
+    const promptAbort = new AbortController();
+    const prompt = session
+      .prompt(
+        { prompt: [{ type: 'text', text: 'cancel me' }] },
+        promptAbort.signal,
+      )
+      .catch((error: unknown) => error);
+    await waitForPendingPrompt(session, 'p-1');
+
+    promptAbort.abort();
+    const explicitCancel = session.cancel();
+    await vi.waitFor(() => {
+      expect(calls.filter((call) => call.url.endsWith('/cancel'))).toHaveLength(
+        2,
       );
-      resolveCancel(new Response(null, { status: 204 }));
-      await explicitCancel;
-      await prompt;
-      eventsController?.close();
-      eventsAbort.abort();
-      await eventPump;
-    },
-  );
+    });
+
+    expect(
+      calls
+        .filter((call) => call.url.endsWith('/cancel'))
+        .map((call) => JSON.parse(call.body!)),
+    ).toEqual([{ _meta: { 'qwen.cancelReason': 'interrupted' } }, {}]);
+    resolveCancel(new Response(null, { status: 204 }));
+    await explicitCancel;
+    await prompt;
+    eventsController?.close();
+    eventsAbort.abort();
+    await eventPump;
+  });
+
+  it('sends lifecycle interruption independently of a later user cancellation', async () => {
+    let release!: () => void;
+    const { fetch, calls } = recordingFetch((request) => {
+      const body = JSON.parse(request.body ?? '{}');
+      if (body._meta?.['qwen.cancelReason'] === 'interrupted') {
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(null, { status: 204 }));
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
+    });
+    const interruption = session.interrupt();
+    await session.cancel();
+    expect(calls.map((request) => JSON.parse(request.body ?? '{}'))).toEqual([
+      { _meta: { 'qwen.cancelReason': 'interrupted' } },
+      {},
+    ]);
+    release();
+    await interruption;
+  });
 
   it('coalesces duplicate public cancellations with the existing request shape', async () => {
     const { fetch } = recordingFetch(() => new Response(null, { status: 204 }));
@@ -3641,6 +3680,92 @@ describe('DaemonSessionClient clientId self-heal', () => {
       },
     });
   }
+
+  it('checks the caller before the first admission request', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(202, { promptId: 'p-1', lastEventId: 0 }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const beforeDispatch = vi.fn(() => {
+      throw new DOMException('Caller expired', 'AbortError');
+    });
+
+    await expect(
+      session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        beforeDispatch,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(beforeDispatch).toHaveBeenCalledWith('client-1');
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(['cancel', 'owner', 'client', 'unchanged', 'no-guard'] as const)(
+    'revalidates admission after client recovery: %s',
+    async (change) => {
+      let releaseResume!: (response: Response) => void;
+      const resume = new Promise<Response>((resolve) => {
+        releaseResume = resolve;
+      });
+      let promptCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/resume')) return resume;
+        if (req.url.endsWith('/prompt')) {
+          promptCalls++;
+          return promptCalls === 1
+            ? invalidClientIdResponse()
+            : jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const caller = new AbortController();
+      let ownerCurrent = true;
+      const beforeDispatch = vi.fn((clientId: string | undefined) => {
+        caller.signal.throwIfAborted();
+        if (!ownerCurrent || (change === 'client' && clientId !== 'client-1')) {
+          throw new DOMException('Caller expired', 'AbortError');
+        }
+      });
+      const pending = session.submitPrompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        change === 'no-guard' ? undefined : beforeDispatch,
+      );
+      const result = pending.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(calls.some((call) => call.url.endsWith('/resume'))).toBe(true),
+      );
+      if (change === 'cancel') caller.abort();
+      if (change === 'owner') ownerCurrent = false;
+      releaseResume(
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          state: {},
+        }),
+      );
+
+      if (change === 'unchanged' || change === 'no-guard') {
+        expect(await result).toEqual({ promptId: 'p-1', lastEventId: 0 });
+        expect(promptCalls).toBe(2);
+        expect(calls.at(-1)?.headers['x-qwen-client-id']).toBe('client-2');
+      } else {
+        expect(await result).toMatchObject({ name: 'AbortError' });
+        expect(promptCalls).toBe(1);
+      }
+      if (change !== 'no-guard') {
+        expect(beforeDispatch.mock.calls).toEqual([['client-1'], ['client-2']]);
+      }
+    },
+  );
 
   it('retries a worktree prompt only after matching durable reattachment', async () => {
     let promptCalls = 0;

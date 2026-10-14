@@ -73,6 +73,26 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   },
 }));
 
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
+
 const PARENT = randomUUID();
 const LEAF_RUN = 'run-leaf';
 
@@ -107,6 +127,7 @@ function call(
 function createTurn(
   promptName = 'prompt',
   memberPlanMode = false,
+  hooks?: import('./hosted-hook-session.js').HostedHookSession,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -154,6 +175,7 @@ function createTurn(
         lineage,
       ),
       commands,
+      hooks,
     },
   );
 }
@@ -214,6 +236,7 @@ async function seedFirstInput(text: string): Promise<void> {
 }
 
 beforeEach(async () => {
+  planGate.enabled = false;
   vi.resetAllMocks();
   for (const method of [
     broker.warm,
@@ -332,6 +355,128 @@ function texts(parts: Part[]): string {
   // serialization rather than on a text field that never exists.
   return JSON.stringify(parts);
 }
+
+it('gates the member plan tool and submits it through the durable command wait', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }, true),
+  );
+  const signal = new AbortController().signal;
+  expect(
+    (await createTurn('prompt', true).declarations(signal)).map(
+      (tool) => tool.name,
+    ),
+  ).not.toContain('exit_plan_mode');
+  planGate.enabled = true;
+  expect(
+    (await createTurn().declarations(signal)).map((tool) => tool.name),
+  ).not.toContain('exit_plan_mode');
+  const turn = createTurn('prompt', true);
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toContain(
+    'exit_plan_mode',
+  );
+  expect(
+    texts(
+      await execute(turn, [call({ plan: ' ' }, 'empty', 'exit_plan_mode')]),
+    ),
+  ).toContain('nonempty plan');
+  expect(
+    texts(
+      await execute(turn, [
+        call(
+          { subject: 'write', description: 'write' },
+          'write',
+          'task_create',
+        ),
+      ]),
+    ),
+  ).toContain('plan mode');
+  for (const [name, args, id] of [
+    ['task_list', {}, 'list'],
+    ['exit_plan_mode', { plan: 'Read then edit' }, 'plan'],
+  ] as const) {
+    const running = execute(turn, [call(args, id, name)]);
+    await vi.waitFor(
+      () => expect(commands.command(commandIdOf(id))).toBeDefined(),
+      { timeout: 5000 },
+    );
+    expect(commands.command(commandIdOf(id))?.kind).toBe(
+      name === 'task_list' ? 'board_read' : 'plan_submit',
+    );
+    await commands.handover(commandIdOf(id), PARENT);
+    await commands.answered(commandIdOf(id), {
+      outcome: 'answered',
+      text: 'accepted by leader',
+    });
+    expect(texts(await running)).toContain('accepted by leader');
+  }
+});
+
+it.each(['execute', 'resume', 'refused'] as const)(
+  'runs plan submission post hooks: %s',
+  async (mode) => {
+    planGate.enabled = true;
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }, true),
+    );
+    const events: string[] = [];
+    const hooks = {
+      tools: () => [],
+      toolInput: () => undefined,
+      fire: async (event: string) => {
+        events.push(event);
+        return event === 'PostToolUse'
+          ? {
+              continue: false,
+              stopReason: 'plan hook stop',
+              hookSpecificOutput: {
+                hookEventName: 'PostToolUse',
+                additionalContext: 'plan hook context',
+              },
+            }
+          : undefined;
+      },
+    } as unknown as import('./hosted-hook-session.js').HostedHookSession;
+    const turn = createTurn(
+      'prompt',
+      true,
+      mode === 'resume' ? undefined : hooks,
+    );
+    const running = execute(turn, [
+      call({ plan: 'read' }, 'hook-plan', 'exit_plan_mode'),
+    ]);
+    await vi.waitFor(
+      () => expect(commands.command(commandIdOf('hook-plan'))).toBeDefined(),
+      { timeout: 5000 },
+    );
+    await commands.handover(commandIdOf('hook-plan'), PARENT);
+    await commands.answered(commandIdOf('hook-plan'), {
+      outcome: mode === 'refused' ? 'refused' : 'answered',
+      text: 'leader reply',
+    });
+    const responses = await running;
+    const checked =
+      mode === 'resume' ? createTurn('prompt', true, hooks) : turn;
+    if (mode === 'resume') {
+      planGate.enabled = false;
+      await checked.resumeHookResults(
+        responses,
+        'model',
+        new AbortController().signal,
+      );
+    }
+    if (mode === 'refused') {
+      expect(events).not.toContain('PostToolUse');
+      expect(events).not.toContain('PostToolUseFailure');
+      expect(checked.hookStopReason).toBeUndefined();
+    } else {
+      expect(events).toContain('PostToolUse');
+      expect(checked.hookStopReason).toBe('plan hook stop');
+      expect(JSON.stringify(await session.sink.project())).toContain(
+        'plan hook context',
+      );
+    }
+  },
+);
 
 it('declares the member board tools behind the member preamble of a launch', async () => {
   await seedFirstInput(

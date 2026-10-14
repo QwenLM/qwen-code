@@ -139,6 +139,7 @@ const wakeDeps = vi.hoisted(() => ({
 const domainEnablement = vi.hoisted(() => ({
   childRun: true,
   monitorRun: true,
+  teamPlan: false,
 }));
 
 vi.mock(
@@ -160,6 +161,7 @@ vi.mock(
             'domain monitor_run is registered but not enabled for submission.',
           );
         }
+        if (domain === 'team_plan' && domainEnablement.teamPlan) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock. The
@@ -6085,15 +6087,20 @@ describe('Hosted Harness no-tool session', () => {
     await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).expect(200);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: true,
-      });
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).expect(200);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      },
+      // #14101: the parked chain crosses fsync-backed journal commits; the
+      // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
+      { timeout: 10_000 },
+    );
     const journal = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
       { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
@@ -6133,13 +6140,18 @@ describe('Hosted Harness no-tool session', () => {
         path.join(state.root, `${SESSION_ID}.jsonl`),
         { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
       );
-    await vi.waitFor(async () => {
-      expect(release).toHaveBeenCalledTimes(1);
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).expect(200);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        expect(release).toHaveBeenCalledTimes(1);
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).expect(200);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      // #14101: the debt settle crosses fsync-backed journal commits; the
+      // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
+      { timeout: 10_000 },
+    );
     const parked = await readJournal();
     const terminals = parked.events.filter(
       (event) => event.kind === 'turn.settled',
@@ -6316,6 +6328,42 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
+  });
+
+  it('accepts claim-fenced channel reconciliation only for an unknown settlement', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      })
+      .expect(200);
+    const request = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/channels/operations`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send(body);
+    const operationId = `channel-reconcile:${'a'.repeat(64)}`;
+    const body = {
+      operationId,
+      kind: 'settle_delivery',
+      deliveryId: 'missing',
+      outcome: 'unknown',
+    };
+    const settle = vi.spyOn(HostedChannelSession.prototype, 'settle');
+    await request({ ...body, operationId: `${operationId}x` }).expect(400);
+    await request({ ...body, outcome: 'rejected' }).expect(400);
+    await request({ ...body, kind: 'cancel_delivery' }).expect(400);
+    expect(settle).not.toHaveBeenCalled();
+    await request(body).expect(409);
+    expect(settle).toHaveBeenLastCalledWith('missing', 'unknown', operationId);
+    await request({ ...body, operationId: randomUUID() }).expect(409);
+    expect(settle).toHaveBeenLastCalledWith('missing', 'unknown', undefined);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
   });
 
   it('wires the wake pump with the shared recovery predicate (M3b)', async () => {
@@ -7114,8 +7162,9 @@ describe('Hosted Harness no-tool session', () => {
 
   // H4e-b1: the reopen verifier admits the lead's team roster and board, so
   // a Session that led a team reopens with its own committed history.
-  it('reopens a Session whose journal carries its team and board', async () => {
+  it('reopens a Session whose journal carries its team, board and plan with the plan gate off', async () => {
     domainEnablement.childRun = true;
+    domainEnablement.teamPlan = true;
     try {
       const key = {
         tenantId: 'tenant',
@@ -7185,11 +7234,22 @@ describe('Hosted Harness no-tool session', () => {
           workingDirectory: '.',
           executionCallId: 'run-1',
         });
-        await teams.join({ ...member, childRunId: 'run-1' });
+        await teams.join({
+          ...member,
+          childRunId: 'run-1',
+          planModeRequired: true,
+        });
+        await children.dispatchStarted('run-1', {
+          dispatchId: 'plan-dispatch',
+          runtime: { runtimeBindingId: 'plan-binding', generation: '1' },
+        });
+        await children.attach('run-1', CHILD_SESSION_ID);
+        await teams.submitPlan('cmd_reopen_plan', 'run-1', 'Read then edit');
+        domainEnablement.teamPlan = false;
         await children.settleFailed('run-1', {
-          stopReason: 'creation_failed',
+          stopReason: 'child_failed',
           reason: null,
-          started: false,
+          started: true,
         });
         await teams.run(
           'task_create',
@@ -7214,7 +7274,12 @@ describe('Hosted Harness no-tool session', () => {
           .filter((event) => event.kind === 'domain.committed')
           .map((event) => event.payload['domain']),
       ).toEqual(
-        expect.arrayContaining(['team_state', 'team_task', 'child_run']),
+        expect.arrayContaining([
+          'team_state',
+          'team_task',
+          'team_plan',
+          'child_run',
+        ]),
       );
       expect(
         (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
@@ -7222,6 +7287,7 @@ describe('Hosted Harness no-tool session', () => {
       ).toBe(204);
     } finally {
       domainEnablement.childRun = true;
+      domainEnablement.teamPlan = false;
     }
   });
 
@@ -18748,6 +18814,17 @@ describe('Hosted Harness refusal reasons', () => {
     await headers(
       supertest(result).delete(`/session/${DECLINE_SESSION}`),
     ).expect(204);
+    // R3-1's stamp needs a shape that still declines: a durably blocked
+    // checkpoint verdict keeps its typed terminal (`checkpoint_blocked`)
+    // where the journal-only park above now settles (#13847).
+    const blockedVerdict = {
+      status: 'blocked',
+      reason: 'opaque_state',
+    };
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue(blockedVerdict as never);
     const declined = await headers(
       supertest(result).post(`/session/${DECLINE_SESSION}/load`),
     ).send({
@@ -18757,13 +18834,13 @@ describe('Hosted Harness refusal reasons', () => {
     });
     expect(declined.status).toBe(409);
     expect(declined.body.code).toBe('hosted_turn_recovery_declined');
-    expect(declined.body.reason).toBe('unresolved_after_settle');
+    expect(declined.body.reason).toBe('checkpoint_blocked');
     expect(logger.warn).toHaveBeenCalledWith(
       'request completed',
       expect.objectContaining({
         status: 409,
         code: 'hosted_turn_recovery_declined',
-        reason: 'unresolved_after_settle',
+        reason: 'checkpoint_blocked',
       }),
     );
   });
@@ -24247,21 +24324,31 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
-  it('refuses a takeover whose parked turn is not a Runtime wait', async () => {
+  it('settles a takeover whose parked turn holds nothing unanswerable (#13847)', async () => {
     await parkBlockedTextTurn(true);
     const server = await replacementApp();
-    const loaded = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({
+    const loadBody = {
       managedSessionStore: storeFor(BOOT_ID_2),
       toolProfile: FILE_PROFILE,
       driveRuntimeRecovery: true,
-    });
-    // G3: a park that never reached the Runtime is a typed terminal
-    // decline, not a retriable refusal — retrying can never change it.
+    };
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(loadBody);
+    // G3 declined this park terminally and bricked the Session. #13847
+    // settles it instead: the interrupted Turn owes no Runtime work and
+    // nothing the takeover cannot answer, so it is cancelled durably and
+    // this drive keeps only the plain retriable refusal…
     expect(loaded.status).toBe(409);
-    expect(loaded.body.code).toBe('hosted_turn_recovery_declined');
-    expect(loaded.body.reason).toBe('unresolved_after_settle');
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('takeover_unrecovered');
+    // …and the next drive attaches, because the Turn's settle landed the
+    // input: the Session is never bricked.
+    const reloaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(loadBody);
+    expect(reloaded.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
   async function loadParkedRecovery() {

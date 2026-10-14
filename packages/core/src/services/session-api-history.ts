@@ -11,6 +11,7 @@ import type {
   ChatRecord,
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
+  TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 
@@ -48,68 +49,26 @@ export function findApiHistoryPromptIndex(
   return match;
 }
 
-export type SessionTurnSettlementHint =
-  | { kind: 'prompt' | 'attempt'; promptId?: string; daemonPromptId?: string }
-  | {
-      kind: 'result';
-      promptId: string;
-      state: 'completed' | 'cancelled' | 'error';
-      cancelledAt?: number;
-      cancelReason?: 'user';
-    };
-
-export function getSessionTurnSettlementHint(
-  record: ChatRecord,
-): SessionTurnSettlementHint | undefined {
-  if (
-    (record.type === 'user' && record.subtype === undefined) ||
-    (record.type === 'system' && record.subtype === 'turn_attempt')
-  ) {
-    return {
-      kind: record.type === 'user' ? 'prompt' : 'attempt',
-      promptId:
-        typeof record.promptId === 'string' && record.promptId.length > 0
-          ? record.promptId
-          : undefined,
-      daemonPromptId:
-        typeof record.daemonPromptId === 'string' &&
-        record.daemonPromptId.length > 0
-          ? record.daemonPromptId
-          : undefined,
-    };
-  }
-  if (
-    record.type === 'system' &&
-    record.subtype === 'turn_result' &&
-    isTurnResultRecordPayload(record.systemPayload)
-  ) {
-    return {
-      kind: 'result',
-      promptId: record.systemPayload.promptId,
-      state: record.systemPayload.state,
-      cancelledAt: record.systemPayload.cancelledAt,
-      cancelReason: record.systemPayload.cancelReason,
-    };
-  }
-  return undefined;
-}
-
 export function getLastApiHistoryPromptId(
   history: readonly Content[],
   trailingSystemNotifications?: number,
 ): string | undefined {
-  const end = history.length - (trailingSystemNotifications ?? 0);
   const prompt = history
-    .slice(0, end)
+    .slice(0, history.length - (trailingSystemNotifications ?? 0))
     .findLast((content) => getApiHistoryPromptId(content) !== undefined);
   return prompt && getApiHistoryPromptId(prompt);
 }
 
 export function getTurnResultCancellation(
-  result: Omit<Extract<SessionTurnSettlementHint, { kind: 'result' }>, 'kind'>,
+  result: Pick<
+    TurnResultRecordPayload,
+    'promptId' | 'state' | 'cancelledAt' | 'cancelReason'
+  >,
   owned = true,
 ): { reason: 'user' | 'unknown'; promptId: string } | undefined {
-  return result.state === 'cancelled' && result.cancelledAt !== undefined
+  return result.state === 'cancelled' &&
+    typeof result.cancelledAt === 'number' &&
+    Number.isFinite(result.cancelledAt)
     ? {
         reason: owned && result.cancelReason === 'user' ? 'user' : 'unknown',
         promptId: result.promptId,
@@ -117,53 +76,90 @@ export function getTurnResultCancellation(
     : undefined;
 }
 
-/** Client prompt IDs identify history entries; daemon IDs identify terminal outcomes. */
 export function getLastApiPromptCancellation(
   history: readonly Content[],
-  hints: ReadonlyArray<SessionTurnSettlementHint | undefined>,
+  records: readonly ChatRecord[],
   trailingSystemNotifications?: number,
-): { reason: 'user' | 'unknown'; promptId: string } | undefined {
-  const latest = hints.findLast((hint) => hint !== undefined);
-  const unknown =
-    latest?.kind === 'result'
-      ? getTurnResultCancellation(latest, false)
-      : undefined;
+):
+  | { reason: 'user' | 'unknown'; promptId: string; confirmationId?: string }
+  | undefined {
   const promptId = getLastApiHistoryPromptId(
     history,
     trailingSystemNotifications,
   );
-  if (!promptId) return unknown;
-  const matches = hints.filter(
-    (hint) => hint?.kind === 'prompt' && hint.promptId === promptId,
+  const isOwner = (record: ChatRecord) =>
+    (record.type === 'user' && record.subtype === undefined) ||
+    (record.type === 'system' && record.subtype === 'turn_attempt');
+  const isResult = (record: ChatRecord) =>
+    record.type === 'system' && record.subtype === 'turn_result';
+  const cancellation = (record: ChatRecord | undefined, owned: boolean) => {
+    if (!record || !isResult(record)) return undefined;
+    const result = record.systemPayload as TurnResultRecordPayload;
+    return getTurnResultCancellation(
+      {
+        ...result,
+        promptId:
+          typeof result?.promptId === 'string' && result.promptId.length > 0
+            ? result.promptId
+            : record.uuid,
+      },
+      owned && isTurnResultRecordPayload(result),
+    );
+  };
+  const latest = records.findLast(
+    (record) => isOwner(record) || isResult(record),
   );
-  if (matches.length !== 1) return unknown;
-  const original = matches[0]!;
   const owner =
-    hints
-      .slice(hints.indexOf(original) + 1)
-      .findLast((hint) => hint?.kind === 'attempt') ?? original;
+    promptId &&
+    records.findLast(
+      (record) => isOwner(record) && record.promptId === promptId,
+    );
+  if (!owner) return cancellation(latest, false);
+  const results = records
+    .slice(records.indexOf(owner) + 1)
+    .filter(
+      (record) =>
+        isResult(record) &&
+        (record.promptId === promptId ||
+          (record.promptId === undefined &&
+            owner.daemonPromptId !== undefined &&
+            (record.systemPayload as TurnResultRecordPayload)?.promptId ===
+              owner.daemonPromptId)),
+    );
+  const result = results.findLast((record) => cancellation(record, false));
+  if (!result)
+    return results.length > 0 ? undefined : cancellation(latest, false);
+  const owned =
+    results.length === 1 &&
+    (result.promptId === promptId ||
+      records.filter(
+        (record) =>
+          isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+      ).length === 1);
+  const cancelled = cancellation(result, owned);
+  const payload = result.systemPayload;
   if (
-    owner.kind === 'result' ||
-    owner.promptId !== promptId ||
-    !owner.daemonPromptId ||
-    hints.filter(
-      (hint) =>
-        hint?.kind !== 'result' &&
-        hint?.daemonPromptId === owner.daemonPromptId,
-    ).length !== 1
-  )
-    return unknown;
-  const results = hints.filter(
-    (hint) => hint?.kind === 'result' && hint.promptId === owner.daemonPromptId,
-  );
-  const result = results[0];
-  if (
-    results.length !== 1 ||
-    result?.kind !== 'result' ||
-    hints.indexOf(result) <= hints.indexOf(owner)
-  )
-    return unknown;
-  return getTurnResultCancellation(result) ?? unknown;
+    cancelled?.reason === 'unknown' &&
+    owned &&
+    isTurnResultRecordPayload(payload) &&
+    payload.cancelReason === undefined &&
+    typeof owner.daemonPromptId === 'string' &&
+    owner.daemonPromptId.length > 0 &&
+    payload.promptId === owner.daemonPromptId &&
+    !records
+      .slice(records.indexOf(result) + 1)
+      .some((record) => cancellation(record, false)) &&
+    records.filter(
+      (record) =>
+        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+    ).length === 1 &&
+    typeof result.uuid === 'string' &&
+    result.uuid.length > 0 &&
+    records.filter((record) => record.uuid === result.uuid).length === 1
+  ) {
+    return { ...cancelled, confirmationId: result.uuid };
+  }
+  return cancelled;
 }
 
 export interface BuildApiHistoryOptions {
@@ -513,7 +509,6 @@ export function buildSessionHistoryFromConversation(
   apiHistory: Content[];
   completedToolCallIds?: string[];
   trailingSystemNotifications: number;
-  turnCancellation?: ReturnType<typeof getLastApiPromptCancellation>;
 } {
   const accumulator = new SessionApiHistoryAccumulator();
   for (const record of conversation.messages) accumulator.add(record);
@@ -522,11 +517,6 @@ export function buildSessionHistoryFromConversation(
   const completedToolCallIds = accumulator
     .getCompletedToolCallIds()
     .filter((toolCallId) => hasUniqueToolResult(apiHistory, toolCallId));
-  const cancellationReason = getLastApiPromptCancellation(
-    apiHistory,
-    conversation.messages.map(getSessionTurnSettlementHint),
-    trailingSystemNotifications,
-  );
   return {
     apiHistory,
     ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
@@ -536,6 +526,5 @@ export function buildSessionHistoryFromConversation(
     // envelope-shaped real prompt from being trimmed. Omitting it would drop
     // the consumer back to shape-only guessing.
     trailingSystemNotifications,
-    ...(cancellationReason ? { turnCancellation: cancellationReason } : {}),
   };
 }

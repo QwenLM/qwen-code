@@ -297,7 +297,7 @@ describe('AcpWsTransport', () => {
 
     it.each([
       [undefined, 'interrupted'],
-      ['qwen:user-cancel', 'user'],
+      ['caller stopped', 'interrupted'],
     ] as const)(
       'forwards an abort as %s cancellation',
       async (reason, expected) => {

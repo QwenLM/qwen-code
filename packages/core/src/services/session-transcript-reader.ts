@@ -48,9 +48,6 @@ import {
 import {
   isApiHistoryCompressionCandidate,
   SessionApiHistoryAccumulator,
-  getSessionTurnSettlementHint,
-  getLastApiPromptCancellation,
-  type SessionTurnSettlementHint,
 } from './session-api-history.js';
 import {
   isResumeTokenCountsCandidate,
@@ -276,7 +273,6 @@ export interface SessionRestoreReplayPage {
 
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
-  turnCancellation?: ReturnType<typeof getLastApiPromptCancellation>;
   completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
@@ -405,15 +401,8 @@ function buildManagedSessionRestoreProjection(
   const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
   const restoredTokenCounts = resumeTokenCounts.finish();
   const restoredFileHistory = fileHistory.finish();
-  const restoredHistory = apiHistory.finishSession();
-  const cancellationReason = getLastApiPromptCancellation(
-    restoredHistory.apiHistory,
-    records.map(getSessionTurnSettlementHint),
-    restoredHistory.trailingSystemNotifications,
-  );
   const runtime: SessionRuntimeResumeState = {
-    apiHistory: restoredHistory.apiHistory,
-    ...(cancellationReason ? { turnCancellation: cancellationReason } : {}),
+    apiHistory: apiHistory.finish(),
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -524,7 +513,6 @@ interface UuidIndexEntry {
   navigationOrdinal?: number;
   navigationTextSuppressed: boolean;
   assistantPreviewCandidate: boolean;
-  turnSettlementHint?: SessionTurnSettlementHint;
   turnResultPromptId?: string;
   daemonPromptId?: string;
   segments: RecordSegment[];
@@ -1817,13 +1805,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.type) +
       estimateStringBytes(entry.subtype) +
       estimateStringBytes(entry.navigationKind) +
-      (entry.turnSettlementHint
-        ? INDEX_HINT_BASE_BYTES +
-          estimateStringBytes(entry.turnSettlementHint.promptId) +
-          (entry.turnSettlementHint.kind !== 'result'
-            ? estimateStringBytes(entry.turnSettlementHint.daemonPromptId)
-            : 0)
-        : 0) +
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
@@ -2155,7 +2136,6 @@ function newIndexEntry(
     attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
     goalRecoveryCandidate: isGoalRecoveryCandidate(record),
     turnHint: getSessionTurnRecordHint(record, sessionId),
-    turnSettlementHint: getSessionTurnSettlementHint(record),
     ...(navigationKind ? { navigationKind } : {}),
     ...(typeof record.daemonPromptId === 'string'
       ? { daemonPromptId: record.daemonPromptId }
@@ -3529,17 +3509,8 @@ export class SessionTranscriptReader {
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
     const completedToolCallIds = apiHistory.getCompletedToolCallIds();
-    const restoredHistory = apiHistory.finishSession();
-    const cancellationReason = getLastApiPromptCancellation(
-      restoredHistory.apiHistory,
-      index.runtimeUuids.map(
-        (uuid) => index.byUuid.get(uuid)?.turnSettlementHint,
-      ),
-      restoredHistory.trailingSystemNotifications,
-    );
     const runtime: SessionRuntimeResumeState = {
-      apiHistory: restoredHistory.apiHistory,
-      ...(cancellationReason ? { turnCancellation: cancellationReason } : {}),
+      apiHistory: apiHistory.finish(),
       ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }

@@ -22,7 +22,7 @@ public final class WorkspaceRecoveryReaderAssertions {
         ObjectNode source = WorkspaceRecoveryStore.JSON.createObjectNode();
         ObjectNode head = source.putObject("head");
         key.fields().forEachRemaining(field -> head.set(field.getKey(), field.getValue()));
-        head.put("journalRevision", jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class));
+        head.put("journalRevision", jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class));
         head.put("committedSequence", sequence);
         var reader = new WorkspaceRecoveryReader(jdbc, objects);
         ObjectNode request = WorkspaceRecoveryStore.JSON.createObjectNode().put("executionCallId", "execution-1")
@@ -44,21 +44,21 @@ public final class WorkspaceRecoveryReaderAssertions {
         assertThat(reader.resource(source, manifest).path("ref")).isEqualTo(manifest);
         assertThatThrownBy(() -> reader.publicationReceipt(source, request.deepCopy().put("sequence", sequence + 1)))
                 .hasMessageContaining("publication_receipt_conflict");
-        jdbc.update("UPDATE qwen_tool_execution SET request_digest = 'changed'");
+        jdbc.update("UPDATE ma_tool_execution SET request_digest = 'changed'");
         assertThatThrownBy(() -> reader.publicationReceipt(source, request)).hasMessageContaining("publication_owner_conflict");
-        jdbc.update("UPDATE qwen_tool_execution SET request_digest = ?", receipt.path("binding").path("requestDigest").asText());
-        byte[] terminal = jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object WHERE slot_key = 'terminal'", byte[].class);
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ? WHERE slot_key = 'terminal'", new byte[]{1});
+        jdbc.update("UPDATE ma_tool_execution SET request_digest = ?", receipt.path("binding").path("requestDigest").asText());
+        byte[] terminal = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE slot_key = X'7465726d696e616c'", byte[].class);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'", new byte[]{1});
         assertThatThrownBy(() -> reader.publicationObject(source, "pub-1", "terminal")).hasMessageContaining("resource_corrupt");
-        jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ? WHERE slot_key = 'terminal'", terminal);
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'", terminal);
         assertThat(snapshot(jdbc)).usingRecursiveComparison().isEqualTo(before);
     }
 
     private static Map<String, Object> snapshot(JdbcTemplate jdbc) {
         Map<String, Object> result = new LinkedHashMap<>();
-        for (String table : List.of("qwen_managed_session_journal_head", "qwen_managed_session_resource",
-                "qwen_tool_publication", "qwen_tool_publication_object", "qwen_tool_publication_seal",
-                "qwen_tool_execution", "qwen_runtime_binding")) result.put(table, jdbc.queryForList("SELECT * FROM " + table));
+        for (String table : List.of("ma_session_head", "ma_resource",
+                "ma_output_capture", "ma_resource", "ma_resource_ref",
+                "ma_tool_execution", "ma_runtime_binding")) result.put(table, jdbc.queryForList("SELECT * FROM " + table));
         return result;
     }
 }

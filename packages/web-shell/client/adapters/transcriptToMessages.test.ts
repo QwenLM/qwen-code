@@ -4641,6 +4641,42 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
+  it.each([' ', '\n', '\r\n', '\t'])(
+    'omits a standalone whitespace assistant between tools and thinking: %j',
+    (whitespace) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('tool-1', 'call-1', 'completed', 1),
+        textBlock('blank', 'assistant', whitespace, 2, true),
+        textBlock('thought', 'thought', 'Check the next file.', 3, true),
+        toolBlock('tool-2', 'call-2', 'completed', 4),
+      ]);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'tool_group',
+        'thinking',
+        'tool_group',
+      ]);
+    },
+  );
+
+  it('preserves whitespace chunks within existing assistant prose and usage', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('first', 'assistant', 'First paragraph.', 1, true),
+      textBlock('spacing', 'assistant', '\n\n', 2, true, {
+        usage: { inputTokens: 10, outputTokens: 2 },
+      }),
+      textBlock('last', 'assistant', 'Second paragraph.\n', 3),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'First paragraph.\n\nSecond paragraph.\n',
+        usage: { inputTokens: 10, outputTokens: 2 },
+      },
+    ]);
+  });
+
   it('keeps status blocks in the main transcript while subagent is active', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {

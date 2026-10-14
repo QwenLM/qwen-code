@@ -163,8 +163,6 @@ import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import { markApiHistoryPrompt } from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
-import { getInvocationContext } from '../utils/invocation-context.js';
-
 export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
@@ -3641,15 +3639,6 @@ export class LlmChat {
         this.generationConfig = previousGenerationConfig;
       streamDoneResolver!();
       throw error;
-    }
-
-    const client = this.config.getLlmClient?.();
-    if (
-      !this.isForkedChat &&
-      client?.isInitialized?.() &&
-      client.getChat() === this
-    ) {
-      client.acceptTurnInput(getInvocationContext()?.promptId ?? prompt_id);
     }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias

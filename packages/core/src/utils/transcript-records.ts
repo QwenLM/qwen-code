@@ -21,7 +21,6 @@ export interface TranscriptProjectionDiagnostic {
 }
 
 export interface TranscriptRecordInput {
-  readonly promptId?: string;
   readonly uuid: string;
   readonly parentUuid: string | null;
   readonly sessionId: string;
@@ -437,10 +436,6 @@ export function validateTranscriptRecord(
       uuid,
       parentUuid,
       sessionId,
-      promptId:
-        typeof value['promptId'] === 'string' && value['promptId'].length > 0
-          ? value['promptId']
-          : undefined,
       daemonPromptId:
         typeof value['daemonPromptId'] === 'string' &&
         value['daemonPromptId'].trim().length > 0

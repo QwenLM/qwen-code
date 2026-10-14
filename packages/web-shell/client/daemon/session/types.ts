@@ -408,6 +408,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
@@ -420,6 +421,8 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Revalidates the caller before every HTTP attempt, including client recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
@@ -431,7 +434,8 @@ export interface SendPromptOptions {
   onAdmitted?: (admission: { promptId: string }) => void;
 }
 
-export interface SubmitPromptOptions extends SendPromptOptions {
+export interface SubmitPromptOptions
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source'> {
   sessionId?: string;
   signal?: AbortSignal;
 }

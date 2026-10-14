@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
@@ -1207,27 +1209,24 @@ export async function runNonInteractive(
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
+        const history = llmClient.getChat().getHistory();
+        const cancellation = getLastApiPromptCancellation(
+          llmClient.getChat().getHistoryShallow(),
+          await config.getChatRecordingService()!.readActiveTranscriptChain(),
+        );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: llmClient.getChat().getHistory(),
+          apiHistory: history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
-          turnCancellation: llmClient.getTurnCancellation?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
           repairs: recoveryPlan.repairs,
           hasContinuation: recoveryPlan.continuation !== undefined,
         });
-        // Only a plan that carries a continuation has a confirmation to
-        // check: `clean` and `degraded_history` spread no
-        // `cancellationConfirmationId`, so a caller that passed the
-        // confirmation it read for a turn that has since settled compared two
-        // unrelated things and got a mismatch error where the no-op below is
-        // the answer.
         if (
-          recoveryPlan.continuation &&
-          options.confirmCancellation !==
-            recoveryPlan.cancellationConfirmationId
+          (cancellation && !cancellation.confirmationId) ||
+          options.confirmCancellation !== cancellation?.confirmationId
         ) {
           await emitNonInteractiveFinalMessage({
             message:

@@ -44,7 +44,6 @@ export interface SessionRecoveryPlan {
   canContinue: boolean;
   canAutoContinue: boolean;
   requiresUserConfirmation: boolean;
-  cancellationConfirmationId?: string;
   visibleNotice?: string;
   continuation?: SessionRecoveryContinuation;
 }
@@ -62,7 +61,6 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
   sessionId: string;
   apiHistory: Content[];
   completedToolCallIds?: readonly string[];
-  turnCancellation?: { reason: 'user' | 'unknown'; promptId: string };
   /**
    * Authoritative count of trailing `apiHistory` entries whose source record
    * the recorder stamped as a system-injected notification AND that is a cold
@@ -140,7 +138,6 @@ export function buildSessionRecoveryPlanFromApiHistory({
   sessionId,
   apiHistory: inputApiHistory,
   completedToolCallIds,
-  turnCancellation,
   trailingSystemNotifications,
   historyGaps,
   options,
@@ -191,7 +188,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
     completedToolCallIds,
     trailingSystemNotifications,
   );
-  if (turnCancellation?.reason === 'user' || interruption.kind === 'none') {
+  if (interruption.kind === 'none') {
     return {
       planId,
       sessionId,
@@ -205,10 +202,6 @@ export function buildSessionRecoveryPlanFromApiHistory({
     };
   }
 
-  const cancellationConfirmationId =
-    turnCancellation?.reason === 'unknown'
-      ? turnCancellation.promptId
-      : undefined;
   if (interruption.kind === 'interrupted_prompt') {
     const continuation: SessionRecoveryContinuation = {
       mode: 'retry_user_parts',
@@ -223,12 +216,8 @@ export function buildSessionRecoveryPlanFromApiHistory({
       apiHistory,
       repairs,
       canContinue: true,
-      canAutoContinue:
-        !cancellationConfirmationId && options?.allowAutoContinue === true,
-      requiresUserConfirmation:
-        Boolean(cancellationConfirmationId) ||
-        options?.allowAutoContinue !== true,
-      ...(cancellationConfirmationId ? { cancellationConfirmationId } : {}),
+      canAutoContinue: options?.allowAutoContinue === true,
+      requiresUserConfirmation: options?.allowAutoContinue !== true,
       visibleNotice: buildVisibleNotice('interrupted_prompt', repairs, gaps),
       continuation,
     };
@@ -247,7 +236,6 @@ export function buildSessionRecoveryPlanFromApiHistory({
     planId,
     sessionId,
     kind: 'interrupted_turn',
-    ...(cancellationConfirmationId ? { cancellationConfirmationId } : {}),
     originalApiHistory,
     apiHistory,
     repairs,

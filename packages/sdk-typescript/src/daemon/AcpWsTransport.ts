@@ -600,8 +600,7 @@ export class AcpWsTransport implements DaemonTransport {
             this.sendNotification('session/cancel', {
               sessionId,
               _meta: {
-                'qwen.cancelReason':
-                  signal.reason === 'qwen:user-cancel' ? 'user' : 'interrupted',
+                'qwen.cancelReason': 'interrupted',
               },
             });
           }

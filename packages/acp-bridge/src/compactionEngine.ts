@@ -679,7 +679,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        if (hasDiscreteMessageMeta(data?.update?._meta)) {
+        const meta = data?.update?._meta as Record<string, unknown> | undefined;
+        if (
+          hasDiscreteMessageMeta(data?.update?._meta) ||
+          meta?.['executionLifecycle'] !== undefined
+        ) {
           this.slots.push({ kind: 'misc', event });
           break;
         }
