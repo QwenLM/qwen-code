@@ -57,6 +57,7 @@ import {
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
+import { UnauthorizedError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 
 // --- MOCKS ---
@@ -1884,6 +1885,7 @@ describe('useLlmStream', () => {
         result.current.cancelOngoingRequest();
       });
 
+      expect(result.current.turnCancellationRevision).toBe(1);
       const completed = createCompletedToolCall();
       rerenderWithToolCalls([completed]);
       await completeToolRound([completed]);
@@ -4680,7 +4682,7 @@ describe('useLlmStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
     const client = new MockedLlmClientClass(mockConfig);
-    renderHook(() =>
+    const { result } = renderHook(() =>
       useLlmStream(
         client,
         [],
@@ -4752,6 +4754,7 @@ describe('useLlmStream', () => {
     });
     expect(finishTurn).not.toHaveBeenCalled();
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(result.current.turnHasError).toBe(true);
     expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
       promptId: 'prompt-goal-missing',
       errorMessage: 'missing Goal tool context',
@@ -5495,6 +5498,7 @@ describe('useLlmStream', () => {
     });
     releaseRefresh?.();
     await batch;
+    expect(result.current.turnCancellationRevision).toBe(1);
 
     expect(client.addHistory).toHaveBeenCalledWith({
       role: 'user',
@@ -8518,6 +8522,127 @@ describe('useLlmStream', () => {
       'prompt-id-midturn',
       expect.objectContaining({ type: SendMessageType.ToolResult }),
     );
+  });
+
+  describe('terminal turn outcome', () => {
+    const renderStatusStream = (onAuthError = vi.fn()) =>
+      renderHook(() =>
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          onAuthError,
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+    it('reports an unauthorized turn as failed without changing retry routing', async () => {
+      const onAuthError = vi.fn();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield* [];
+          throw new UnauthorizedError('Expired session');
+        })(),
+      );
+      const { result } = renderStatusStream(onAuthError);
+      await act(async () => {
+        await result.current.submitQuery('hello', SendMessageType.UserQuery);
+      });
+      expect(onAuthError).toHaveBeenCalledWith(
+        'Session expired or is unauthorized.',
+      );
+      expect(result.current.turnHasError).toBe(true);
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('does not carry a terminal API error into a successful shell command', async () => {
+      let onExec: ((done: Promise<void>) => Promise<void>) | undefined;
+      vi.mocked(useShellCommandProcessor).mockImplementation(
+        (_add, _pending, callback) => {
+          onExec = callback as typeof onExec;
+          return { handleShellCommand: vi.fn(), activeShellPtyId: null };
+        },
+      );
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Error,
+            value: { error: { message: 'API failed', status: 500 } },
+          };
+        })(),
+      );
+      const { result } = renderStatusStream();
+      await act(async () => {
+        await result.current.submitQuery('hello', SendMessageType.UserQuery);
+      });
+      expect(result.current.turnHasError).toBe(true);
+      expect(
+        result.current.pendingHistoryItems.some(
+          (item) => item.type === 'error',
+        ),
+      ).toBe(true);
+      let finish!: () => void;
+      const done = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      let execution: Promise<void> | undefined;
+      act(() => {
+        execution = onExec!(done);
+      });
+      expect(result.current.turnHasError).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        finish();
+        await execution;
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(result.current.turnHasError).toBe(false);
+      expect(
+        result.current.pendingHistoryItems.some(
+          (item) => item.type === 'error',
+        ),
+      ).toBe(true);
+    });
+
+    it('reports a terminal error during an active retry countdown', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Retry,
+            retryInfo: {
+              attempt: 1,
+              maxRetries: 2,
+              delayMs: 60000,
+              skipDelay: vi.fn(),
+            },
+          };
+          yield {
+            type: ServerLlmEventType.Error,
+            value: { error: { message: 'Retry failed', status: 500 } },
+          };
+        })(),
+      );
+      const { result } = renderStatusStream();
+      await act(async () => {
+        await result.current.submitQuery('hello', SendMessageType.UserQuery);
+      });
+      expect(result.current.turnHasError).toBe(true);
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
   });
 
   it('exposes provider cancellation to terminal status consumers', async () => {
@@ -16537,6 +16662,10 @@ describe('useLlmStream', () => {
       await act(async () => {
         await result.current.submitQuery('test terminal boundary');
       });
+
+      expect(result.current.turnHasError).toBe(
+        testCase.event.type === ServerLlmEventType.SessionTokenLimitExceeded,
+      );
 
       expect(
         mockAddItem.mock.calls

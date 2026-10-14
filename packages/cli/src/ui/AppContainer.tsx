@@ -206,7 +206,10 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
-import { useProgramStatus } from './hooks/use-program-status.js';
+import {
+  useProgramStatus,
+  programStatusBlockedKind,
+} from './hooks/use-program-status.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
@@ -2463,6 +2466,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     streamingState,
     turnCancellationRevision,
+    turnHasError,
     submitQuery,
     initError,
     pendingHistoryItems: pendingLlmHistoryItems,
@@ -4060,28 +4064,26 @@ export const AppContainer = (props: AppContainerProps) => {
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
+  const blockedKind = programStatusBlockedKind({
+    auth: isAuthDialogOpen || isAuthenticating,
+    question: pendingToolCalls.some(
+      (call) =>
+        call.status === 'awaiting_approval' &&
+        call.confirmationDetails.type === 'ask_user_question',
+    ),
+    permission:
+      streamingState === StreamingState.WaitingForConfirmation ||
+      isMcpApprovalDialogOpen ||
+      isFolderTrustDialogOpen ||
+      !!shellConfirmationRequest ||
+      !!confirmationRequest ||
+      !!loopDetectionConfirmationRequest,
+    dialog: dialogsVisible || isFeedbackDialogOpen,
+  });
   useProgramStatus(
     streamingState,
-    isAuthDialogOpen || isAuthenticating
-      ? 'auth'
-      : pendingToolCalls.some(
-            (call) =>
-              call.status === 'awaiting_approval' &&
-              call.confirmationDetails.type === 'ask_user_question',
-          )
-        ? 'question'
-        : streamingState === StreamingState.WaitingForConfirmation ||
-            isMcpApprovalDialogOpen ||
-            isFolderTrustDialogOpen ||
-            !!shellConfirmationRequest ||
-            !!confirmationRequest ||
-            !!loopDetectionConfirmationRequest
-          ? 'permission'
-          : dialogsVisible
-            ? 'question'
-            : undefined,
-    historyManager.history.at(-1)?.type === 'error' ||
-      pendingLlmHistoryItems.some((item) => item.type === 'error'),
+    blockedKind,
+    turnHasError,
     turnCancellationRevision,
   );
   dialogsVisibleRef.current = dialogsVisible;

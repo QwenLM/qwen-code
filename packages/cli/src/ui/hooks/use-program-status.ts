@@ -11,6 +11,18 @@ import { OSC, osc, wrapForMultiplexer } from '../../utils/osc.js';
 
 export type ProgramStatusBlockKind = 'permission' | 'question' | 'auth';
 
+export function programStatusBlockedKind(input: {
+  auth: boolean;
+  question: boolean;
+  permission: boolean;
+  dialog: boolean;
+}): ProgramStatusBlockKind | undefined {
+  if (input.auth) return 'auth';
+  if (input.question) return 'question';
+  if (input.permission) return 'permission';
+  return input.dialog ? 'question' : undefined;
+}
+
 export function useProgramStatus(
   streamingState: StreamingState,
   blockedKind: ProgramStatusBlockKind | undefined,
@@ -22,6 +34,8 @@ export function useProgramStatus(
   const previousCancellation = useRef(cancellationRevision);
   const result = useRef<'idle' | 'done' | 'error'>('idle');
   const lastReport = useRef('');
+  const lastWritten = useRef('');
+  const released = useRef(false);
 
   useEffect(() => {
     if (!process.stdout.isTTY) return;
@@ -42,7 +56,10 @@ export function useProgramStatus(
       if (streamingState !== StreamingState.Idle) {
         turnActive.current = true;
         result.current = 'idle';
-      } else if (turnActive.current) {
+      } else if (
+        turnActive.current ||
+        (hasError && result.current === 'done')
+      ) {
         result.current = hasError ? 'error' : 'done';
         turnActive.current = false;
       }
@@ -50,39 +67,50 @@ export function useProgramStatus(
         ? 'blocked'
         : streamingState === StreamingState.Responding
           ? 'working'
-          : streamingState === StreamingState.WaitingForConfirmation
-            ? 'blocked'
-            : result.current;
+          : result.current;
     }
-    const kind =
-      state === 'blocked' ? `:kind=${blockedKind ?? 'permission'}` : '';
+    const kind = state === 'blocked' ? `:kind=${blockedKind}` : '';
     const report = wrapForMultiplexer(
       osc(OSC.PROGRAM_STATUS, `state=${state}${kind}:app=qwen-code`),
     );
-    if (report !== lastReport.current) {
+    lastReport.current = report;
+    if (!released.current && report !== lastWritten.current) {
       // Bypass Ink's rendering pipeline, which can corrupt OSC/DCS bytes.
       process.stdout.write(report);
-      lastReport.current = report;
+      lastWritten.current = report;
     }
   }, [streamingState, blockedKind, hasError, cancellationRevision]);
 
   useEffect(() => {
     if (!process.stdout.isTTY) return;
     const clear = () => {
-      process.stdout.write(
-        wrapForMultiplexer(osc(OSC.PROGRAM_STATUS, 'state=clear')),
+      const sequence = wrapForMultiplexer(
+        osc(OSC.PROGRAM_STATUS, 'state=clear'),
       );
+      process.stdout.write(sequence);
+      lastWritten.current = sequence;
     };
     const restore = () => {
-      if (lastReport.current) process.stdout.write(lastReport.current);
+      if (!released.current && lastReport.current) {
+        process.stdout.write(lastReport.current);
+        lastWritten.current = lastReport.current;
+      }
     };
-    appEvents.on(AppEvent.TerminalReleased, clear);
-    appEvents.on(AppEvent.TerminalAcquired, restore);
+    const release = () => {
+      released.current = true;
+      clear();
+    };
+    const acquire = () => {
+      released.current = false;
+      restore();
+    };
+    appEvents.on(AppEvent.TerminalReleased, release);
+    appEvents.on(AppEvent.TerminalAcquired, acquire);
     process.on('SIGCONT', restore);
     process.on('exit', clear);
     return () => {
-      appEvents.removeListener(AppEvent.TerminalReleased, clear);
-      appEvents.removeListener(AppEvent.TerminalAcquired, restore);
+      appEvents.removeListener(AppEvent.TerminalReleased, release);
+      appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
       process.removeListener('SIGCONT', restore);
       process.removeListener('exit', clear);
       clear();

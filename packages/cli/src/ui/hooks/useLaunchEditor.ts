@@ -1,3 +1,4 @@
+import { isTerminalEditorCommand } from '../../utils/terminal-editor.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 import { useCallback } from 'react';
 import { useStdin } from 'ink';
@@ -62,9 +63,10 @@ export function useLaunchEditor() {
       }
 
       // Temporarily disable raw mode for editor
+      const terminalEditor = isTerminalEditorCommand(editorCommand);
       const wasRaw = stdin?.isRaw ?? false;
       try {
-        appEvents.emit(AppEvent.TerminalReleased);
+        if (terminalEditor) appEvents.emit(AppEvent.TerminalReleased);
         setRawMode?.(false);
 
         // On Windows, .cmd and .bat files need shell: true
@@ -83,7 +85,7 @@ export function useLaunchEditor() {
         }
       } finally {
         if (wasRaw) setRawMode?.(true);
-        appEvents.emit(AppEvent.TerminalAcquired);
+        if (terminalEditor) appEvents.emit(AppEvent.TerminalAcquired);
       }
     },
     [settings.merged.general?.preferredEditor, setRawMode, stdin],

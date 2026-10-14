@@ -5,12 +5,17 @@
  */
 // @vitest-environment jsdom
 
+import { createElement, StrictMode, act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderHook, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import { StreamingState } from '../types.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
-import { useProgramStatus } from './use-program-status.js';
+import {
+  useProgramStatus,
+  programStatusBlockedKind,
+} from './use-program-status.js';
 import type { ProgramStatusBlockKind } from './use-program-status.js';
 
 vi.mock('../../utils/osc.js', async (importOriginal) => {
@@ -34,6 +39,7 @@ describe('useProgramStatus', () => {
     vi.stubEnv('TERM', 'xterm');
     vi.stubEnv('STY', '');
     vi.stubEnv('TMUX', '');
+    vi.stubEnv('KITTY_WINDOW_ID', '');
     Object.defineProperty(process.stdout, 'isTTY', {
       value: true,
       configurable: true,
@@ -75,9 +81,24 @@ describe('useProgramStatus', () => {
       cancellation: 0,
     });
     expect(write).toHaveBeenLastCalledWith(report('working'));
+    write.mockClear();
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: true,
+      cancellation: 0,
+    });
+    expect(write).not.toHaveBeenCalled();
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    expect(write).not.toHaveBeenCalled();
     rerender({
       state: StreamingState.WaitingForConfirmation,
-      kind: undefined,
+      kind: 'permission',
       error: false,
       cancellation: 0,
     });
@@ -171,6 +192,131 @@ describe('useProgramStatus', () => {
     expect(write).toHaveBeenLastCalledWith(report('idle'));
   });
 
+  it('upgrades a completed result when asynchronous finalization reports an error', () => {
+    const { rerender } = mount();
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    rerender({
+      state: StreamingState.Idle,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    expect(write).toHaveBeenLastCalledWith(report('done'));
+    rerender({
+      state: StreamingState.Idle,
+      kind: undefined,
+      error: true,
+      cancellation: 0,
+    });
+    expect(write).toHaveBeenLastCalledWith(report('error'));
+  });
+
+  it('starts the next turn after a cancellation', () => {
+    const { rerender } = mount();
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    rerender({
+      state: StreamingState.Idle,
+      kind: undefined,
+      error: false,
+      cancellation: 1,
+    });
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: false,
+      cancellation: 1,
+    });
+    expect(write).toHaveBeenLastCalledWith(report('working'));
+    rerender({
+      state: StreamingState.Idle,
+      kind: undefined,
+      error: false,
+      cancellation: 1,
+    });
+    expect(write).toHaveBeenLastCalledWith(report('done'));
+  });
+
+  it.each([false, true])(
+    'restores a latched result after a dialog (error=%s)',
+    (error) => {
+      const { rerender } = mount();
+      rerender({
+        state: StreamingState.Responding,
+        kind: undefined,
+        error: false,
+        cancellation: 0,
+      });
+      rerender({
+        state: StreamingState.Idle,
+        kind: undefined,
+        error,
+        cancellation: 0,
+      });
+      rerender({
+        state: StreamingState.Idle,
+        kind: 'question',
+        error,
+        cancellation: 0,
+      });
+      expect(write).toHaveBeenLastCalledWith(report('blocked', 'question'));
+      rerender({
+        state: StreamingState.Idle,
+        kind: undefined,
+        error,
+        cancellation: 0,
+      });
+      expect(write).toHaveBeenLastCalledWith(report(error ? 'error' : 'done'));
+    },
+  );
+
+  it('does not restore or emit updates while another program owns the terminal', () => {
+    const before = process.listeners('SIGCONT');
+    const { rerender } = mount();
+    const resume = process
+      .listeners('SIGCONT')
+      .find((listener) => !before.includes(listener));
+    appEvents.emit(AppEvent.TerminalReleased);
+    expect(write).toHaveBeenLastCalledWith(clear);
+    write.mockClear();
+    resume!('SIGCONT');
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    expect(write).not.toHaveBeenCalled();
+    appEvents.emit(AppEvent.TerminalAcquired);
+    expect(write).toHaveBeenLastCalledWith(report('working'));
+  });
+
+  it('leaves startup idle current after StrictMode effect remount', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    function Probe() {
+      useProgramStatus(StreamingState.Idle, undefined, false, 0);
+      return null;
+    }
+    try {
+      await act(async () =>
+        root.render(createElement(StrictMode, null, createElement(Probe))),
+      );
+      expect(write).toHaveBeenLastCalledWith(report('idle'));
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   it('clears on handoff and restores on return, then clears on unmount', () => {
     const { unmount, rerender } = mount();
     rerender({
@@ -234,4 +380,31 @@ describe('useProgramStatus', () => {
     unmount();
     expect(write).not.toHaveBeenCalled();
   });
+});
+
+describe('programStatusBlockedKind', () => {
+  it.each([
+    [{ auth: true, question: true, permission: true, dialog: true }, 'auth'],
+    [
+      { auth: false, question: true, permission: true, dialog: true },
+      'question',
+    ],
+    [
+      { auth: false, question: false, permission: true, dialog: true },
+      'permission',
+    ],
+    [
+      { auth: false, question: false, permission: false, dialog: true },
+      'question',
+    ],
+    [
+      { auth: false, question: false, permission: false, dialog: false },
+      undefined,
+    ],
+  ] as const)(
+    'honors the blocked-state precedence for %j',
+    (input, expected) => {
+      expect(programStatusBlockedKind(input)).toBe(expected);
+    },
+  );
 });

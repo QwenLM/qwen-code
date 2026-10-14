@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTerminalEditorCommand } from '../../../utils/terminal-editor.js';
 import { appEvents, AppEvent } from '../../../utils/events.js';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -2581,6 +2582,8 @@ export function useTextBuffer({
         }
       }
 
+      const terminalEditor = isTerminalEditorCommand(editorCmd);
+      let terminalReleased = false;
       if (useShell) {
         // .cmd/.bat launch through cmd.exe on Windows. Quote both the
         // command and args so paths with spaces survive cmd.exe parsing.
@@ -2597,7 +2600,10 @@ export function useTextBuffer({
           encoding: 'utf8',
           mode: 0o600,
         });
-        appEvents.emit(AppEvent.TerminalReleased);
+        if (terminalEditor) {
+          appEvents.emit(AppEvent.TerminalReleased);
+          terminalReleased = true;
+        }
         setRawMode?.(false);
 
         debugLogger.warn(
@@ -2634,7 +2640,7 @@ export function useTextBuffer({
             rawErr,
           );
         }
-        appEvents.emit(AppEvent.TerminalAcquired);
+        if (terminalReleased) appEvents.emit(AppEvent.TerminalAcquired);
         try {
           // recursive+force handles leftover swap files (.swp) from vim/neovim.
           // On Windows, EPERM/EBUSY from locked files may still cause a partial

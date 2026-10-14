@@ -106,6 +106,41 @@ describe('openInExternalEditor', () => {
     },
   );
 
+  it.each(['write failure', 'GUI editor'])(
+    'does not publish a terminal handoff for %s',
+    async (scenario) => {
+      const events: string[] = [];
+      const release = () => events.push('release');
+      const acquire = () => events.push('acquire');
+      appEvents.on(AppEvent.TerminalReleased, release);
+      appEvents.on(AppEvent.TerminalAcquired, acquire);
+      if (scenario === 'write failure')
+        (fs.writeFileSync as Mock).mockImplementation(() => {
+          throw new Error('ENOSPC');
+        });
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+          }),
+        );
+        await act(async () => {
+          await result.current.openInExternalEditor(
+            scenario === 'GUI editor' ? { editor: 'code' } : {},
+          );
+        });
+        expect(events).toEqual([]);
+        if (scenario === 'write failure')
+          expect(mockSpawnSync).not.toHaveBeenCalled();
+      } finally {
+        appEvents.removeListener(AppEvent.TerminalReleased, release);
+        appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+      }
+    },
+  );
+
   it('should create temp file in private mkdtemp directory', async () => {
     const { result } = renderHook(() =>
       useTextBuffer({

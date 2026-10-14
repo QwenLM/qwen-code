@@ -599,6 +599,7 @@ export const useLlmStream = (
     onSubmissionSettled?: () => void;
   } | null>,
 ) => {
+  const [turnHasError, setTurnHasError] = useState(false);
   const [turnCancellationRevision, setTurnCancellationRevision] = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1264,6 +1265,7 @@ export const useLlmStream = (
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
   const onExec = useCallback(async (done: Promise<void>) => {
+    setTurnHasError(false);
     setIsResponding(true);
     await done;
     setIsResponding(false);
@@ -2293,6 +2295,7 @@ export const useLlmStream = (
       userMessageTimestamp: number,
       submitType: SendMessageType,
     ) => {
+      setTurnHasError(true);
       if (submitType !== SendMessageType.Goal) {
         lastPromptErroredRef.current = true;
       } else {
@@ -2498,7 +2501,8 @@ export const useLlmStream = (
   );
 
   const handleSessionTokenLimitExceededEvent = useCallback(
-    (value: { currentTokens: number; limit: number; message: string }) =>
+    (value: { currentTokens: number; limit: number; message: string }) => {
+      setTurnHasError(true);
       addItem(
         {
           type: 'error',
@@ -2510,7 +2514,8 @@ export const useLlmStream = (
             `   • Compress history: Use /compress command to compress history`,
         },
         Date.now(),
-      ),
+      );
+    },
     [addItem],
   );
 
@@ -3668,6 +3673,7 @@ export const useLlmStream = (
       // the trackers untouched — they're piggybacking on an in-flight
       // turn that already owns its own snapshot.
       if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
+        setTurnHasError(false);
         lastTurnUserItemRef.current = null;
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
@@ -4290,8 +4296,10 @@ export const useLlmStream = (
           cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
+            setTurnHasError(true);
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
+            setTurnHasError(true);
             if (submitType !== SendMessageType.Goal) {
               lastPromptErroredRef.current = true;
             }
@@ -5164,6 +5172,7 @@ export const useLlmStream = (
         ) {
           return;
         }
+        if (status === 'error') setTurnHasError(true);
         endInteractionSpan(status, {
           promptId,
           ...(errorMessage ? { errorMessage } : {}),
@@ -5395,6 +5404,7 @@ export const useLlmStream = (
             (toolCall) => toolCall.status === 'cancelled',
           )
         ) {
+          setTurnCancellationRevision((revision) => revision + 1);
           endToolInteraction('cancelled');
         } else if (
           completedAndReadyToSubmitTools.some(
@@ -5497,6 +5507,7 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
+        setTurnCancellationRevision((revision) => revision + 1);
         // This is the branch a cancelled Goal tool batch actually takes: the
         // controller retained across tool execution feeds the continuation
         // owner's signal, so pressing Esc while tools run aborts it here
@@ -5984,6 +5995,7 @@ export const useLlmStream = (
       // sends an unpaired call -- the same pairing the cancellation check
       // above owes its own batch.
       if (continuationWasCancelled()) {
+        setTurnCancellationRevision((revision) => revision + 1);
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
@@ -6003,6 +6015,7 @@ export const useLlmStream = (
         return;
       }
       if (toolGoalBinding?.controller.signal.aborted) {
+        setTurnCancellationRevision((revision) => revision + 1);
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (llmClient) {
@@ -6802,6 +6815,7 @@ export const useLlmStream = (
   return {
     streamingState,
     turnCancellationRevision,
+    turnHasError,
     submitQuery,
     initError,
     pendingHistoryItems,
