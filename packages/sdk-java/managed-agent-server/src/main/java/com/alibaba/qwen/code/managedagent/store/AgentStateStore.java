@@ -124,6 +124,26 @@ public interface AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
 
+    SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
+            String requestDigest, String sessionId, String title);
+
+    SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, String title, String harnessBootId, long revision);
+
+    SessionRecord completeSessionRename(StoreModels.RenameDelivery delivery, String owner, String bootId);
+
+    void abandonSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, long revision, String owner);
+
+    List<StoreModels.RenameDelivery> deliverableRenames(long now);
+
+    Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
+            String owner, Duration lease);
+
+    void markRenameSubmitted(StoreModels.RenameDelivery delivery, String owner);
+
+    void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
+
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId);
@@ -151,6 +171,10 @@ public interface AgentStateStore {
         return false;
     }
 
+    default boolean workspaceShellEnabled() {
+        return false;
+    }
+
     default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest, boolean supported) {
         throw new UnsupportedOperationException("Workspace close is unavailable");
@@ -159,6 +183,12 @@ public interface AgentStateStore {
     OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
+
+    default OperationAdmission beginChildClose(String tenantId, String parentSessionId,
+            String childSessionId, String childRunId, String actorDigest, String key,
+            String digest, boolean supported) {
+        throw new UnsupportedOperationException("Internal child close is unavailable");
+    }
 
     default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
@@ -370,6 +400,8 @@ public interface AgentStateStore {
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
+    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
+
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
@@ -393,6 +425,13 @@ public interface AgentStateStore {
 
     MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit);
+
+    /**
+     * Rotates a stale materialization target behind the fresher ones by
+     * touching only {@code updated_at} on its progress row — never
+     * {@code covered_sequence}, which the gap guard must freeze on failure.
+     */
+    void deferMaterializationTarget(String tenantId, String sessionId);
 
     List<DispatchTarget> findDispatchable(long now, int limit);
 
@@ -447,6 +486,11 @@ public interface AgentStateStore {
     void retractHarnessTurnOutput(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId);
+
+    void retractHarnessTurnOutput(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long fromSourceId, long retractionSourceId, String sourceBootId,
+            String sourceEventEpoch, Long throughSourceId);
 
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,

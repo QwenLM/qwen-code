@@ -25,10 +25,10 @@ public final class InMemoryRuntimeSessionRepository
     public synchronized RuntimeSessionRecord findOrCreate(
             RuntimeSessionRecord candidate) {
         if (candidate == null || candidate.getVersion() != 0
-                || candidate.getState()
-                        != RuntimeSessionRecord.State.ACQUIRING) {
+                || (candidate.getState() != RuntimeSessionRecord.State.ACQUIRING
+                        && candidate.getState() != RuntimeSessionRecord.State.RELEASED)) {
             throw new IllegalArgumentException(
-                    "candidate must be a new acquiring Session");
+                    "candidate must be a new acquiring Session or release tombstone");
         }
         RuntimeScope scope = candidate.getSession().getScope();
         Map<String, RuntimeSessionRecord> scopedRecords = records.computeIfAbsent(

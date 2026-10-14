@@ -8377,6 +8377,7 @@ export function registerSessionRoutes(
             runtime.bridge.closeSession(
               sessionId,
               clientId !== undefined ? { clientId } : undefined,
+              { cancelReason: 'user' },
             ),
           ),
         ),
@@ -9987,6 +9988,26 @@ export function registerSessionRoutes(
             ...(eventDetailMode !== undefined ? { eventDetailMode } : {}),
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  // Deliver the queued mid-turn messages now: the agent cuts a streaming
+  // model response short instead of waiting for its next tool boundary,
+  // unless that response has started a tool call.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/send-now',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.sendMidTurnMessagesNow(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(result);
       },

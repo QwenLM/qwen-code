@@ -201,6 +201,7 @@ export interface WebShellChatHeaderOptions {
 }
 
 export type WebShellRightPanelItem =
+  | 'files'
   | 'review'
   | 'sideTask'
   | 'terminal'
@@ -284,6 +285,7 @@ export interface WebShellSubmitSnapshot {
   sessionId?: string;
   prompt: string;
   inputAnnotations: readonly DaemonInputAnnotation[];
+  source?: 'mcp-app';
 }
 
 export type UserMessageContentRenderer = (

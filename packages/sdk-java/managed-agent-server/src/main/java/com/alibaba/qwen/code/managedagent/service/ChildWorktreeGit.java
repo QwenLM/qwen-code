@@ -190,6 +190,7 @@ public final class ChildWorktreeGit {
         } catch (IOException error) {
             throw ChildWorkspaceException.layout("The parent's working directory is unreadable");
         }
+        preflightMetadata(root, directory);
         Result located = run(directory, root, null, List.of("rev-parse", "--path-format=absolute",
                 "--show-toplevel"));
         if (located.exit != 0) {
@@ -213,6 +214,7 @@ public final class ChildWorktreeGit {
             throw ChildWorkspaceException.layout(
                     "The repository must lie strictly inside the storage root, outside " + CONTAINER);
         }
+        preflightMetadata(root, top);
         Result result = run(top, root, null, List.of("rev-parse", "--path-format=absolute",
                 "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--is-bare-repository"));
         if (result.exit != 0) {
@@ -245,6 +247,70 @@ public final class ChildWorktreeGit {
         // carry a write or a deletion out of the storage. Objects are one
         // level deep; packed-refs is rewritten through a lock file, which
         // Git places beside the file a link names.
+        requireSafeMetadata(commonDir);
+        requireSafeConfig(root, repository);
+        return repository;
+    }
+
+    private static void preflightMetadata(Path root, Path directory) {
+        // Even rev-parse can prune linked-worktree metadata before returning.
+        for (Path current = directory; current != null && current.startsWith(root); current = current.getParent()) {
+            Path marker = current.resolve(".git");
+            if (!Files.exists(marker, LinkOption.NOFOLLOW_LINKS)) {
+                try {
+                    Path head = current.resolve("HEAD");
+                    if (Files.exists(head, LinkOption.NOFOLLOW_LINKS)
+                            && Files.exists(current.resolve("objects"), LinkOption.NOFOLLOW_LINKS)
+                            && Files.exists(current.resolve("refs"), LinkOption.NOFOLLOW_LINKS)) {
+                        String ref = Files.isSymbolicLink(head)
+                                ? "ref: " + Files.readSymbolicLink(head) : metadataPointer(head);
+                        if (ref.startsWith("ref: refs/") || OBJECT_ID.matcher(ref).matches()) {
+                            throw ChildWorkspaceException.layout("A bare repository has no working tree");
+                        }
+                    }
+                } catch (IOException error) {
+                    throw ChildWorkspaceException.layout("The repository's Git metadata is unreadable");
+                }
+                continue;
+            }
+            try {
+                Path gitDir;
+                if (Files.isDirectory(marker)) {
+                    gitDir = marker.toRealPath();
+                } else {
+                    String pointer = metadataPointer(marker);
+                    if (!pointer.startsWith("gitdir: ")) {
+                        throw ChildWorkspaceException.layout("The repository's Git file is invalid");
+                    }
+                    gitDir = marker.getParent().resolve(pointer.substring(8)).normalize().toRealPath();
+                }
+                Path commonPointer = gitDir.resolve("commondir");
+                Path commonDir = Files.exists(commonPointer, LinkOption.NOFOLLOW_LINKS)
+                        ? gitDir.resolve(metadataPointer(commonPointer)).normalize().toRealPath() : gitDir;
+                if (!gitDir.startsWith(root) || !commonDir.startsWith(root)
+                        || !Files.isDirectory(gitDir) || !Files.isDirectory(commonDir)) {
+                    throw ChildWorkspaceException.layout("The repository's Git directory is outside the storage root");
+                }
+                requireSafeMetadata(commonDir);
+                return;
+            } catch (IOException | java.nio.file.InvalidPathException error) {
+                throw ChildWorkspaceException.layout("The repository's Git metadata is unreadable");
+            }
+        }
+    }
+
+    private static String metadataPointer(Path path) throws IOException {
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.size(path) > 16 * 1024) {
+            throw ChildWorkspaceException.layout("The repository's Git pointer is not a regular file");
+        }
+        String pointer = Files.readString(path).replaceFirst("\\r?\\n$", "");
+        if (pointer.isEmpty() || pointer.indexOf('\n') >= 0 || pointer.indexOf('\r') >= 0) {
+            throw ChildWorkspaceException.layout("The repository's Git pointer is invalid");
+        }
+        return pointer;
+    }
+
+    private static void requireSafeMetadata(Path commonDir) {
         requireNoLinks(commonDir, "refs", Integer.MAX_VALUE);
         requireNoLinks(commonDir, "logs", Integer.MAX_VALUE);
         requireNoLinks(commonDir, "worktrees", Integer.MAX_VALUE);
@@ -252,8 +318,6 @@ public final class ChildWorktreeGit {
         if (Files.isSymbolicLink(commonDir.resolve("packed-refs"))) {
             throw ChildWorkspaceException.layout("The repository's packed-refs is a link");
         }
-        requireSafeConfig(root, repository);
-        return repository;
     }
 
     /**
@@ -282,9 +346,20 @@ public final class ChildWorktreeGit {
                             }
                             return FileVisitResult.CONTINUE;
                         }
+
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException error) throws IOException {
+                            // Git can remove an object entry after the directory iterator lists it.
+                            if ("objects".equals(name) && !file.equals(directory)
+                                    && error instanceof NoSuchFileException) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                            throw error;
+                        }
                     });
         } catch (IOException error) {
-            throw ChildWorkspaceException.layout("The repository's " + name + " directory is unreadable");
+            throw new ChildWorkspaceException(ChildWorkspaceException.LAYOUT, false,
+                    "The repository's " + name + " directory is unreadable", error);
         }
     }
 
@@ -1186,6 +1261,7 @@ public final class ChildWorktreeGit {
         Path out = tempFile("out");
         Path err = tempFile("err");
         Path in = input;
+        Process process = null;
         try {
             if (in == null) {
                 in = tempFile("in");
@@ -1197,7 +1273,7 @@ public final class ChildWorktreeGit {
             if (!live.getAsBoolean()) {
                 throw claimLost(args);
             }
-            Process process = builder.start();
+            process = builder.start();
             long deadline = System.nanoTime() + timeout.toNanos();
             try {
                 while (!process.waitFor(Math.min(LIVENESS_POLL_MS,
@@ -1233,6 +1309,9 @@ public final class ChildWorktreeGit {
             throw new ChildWorkspaceException(ChildWorkspaceException.GIT, true,
                     "git " + args.getFirst() + " could not run", error);
         } finally {
+            if (process != null && process.isAlive()) {
+                kill(process);
+            }
             deleteQuietly(out);
             deleteQuietly(err);
             if (input == null && in != null) {
@@ -1248,9 +1327,22 @@ public final class ChildWorktreeGit {
      * they would be reparented out of reach.
      */
     private static void kill(Process process) {
-        List<ProcessHandle> descendants = process.descendants().toList();
-        process.destroyForcibly();
-        descendants.forEach(ProcessHandle::destroyForcibly);
+        try {
+            List<ProcessHandle> descendants = process.descendants().toList();
+            process.destroyForcibly();
+            descendants.forEach(ProcessHandle::destroyForcibly);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (process.isAlive() || descendants.stream().anyMatch(ProcessHandle::isAlive)) {
+                if (Thread.currentThread().isInterrupted() || System.nanoTime() >= deadline) {
+                    throw new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,
+                            "The original Git process tree has no confirmed stop proof");
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
+        } catch (RuntimeException unverified) {
+            throw new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,
+                    "The original Git process tree has no confirmed stop proof", unverified);
+        }
     }
 
     private boolean oversized(Path out, Path err) throws IOException {

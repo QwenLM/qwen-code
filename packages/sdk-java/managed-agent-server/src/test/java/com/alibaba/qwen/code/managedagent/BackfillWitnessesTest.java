@@ -1,60 +1,96 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import java.util.UUID;
+import com.alibaba.qwen.code.managedagent.config.ManagedSchemaConfiguration;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+
 import org.flywaydb.core.Flyway;
-import org.flywaydb.core.api.MigrationVersion;
-import org.flywaydb.core.api.configuration.FluentConfiguration;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.flyway.FlywayMigrationStrategy;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
-/**
- * The witness gates of {@link ManagedAgentMySqlIT} against databases staged
- * at each boundary version: a witness opens exactly when its one-shot
- * backfill was still pending at the run's start, so a database left
- * mid-window (V14 keeps the V15, V17 and V29 witnesses open while closing
- * V2's, V16 closes V15's) neither fails the V2-derived count nor silently
- * skips the later witnesses.
- */
+import java.util.UUID;
+
+/** Fresh-baseline admission replaces the retired upgrade/backfill witnesses. */
 class BackfillWitnessesTest {
     @Test
-    void gatesFollowTheVersionsPendingAtRunStart() {
-        // staged -> (consumerProgress V2, eventIdentity V15,
-        // pendingOperations V17, hookAdmissions V29, reseedCreationScope V9)
-        assertGates(null, true, true, true, true, false);
-        assertGates("1", true, true, true, true, false);
-        assertGates("8", false, true, true, true, false);
-        assertGates("9", false, true, true, true, true);
-        assertGates("14", false, true, true, true, true);
-        assertGates("15", false, false, true, true, true);
-        assertGates("16", false, false, true, true, true);
-        assertGates("17", false, false, false, true, true);
-        assertGates("28", false, false, false, true, true);
-        assertGates("29", false, false, false, false, true);
-        assertGates("head", false, false, false, false, true);
+    void brokerAndServerInitializeTheSameBaselineAndReplayWithoutAddingTables() {
+        var source = source();
+        ManagedSchema.initialize(source);
+        activate(source);
+        activate(source);
+        ManagedSchema.validate(source);
+        assertThat(
+                        new JdbcTemplate(source)
+                                .queryForObject(
+                                        "SELECT COUNT(*) FROM information_schema.tables WHERE"
+                                            + " table_schema = 'public' AND table_type='BASE"
+                                            + " TABLE'",
+                                        Integer.class))
+                .isEqualTo(33);
+        assertThat(
+                        new JdbcTemplate(source)
+                                .queryForObject(
+                                        "SELECT version FROM flyway_schema_history"
+                                                + " WHERE success = TRUE AND type = 'BASELINE'",
+                                        String.class))
+                .isEqualTo("2");
     }
 
-    private static void assertGates(String staged, boolean consumerProgress,
-            boolean eventIdentity, boolean pendingOperations,
-            boolean hookAdmissions, boolean reseedCreationScope) {
-        JdbcDataSource dataSource = new JdbcDataSource();
-        dataSource.setURL("jdbc:h2:mem:witness-gates-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        if (staged != null) {
-            FluentConfiguration flyway = Flyway.configure()
-                    .dataSource(dataSource)
-                    .locations("classpath:db/migration");
-            if (!"head".equals(staged)) {
-                flyway.target(MigrationVersion.fromVersion(staged));
-            }
-            flyway.load().migrate();
+    @Test
+    void serverInitializesAFreshCatalogWithTheSingleVersionedBaseline() {
+        var source = source();
+        activate(source);
+        ManagedSchema.validate(source);
+        assertThat(
+                        new JdbcTemplate(source)
+                                .queryForObject(
+                                        "SELECT script FROM flyway_schema_history"
+                                                + " WHERE version = '1'",
+                                        String.class))
+                .isEqualTo("V1__managed_schema.sql");
+    }
+
+    @Test
+    void legacyAndHistoryOnlyCatalogsAreRejectedBeforeAnySchemaMutation() {
+        for (String table : new String[] {"managed_agent_session", "flyway_schema_history"}) {
+            var source = source();
+            var jdbc = new JdbcTemplate(source);
+            jdbc.execute("CREATE TABLE " + table + " (witness INT)");
+            jdbc.update("INSERT INTO " + table + " VALUES (42)");
+            assertThatThrownBy(() -> activate(source)).isInstanceOf(IllegalStateException.class);
+            assertThat(jdbc.queryForObject("SELECT witness FROM " + table, Integer.class))
+                    .isEqualTo(42);
+            assertThat(
+                            jdbc.queryForObject(
+                                    "SELECT COUNT(*) FROM information_schema.tables WHERE"
+                                        + " table_schema = 'public' AND table_type='BASE TABLE'",
+                                    Integer.class))
+                    .isEqualTo(1);
         }
-        assertThat(BackfillWitnesses.forApplied(
-                BackfillWitnesses.appliedVersions(dataSource)))
-                .as("database staged at %s", staged)
-                .isEqualTo(new BackfillWitnesses(consumerProgress,
-                        eventIdentity, pendingOperations, hookAdmissions,
-                        reseedCreationScope));
+    }
+
+    private static void activate(JdbcDataSource source) {
+        FlywayMigrationStrategy strategy =
+                ReflectionTestUtils.invokeMethod(
+                        new ManagedSchemaConfiguration(), "freshManagedSchema", source);
+        strategy.migrate(
+                Flyway.configure()
+                        .dataSource(source)
+                        .locations(ManagedSchema.FLYWAY_LOCATION)
+                        .load());
+    }
+
+    private static JdbcDataSource source() {
+        var source = new JdbcDataSource();
+        source.setURL(
+                "jdbc:h2:mem:baseline-witness-"
+                        + UUID.randomUUID()
+                        + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
     }
 }

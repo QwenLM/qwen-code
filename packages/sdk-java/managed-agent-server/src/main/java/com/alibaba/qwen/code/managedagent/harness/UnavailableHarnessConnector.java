@@ -41,6 +41,11 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void rename(String tenantId, String sessionId, String title, long revision) {
+        rename(tenantId, sessionId, title);
+    }
+
+    @Override
     public void rename(String tenantId, String sessionId, String title) {
         throw unavailable();
     }
