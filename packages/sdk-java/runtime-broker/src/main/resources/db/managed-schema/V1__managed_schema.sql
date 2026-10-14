@@ -53,8 +53,7 @@ CREATE TABLE ma_session (
     CONSTRAINT uq_ma_session_scope UNIQUE (session_scope_key)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
--- Session lists page on the immutable created_at keyset: updated_at moves on every event append.
-CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, created_at, session_id);
+CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, updated_at, session_id);
 
 CREATE INDEX ix_ma_session_retirement ON ma_session (retired_at, recovery_protected);
 
