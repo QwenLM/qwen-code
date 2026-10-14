@@ -393,7 +393,7 @@ final class ManagedSchemaCatalog {
         };
     }
 
-    private static void validateGeneratedColumns(Connection connection, String name, String body)
+    static void validateGeneratedColumns(Connection connection, String name, String body)
             throws SQLException {
         Map<String, String> actual = new HashMap<>();
         try (var statement =
@@ -420,6 +420,10 @@ final class ManagedSchemaCatalog {
             List<String> expectedTokens = expressionTokens(expression);
             List<String> actualTokens = stored == null ? List.of() : expressionTokens(stored);
             boolean same = expectedTokens.equals(actualTokens);
+            if (!same && "csi_guard".equals(column.group(1))) {
+                same = expectedTokens.stream().map(token -> "false".equals(token) ? "0" : token).toList()
+                        .equals(actualTokens.stream().map(token -> "false".equals(token) ? "0" : token).toList());
+            }
             if (!same && "projection_pending".equals(column.group(1))) {
                 int split = expectedTokens.indexOf("or");
                 List<String> commuted =
