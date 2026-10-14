@@ -704,6 +704,9 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
+      findLastHistoryEntry: vi.fn((predicate: (entry: Content) => boolean) =>
+        [...history].reverse().find(predicate),
+      ),
       setHistory: vi.fn(),
     });
   /** Installs a message bus answering hook requests with `request`. */
@@ -754,6 +757,7 @@ describe('Gemini Client (client.ts)', () => {
     const chat = {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      findLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       ...overrides,
     };
     client['chat'] = chat as unknown as LlmChat;

@@ -25,8 +25,11 @@ per-query scores.
 ## Current state
 
 - `packages/core/src/core/client.ts` appends the hook context as its own part,
-  wrapped in the reserved tag, at the `UserPromptSubmit` injection site. It
-  never consults history first.
+  wrapped in the reserved tag, at the interactive `UserPromptSubmit` injection
+  site.
+- `packages/cli/src/acp-integration/session/Session.ts` appends the same wrapped
+  part on the ACP/IDE path. Both sites run per turn against shared session
+  history, so both grow the transcript the same way.
 - `packages/core/src/utils/transcript-records.ts` owns the reserved tag and the
   matcher that recognizes a tagged part.
 - `packages/core/src/hooks/user-prompt-submit-context.ts` owns the shared
@@ -58,11 +61,11 @@ turn — so this removes duplication, not information.
 
 ## Proposed solution
 
-Add one exported predicate next to the existing tag helpers, and guard the
-injection site with it.
+Add one exported predicate next to the existing tag helpers, and guard both
+injection sites with it.
 
-The predicate scans shallow conversation history for a part whose text is
-exactly the wrapped block it is about to append, comparing the full wrapped
+The predicate looks inside one conversation history entry for a part whose text
+is exactly the wrapped block it is about to append, comparing the full wrapped
 string rather than parsing and re-slicing the inner body. Exact equality is
 correct here because core is the sole producer of these parts and it stores the
 string it built, unmodified. It also sidesteps two traps: the wrapper inserts a
@@ -70,14 +73,34 @@ newline on both sides of the body, so offset-based inner slicing is easy to get
 wrong; and the injected string is the HTML-escaped form, so comparing against
 the raw hook output would never match a payload containing angle brackets.
 
+Matching bytes is not enough to prove provenance, so the predicate also requires
+the shape injection produces: a user entry whose trailing part is the block,
+preceded by at least one part of the user's own. History carries no hook-origin
+field, so the injector's invariant shape is the only evidence available, and it
+is the same invariant `stripTrailingUserPromptSubmitContextPart` already relies
+on when it treats a sole tagged part as user-authored. Tagged text that merely
+appears — in a model entry, or as a whole user message — is therefore not proof
+that the hook delivered it, so it does not suppress a fresh delivery. An
+unprovable origin injects the block as before.
+
+The predicate answers a question about a single history entry — does this entry
+carry exactly this wrapped block where injection would have put it — and the
+caller feeds it the entries newest first and stops at the first match. Keeping
+the predicate per entry rather than per history array means the same helper
+serves both injection sites, and each site keeps its own access to history.
+
+The interactive site and the ACP/IDE site both consult session history before
+appending, so a block delivered by either path suppresses a repeat from either
+path.
+
 When a match is found the turn proceeds without the appended part and without
 recording hook-context provenance for that turn, which keeps the displayed
 transcript consistent with what the model actually received.
 
-History access uses the shallow accessor, which copies containers without
-deep-cloning large leaf payloads. That accessor is already on the per-turn path
-in the same module and already tolerates a chat implementation that only
-provides the deep accessor.
+History lookup goes through the chat's read-only newest-first search, which
+returns a live entry without cloning it. The injection site is reached on every
+continuation, including tool round trips, so a deep-cloning history accessor is
+not acceptable on that path.
 
 ## Design decisions and rationale
 
@@ -125,10 +148,13 @@ accepted and documented as a limitation rather than solved here.
 ## Validation plan
 
 1. Unit coverage for the predicate over absent, present, differently-wrapped,
-   and cross-content-entry cases.
-2. A regression test at the injection site: with the tagged block already in
+   whitespace-padded, and malformed entries, plus the provenance cases: the
+   tagged block in a model entry, as a sole user-authored part, and ahead of the
+   trailing part all inject rather than suppress.
+2. A regression test at each injection site: with the tagged block already in
    history, the appended part and the recorded hook-context provenance are both
-   absent; with history clear, the existing behavior is unchanged.
+   absent on the interactive path, and only the prompt text is sent on the
+   ACP/IDE path; with history clear, the existing behavior is unchanged.
 3. An end-to-end check with a constant-payload `UserPromptSubmit` hook over
    several turns in one session, counting — per recorded user message — whether
    the tagged block and its provenance are present. The count is taken over user
@@ -138,11 +164,15 @@ accepted and documented as a limitation rather than solved here.
 4. `npm run build && npm run typecheck` plus the core unit suites that assert
    on the reserved tag.
 
+The ACP/IDE site reuses the same predicate and carries a matching regression
+test of its own: with the tagged block already in history, only the prompt text
+is sent to the model.
+
 ## Acceptance criteria
 
-- A byte-identical hook context block is appended at most once per session
-  history, as observed in the model-bound request and in the session
-  transcript.
+- A byte-identical hook context block reaches the model at most once per
+  session history, from either injection site, as observed in the model-bound
+  request and in the session transcript.
 - A changed payload is always appended.
 - No new configuration, schema, or public API surface beyond the one exported
   predicate.
@@ -151,5 +181,3 @@ accepted and documented as a limitation rather than solved here.
 
 - Whether an explicit opt-out for intentionally repeating hooks should exist.
   Deferred until a concrete use case is reported.
-- Whether the same guard should apply to hook context arriving through other
-  injection points. None exist today.

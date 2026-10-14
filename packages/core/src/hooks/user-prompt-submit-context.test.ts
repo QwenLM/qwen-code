@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  isUserPromptSubmitContextInHistory,
+  hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
   stripTrailingUserPromptSubmitContextPart,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
@@ -56,41 +56,89 @@ describe('stripTrailingUserPromptSubmitContextPart', () => {
   });
 });
 
-describe('isUserPromptSubmitContextInHistory', () => {
-  it('finds a tagged block in an earlier user content', () => {
-    const history = [
-      { role: 'user', parts: [{ text: 'earlier prompt' }] },
-      {
-        role: 'user',
-        parts: [
-          { text: 'my prompt' },
-          { text: wrapUserPromptSubmitContext('ctx') },
-        ],
-      },
-    ];
-    expect(isUserPromptSubmitContextInHistory(history, 'ctx')).toBe(true);
+describe('hasUserPromptSubmitContext', () => {
+  it('matches a tagged block in the given entry', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        { text: wrapUserPromptSubmitContext('ctx') },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(true);
   });
 
   it('does not match when the payload bytes differ', () => {
-    const history = [
-      { parts: [{ text: wrapUserPromptSubmitContext('older ctx') }] },
-    ];
-    expect(isUserPromptSubmitContextInHistory(history, 'new ctx')).toBe(false);
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        { text: wrapUserPromptSubmitContext('older ctx') },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'new ctx')).toBe(false);
   });
 
   it('does not match the same text outside the reserved tag', () => {
-    const history = [{ parts: [{ text: 'my prompt' }] }];
-    expect(isUserPromptSubmitContextInHistory(history, 'my prompt')).toBe(
-      false,
-    );
+    const entry = {
+      role: 'user',
+      parts: [{ text: 'my prompt' }, { text: 'ctx' }],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
   });
 
-  it('returns false for empty or malformed history', () => {
-    expect(isUserPromptSubmitContextInHistory([], 'ctx')).toBe(false);
-    expect(isUserPromptSubmitContextInHistory([null, {}], 'ctx')).toBe(false);
-    expect(
-      isUserPromptSubmitContextInHistory([{ parts: 'not-an-array' }], 'ctx'),
-    ).toBe(false);
+  it('does not match a block with added whitespace', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        { text: `\n${wrapUserPromptSubmitContext('ctx')}` },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('does not match a block in a model entry', () => {
+    const entry = {
+      role: 'model',
+      parts: [
+        { text: 'my answer' },
+        { text: wrapUserPromptSubmitContext('ctx') },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('does not match a sole tagged part, which is treated as user-authored', () => {
+    const entry = {
+      role: 'user',
+      parts: [{ text: wrapUserPromptSubmitContext('ctx') }],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('does not match a tagged part that is not the trailing one', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: wrapUserPromptSubmitContext('ctx') },
+        { text: 'my prompt' },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
+
+  it('returns false for an empty or malformed entry', () => {
+    expect(hasUserPromptSubmitContext(undefined, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext(null, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext({}, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext({ parts: 'not-an-array' }, 'ctx')).toBe(
+      false,
+    );
+    expect(hasUserPromptSubmitContext({ role: 'user' }, 'ctx')).toBe(false);
+    expect(hasUserPromptSubmitContext({ role: 'user', parts: [] }, 'ctx')).toBe(
+      false,
+    );
   });
 });
 

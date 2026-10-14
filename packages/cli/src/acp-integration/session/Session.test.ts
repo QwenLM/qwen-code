@@ -826,6 +826,9 @@ describe('Session', () => {
       peekLastHistoryEntry: vi.fn(() =>
         (mockChat.getHistory() as Content[]).at(-1),
       ),
+      findLastHistoryEntry: vi.fn((predicate: (entry: Content) => boolean) =>
+        [...(mockChat.getHistory() as Content[])].reverse().find(predicate),
+      ),
       getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistoryToolCallFingerprints: vi
         .fn()
@@ -39739,6 +39742,44 @@ describe('Session', () => {
           expect(
             mockLlmClient.beginManagedAutoMemoryRecall,
           ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
+        });
+
+        it('does not re-append an unchanged UserPromptSubmit context block already in history', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  additionalContext: 'extra hook context',
+                },
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+          mockChat.getHistory = vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: 'an earlier prompt' },
+                {
+                  text: core.wrapUserPromptSubmitContext('extra hook context'),
+                },
+              ],
+            },
+          ]);
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(textParts(firstSentMessage())).toEqual(['hello']);
         });
       });
 

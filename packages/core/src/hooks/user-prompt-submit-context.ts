@@ -46,18 +46,29 @@ export function stripTrailingUserPromptSubmitContextPart<T>(
 
 /**
  * Matches the whole wrapped block rather than a substring, so `context` must be
- * the escaped string that injection appends, not the raw hook output.
+ * the escaped string that injection appends, not the raw hook output. Unlike
+ * `isUserPromptSubmitContextPartText`, which recognizes any tagged block, this
+ * recognizes one exact payload and does not trim.
+ *
+ * A match also requires the shape injection produces: a user entry whose
+ * trailing part is the block, preceded by at least one part of the user's own.
+ * Tagged text that merely appears — in a model entry, or as a whole user
+ * message, which `stripTrailingUserPromptSubmitContextPart` treats as
+ * user-authored — is not proof the hook delivered it, so it does not suppress a
+ * fresh delivery.
  */
-export function isUserPromptSubmitContextInHistory(
-  history: readonly unknown[],
+export function hasUserPromptSubmitContext(
+  entry: unknown,
   context: string,
 ): boolean {
-  const tagged = wrapUserPromptSubmitContext(context);
-  return history.some((content) => {
-    const parts = (content as { parts?: unknown } | null)?.parts;
-    return (
-      Array.isArray(parts) &&
-      parts.some((part) => (part as { text?: unknown } | null)?.text === tagged)
-    );
-  });
+  const candidate = entry as { role?: unknown; parts?: unknown } | null;
+  if (candidate?.role !== 'user' || !Array.isArray(candidate.parts)) {
+    return false;
+  }
+  const parts = candidate.parts;
+  if (parts.length < 2) {
+    return false;
+  }
+  const last = parts[parts.length - 1] as { text?: unknown } | null;
+  return last?.text === wrapUserPromptSubmitContext(context);
 }
