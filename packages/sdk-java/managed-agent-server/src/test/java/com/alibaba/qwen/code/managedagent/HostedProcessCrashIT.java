@@ -9,6 +9,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -91,6 +92,7 @@ class HostedProcessCrashIT {
             root = Files.createDirectory(temporary.resolve(fault)).toRealPath();
             Files.createDirectory(root.resolve("runtime"));
             Files.createDirectories(root.resolve("workspace/child"));
+            Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
             assertThat(cli).isRegularFile();
         }
 

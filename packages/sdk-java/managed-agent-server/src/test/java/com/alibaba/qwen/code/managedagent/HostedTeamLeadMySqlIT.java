@@ -26,6 +26,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
@@ -746,6 +747,7 @@ class HostedTeamLeadMySqlIT {
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         Path workspace = Files.createDirectory(temporary.resolve("workspace-a"));
         Files.createDirectory(workspace.resolve("child"));
+        Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
         port = freePort();
         int harnessPort = freePort();
         int brokerPort = freePort();

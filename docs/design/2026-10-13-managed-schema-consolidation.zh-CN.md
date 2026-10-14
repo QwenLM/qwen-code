@@ -93,6 +93,8 @@ MySQL/MariaDB 的两个初始化入口都要求选定应用数据库，在读取
 
 Linux Hosted 用例在工具准入前通过生产原生存储 guard 登记每个已配置的 Workspace storage。崩溃及生命周期恢复用例仅在首次启动时登记，重启保留原登记与物理占用证明。物理 owner 断言先将逻辑 alias 解析为物理 key。这些用例不跳过原生存储检查，不通过 SQL 构造身份凭证，也不削弱故障断言。
 
+新建 fixture 根目录在 native 登记前设置独立的目录修改时间，使 guard 能区分真实出生时间与 OpenJDK 的修改时间回退值。缺失、epoch 或有歧义的出生时间仍被拒绝。取消、SSE-gap、输出和 provider-control 探针通过 `ma_storage` 解析 tenant/storage 别名并核对原始身份，再读取物理 owner；owner 的首次登记来源可能属于另一别名。
+
 ## 实施顺序与验收
 
 1. 提交中英文设计、63→32 完整归属清单、类型/键/状态契约和共享 DDL；验证空库初始化及旧库拒绝。

@@ -93,6 +93,8 @@ The real-stack E2E runner seeds and audits only canonical tables, including the 
 
 Linux Hosted fixtures register each configured workspace storage through the production native storage guard before tool admission. Crash and lifecycle recovery fixtures register only at initial startup; restarting preserves the original registration and physical holder evidence. Physical owner assertions resolve the logical alias to its physical key. These fixtures do not skip native storage checks, manufacture identity proofs in SQL or weaken fault assertions.
 
+Fresh fixture roots set a distinct directory modification time before native registration, so the guard can distinguish a genuine birth time from OpenJDK's modification-time fallback. Missing, epoch or ambiguous birth times remain rejected. Cancellation, SSE-gap, output and provider-control probes resolve the tenant/storage alias through `ma_storage` and verify the raw identity before reading its physical owner; the owner's original registration provenance may belong to another alias.
+
 ## Delivery sequence and acceptance
 
 1. Commit bilingual design, complete 63-to-32 ownership inventory, typed keys/state contracts and canonical DDL; verify clean database initialization and refusal of legacy schemas.

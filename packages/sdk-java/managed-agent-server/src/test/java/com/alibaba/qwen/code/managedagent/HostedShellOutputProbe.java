@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -75,8 +76,10 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String key = sha256((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8));
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", key);
+        String storage = "storage-" + sessions.indexOf(session);
+        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                        + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage), tenant, storage);
     }
 
     private List<?> owned() {

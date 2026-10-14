@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -22,10 +23,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Principal;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -158,15 +157,19 @@ final class HostedSseGapProbe implements AutoCloseable {
                 + " ORDER BY sequence_id", tenant, session);
     }
 
+    private Map<String, Object> owner() {
+        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                        + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage-0"), tenant, "storage-0");
+    }
+
     private void assertExecution(boolean finished) throws Exception {
         var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         if (!finished) executionId = execution.get("execution_call_id").toString();
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
-        String storageKey = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-0").getBytes(StandardCharsets.UTF_8)));
-        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        var owner = owner();
         if (finished) assertThat(owner.get("holder_key")).isNull();
         else {
             assertThat(owner.get("holder_key")).isNotNull();
