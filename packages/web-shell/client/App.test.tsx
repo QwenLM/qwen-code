@@ -37194,6 +37194,12 @@ describe('App session callbacks', () => {
     };
 
     expect(swipe(dialog)).toBe(false);
+    // A real phone gesture starts on a descendant of the marker — the panel
+    // itself is not what scrolls — so pin the closest() walk, not just the
+    // marker element.
+    const dialogChild = dialog?.firstElementChild ?? null;
+    expect(dialogChild).not.toBeNull();
+    expect(swipe(dialogChild)).toBe(false);
     expect(swipe(drawer)).toBe(false);
     // The page behind the drawer must stay locked.
     expect(swipe(document.body)).toBe(true);
