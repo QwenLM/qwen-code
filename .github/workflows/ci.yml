@@ -110,7 +110,7 @@ jobs:
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
     # Gate runs on ECS for in-repo PRs, fork PRs whose author has write access
     # (OWNER/MEMBER/COLLABORATOR association — a write-access author is as
-    # trusted as an in-repo branch), and the merge queue (base-repo context),
+    # trusted as an in-repo branch), the merge queue, and pushes to main,
     # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
     # kill-switch is read here, so flipping it reverts everything to hosted.
     # This runs-on and the pick_runner step below are the canonical home of
@@ -119,7 +119,7 @@ jobs:
     # not: a pull_request run executes the PR's own YAML, so no runs-on trust
     # clause is enforceable there and its lane never admits pull requests to
     # the pool.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     permissions:
       contents: 'read'
@@ -171,12 +171,8 @@ jobs:
       # PRs stay hosted. Disable via repo var
       # MAINTAINER_ECS_RUNNER_DISABLED=true.
       #
-      # push is deliberately absent from the `runs-on` expression above, so a
-      # post-merge run leaves classify_pr hosted while the Test job it feeds
-      # goes to ECS. That is intentional: the expression is the canonical
-      # association-routing text sdk-java.yml and serve-ab.yml mirror, a push
-      # has no author association to route on, and classify_pr costs seconds —
-      # while Test should not spend a scarce hosted runner on every merge.
+      # Keep push routing aligned with the classifier above so a hosted queue
+      # does not delay the downstream ECS jobs.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
