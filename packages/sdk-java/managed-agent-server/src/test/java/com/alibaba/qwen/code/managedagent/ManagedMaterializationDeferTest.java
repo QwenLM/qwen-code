@@ -1,20 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Pins the deferral SQL on H2 in MySQL mode against the three columns the
@@ -48,8 +49,7 @@ class ManagedMaterializationDeferTest {
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
                         ZoneOffset.UTC),
-                ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties());
 
         store.deferMaterializationTarget("tenant", "session");
@@ -101,8 +101,7 @@ class ManagedMaterializationDeferTest {
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
                         ZoneOffset.UTC),
-                ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties());
 
         assertThat(store.findMaterializationTargets(2))

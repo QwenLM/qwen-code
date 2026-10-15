@@ -1,15 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -51,6 +41,16 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WorkspaceCsiSessionMainTest {
     private final ObjectMapper json = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
@@ -200,8 +200,14 @@ class WorkspaceCsiSessionMainTest {
     void concurrentCreatorsCommitOneOriginalSession() throws Exception {
         var gate = new CyclicBarrier(2);
         try (var executor = Executors.newFixedThreadPool(2)) {
-            var one = executor.submit(() -> { gate.await(); return create(request("race")); });
-            var two = executor.submit(() -> { gate.await(); return create(request("race")); });
+            var one = executor.submit(() -> {
+                gate.await();
+                return create(request("race"));
+            });
+            var two = executor.submit(() -> {
+                gate.await();
+                return create(request("race"));
+            });
             var first = one.get(10, TimeUnit.SECONDS);
             var second = two.get(10, TimeUnit.SECONDS);
             assertThat(first.sessionId()).isEqualTo(second.sessionId());
@@ -553,11 +559,11 @@ class WorkspaceCsiSessionMainTest {
             if (type == Map.class) {
                 return Map.of();
             }
-                                    if (type == StoreModels.RenameDelivery.class) {
-                                        return new StoreModels.RenameDelivery(
+            if (type == StoreModels.RenameDelivery.class) {
+                return new StoreModels.RenameDelivery(
                                                 "tenant", sessionId, "unused", "title", 1, 0);
-                                    }
-                                    throw new IllegalStateException("Unsupported mutation parameter " + type);
+            }
+            throw new IllegalStateException("Unsupported mutation parameter " + type);
         }).toArray();
         if (method.getParameterTypes()[0] == String.class) {
             arguments[0] = "tenant";

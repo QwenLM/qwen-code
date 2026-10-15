@@ -8,9 +8,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.time.Clock;
-
 import javax.sql.DataSource;
+
+import java.time.Clock;
 
 /** H2/API construction fixture; its original Session is made by the private CREATE producer. */
 public final class WorkspaceCsiRuntimeConstructionFixture {
@@ -34,7 +34,7 @@ public final class WorkspaceCsiRuntimeConstructionFixture {
         var created = WorkspaceCsiSessionMain.create(jdbc, manager, json, properties,
                 new WorkspaceCsiSessionMain.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", ".")));
-        var managed = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> { },
+        var managed = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
         return new TransactionTemplate(manager).execute(status -> managed.requireCsiRequest(registration, created.sessionId()));
     }

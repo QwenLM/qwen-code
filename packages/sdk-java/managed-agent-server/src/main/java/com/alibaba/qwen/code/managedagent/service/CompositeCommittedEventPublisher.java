@@ -13,6 +13,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+
 /**
  * Sole CommittedEventPublisher bean: the local hub fan-out first (unchanged
  * semantics), then each EventTransport. A transport failure must never block
