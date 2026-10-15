@@ -4945,6 +4945,8 @@ function backgroundTurnRig(
     notStartedProven?: boolean;
     reserveRefused?: boolean;
     publicationMissing?: boolean;
+    closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
+    executionCallIds?: readonly string[];
   } = {},
 ) {
   enablement.childRun = true;
@@ -4999,23 +5001,32 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
-        if (options.publicationMissing)
+        const closeResult =
+          options.closeResults?.[
+            order.filter((item) => item === 'close_not_started').length - 1
+          ];
+        if (options.publicationMissing || closeResult === 'MISSING')
           throw new ManagedSessionStoreHttpError(
             404,
             'publication_not_found',
             'Publication does not exist',
           );
         return {
-          state: options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
+          state:
+            closeResult ??
+            (options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED'),
         };
       }
       throw new Error('Unexpected publication route ' + route);
     }),
   } as unknown as HttpToolPublicationOwner;
-  broker.prepareV3.mockResolvedValue({
-    executionCallId: 'shell-execution',
-    runtimeBindingId: 'binding-1',
-    bindingGeneration: '1',
+  broker.prepareV3.mockImplementation(async () => {
+    const index = broker.prepareV3.mock.calls.length - 1;
+    return {
+      executionCallId: options.executionCallIds?.[index] ?? 'shell-execution',
+      runtimeBindingId: `binding-${index + 1}`,
+      bindingGeneration: '1',
+    };
   });
   broker.executeV3.mockImplementation(async () => {
     order.push('execute');
@@ -6175,6 +6186,9 @@ it('settles the admitted child run when grant reservation exhausts its retries',
 });
 
 it('settles an in-turn dispatch with no publication and no durable process row', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
   const { call, parts } = backgroundCall();
   const rig = backgroundTurnRig(
     { executionStatus: 'success', responseParts: [], capture: null },
@@ -6198,6 +6212,183 @@ it('settles an in-turn dispatch with no publication and no durable process row',
   expect(broker.backgroundProcessStatus).toHaveBeenCalledWith(
     'shell-execution',
   );
+  expect(stderr).toHaveBeenCalledWith(
+    'qwen serve: Settled never-started background child run shell-execution from durable process-ledger absence.',
+  );
+  stderr.mockRestore();
+});
+
+it('probes every inconclusive background binding within one timeout window', async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  vi.useFakeTimers();
+  let guard: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        publicationMissing: true,
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    let resolveBothProbes!: () => void;
+    const bothProbesStarted = new Promise<void>((resolve) => {
+      resolveBothProbes = resolve;
+    });
+    broker.backgroundProcessStatus.mockImplementation(
+      () =>
+        new Promise<undefined>((_resolve, reject) => {
+          if (broker.backgroundProcessStatus.mock.calls.length === 2)
+            resolveBothProbes();
+          setTimeout(
+            () => reject(new DOMException('timed out', 'TimeoutError')),
+            30_000,
+          );
+        }),
+    );
+    let completed = false;
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      )
+      .finally(() => {
+        completed = true;
+      });
+    const guardedStart = new Promise<never>((_resolve, reject) => {
+      guard = realSetTimeout(
+        () => reject(new Error('both probes did not start concurrently')),
+        1_000,
+      );
+    });
+
+    await Promise.race([bothProbesStarted, guardedStart]);
+    if (guard !== undefined) realClearTimeout(guard);
+    guard = undefined;
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledTimes(2);
+    expect(completed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(completed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const { rejection } = await outcome;
+    expect(completed).toBe(true);
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.order.filter((item) => item === 'close_not_started'),
+    ).toHaveLength(2);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toHaveLength(0);
+  } finally {
+    if (guard !== undefined) realClearTimeout(guard);
+    vi.useRealTimers();
+    turn = createTurn();
+  }
+});
+
+it('settles grant-proven bindings before waiting for process probes', async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  vi.useFakeTimers();
+  let guard: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        closeResults: ['NOT_STARTED', 'MISSING'],
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    let resolveProbeStarted!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve;
+    });
+    broker.backgroundProcessStatus.mockImplementation(() => {
+      resolveProbeStarted();
+      return new Promise<undefined>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new DOMException('timed out', 'TimeoutError')),
+          30_000,
+        );
+      });
+    });
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      );
+    const guardedStart = new Promise<never>((_resolve, reject) => {
+      guard = realSetTimeout(
+        () => reject(new Error('process probe did not start')),
+        1_000,
+      );
+    });
+
+    await Promise.race([probeStarted, guardedStart]);
+    if (guard !== undefined) realClearTimeout(guard);
+    guard = undefined;
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledOnce();
+    expect(rig.orchestrator.calls.at(-1)).toEqual([
+      'settleFailed',
+      {
+        id: 'shell-execution-1',
+        params: { stopReason: 'start_failed', started: false },
+      },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const { rejection } = await outcome;
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toHaveLength(1);
+  } finally {
+    if (guard !== undefined) realClearTimeout(guard);
+    vi.useRealTimers();
+    turn = createTurn();
+  }
 });
 
 it('keeps an in-flight dispatch blocked when cancellation fails before process admission', async () => {
@@ -6252,10 +6443,12 @@ it.each(['present', 'unavailable'] as const)(
       'admit',
       'dispatchStarted',
     ]);
-    if (proof === 'unavailable')
-      expect(stderr).toHaveBeenCalledWith(
-        'qwen serve: Background process absence could not be confirmed for shell-execution (status 503, code store_unavailable).',
-      );
+    expect(stderr).toHaveBeenCalledWith(
+      proof === 'present'
+        ? 'qwen serve: Background process absence could not be confirmed for shell-execution (ambiguous_state (executing)).'
+        : 'qwen serve: Background process absence could not be confirmed for shell-execution (probe_rejected (status 503, code store_unavailable)).',
+    );
+    stderr.mockRestore();
   },
 );
 

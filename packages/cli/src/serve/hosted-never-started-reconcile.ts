@@ -38,15 +38,20 @@ export interface NeverStartedReconcileResult {
   readonly skipped: readonly string[];
 }
 
+type NeverStartedProbeResult =
+  | { readonly proven: true }
+  | { readonly proven: false; readonly cause: string };
+
 type RouteResolution =
   | { readonly runtimeSessionId: string }
   | { readonly failure: 'no_identity' | 'route_foreign' };
 
 // The stderr diagnostic carries these fields and nothing more: the
 // rejection's message embeds the request URL with its session ids (and a
-// mis-typed logger could leak the bearer token), so only the status/code
-// pair is ever interpolated.
-export function rejectionDetail(cause: unknown): string {
+// mis-typed logger could leak the bearer token), so it is never interpolated.
+// Only status/code, stable tokens for known contract errors, or Error.name
+// describe a rejection.
+function rejectionDetail(cause: unknown): string {
   const bag =
     cause !== null && typeof cause === 'object'
       ? (cause as Record<string, unknown>)
@@ -54,7 +59,32 @@ export function rejectionDetail(cause: unknown): string {
   const parts: string[] = [];
   if (typeof bag['status'] === 'number') parts.push(`status ${bag['status']}`);
   if (typeof bag['code'] === 'string') parts.push(`code ${bag['code']}`);
-  return parts.length > 0 ? parts.join(', ') : 'no status';
+  if (parts.length > 0) return parts.join(', ');
+  if (cause instanceof Error) {
+    if (cause.message === 'Runtime execution identity changed.')
+      return 'identity_changed';
+    if (cause.message === 'Runtime execution outcome is unknown.')
+      return 'outcome_unknown';
+    return `error ${cause.name}`;
+  }
+  return 'no status';
+}
+
+export async function probeNeverStarted(
+  broker: Pick<HostedWorkspaceBroker, 'backgroundProcessStatus'>,
+  executionCallId: string,
+): Promise<NeverStartedProbeResult> {
+  try {
+    const answer = await broker.backgroundProcessStatus(executionCallId);
+    return answer === undefined
+      ? { proven: true }
+      : { proven: false, cause: `ambiguous_state (${answer.state})` };
+  } catch (cause) {
+    return {
+      proven: false,
+      cause: `probe_rejected (${rejectionDetail(cause)})`,
+    };
+  }
 }
 
 function asDurableRef(value: unknown): ManagedSessionDurableRef | undefined {
@@ -188,15 +218,9 @@ export async function reconcileNeverStartedChildRuns(input: {
     // the proof never needs one.
     for (const record of group) {
       const executionCallId = record.run.executionCallId ?? record.shellId;
-      let answer: { state: string } | undefined;
-      try {
-        answer = await broker.backgroundProcessStatus(executionCallId);
-      } catch (cause) {
-        skip(record, `probe_rejected (${rejectionDetail(cause)})`);
-        continue;
-      }
-      if (answer !== undefined) {
-        skip(record, `ambiguous_state (${answer.state})`);
+      const proof = await probeNeverStarted(broker, executionCallId);
+      if (!proof.proven) {
+        skip(record, proof.cause);
         continue;
       }
       await input.childRuns.settleFailed(record.shellId, {
