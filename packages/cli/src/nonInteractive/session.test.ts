@@ -352,10 +352,25 @@ describe('runNonInteractiveStreamJson', () => {
     const getHistoryTail = vi.fn().mockReturnValue(historyTail);
     const llmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
-      getChat: vi.fn().mockReturnValue({ getHistoryTail }),
+      getChat: vi
+        .fn<
+          () => {
+            getHistoryTail: ReturnType<typeof vi.fn>;
+            getHistoryShallow: ReturnType<typeof vi.fn>;
+          }
+        >()
+        .mockReturnValue({
+          getHistoryTail,
+          getHistoryShallow: vi.fn(() => historyTail),
+        }),
     };
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(llmClient),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
+        flush: vi.fn().mockResolvedValue(undefined),
+        finalize: vi.fn(),
+      }),
     });
     return { llmClient, getHistoryTail };
   }
@@ -539,6 +554,36 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(getHistoryTail).toHaveBeenCalledWith(50);
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses stream-json continuation of an unknown legacy cancellation', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedLlmClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    vi.mocked(
+      config.getChatRecordingService()!.readActiveTranscriptChain,
+    ).mockResolvedValue([
+      {
+        ...createResumedTelemetryRecord('legacy-daemon'),
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'legacy-daemon',
+          state: 'cancelled',
+          cancelledAt: 1,
+          endedAt: 2,
+        },
+      },
+    ]);
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createContinueRequest();
+    };
+    await runNonInteractiveStreamJson(config, '');
     expect(continueResults).toEqual([
       { accepted: false, interruption: 'none' },
     ]);
@@ -774,6 +819,7 @@ describe('runNonInteractiveStreamJson', () => {
         return vi.fn();
       },
       getChatRecordingService: () => ({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         finalize: () => order.push('finalize'),
         flush: async () => {
           order.push('flush');

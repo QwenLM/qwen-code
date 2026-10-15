@@ -24,6 +24,10 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -38,15 +42,12 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 
 /**
  * H6b: the control plane's automation service. Public mutations are
  * relayed to the target Session's Hosted Harness, whose authority commits
- * the definition revision or the manual run; the answer is mirrored into
- * the V57 ledger and replayed by Idempotency-Key. Reads answer from the
+ * the definition revision and its SQL projection or the manual run. The
+ * response is replayed by Idempotency-Key. Reads answer from the
  * ledger alone. See docs/design/2026-10-07-managed-automation-runtime.md,
  * decisions 11 and 12.
  */
@@ -153,7 +154,7 @@ public class ManagedAutomationService {
         // from here on, so a lost answer or a concurrent request under
         // the same key meets this binding instead of committing twice. A
         // claim already held by the identical request is its own redrive.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(session.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, scheduleId, ""),
                 clock.get());
         if (!claimed) {
@@ -167,7 +168,7 @@ public class ManagedAutomationService {
         Map<String, Object> answer = define(session, actorId, scheduleId,
                 definition, operationIdFor(tenantId, idempotencyKey),
                 idempotencyKey, requestDigest);
-        PublicAutomation created = mirror(session, actorId, answer);
+        PublicAutomation created = committedDefinition(session, answer);
         remember(tenantId, actorId, idempotencyKey, requestDigest, scheduleId,
                 created);
         return new Result<>(created, replayed(answer));
@@ -203,7 +204,7 @@ public class ManagedAutomationService {
         requireEnabled();
         // Claim before the relay, as create does: the row binds this
         // request before its side effect, and only this digest settles it.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(session.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, automationId, ""),
                 clock.get());
         if (!claimed) {
@@ -217,7 +218,7 @@ public class ManagedAutomationService {
         Map<String, Object> answer = define(session, actorId, automationId,
                 definition, operationIdFor(tenantId, idempotencyKey),
                 idempotencyKey, requestDigest);
-        PublicAutomation revised = mirror(session, actorId, answer);
+        PublicAutomation revised = committedDefinition(session, answer);
         remember(tenantId, actorId, idempotencyKey, requestDigest,
                 automationId, revised);
         return new Result<>(revised, replayed(answer));
@@ -255,7 +256,7 @@ public class ManagedAutomationService {
         requireEnabled();
         // The same pre-relay claim create uses: a late or re-driven
         // request meets the binding, and only the owner settles it.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(row.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, automationId, ""),
                 clock.get());
         if (!claimed) {
@@ -290,7 +291,7 @@ public class ManagedAutomationService {
         body.put("scheduleId", automationId);
         Map<String, Object> answer = relayClaimed(tenantId, idempotencyKey,
                 requestDigest, actorId, session, body);
-        PublicAutomation retired = mirror(session, actorId, answer);
+        PublicAutomation retired = committedDefinition(session, answer);
         ledger.retire(tenantId, automationId, clock.get());
         remember(tenantId, actorId, idempotencyKey, requestDigest,
                 automationId, retired);
@@ -533,8 +534,8 @@ public class ManagedAutomationService {
                 "The automation is being scanned; retry.");
     }
 
-    /** The Harness answer's definition summary, mirrored into the ledger. */
-    private PublicAutomation mirror(SessionRecord session, String actorId,
+    /** A Harness answer is visible only after its authoritative projection committed. */
+    private PublicAutomation committedDefinition(SessionRecord session,
             Map<String, Object> answer) {
         JsonNode schedule = mapper.valueToTree(answer.get("schedule"));
         if (schedule == null || !schedule.isObject()) {
@@ -542,29 +543,14 @@ public class ManagedAutomationService {
                     "automation_operation_failed",
                     "The Hosted Harness answered without the definition.");
         }
-        long now = clock.get();
         long recordRevision = schedule.required("revision").asLong();
-        ScheduleRow row = ledger.upsertSchedule(new ScheduleRow(
-                session.tenantId(), schedule.required("scheduleId").asText(),
-                session.sessionId(), session.workspace() == null ? ""
-                        : session.workspace().getWorkspaceId(), actorId,
-                recordRevision,
-                schedule.required("definitionRevision").asLong(),
-                schedule.required("definitionDigest").asText(),
-                schedule.required("goal").asText(),
-                schedule.required("cron").asText(),
-                schedule.required("timezone").asText(),
-                schedule.required("sessionMode").asText(),
-                schedule.required("overlap").asText(),
-                schedule.required("catchUp").asText(),
-                schedule.required("catchUpLimit").isNull() ? null
-                        : schedule.required("catchUpLimit").asLong(),
-                schedule.required("enabled").asBoolean(),
-                List.of("settled", "failed", "cancelled").contains(
-                        schedule.required("state").asText())
-                        ? AutomationLedgerStore.STATE_RETIRED
-                        : AutomationLedgerStore.STATE_LIVE,
-                null, 0, null, null, null, 0, 0, 0), now);
+        ScheduleRow row = ledger.findSchedule(session.tenantId(),
+                schedule.required("scheduleId").asText()).filter(committed ->
+                        committed.sessionId().equals(session.sessionId())
+                                && committed.recordRevision() >= recordRevision)
+                .orElseThrow(() -> new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "automation_projection_unavailable",
+                        "The committed automation definition is unavailable."));
         if (row.recordRevision() > recordRevision) {
             // The answer replays an operation committed before the
             // revision the mirror already tracks: the ledger row kept the
@@ -838,7 +824,7 @@ public class ManagedAutomationService {
                 row.sessionId(), row.definitionRevision(),
                 row.definitionDigest(), row.goal(), row.cron(), row.timezone(),
                 row.sessionMode(), row.overlap(), row.catchUp(),
-                row.catchUpLimit(), row.enabled(), row.state(),
+                row.catchUpLimit(), row.enabled() && AutomationLedgerStore.STATE_LIVE.equals(row.state()), row.state(),
                 row.createdAt(), row.updatedAt());
     }
 

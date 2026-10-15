@@ -71,7 +71,7 @@ class ManagedContextRecoveryTest {
     @Test
     void failedLaunchRemainsBlockedAcrossWarmAndDatabaseReconstruction() throws Exception {
         DataSource source = database();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         FailingProvisioner provisioner = new FailingProvisioner(false);
         JdbcRuntimeBindingRepository first = repository(source);
         try (RuntimeBrokerService service = service(first, provisioner)) {
@@ -115,7 +115,7 @@ class ManagedContextRecoveryTest {
         RuntimeProvisionRequest customSecond = new RuntimeProvisionRequest(customScope,
                 "harness-2", "custom", REQUEST.getStorageId());
         DataSource source = database();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         for (RuntimeBindingRepository bindings : List.of(
                 new InMemoryRuntimeBindingRepository(), repository(source))) {
             RuntimeBindingRecord initial = bindings.findOrCreate(first);
@@ -180,7 +180,7 @@ class ManagedContextRecoveryTest {
         RuntimeProvisionRequest third = new RuntimeProvisionRequest(thirdScope,
                 "legacy-harness-c", "local-process");
         DataSource source = database();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         for (RuntimeBindingRepository bindings : List.of(
                 new InMemoryRuntimeBindingRepository(), repository(source))) {
             RuntimeBindingRecord initial = bindings.findOrCreate(first);
@@ -220,7 +220,7 @@ class ManagedContextRecoveryTest {
     @Test
     void persistedMarkerBeforeSpawnBlocksTheFirstCallAfterRestart() throws Exception {
         DataSource source = database();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         JdbcRuntimeBindingRepository first = repository(source);
         RuntimeBindingRecord initial = first.findOrCreate(REQUEST);
         RuntimeBindingRecord saved = first.claimOperation(initial.getBindingId(), "setup", Duration.ofMinutes(1));
@@ -237,7 +237,7 @@ class ManagedContextRecoveryTest {
     @Test
     void timedOutLaunchIsBlockedAndLateCompletionCannotPublishReady() throws Exception {
         DataSource source = database();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         FailingProvisioner provisioner = new FailingProvisioner(true);
         try (RuntimeBrokerService service = service(repository(source), provisioner)) {
             assertBlocked(service);
@@ -271,29 +271,14 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
-    void schemaUpgradePreservesLegacyAndRoundtripsManagedReadyIdentity() throws Exception {
-        for (boolean flyway : new boolean[] {false, true}) {
+    void freshSchemaRoundtripsUnboundAndManagedReadyIdentity() throws Exception {
+        {
             DataSource source = database();
-            JdbcRuntimeBrokerSchema.initialize(source);
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             RuntimeProvisionRequest legacy = new RuntimeProvisionRequest(
                     REQUEST.getScope(), null, REQUEST.getProvisionerKind());
             RuntimeBindingRecord old = repository(source).findOrCreate(legacy);
-            try (Connection connection = source.getConnection(); var statement = connection.createStatement()) {
-                statement.execute("DROP INDEX qwen_runtime_storage_bindings_idx");
-                statement.execute("ALTER TABLE qwen_runtime_binding DROP COLUMN storage_id");
-                statement.execute("ALTER TABLE qwen_runtime_binding_slot DROP COLUMN storage_id");
-                if (flyway) {
-                    String migration = Files.readString(Path.of("../managed-agent-server/src/main/resources/"
-                            + "db/migration/V10__managed_runtime_context.sql"));
-                    for (String sql : migration.split(";")) {
-                        if (!sql.isBlank()) {
-                            statement.execute(sql);
-                        }
-                    }
-                }
-            }
-            JdbcRuntimeBrokerSchema.initialize(source);
-            JdbcRuntimeBrokerSchema.initialize(source);
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             assertEquals(old.getBindingId(), repository(source).findOrCreate(legacy).getBindingId());
             JdbcRuntimeBindingRepository repo = repository(source);
             RuntimeBindingRecord initial = repo.findOrCreate(REQUEST);
@@ -312,7 +297,7 @@ class ManagedContextRecoveryTest {
                     REQUEST.getProvisionerKind(), "other-storage");
             assertNotEquals(created.getBindingId(), repo.findOrCreate(other).getBindingId());
             try (Connection connection = source.getConnection(); var statement = connection.prepareStatement(
-                    "UPDATE qwen_runtime_binding SET storage_id = ? WHERE binding_id = ?")) {
+                    "UPDATE ma_runtime_binding SET storage_id = ? WHERE binding_id = ?")) {
                 statement.setString(1, "tampered-storage");
                 statement.setString(2, ready.getBindingId());
                 statement.executeUpdate();
@@ -609,12 +594,10 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
-    void schemaUpgradeToleratesAColumnAnotherInstanceAdded() throws Exception {
+    void repeatInitializationValidatesWithoutAlteringTables() throws Exception {
         DataSource source = database();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         AtomicInteger stale = new AtomicInteger();
-        // The first check sees the table as another instance left it just
-        // before that instance added the column.
         DataSource racing = (DataSource) java.lang.reflect.Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] {DataSource.class},
                 (proxy, method, args) -> {
@@ -622,9 +605,8 @@ class ManagedContextRecoveryTest {
                     return result instanceof Connection connection
                             ? staleConnection(connection, stale) : result;
                 });
-        JdbcRuntimeBrokerSchema.initialize(racing);
-        // Checked stale, then again after its own ALTER failed.
-        assertEquals(2, stale.get());
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(racing);
+        assertEquals(0, stale.get());
     }
 
     private static Connection staleConnection(Connection connection, AtomicInteger stale) {
@@ -642,11 +624,8 @@ class ManagedContextRecoveryTest {
         return (java.sql.Statement) java.lang.reflect.Proxy.newProxyInstance(
                 java.sql.Statement.class.getClassLoader(),
                 new Class<?>[] {java.sql.Statement.class}, (proxy, method, args) -> {
-                    if ("executeQuery".equals(method.getName())
-                            && ((String) args[0]).startsWith("SELECT * FROM qwen_runtime_binding_slot")
-                            && stale.getAndIncrement() == 0) {
-                        return statement.executeQuery(
-                                "SELECT request_key FROM qwen_runtime_binding_slot WHERE 1 = 0");
+                    if ("execute".equals(method.getName()) && ((String) args[0]).startsWith("ALTER TABLE")) {
+                        stale.incrementAndGet();
                     }
                     return invoke(method, statement, args);
                 });

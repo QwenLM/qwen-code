@@ -1,18 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import java.util.Base64;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.function.Supplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
@@ -20,6 +7,20 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * H4d-b: the session message relay. It discovers outbox entries whose
@@ -117,7 +118,7 @@ public class SessionMessageRelay {
             return;
         }
         try {
-            JsonNode body = readJson(records.readResource(row.tenantId(),
+            JsonNode body = readJson(records.readResource(row.tenantId(), row.senderSessionId(),
                     current.recordResourceId()), "message body");
             String senderStatus = records.sessionStatus(row.tenantId(),
                     row.senderSessionId());
@@ -318,7 +319,7 @@ public class SessionMessageRelay {
                 }
             }
             JsonNode contentRef = body.required("contentRef");
-            byte[] content = records.readResourceBytes(row.tenantId(),
+            byte[] content = records.readResourceBytes(row.tenantId(), row.senderSessionId(),
                     contentRef.required("resourceId").asText());
             if (content == null) {
                 throw new IllegalStateException(
@@ -519,7 +520,7 @@ public class SessionMessageRelay {
             return;
         }
         JsonNode argsRef = body.required("argsRef");
-        byte[] args = records.readResourceBytes(row.tenantId(),
+        byte[] args = records.readResourceBytes(row.tenantId(), row.senderSessionId(),
                 argsRef.required("resourceId").asText());
         if (args == null) {
             throw new IllegalStateException(
@@ -597,7 +598,7 @@ public class SessionMessageRelay {
                     } else if (latest != null
                             && !"cancelled".equals(state)) {
                         JsonNode body = readJson(records.readResource(
-                                row.tenantId(), latest.recordResourceId()),
+                                row.tenantId(), row.senderSessionId(), latest.recordResourceId()),
                                 "command body");
                         String target = body.path("targetSessionId")
                                 .isTextual()
@@ -611,13 +612,13 @@ public class SessionMessageRelay {
                                                 row.messageId());
                         if (receipt != null) {
                             JsonNode receiptBody = readJson(
-                                    records.readResource(row.tenantId(),
+                                    records.readResource(row.tenantId(), target,
                                             receipt.recordResourceId()),
                                     "command receipt");
                             JsonNode replyRef = receiptBody
                                     .required("replyRef");
                             JsonNode reply = readJson(
-                                    records.readResource(row.tenantId(),
+                                    records.readResource(row.tenantId(), target,
                                             replyRef.required("resourceId")
                                                     .asText()),
                                     "command reply");
@@ -633,7 +634,7 @@ public class SessionMessageRelay {
                 } else if ("accepting".equals(state)
                         || "unknown".equals(state)) {
                     JsonNode body = readJson(records.readResource(
-                            row.tenantId(), latest.recordResourceId()),
+                            row.tenantId(), row.senderSessionId(), latest.recordResourceId()),
                             "message body");
                     if (store.deliveryState(row.tenantId(), target(body),
                             domain, row.messageId()) != null) {

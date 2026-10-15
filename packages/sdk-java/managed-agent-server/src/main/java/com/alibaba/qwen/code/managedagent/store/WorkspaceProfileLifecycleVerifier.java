@@ -6,6 +6,11 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -13,9 +18,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
 
 @Component
 public class WorkspaceProfileLifecycleVerifier {
@@ -91,7 +93,7 @@ public class WorkspaceProfileLifecycleVerifier {
                         && (generation != binding.getGeneration() || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding))) {
                     unsettled();
                 }
-                var owners = jdbc.queryForList("SELECT binding_id, runtime_generation, session_state FROM qwen_runtime_session"
+                var owners = jdbc.queryForList("SELECT binding_id, runtime_generation, session_state FROM ma_runtime_session"
                         + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ? FOR UPDATE",
                         operation.tenantId(), operation.sessionId(), configuration.path("runtimeSessionId").asText());
                 if (owners.size() != 1 || !binding.getBindingId().equals(owners.getFirst().get("binding_id"))
@@ -115,10 +117,11 @@ public class WorkspaceProfileLifecycleVerifier {
                 }
             }
         }
-        var sourcesByCall = jdbc.queryForList("SELECT source_json FROM managed_agent_tool_result"
-                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
-                operation.tenantId(), operation.sessionId()).stream().map(this::source)
+        var sourcesByCall = jdbc.queryForList("SELECT request_json FROM ma_operation"
+                + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
                 .collect(Collectors.groupingBy(ManagedToolResultStore.Source::executionCallId));
+        var fileInputs = nativeFileInputs(operation);
         for (ToolExecutionRecord execution : executions.values()) {
             if (!execution.isSettled()) {
                 unsettled();
@@ -127,6 +130,12 @@ public class WorkspaceProfileLifecycleVerifier {
                 continue;
             }
             var sources = sourcesByCall.getOrDefault(execution.getExecutionCallId(), List.of());
+            if (sources.isEmpty() && "deferred".equals(execution.getReference().get("dispatchMode"))
+                    && execution.getReference().get("runtimeProtocol") == null
+                    && execution.getReference().get("publicationId") == null
+                    && fileInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest())) {
+                continue;
+            }
             if (sources.size() != 1) {
                 unsettled();
             }
@@ -139,7 +148,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 if ("not_started".equals(execution.getExecutionStatus())
                         || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0) {
                     var rows = jdbc.queryForList("SELECT producer_phase, terminal_resource_id, quarantined"
-                            + " FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
+                            + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
                             operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
                     if (rows.size() != 1 || !"NOT_STARTED".equals(rows.getFirst().get("producer_phase"))
                             || Boolean.TRUE.equals(rows.getFirst().get("quarantined"))
@@ -148,7 +157,7 @@ public class WorkspaceProfileLifecycleVerifier {
                     }
                 } else {
                     var rows = jdbc.queryForList("SELECT producer_phase, admission_resource_id, receipt_sequence, receipt_revision,"
-                            + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM qwen_tool_publication"
+                            + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
                             operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
                     if (rows.size() != 1 || !"REFERENCED".equals(rows.getFirst().get("producer_phase"))
@@ -248,6 +257,32 @@ public class WorkspaceProfileLifecycleVerifier {
                 }
             }
         }
+    }
+
+    private java.util.Set<String> nativeFileInputs(OperationRecord operation) {
+        var inputs = new java.util.HashSet<String>();
+        var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
+                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                + " AND kind = ? AND state = 'REFERENCED' FOR UPDATE",
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                operation.tenantId(), operation.sessionId(), "managed-tool-input");
+        for (var row : refs) {
+            var ref = JSON.createObjectNode().put("resourceId", row.get("resource_id").toString())
+                    .put("kind", "managed-tool-input").put("schemaVersion", ((Number) row.get("schema_version")).intValue())
+                    .put("byteLength", ((Number) row.get("byte_length")).longValue()).put("digest", row.get("sha256").toString());
+            JsonNode input = records.readRecordResource(operation.tenantId(), operation.sessionId(), ref);
+            if (!operation.sessionId().equals(input.path("harnessSessionId").asText())
+                    || !input.path("runtimeSessionId").isTextual() || !input.path("payloadJson").isTextual()) {
+                continue;
+            }
+            byte[] payload = input.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8);
+            JsonNode call = ToolPublicationContract.readJson(payload);
+            if (call.size() == 2 && call.path("input").isObject()
+                    && List.of("read_file", "write_file", "edit", "glob").contains(call.path("toolName").asText())) {
+                inputs.add(input.path("runtimeSessionId").textValue() + ":sha256:" + ToolPublicationContract.sha256(payload));
+            }
+        }
+        return inputs;
     }
 
     private List<ToolExecutionRecord> executions(OperationRecord operation) {
@@ -367,7 +402,7 @@ public class WorkspaceProfileLifecycleVerifier {
 
     private byte[] readContent(OperationRecord operation, String id, JsonNode expected) {
         var rows = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                + " FROM qwen_managed_session_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                 + " AND resource_id = ? FOR UPDATE", ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), id);
         if (rows.size() != 1) {

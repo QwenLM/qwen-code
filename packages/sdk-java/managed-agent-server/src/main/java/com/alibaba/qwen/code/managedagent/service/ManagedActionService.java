@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -37,7 +36,8 @@ public class ManagedActionService {
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("read_file", "write_file", "edit", "run_shell_command",
                     "agent", "send_message", "team_create", "task_create",
-                    "task_update", "workflow", "request_shutdown");
+                    "task_update", "workflow", "request_shutdown", "exit_plan_mode",
+                    "team_plan_approval");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
     private final ManagedExtensionRecordStore resources;

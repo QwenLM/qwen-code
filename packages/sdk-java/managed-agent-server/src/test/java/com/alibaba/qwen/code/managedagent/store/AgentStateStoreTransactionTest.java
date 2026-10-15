@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class AgentStateStoreTransactionTest {
     @Test

@@ -1,14 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
@@ -18,6 +9,10 @@ import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.Message
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -25,9 +20,15 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** The message relay's state machine against recorded harness calls. */
 class SessionMessageRelayTest {
@@ -140,36 +141,36 @@ class SessionMessageRelayTest {
         when(store.claim(anyString(), anyString(), anyString(), anyString(),
                 anyLong(), anyLong())).thenAnswer(ignored -> row.get());
         Mockito.doAnswer(args -> {
-                    MessageRow before = row.get();
-                    row.set(new MessageRow(before.tenantId(),
+            MessageRow before = row.get();
+            row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             args.getArgument(3), args.getArgument(2),
                             before.claimedBy(), before.claimedUntil(),
                             before.attempts(), args.getArgument(4),
                             before.lastError()));
-                    return null;
-                }).when(store).advance(any(MessageRow.class), anyString(),
+            return null;
+        }).when(store).advance(any(MessageRow.class), anyString(),
                         anyString(), any(), anyLong(), anyLong(), anyLong());
         Mockito.doAnswer(args -> {
-                    MessageRow before = row.get();
-                    row.set(new MessageRow(before.tenantId(),
+            MessageRow before = row.get();
+            row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             before.targetSessionId(), args.getArgument(2),
                             null, 0, before.attempts(), before.nextRetryAt(),
                             args.getArgument(3)));
-                    return null;
-                }).when(store).classify(any(MessageRow.class), anyString(),
+            return null;
+        }).when(store).classify(any(MessageRow.class), anyString(),
                         anyString(), any(), anyLong());
         Mockito.doAnswer(args -> {
-                    MessageRow before = row.get();
-                    row.set(new MessageRow(before.tenantId(),
+            MessageRow before = row.get();
+            row.set(new MessageRow(before.tenantId(),
                             before.senderSessionId(), before.messageId(),
                             before.targetSessionId(), before.state(),
                             before.claimedBy(), before.claimedUntil(),
                             before.attempts() + 1, args.getArgument(2),
                             args.getArgument(3)));
-                    return null;
-                }).when(store).defer(any(MessageRow.class), anyString(),
+            return null;
+        }).when(store).defer(any(MessageRow.class), anyString(),
                         anyLong(), any(), anyLong(), anyLong());
         when(store.currentRecord(anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(ignored -> new SessionMessageRelayStore
@@ -177,7 +178,7 @@ class SessionMessageRelayTest {
                                 "resource-message"));
         when(records.sessionStatus(TENANT, PARENT)).thenReturn("ACTIVE");
         when(records.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
-        when(records.readResourceBytes(TENANT, "resource-content"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-content"))
                 .thenReturn(CONTENT);
         body("to_child", PARENT, null);
         childRun("running", CHILD);
@@ -198,7 +199,8 @@ class SessionMessageRelayTest {
     }
 
     private void body(String route, String sender, String target) {
-        when(records.readResource(TENANT, "resource-message")).thenReturn(
+        when(records.readResourceBytes(TENANT, sender, "resource-content")).thenReturn(CONTENT);
+        when(records.readResource(TENANT, sender, "resource-message")).thenReturn(
                 "{\"direction\":\"outbound\",\"messageId\":\"" + MESSAGE
                         + "\",\"route\":\"" + route
                         + "\",\"childRunId\":\"run-1\",\"senderSessionId\":\""
@@ -619,7 +621,7 @@ class SessionMessageRelayTest {
     private void commandBody(String kind, Object target) {
         String targetJson = target == null ? "null"
                 : "\"" + target + "\"";
-        when(records.readResource(TENANT, "resource-message")).thenReturn(
+        when(records.readResource(TENANT, PARENT, "resource-message")).thenReturn(
                 "{\"direction\":\"outbound\",\"route\":\"to_parent\","
                         + "\"childRunId\":\"run-1\",\"kind\":\"" + kind
                         + "\",\"commandId\":\"" + MESSAGE
@@ -641,7 +643,7 @@ class SessionMessageRelayTest {
         commandBody("board_write", null);
         when(store.lineage(TENANT, PARENT))
                 .thenReturn(new Lineage(CHILD, "run-1"));
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.reply = Map.of("outcome", "answered", "text", "done");
         relay.scan();
@@ -672,7 +674,7 @@ class SessionMessageRelayTest {
     void rejectsACommandItsLeaderRefusesForGood() {
         pending.set(commandPending("accepting"));
         commandBody("board_write", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "session_command_refused";
@@ -687,7 +689,7 @@ class SessionMessageRelayTest {
     void defersABlockedLeaderWithoutSpendingAnAttempt() {
         pending.set(commandPending("accepting"));
         commandBody("board_read", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "hosted_turn_recovery_required";
@@ -701,7 +703,7 @@ class SessionMessageRelayTest {
     void defersAClosingLeaderWithoutSpendingAnAttempt() {
         pending.set(commandPending("accepting"));
         commandBody("board_read", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "hosted_session_closing";
@@ -716,7 +718,7 @@ class SessionMessageRelayTest {
     void defersACommandWhoseSenderHasNotAttachedYet() {
         pending.set(commandPending("accepting"));
         commandBody("board_read", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         harness.refuseKind = "execute";
         harness.refuseCode = "session_command_blocked";
@@ -748,7 +750,7 @@ class SessionMessageRelayTest {
     void classifiesAnAlreadyUnknownCommandWithoutExecutingItAgain() {
         pending.set(commandPending("unknown"));
         commandBody("board_write", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         relay.scan();
         assertThat(harness.calls).isEmpty();
@@ -761,7 +763,7 @@ class SessionMessageRelayTest {
     void classifiesAnAlreadyCancelledCommandWithoutExecutingIt() {
         pending.set(commandPending("cancelled"));
         commandBody("board_write", CHILD);
-        when(records.readResourceBytes(TENANT, "resource-args"))
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
                 .thenReturn(CONTENT);
         relay.scan();
         assertThat(harness.calls).isEmpty();
@@ -800,10 +802,10 @@ class SessionMessageRelayTest {
                                         "accepting", "resource-message")
                                 : new SessionMessageRelayStore.CurrentRecord(
                                         "consumed", "resource-receipt"));
-        when(records.readResource(TENANT, "resource-receipt")).thenReturn(
+        when(records.readResource(TENANT, CHILD, "resource-receipt")).thenReturn(
                 "{\"direction\":\"inbound\",\"replyRef\":{\"resourceId\":"
                         + "\"resource-reply\"}}");
-        when(records.readResource(TENANT, "resource-reply")).thenReturn(
+        when(records.readResource(TENANT, CHILD, "resource-reply")).thenReturn(
                 "{\"outcome\":\"answered\",\"text\":\"says\"}");
         relay.scan();
         assertThat(kinds()).containsExactly("answered");

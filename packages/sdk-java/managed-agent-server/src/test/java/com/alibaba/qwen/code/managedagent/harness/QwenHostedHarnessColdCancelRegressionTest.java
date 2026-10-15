@@ -1,19 +1,7 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -27,16 +15,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -44,6 +25,26 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:cold-cancel;MODE=MySQL;"
@@ -71,11 +72,11 @@ class QwenHostedHarnessColdCancelRegressionTest {
     void coldCancellationRequiresPersistedIntentAndSurvivesMutableAuthorityChanges() {
         String tenant = "tenant-" + UUID.randomUUID();
         String boot = "11111111-1111-4111-8111-111111111111";
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'ws-a', 1, 'storage-a', 'Workspace', ?, ?, 'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')",
                 tenant, "actor-a".getBytes(StandardCharsets.UTF_8));
         ManagedAgentProperties properties = new ManagedAgentProperties();
@@ -83,7 +84,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
         ManagedAgentStore store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> { }, registry, properties);
+                ignored -> {}, registry, properties);
         var admission = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest",
                 "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."));
         String session = admission.sessionId();
@@ -129,7 +130,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             assertThatThrownBy(() -> connector.recoverManagedRuntime(tenant, session, true))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
-            jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
             assertThat(store.insertCancelCommand(tenant, "CANCEL", "cancel", "digest", session, turn)
                     .commandEffect()).isTrue();
 
@@ -147,9 +148,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
             clearInvocations(client);
             doNothing().when(client).cancelTurn(attached);
             coordinator.cancel(tenant, session, turn);
-            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
             assertThat(connector.recoverManagedRuntime(tenant, session, false).runtimeRecovery()).isNull();
-            jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
 
             assertThat(store.findTurn(tenant, session, turn).orElseThrow().status()).isEqualTo("CANCELLING");
             verify(client).cancelTurn(attached);
@@ -159,10 +160,10 @@ class QwenHostedHarnessColdCancelRegressionTest {
             verify(client, never()).submitTurn(any());
 
             for (String change : List.of(
-                    "DELETE FROM managed_workspace_access WHERE tenant_id = ?",
-                    "UPDATE managed_workspace_registry SET state = 'DRAINING' WHERE tenant_id = ?",
-                    "UPDATE managed_workspace_registry SET workspace_generation = workspace_generation + 1 WHERE tenant_id = ?",
-                    "UPDATE managed_workspace_registry SET storage_id = 'replacement-storage' WHERE tenant_id = ?")) {
+                    "DELETE FROM ma_workspace_access WHERE tenant_id = ?",
+                    "UPDATE ma_workspace SET state = 'DRAINING' WHERE tenant_id = ?",
+                    "UPDATE ma_workspace SET workspace_generation = workspace_generation + 1 WHERE tenant_id = ?",
+                    "UPDATE ma_workspace SET storage_id = X'7265706c6163656d656e742d73746f72616765' WHERE tenant_id = ?")) {
                 jdbc.update(change, tenant);
                 clearInvocations(client);
                 ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
@@ -191,11 +192,11 @@ class QwenHostedHarnessColdCancelRegressionTest {
     void aMessageStopAttachesWithoutACancellingTurnOrACurrentGrant() {
         String tenant = "tenant-" + UUID.randomUUID();
         String boot = "11111111-1111-4111-8111-111111111111";
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, 'ws-a', 1, 'storage-a', 'Workspace', ?, ?, 'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')",
                 tenant, "actor-a".getBytes(StandardCharsets.UTF_8));
         ManagedAgentProperties properties = new ManagedAgentProperties();
@@ -203,13 +204,13 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
         ManagedAgentStore store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> { }, registry, properties);
+                ignored -> {}, registry, properties);
         String session = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest",
                 "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."))
                 .sessionId();
         store.insertTurnCommand(tenant, "SUBMIT", "submit", "digest", session,
                 List.of(Map.of("type", "text", "text", "go")), "payload");
-        jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
 
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
@@ -237,7 +238,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             verify(client).loadSession(any());
             verify(client).runMessageOperation(attached, stop);
             // The Session's own structure still decides: a closed one is refused.
-            jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+            jdbc.update("UPDATE ma_session SET status = 'CLOSED'"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
             assertThatThrownBy(() -> execution.authorizeCommittedStop(
                     store.requireSession(tenant, session)))

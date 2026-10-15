@@ -1,19 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.tuple;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -37,28 +23,10 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.ArrayDeque;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -77,6 +45,40 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-agent;MODE=MySQL;"
@@ -125,7 +127,7 @@ class ManagedAgentServerIntegrationTest {
         // would otherwise be claimed once its dispatch lease expires and
         // poison the counter-sensitive tests that run later in this shared
         // context.
-        jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED',"
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED',"
                 + " error_code = 'test_cleanup', completed_at = ?,"
                 + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
                 + " retry_after = NULL WHERE status IN ('ACCEPTED',"
@@ -203,8 +205,7 @@ class ManagedAgentServerIntegrationTest {
                 ManagedWorkspaceRegistry.class);
         ManagedAgentService upgraded = new ManagedAgentService(
                 new ManagedAgentStore(jdbc, objectMapper, Clock.systemUTC(),
-                        ignored -> {
-                        }, workspaces, changed),
+                        ignored -> {}, workspaces, changed),
                 applicationContext.getBean(RequestDigests.class),
                 applicationContext.getBean(HarnessCoordinator.class),
                 harness, workspaces);
@@ -308,7 +309,7 @@ class ManagedAgentServerIntegrationTest {
         assertThat(UUID.fromString(sessionId).toString()).isEqualTo(sessionId);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " INFORMATION_SCHEMA.COLUMNS WHERE"
-                        + " LOWER(TABLE_NAME) = 'managed_agent_session' AND"
+                        + " LOWER(TABLE_NAME) = 'ma_session' AND"
                         + " LOWER(COLUMN_NAME) = 'harness_session_id'",
                 Integer.class)).isZero();
 
@@ -720,26 +721,16 @@ class ManagedAgentServerIntegrationTest {
                         .content("{\"title\":\"blocked\"}"))
                 .andExpect(status().isOk());
 
-        // The retained failed receipt replays the same content and retries
-        // the Harness mutation without duplicating the requested event.
-        // The mutation is retried on the delivery lane, whose completion
-        // order with the "blocked" sibling is nondeterministic, so the
-        // live title at replay time may legitimately read either value;
-        // only the replay flag and the event inventory below are stable.
+        // An already submitted, superseded identity cannot become a new title revision.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "true"));
-
-        JsonNode events = objectMapper.readTree(events(tenant, sessionId)
-                .getResponse().getContentAsString()).get("data");
-        assertThat(events).filteredOn(event -> "session.updated".equals(
-                        event.get("type").asText()))
-                .hasSize(2);
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("session_mutation_superseded"));
+        JsonNode events = objectMapper.readTree(events(tenant, sessionId).getResponse().getContentAsString()).get("data");
+        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(1);
     }
 
     @Test
@@ -1045,9 +1036,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
                 .extracting(event -> event.sequence())
                 .containsExactly(before + 1, before + 2, before + 3);
-        store.materializeNextBatch(tenant, session.sessionId(), 200);
-        assertThat(store.findSnapshot(tenant, session.sessionId()))
-                .get().satisfies(snapshot -> {
+        assertThat(awaitSnapshotCovering(tenant, session.sessionId(),
+                before + 3))
+                .satisfies(snapshot -> {
                     assertThat(snapshot.coveredSequence())
                             .isEqualTo(before + 3);
                     assertThat(snapshot.items()).filteredOn(item ->
@@ -1271,9 +1262,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(before).extracting(EventRecord::contentPartId)
                 .containsOnly(before.get(0).contentPartId());
 
+        store.materializeNextBatch(tenant, sessionId, 100);
         store.retractContinuationOutput(tenant, sessionId, turn.turnId(),
                 owner, "boot_old", "epoch_old");
-        store.materializeNextBatch(tenant, sessionId, 100);
 
         assertThat(assertEventsNameTheSnapshot(tenant, sessionId))
                 .filteredOn(event -> event.type().endsWith(".delta"))
@@ -1284,13 +1275,31 @@ class ManagedAgentServerIntegrationTest {
                                 + before.get(1).sequence()));
     }
 
+    // The Snapshot is published after the drain that produced it commits, and
+    // a rewrite the refresh gate deferred stays behind until that floor ages
+    // out, so a drain never leaves the published Snapshot current on its own.
+    // Draining inside the wait keeps this independent of whether the 10ms
+    // materializer or the caller's own drain consumed the batch.
+    private SnapshotRecord awaitSnapshotCovering(String tenant, String sessionId,
+            long sequence) {
+        await().atMost(Duration.ofSeconds(30)).until(() -> {
+            store.materializeNextBatch(tenant, sessionId, 200);
+            return store.findSnapshot(tenant, sessionId)
+                    .filter(snapshot -> snapshot.coveredSequence() >= sequence)
+                    .isPresent();
+        });
+        return store.findSnapshot(tenant, sessionId).orElseThrow();
+    }
+
     // Every event that names an Item or a Part names one of the Snapshot.
     private List<EventRecord> assertEventsNameTheSnapshot(String tenant,
             String sessionId) {
-        List<ItemRecord> items = store.findSnapshot(tenant, sessionId)
-                .orElseThrow().items();
         List<EventRecord> events = store.findEvents(tenant, sessionId, 0,
                 100);
+        List<ItemRecord> items = awaitSnapshotCovering(tenant, sessionId,
+                events.isEmpty() ? 0
+                        : events.get(events.size() - 1).sequence())
+                .items();
         for (EventRecord event : events) {
             assertThat(event.schemaVersion()).isEqualTo(1);
             assertThat(event.projectionVersion()).isEqualTo(1);
@@ -1353,9 +1362,9 @@ class ManagedAgentServerIntegrationTest {
                 store.findLatestTurns(tenant,
                         java.util.List.of(session.sessionId())))
                         .get(session.sessionId())).satisfies(event -> {
-                    assertThat(event.turnId()).isEqualTo(second.turnId());
-                    assertThat(event.type()).isEqualTo("environment.ready");
-                });
+                            assertThat(event.turnId()).isEqualTo(second.turnId());
+                            assertThat(event.type()).isEqualTo("environment.ready");
+                        });
     }
 
     @Test
@@ -1742,8 +1751,6 @@ class ManagedAgentServerIntegrationTest {
                                 "event epoch changed"));
     }
 
-
-
     @Test
     void boundedRetractionRemovesFullyConsumedOriginalNamespace() {
         assertBoundedRetractionAcrossAttachment(4, "consumed");
@@ -1833,8 +1840,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
                 .filteredOn(event -> "turn.completed".equals(event.type()) && turn.turnId().equals(event.turnId())).hasSize(1);
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
-                assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence()));
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
+                        assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence())));
         assertEventsNameTheSnapshot(tenant, session.sessionId());
     }
 
@@ -2120,8 +2128,8 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness() {
-            return new FixtureHarness();
+        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+            return new FixtureHarness(jdbc);
         }
     }
 
@@ -2156,7 +2164,16 @@ class ManagedAgentServerIntegrationTest {
         private final Map<String, HarnessRuntimeRecovery>
                 tenantRecoveries = new ConcurrentHashMap<>();
         /** H6b: the automation funnel this fixture answers for. */
-        final AutomationHarnessFake automations = new AutomationHarnessFake();
+        final AutomationHarnessFake automations;
+
+        FixtureHarness(JdbcTemplate jdbc) {
+            automations = new AutomationHarnessFake((sessionId, schedule) -> {
+                String tenantId = jdbc.queryForObject("SELECT tenant_id FROM ma_session"
+                        + " WHERE session_id = ?", String.class, sessionId);
+                AutomationHarnessFake.projectSchedule(jdbc, tenantId, sessionId, schedule,
+                        System.currentTimeMillis());
+            });
+        }
 
         @Override
         public boolean isAvailable() {
@@ -2433,7 +2450,6 @@ class ManagedAgentServerIntegrationTest {
             uncertainGates.values().forEach(CountDownLatch::countDown);
             uncertainGates.clear();
         }
-
     }
     @Test
     void preAcquireCleanupUsesCurrentLifecycleAuthorityAndDoesNotAcquire() {
@@ -2453,7 +2469,9 @@ class ManagedAgentServerIntegrationTest {
                 .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(lease));
         java.util.function.Consumer<Throwable> admissionClosed = error -> {
             Throwable cause = error;
-            while (cause.getCause() != null) cause = cause.getCause();
+            while (cause.getCause() != null) {
+                cause = cause.getCause();
+            }
             assertThat(cause).isInstanceOfSatisfying(RuntimeBrokerException.class,
                     conflict -> assertThat(conflict.getCode()).isEqualTo("runtime_admission_closed"));
         };
@@ -2465,7 +2483,7 @@ class ManagedAgentServerIntegrationTest {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
                 return null;
             });
-            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+            jdbc.update("UPDATE ma_session_head SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
                     System.currentTimeMillis() + 60_000, tenant, harnessSession);
             var authority = new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, 7);
             for (var invalid : java.util.Arrays.asList(null,
@@ -2475,11 +2493,11 @@ class ManagedAgentServerIntegrationTest {
                         binding.getGeneration(), invalid).toCompletableFuture().join()).satisfies(admissionClosed);
                 assertThat(sessions.findById(scope, "runtime-a")).isNull();
             }
-            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = 0 WHERE tenant_id = ? AND harness_session_id = ?", tenant, harnessSession);
+            jdbc.update("UPDATE ma_session_head SET claim_lease_until = 0 WHERE tenant_id = ? AND harness_session_id = ?", tenant, harnessSession);
             assertThatThrownBy(() -> broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(),
                     binding.getGeneration(), authority).toCompletableFuture().join()).satisfies(admissionClosed);
             assertThat(sessions.findById(scope, "runtime-a")).isNull();
-            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+            jdbc.update("UPDATE ma_session_head SET claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
                     System.currentTimeMillis() + 60_000, tenant, harnessSession);
             assertThat(broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(), binding.getGeneration(), authority)
                     .toCompletableFuture().join()).isTrue();
@@ -2491,5 +2509,4 @@ class ManagedAgentServerIntegrationTest {
             org.mockito.Mockito.verify(provisioner, org.mockito.Mockito.times(1)).provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class));
         }
     }
-
 }
