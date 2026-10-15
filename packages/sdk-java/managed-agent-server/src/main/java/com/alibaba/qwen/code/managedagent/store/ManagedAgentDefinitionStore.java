@@ -1,21 +1,22 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.Map;
-import java.util.List;
-import java.util.Optional;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * Tenant-scoped AgentDefinition revisions (D8a). Revisions are append-only:
@@ -26,10 +27,13 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Repository
 public class ManagedAgentDefinitionStore {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
+    private final RequestDigests digests;
 
-    public ManagedAgentDefinitionStore(JdbcTemplate jdbc) {
+    public ManagedAgentDefinitionStore(JdbcTemplate jdbc, RequestDigests digests) {
         this.jdbc = jdbc;
+        this.digests = digests;
     }
 
     public record DefinitionRevision(String agentId, long revision,
@@ -112,13 +116,13 @@ public class ManagedAgentDefinitionStore {
                 .orElseThrow(ManagedAgentDefinitionStore::notFound);
         Map<String, Object> content;
         try {
-            content = new ObjectMapper().readValue(revision.definitionJson(),
+            content = JSON.readValue(revision.definitionJson(),
                     new TypeReference<Map<String, Object>>() { });
         } catch (Exception error) {
             throw new IllegalStateException("Invalid pinned definition", error);
         }
         if (!revision.digest().equals(session.agentDefinitionDigest())
-                || !new RequestDigests().digest(content)
+                || !digests.digest(content)
                         .equals("sha256:" + session.agentDefinitionDigest())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "hosted_agent_definition_conflict",

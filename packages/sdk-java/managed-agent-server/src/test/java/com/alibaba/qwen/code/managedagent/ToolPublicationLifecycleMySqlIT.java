@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -20,6 +14,18 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -36,16 +42,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.beans.factory.support.DefaultListableBeanFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ToolPublicationLifecycleMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();

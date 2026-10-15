@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
@@ -12,11 +9,15 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.function.LongSupplier;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class SessionResourceCollectionCollectorTest extends ToolPublicationRetentionStoreTest {
     private static final String CONTENT = "managed-tool-result-content";
@@ -456,7 +457,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             var page = pages.submit(() -> collector.collect(claim));
             assertThat(dropReached.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
             long started = System.nanoTime();
-        recovery("op-after", "CAPTURING");
+            recovery("op-after", "CAPTURING");
             long waitedMillis = (System.nanoTime() - started) / 1_000_000;
             // The pin could not be written until the page committed its byte drop: the page's gap
             // lock
@@ -1123,7 +1124,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 "UPDATE ma_resource SET scope_key = ?, publication_id = ?, slot_key ="
                         + " 'segment:stdout:0', capture_state = ? WHERE session_scope_key = ? AND"
                         + " resource_id = ?", ToolPublicationDataStore.scope(tenant, "workspace-1", session),
-                "pub-collected", "COLLECTED", resScope, "freed" );
+                "pub-collected", "COLLECTED", resScope, "freed");
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
         source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
@@ -1190,7 +1191,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 "UPDATE ma_resource SET scope_key = ?, publication_id = ?, slot_key ="
                         + " 'segment:stdout:0', capture_state = ? WHERE session_scope_key = ? AND"
                         + " resource_id = ?", ToolPublicationDataStore.scope(tenant, "workspace-1", session),
-                "pub-inflight", "VERIFIED", resScope, "inflight" );
+                "pub-inflight", "VERIFIED", resScope, "inflight");
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
         source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")

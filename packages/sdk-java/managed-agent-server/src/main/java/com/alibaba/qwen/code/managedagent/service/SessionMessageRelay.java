@@ -1,18 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import java.util.Base64;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.function.Supplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
@@ -20,6 +7,20 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * H4d-b: the session message relay. It discovers outbox entries whose
@@ -152,6 +153,14 @@ public class SessionMessageRelay {
                         now + LEASE_MS, now);
                 return;
             }
+            if (row.attempts() >= MAX_ATTEMPTS) {
+                // Past the bound only the give-up is owed, never the step:
+                // a message that a younger one was released past (see
+                // olderOwedMessages) must not land after it.
+                defer(row, pending.domain(), new IllegalStateException(
+                        "past the attempt bound: " + row.lastError()), now);
+                return;
+            }
             if ("session_command".equals(pending.domain())) {
                 workCommand(row, body, current, now);
             } else {
@@ -194,6 +203,20 @@ public class SessionMessageRelay {
         JsonNode run = records.childRunBody(row.tenantId(), parent,
                 body.required("childRunId").asText());
         return run != null && run.path("stopRequested").asBoolean(false);
+    }
+
+    /** Whether an older message of the sender to the same run still owes
+     * its handover or receipt. */
+    private boolean olderOwedOnRun(MessageRow row, String childRunId) {
+        for (String resource : store.olderOwedMessages(row.tenantId(),
+                row.senderSessionId(), row.messageId())) {
+            JsonNode older = readJson(records.readResource(row.tenantId(),
+                    row.senderSessionId(), resource), "older message body");
+            if (childRunId.equals(older.path("childRunId").textValue())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The receipt's input, as the Hosted side derives it
@@ -280,6 +303,14 @@ public class SessionMessageRelay {
             senderOperation(row, "cancelled", Map.of());
             store.classify(row, owner, "done", "target session is not active",
                     now);
+            return;
+        }
+        if (olderOwedOnRun(row, childRunId)) {
+            // One run's messages pass in send order: a younger one handed
+            // over first would wake its turn ahead of the older. The hold
+            // costs no attempt; the older one's give-up bounds it.
+            store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
             return;
         }
         senderOperation(row, "handover", Map.of("targetSessionId", target));

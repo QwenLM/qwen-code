@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.aliyun.oss.ClientBuilderConfiguration;
@@ -13,6 +9,10 @@ import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.comm.SignVersion;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
@@ -26,9 +26,10 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
 
 /** Private offline entry; it never boots the application or a Runtime. */
 public final class WorkspaceRecoveryMain {
