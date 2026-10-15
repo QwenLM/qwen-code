@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -12,10 +8,15 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.util.List;
-import java.util.Set;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+
+import java.util.List;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ManagedAgentSessionCapabilitiesTest {
     @ParameterizedTest

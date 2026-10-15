@@ -2,22 +2,22 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 @Repository
 public class WorkspaceExecutionStore {
@@ -441,8 +441,8 @@ public class WorkspaceExecutionStore {
     public boolean canStopDrained(RuntimeBindingRecord saved) {
         if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
                 || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
-                || !"local-process".equals(saved.getRequest().getProvisionerKind())
-                || !"session".equals(saved.getRequest().getScope().getIsolationClass())) {
+                || !LocalProcessRuntimeProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())
+                || !WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())) {
             return false;
         }
         var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
@@ -626,9 +626,8 @@ public class WorkspaceExecutionStore {
 
     private static String digest(String value) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }

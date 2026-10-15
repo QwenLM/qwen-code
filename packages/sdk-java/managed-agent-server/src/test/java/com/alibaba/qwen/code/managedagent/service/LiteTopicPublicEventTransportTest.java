@@ -1,17 +1,15 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.rocketmq.client.apis.ClientServiceProvider;
+import org.apache.rocketmq.client.apis.message.Message;
+import org.apache.rocketmq.client.apis.producer.Producer;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -23,11 +21,14 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
-import org.apache.rocketmq.client.apis.ClientServiceProvider;
-import org.apache.rocketmq.client.apis.message.Message;
-import org.apache.rocketmq.client.apis.producer.Producer;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class LiteTopicPublicEventTransportTest {
     private static final ObjectMapper JSON = new ObjectMapper();

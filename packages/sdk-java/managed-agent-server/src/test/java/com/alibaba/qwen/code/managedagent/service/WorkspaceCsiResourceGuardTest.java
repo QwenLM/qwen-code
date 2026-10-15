@@ -1,20 +1,21 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiResourceGuardTest {
     private final WorkspaceCsiRegistration registration = new WorkspaceCsiRegistration("tenant", "storage",
@@ -142,7 +143,7 @@ class WorkspaceCsiResourceGuardTest {
         private int creates;
         private int policyReads;
         private int bindingReads;
-        private Runnable afterStorage = () -> { };
+        private Runnable afterStorage = () -> {};
         private RuntimeBrokerException failure;
         private boolean synchronousFailure;
 

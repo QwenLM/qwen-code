@@ -1133,22 +1133,35 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     context.lease(), context.session(), grant)),
                                     "runtime_publication_install_failed", "Publication installation failed")
                                     .thenApply(ignored -> {
-                                        // The detached family holds its Runtime
-                                        // through its own ledger row: the Shell
-                                        // process for `is_background`, the watch
-                                        // for `is_monitor`.
-                                        Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
-                                        ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
-                                                ? ManagedHoldFamily.MONITOR
-                                                : Boolean.TRUE.equals(toolInput.get("is_background"))
-                                                        ? ManagedHoldFamily.SHELL
-                                                        : null;
-                                        if (family != null) {
-                                            admitBackgroundProcess(context, record, family);
+                                        context.lock();
+                                        try {
+                                            ToolExecutionRecord current = executionRepository
+                                                    .findByExecutionCallId(executionId);
+                                            if (current == null || current.isTerminal()
+                                                    || current.isCancelRequested()
+                                                    || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
+                                                return current == null ? record : current;
+                                            }
+                                            // The detached family holds its Runtime
+                                            // through its own ledger row: the Shell
+                                            // process for `is_background`, the watch
+                                            // for `is_monitor`.
+                                            Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
+                                            ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
+                                                    ? ManagedHoldFamily.MONITOR
+                                                    : Boolean.TRUE.equals(toolInput.get("is_background"))
+                                                            ? ManagedHoldFamily.SHELL
+                                                            : null;
+                                            if (family != null) {
+                                                admitBackgroundProcess(context, current, family);
+                                            }
+                                            beginDispatch(context, current, payload, grant);
+                                            ToolExecutionRecord latest = executionRepository
+                                                    .findByExecutionCallId(executionId);
+                                            return latest == null ? current : latest;
+                                        } finally {
+                                            context.unlock();
                                         }
-                                        beginDispatch(context, record, payload, grant);
-                                        ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-                                        return latest == null ? record : latest;
                                     });
                         }
                         if (shouldDriveDispatch(record)) {

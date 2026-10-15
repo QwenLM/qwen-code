@@ -1,10 +1,5 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
@@ -14,6 +9,11 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -25,10 +25,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 // Witness for the cold-burst wedge at
 // https://github.com/QwenLM/qwen-code/issues/13333#user-content-creating:

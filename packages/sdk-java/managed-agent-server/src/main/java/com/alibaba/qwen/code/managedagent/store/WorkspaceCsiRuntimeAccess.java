@@ -1,10 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
-import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.CsiFileHistoryProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeReadbackProtocol;
+import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
@@ -21,25 +20,27 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.time.Clock;
-import java.util.Map;
-import java.util.LinkedHashMap;
-import java.util.Objects;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Clock;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 /** Original private Session context, readback and qualified finite file execution. */
 public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, RuntimeTransport {
