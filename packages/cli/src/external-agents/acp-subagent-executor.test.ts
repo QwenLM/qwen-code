@@ -110,6 +110,7 @@ connection = new AgentSideConnection(() => ({
     }
     await send({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'thinking'}});
     await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:params.prompt.map(p=>p.text).join('|')}});
+    await send({sessionUpdate:'tool_call_update',toolCallId:'lifecycle-orphan',_meta:{toolLifecycle:{v:1,phase:'started'}}});
     await send({sessionUpdate:'tool_call',toolCallId:'tool-'+prompts,title:'Shell',kind:'execute',status:'in_progress',rawInput:{}});
     await send({sessionUpdate:'tool_call_update',toolCallId:'tool-'+prompts,rawInput:{command:'printf hello'},_meta:{claudeCode:{toolName:'Bash'}},content:[{type:'content',content:{type:'text',text:'hello'}}]});
     await send({sessionUpdate:'tool_call_update',toolCallId:'tool-'+prompts,status:'completed'});

@@ -524,10 +524,11 @@ describe('NativeLspService Integration Tests', () => {
       expect(results).toEqual([]);
     });
 
-    it('should return empty diagnostics when no server is ready', async () => {
+    it('should reject diagnostics when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
-      const results = await lspService.diagnostics(uri);
-      expect(results).toEqual([]);
+      await expect(lspService.diagnostics(uri)).rejects.toThrow(
+        'No LSP servers are configured or running',
+      );
     });
 
     it('should return empty code actions when no server is ready', async () => {

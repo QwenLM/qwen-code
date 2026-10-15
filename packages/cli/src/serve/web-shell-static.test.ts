@@ -17,6 +17,7 @@ import {
   buildWebShellPermissionsPolicy,
   remoteDaemonConnectOrigins,
   requestedDaemonParam,
+  requestedFanoutParams,
 } from './web-shell-static.js';
 
 const stderr = vi.hoisted(() => ({ writeStderrLine: vi.fn() }));
@@ -130,6 +131,43 @@ describe('Web Shell sandbox framing', () => {
     expect(csp).toContain(
       "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
     );
+  });
+
+  it('widens connect-src for every validated repeated fanout param', () => {
+    // Multi-daemon (#13727): the page connects to the `daemon` host plus
+    // every `fanout` host at once; each value passes the same validation as
+    // `daemon` and repeats dedupe.
+    const url =
+      '/?daemon=https%3A%2F%2Ffocus.example.com' +
+      '&fanout=https%3A%2F%2Falpha.example.com%3A4170' +
+      '&fanout=http%3A%2F%2F10.0.0.2%3A4170' +
+      '&fanout=https%3A%2F%2Falpha.example.com%3A4170' +
+      '&fanout=https%3A%2F%2Fdaemon.example.com%2Fpath' +
+      '&fanout=file%3A%2F%2F%2Ftmp';
+    expect(requestedFanoutParams(url)).toEqual([
+      'https://alpha.example.com:4170',
+      'http://10.0.0.2:4170',
+      'https://daemon.example.com/path',
+      'file:///tmp',
+    ]);
+    const origins = [
+      ...remoteDaemonConnectOrigins(requestedDaemonParam(url)),
+      ...requestedFanoutParams(url).flatMap(remoteDaemonConnectOrigins),
+    ];
+    expect(origins).toEqual([
+      'https://focus.example.com',
+      'wss://focus.example.com',
+      'https://alpha.example.com:4170',
+      'wss://alpha.example.com:4170',
+      'http://10.0.0.2:4170',
+      'ws://10.0.0.2:4170',
+    ]);
+    const csp = buildWebShellCsp([], origins);
+    expect(csp).toContain('https://focus.example.com');
+    expect(csp).toContain('https://alpha.example.com:4170');
+    expect(csp).toContain('ws://10.0.0.2:4170');
+    expect(csp).not.toContain('daemon.example.com');
+    expect(requestedFanoutParams('/')).toEqual([]);
   });
 
   it('never widens connect-src for a key the client parser does not report', () => {

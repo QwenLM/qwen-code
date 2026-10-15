@@ -18,6 +18,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import {
   stopParkedRuntimeExecutions,
+  answerCommittedTurnCalls,
   recoverHostedRuntimeTurn,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
@@ -25,6 +26,8 @@ import {
   type HostedRecoveryTurn,
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import {
   commitHostedFileHistory,
   readHostedFileHistory,
@@ -32,6 +35,7 @@ import {
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
+import { HOSTED_TOOL_APPROVAL_POLICY } from './hosted-tool-approval.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
@@ -283,14 +287,236 @@ describe('recoverHostedRuntimeTurn', () => {
     return session;
   }
 
+  /** Drives a fresh session to a parked await_agent checkpoint (#13708). */
+  async function parkAtAwaitAgent(consume = false): Promise<ManagedSession> {
+    const session = await open('boot-1', true, 'hosted-workspace-files/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'review the diff' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const children = new HostedChildAgentSession(
+      { authority, resources: session.resources },
+      authority.sessionHeader.sessionKey,
+    );
+    const launched = await children.admit({
+      childRunId: 'prompt:call-1',
+      ownerScopeId: SESSION_ID,
+      rootSessionId: SESSION_ID,
+      completion: 'tool',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-files/1',
+        definitionRevision: 1,
+        definitionDigest: authority.sessionHeader.definitionRef.digest,
+      },
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      executionCallId: 'prompt:call-1',
+    });
+    await harness.commitAwaitAgent(
+      [
+        {
+          childRunId: 'prompt:call-1',
+          functionCallId: 'call-1',
+          toolName: 'agent',
+          modelMessageId: 'message-1',
+          consumed: false,
+        },
+      ],
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+      { attemptId: 'message-1', routeRef: launched.inputRef },
+    );
+    if (consume) await harness.resolveAwaitAgent('prompt:call-1');
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    return session;
+  }
+
   const brokerOptions = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
 
+  it('classifies the parked agent wait without folding or acquiring', async () => {
+    const parked = await parkAtAwaitAgent();
+    const replacement = await open('boot-2', false);
+    try {
+      const before = replacement.authority.committedSequence;
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      // Classification only: the fold belongs to the continue route's
+      // resume arm, so the wait sees no new commit here.
+      expect(replacement.authority.committedSequence).toBe(before);
+      expect(turn.acquiredRuntime).toBe(false);
+      expect(turn.report).toMatchObject({
+        phase: 'await_agent',
+        checkpointId: parked.authority.latestCheckpoint?.checkpointId,
+        executions: [
+          {
+            functionCallId: 'call-1',
+            toolName: 'agent',
+            executionCallId: 'prompt:call-1',
+            outcome: 'known',
+            status: { state: 'executing' },
+          },
+        ],
+      });
+      // The wire field is required on every entry; this phase has no
+      // Runtime session to name, so the hosted runtime-session identity
+      // of the parked Turn rides it (R1-32).
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('reports the fully-consumed agent wait as settled, never model_start', async () => {
+    await parkAtAwaitAgent(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(turn.report).toMatchObject({
+        phase: 'await_agent',
+        executions: [
+          {
+            executionCallId: 'prompt:call-1',
+            outcome: 'known',
+            status: { state: 'settled' },
+          },
+        ],
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('classifies the agent wait identically on a passive load', async () => {
+    await parkAtAwaitAgent();
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      expect(turn.acquiredRuntime).toBe(false);
+      expect(turn.report.phase).toBe('await_agent');
+      expect(turn.report.executions[0]).toMatchObject({
+        outcome: 'known',
+        status: { state: 'executing' },
+      });
+      expect(turn.report.executions[0]?.runtimeSessionId).toBe(
+        hostedRuntimeSessionId(PROMPT_ID),
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
   /**
    * Drives a fresh session to a parked await_action checkpoint: the model
    * answered with call-1, the approval is requested, and the owner died
    * asking. The durable Action decides through endAction below.
    */
   const ACTION_ID = '77777777-7777-4777-8777-777777777777';
+
+  it('recovers a plan decision from call-keyed evidence even with the plan gate off', async () => {
+    const session = await open('plan-recovery', true);
+    try {
+      await session.sink.write({
+        uuid: 'plan-assistant',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'hosted-harness/1',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'assistant',
+          parts: [
+            {
+              functionCall: {
+                id: 'decide',
+                name: 'team_plan_approval',
+                args: {},
+              },
+            },
+          ],
+        },
+      });
+      const teams = new HostedTeamSession(
+        { authority: session.authority, resources: session.resources },
+        session.authority.sessionHeader.sessionKey,
+      );
+      const evidence = vi
+        .spyOn(teams, 'planDecisionEvidence')
+        .mockResolvedValue(
+          'Decision committed; continuation not delivered. Request cmd_plan.',
+        );
+      const generic = vi.spyOn(teams, 'committedBy');
+      await answerCommittedTurnCalls({
+        session,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        teams,
+      });
+      expect(evidence).toHaveBeenCalledTimes(1);
+      expect(evidence.mock.calls[0]?.[0]).toContain('decide');
+      expect(generic).not.toHaveBeenCalled();
+      expect(JSON.stringify(await session.sink.project())).toContain(
+        'continuation not delivered',
+      );
+    } finally {
+      await session.close();
+    }
+  });
 
   async function parkAtAwaitAction(
     expiresAt = Date.now() + 3_600_000,
@@ -326,7 +552,7 @@ describe('recoverHostedRuntimeTurn', () => {
         kind: 'execute',
         source: 'tool_call',
         optionsRef: await session.resources.publish(
-          'managed-approval',
+          'managed-action-options',
           Buffer.from(
             JSON.stringify({
               v: 1,
@@ -334,11 +560,14 @@ describe('recoverHostedRuntimeTurn', () => {
               turnId: PROMPT_ID,
               functionCallId: 'call-1',
               toolName: 'write_file',
-              policyRevision: 'pol-1',
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
               inputRevision: 1,
               createdAt: expiresAt - 20_000,
               expiresAt,
-              options: [{ id: 'allow' }, { id: 'deny' }],
+              options: [
+                { id: 'allow', label: 'Allow once' },
+                { id: 'deny', label: 'Deny' },
+              ],
             }),
           ),
         ),

@@ -2,6 +2,12 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.lang.reflect.Constructor;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -12,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
 /**
  * H6b: a Hosted Harness automation funnel in memory, answering the
@@ -28,6 +35,28 @@ import java.util.Set;
  * plane's translation is exercised as in production.
  */
 public final class AutomationHarnessFake {
+    private final BiConsumer<String, Map<String, Object>> projectSchedule;
+
+    public AutomationHarnessFake() {
+        this((sessionId, schedule) -> {});
+    }
+
+    public AutomationHarnessFake(BiConsumer<String, Map<String, Object>> projectSchedule) {
+        this.projectSchedule = projectSchedule;
+    }
+
+    public static void projectSchedule(JdbcTemplate jdbc, String tenantId,
+            String sessionId, Map<String, Object> schedule, long now) {
+        ObjectNode record = new ObjectMapper().valueToTree(schedule);
+        record.putObject("run").put("state", String.valueOf(schedule.get("state")));
+        String workspaceId = jdbc.queryForObject("SELECT workspace_id FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
+        new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()))
+                .executeWithoutResult(status -> new AutomationLedgerStore(jdbc).projectSchedule(
+                        tenantId, workspaceId, sessionId,
+                        ((Number) schedule.get("revision")).longValue(), record, now));
+    }
+
     public final List<Map<String, Object>> operations = new ArrayList<>();
     private final Map<String, Map<String, Object>> schedules =
             new LinkedHashMap<>();
@@ -131,6 +160,7 @@ public final class AutomationHarnessFake {
                 }
                 // The operation is part of the commit, so a relay whose
                 // answer is lost replays it instead of committing twice.
+                projectSchedule.accept(sessionId, schedule);
                 mutations.put(mutationKey, new LinkedHashMap<>(schedule));
                 RuntimeException failure = failAfterNextDefineCommit;
                 if (failure != null) {
@@ -167,6 +197,7 @@ public final class AutomationHarnessFake {
                     schedule.put("revision", (Long) schedule.get("revision") + 1);
                     schedule.put("definitionRevision",
                             (Long) schedule.get("definitionRevision") + 1);
+                    projectSchedule.accept(sessionId, schedule);
                     mutations.put(mutationKey,
                             new LinkedHashMap<>(schedule));
                     RuntimeException failure = failAfterNextRetireCommit;

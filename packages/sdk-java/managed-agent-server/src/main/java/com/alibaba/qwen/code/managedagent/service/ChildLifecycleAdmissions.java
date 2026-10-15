@@ -2,9 +2,9 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import java.util.Map;
 import org.springframework.stereotype.Component;
+
+import java.util.Map;
 
 /**
  * H4b: the idempotent admission of a child Session's own lifecycle close.
@@ -12,8 +12,8 @@ import org.springframework.stereotype.Component;
  * run, so a contested admission replays its receipt instead of minting a
  * second operation, and a finished child (relay `done`) closes through the
  * exact same admission its parent's close would have taken. The child
- * actor clones the parent's creation actor shape, matching how
- * createChildSession registered it.
+ * close authority comes from the persisted child lineage and the original
+ * creation identity; it survives a later revocation of execution grants.
  */
 @Component
 public class ChildLifecycleAdmissions {
@@ -30,7 +30,9 @@ public class ChildLifecycleAdmissions {
 
     /** Whether this host can close a Workspace Session at all. Without it
      * no close is ever admitted, so a caller must not hold anything else
-     * (a parent's settlement) hostage to one. */
+     * (a parent's settlement) hostage to one. The one exception is a
+     * worktree run's merge (#13753 I2), which runs only once its child is
+     * closed: that run waits for a host that can close it. */
     public boolean closeSupported() {
         return runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
     }
@@ -43,8 +45,7 @@ public class ChildLifecycleAdmissions {
             String parentSessionId, String childSessionId,
             String childRunId) {
         String actor = "child:" + parentSessionId;
-        return store.beginWorkspaceLifecycle(tenantId, childSessionId,
-                OperationKind.CLOSE, actor,
+        return store.beginChildClose(tenantId, parentSessionId, childSessionId, childRunId,
                 digests.digest(Map.of("actorId", actor)),
                 "child-close-" + childRunId,
                 digests.digest(Map.of("sessionId", childSessionId,

@@ -1,22 +1,24 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Test;
+
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Checks the Stage H task schemas with valid and invalid instances. The API
  * contract test validates only what the mapped task routes return, so the
- * invalid instances and the planned cancel operation have no other gate.
+ * invalid instances — including every task_cancel outcome a served route
+ * does not happen to produce in that test — have no other gate.
  * Every instance is written in the public shape and also checked, renamed
  * to camelCase, against the WebShell mirror, whose conditionals are copied.
  */
@@ -283,23 +285,26 @@ class PlannedTaskContractTest {
     }
 
     @Test
-    void plannedTaskRoutesDeclareTheTenantFilterForbidden() {
+    void taskRoutesDeclareTheTenantFilterForbidden() {
         // The API contract test checks this declaration in a Spring context;
-        // this gate also checks it without starting one. H3 serves the
-        // events routes; cancel stays planned.
+        // this gate also checks it without starting one. H4f serves cancel
+        // as partial: 403 is both the tenant filter's refusal and
+        // task_forbidden.
         for (String operationId : List.of("cancelSessionTask",
                 "cancelWebShellTask")) {
             assertThat(CONTRACT.operation(operationId).status())
-                    .as("%s stays planned", operationId)
-                    .isEqualTo("planned");
+                    .as("%s is served as partial", operationId)
+                    .isEqualTo("partial");
             assertThat(CONTRACT.responsePointer(
                     CONTRACT.operation(operationId), 403))
                     .as("%s declares the tenant filter refusal", operationId)
                     .isEqualTo("/components/responses/Forbidden");
         }
-        // H3 serves the events routes: no schema-level flip may demote them.
+        // H3 serves the events routes and H4f cancel: no schema-level flip
+        // may demote them.
         for (String operationId : List.of("listSessionTaskEvents",
-                "queryWebShellTaskEvents")) {
+                "queryWebShellTaskEvents", "cancelSessionTask",
+                "cancelWebShellTask")) {
             assertThat(CONTRACT.operation(operationId).status())
                     .as("%s is served, not planned", operationId)
                     .isNotEqualTo("planned");
@@ -315,6 +320,17 @@ class PlannedTaskContractTest {
         checkPublic("WebShellTaskCancelRequest", "cancel without a key",
                 cancel, false);
         cancel.put("idempotencyKey", "key-1");
+        // B12 of #12847: a trace-only request id, null or absent alike.
+        cancel.put("requestId", "request-1");
+        checkPublic("WebShellTaskCancelRequest", "cancel with a request id",
+                cancel, true);
+        cancel.putNull("requestId");
+        checkPublic("WebShellTaskCancelRequest", "cancel with a null request"
+                + " id", cancel, true);
+        cancel.put("requestId", "r".repeat(129));
+        checkPublic("WebShellTaskCancelRequest", "cancel with an overlong"
+                + " request id", cancel, false);
+        cancel.remove("requestId");
         cancel.put("unknown_field", "x");
         checkPublic("WebShellTaskCancelRequest", "cancel with an unknown"
                 + " field", cancel, false);

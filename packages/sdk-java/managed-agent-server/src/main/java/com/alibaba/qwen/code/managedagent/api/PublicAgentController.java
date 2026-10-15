@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -42,14 +43,17 @@ public class PublicAgentController {
     private final ManagedEventStreamService streams;
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
+    private final ManagedTaskCancelService taskCancels;
 
     public PublicAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
-            SessionLifecycleService lifecycle, ManagedTaskService tasks) {
+            SessionLifecycleService lifecycle, ManagedTaskService tasks,
+            ManagedTaskCancelService taskCancels) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
+        this.taskCancels = taskCancels;
     }
 
     @PostMapping
@@ -213,10 +217,23 @@ public class PublicAgentController {
     @GetMapping("/{sessionId}/items")
     public PublicItemList items(TenantContext tenant,
             @PathVariable String sessionId,
-            @RequestParam(defaultValue = "0") long after,
+            @RequestParam(defaultValue = "0") String after,
+            @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return service.listPublicItems(tenant.tenantId(), tenant.actorId(),
-                sessionId, after, limit);
+        long sequence = 0;
+        if (cursor == null && after.matches("-?[0-9]+")) {
+            try {
+                sequence = Long.parseLong(after);
+            } catch (NumberFormatException error) {
+                throw new ApiException(
+                        org.springframework.http.HttpStatus.BAD_REQUEST,
+                        "invalid_event_cursor",
+                        "Item sequence is invalid.");
+            }
+        } else if (cursor == null) {
+            cursor = after;
+        }
+        return service.listPublicItems(tenant.tenantId(), tenant.actorId(), sessionId, cursor, sequence, limit);
     }
 
     @GetMapping("/{sessionId}/turns")
@@ -258,6 +275,16 @@ public class PublicAgentController {
             @RequestParam(defaultValue = "20") int limit) {
         return tasks.listPublicTaskEvents(tenant.tenantId(), tenant.actorId(),
                 sessionId, taskId, after, limit);
+    }
+
+    @PostMapping("/{sessionId}/tasks/{taskId}/cancel")
+    public ResponseEntity<PublicCommandOperation> cancelTask(
+            TenantContext tenant, @PathVariable String sessionId,
+            @PathVariable String taskId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        return ResponseEntity.accepted().body(taskCancels.cancelPublic(
+                tenant.tenantId(), tenant.actorId(), idempotencyKey,
+                sessionId, taskId));
     }
 
     private static long parseSequence(String header, long fallback) {

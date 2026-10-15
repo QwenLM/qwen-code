@@ -12,6 +12,7 @@ import type {
   DaemonWorkspaceProviderStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { isDiscontinuedSettingsModel } from '../../utils/composerModels';
 import styles from './ModelManagementSection.module.css';
 
 export interface ModelDeleteTarget {
@@ -143,6 +144,16 @@ export function ModelManagementSection({
       isCurrent: false,
       isRuntime: false,
     });
+  }
+  // Settings is the third surface that has to drop the discontinued built-in
+  // OAuth entry, so it asks the shared policy rather than restating it. The
+  // filter runs on the merged list, not on `providers`, because the loop above
+  // recreates the row from a persisted configuration after the provider input
+  // has been read (issue #13965).
+  for (const provider of displayProviders) {
+    provider.models = provider.models.filter(
+      (model) => !isDiscontinuedSettingsModel(provider, model),
+    );
   }
   const hasModels = displayProviders.some((p) => p.models.length > 0);
   const currentRowKey = findCurrentRowKey(providers, currentModelId);
