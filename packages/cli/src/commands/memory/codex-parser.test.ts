@@ -72,17 +72,16 @@ describe('parseCodexMemories', () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it('discloses skipped nested memory subsections', () => {
+  it('retains nested memory subsection entries', () => {
     const result = parseHandbook(
       '# Task Group: Atlas\ncwd: /work/atlas\n## Reusable knowledge\n' +
         '- Visible fact.\n### Detail\n- Nested fact.\n',
     );
     expect(result.candidates.map((entry) => entry.content)).toEqual([
       'Visible fact.',
+      'Nested fact.',
     ]);
-    expect(result.warnings.join('\n')).toContain(
-      'nested memory subsections skipped',
-    );
+    expect(result.warnings).toEqual([]);
   });
 
   it('extracts supported group sections with canonical project and provenance', () => {
@@ -509,7 +508,9 @@ ${GROUP}
 `);
     expect(result.candidates).toHaveLength(1);
     expect(result.candidates[0].content).toBe('Review the actual result.');
-    expect(result.warnings[0]).toContain('fenced code or transcript skipped');
+    expect(result.warnings[0]).toContain(
+      'fenced code, transcript, or HTML skipped',
+    );
   });
 
   it('skips oversized entries without truncating or changing subsequent IDs', () => {
@@ -545,5 +546,124 @@ ${GROUP}
     ]);
     expect(result.candidates).toEqual([]);
     expect(result.warnings).toHaveLength(1);
+  });
+  it('compares every canonical scope line before assigning a project', () => {
+    const result = parseHandbook(`# Task Group: Scope
+applies_to: cwd=/work/atlas
+cwd: /work/beta
+## Reusable knowledge
+- Shared fact.
+`);
+    expect(result.candidates[0].sourceProject).toBeUndefined();
+    expect(result.candidates[0].reason).toContain('Multiple');
+  });
+
+  it.each([
+    'cwd=/work/atlas, also /work/beta',
+    'cwd=/work/atlas, see(/work/beta)',
+    'cwd=/work/atlas, related project [/work/beta]',
+    'cwd=/work/atlas, unexpected prose',
+    'cwd=/work/atlas; see `/work/beta`',
+    'cwd=/work/atlas on release/example; reference C:\\work\\beta',
+  ])('does not discard a second path in residual prose: %s', (scope) => {
+    const result = parseHandbook(`# Task Group: Scope
+applies_to: ${scope}
+## Reusable knowledge
+- Shared fact.
+`);
+    expect(result.candidates[0].sourceProject).toBeUndefined();
+    expect(result.candidates[0].reason).toBeDefined();
+  });
+
+  it('compares trailing separators while retaining the first source spelling', () => {
+    const result = parseHandbook(`# Task Group: Scope
+applies_to: cwd=/work/atlas/
+cwd: /work/atlas
+## Reusable knowledge
+- Atlas fact.
+`);
+    expect(result.candidates[0].sourceProject).toBe('/work/atlas/');
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('keeps nested section text and ordered entries without importing thematic breaks', () => {
+    const result = parseHandbook(`${GROUP}
+## Reusable knowledge
+- First fact.
+
+### Release details
+1. Second fact.
+2. Third fact.
+
+---
+
+### User preferences
+- Ask before release.
+
+### Deployment
+- Fourth fact.
+`);
+    expect(
+      result.candidates.map(({ content, type }) => [content, type]),
+    ).toEqual([
+      ['First fact.', 'project'],
+      ['Second fact.', 'project'],
+      ['Third fact.', 'project'],
+      ['Fourth fact.', 'project'],
+      ['Ask before release.', 'feedback'],
+    ]);
+  });
+
+  it('does not let indented code fence text swallow the following project', () => {
+    const source = `${GROUP}
+## Reusable knowledge
+- Atlas fact.
+
+      \`\`\`
+      transcript only
+
+# Task Group: Beta
+applies_to: cwd=/work/beta
+## Reusable knowledge
+- Beta fact.
+`;
+    const result = parseHandbook(source);
+    expect(
+      result.candidates.map(({ content, sourceProject }) => [
+        content,
+        sourceProject,
+      ]),
+    ).toEqual([
+      ['Atlas fact.', '/work/atlas'],
+      ['Beta fact.', '/work/beta'],
+    ]);
+    expect(result.warnings.join(' ')).toMatch(/MEMORY.md:\d+-\d+: fenced code/);
+  });
+  it('does not accept hidden HTML project metadata', () => {
+    const result = parseHandbook(
+      '# Task Group: Hidden\n<!--\ncwd: /work/beta\n-->\n\n## Reusable knowledge\n- Visible fact.\n',
+    );
+    expect(result.candidates[0].sourceProject).toBeUndefined();
+    expect(result.candidates[0].reason).toContain('Missing project metadata');
+  });
+  it.each([
+    'Use <project-root>/src before release.',
+    'Prefer <strong>concise</strong> answers.',
+    'Keep this <!-- hidden --> visible instruction.',
+  ])('preserves prose surrounding inline HTML: %s', (content) => {
+    const result = parseHandbook(
+      `${GROUP}\n## Reusable knowledge\n- ${content}\n`,
+    );
+    expect(result.candidates.map((candidate) => candidate.content)).toEqual([
+      content,
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+  it('does not treat a POSIX backslash filename as a trailing separator', () => {
+    const result = parseHandbook(
+      '# Task Group: Scope\napplies_to: cwd=/work/atlas\\\ncwd: /work/atlas\n## Reusable knowledge\n- Ambiguous fact.\n',
+    );
+    expect(result.candidates[0].sourceProject).toBeUndefined();
+    expect(result.candidates[0].reason).toContain('Multiple');
   });
 });

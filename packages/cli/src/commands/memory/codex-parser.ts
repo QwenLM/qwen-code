@@ -5,6 +5,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+
+const markdown = unified().use(remarkParse);
+type MarkdownNode = ReturnType<typeof markdown.parse>['children'][number];
 
 export interface CodexMemoryCandidate {
   id: string;
@@ -42,30 +47,21 @@ const SUMMARY_SECTIONS = new Map<string, CodexMemoryCandidate['type']>([
   ['user preferences', 'feedback'],
 ]);
 
-function headings(lines: string[]): Heading[] {
+function headings(nodes: MarkdownNode[], lines: string[]): Heading[] {
   const result: Heading[] = [];
-  let fence: string | undefined;
-  for (const [start, line] of lines.entries()) {
-    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
-      if (!fence) fence = marker;
-      else if (marker[0] === fence[0] && marker.length >= fence.length) {
-        fence = undefined;
-      }
-      continue;
-    }
-    if (fence) continue;
-    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (match) {
-      if (result.length > 0) result[result.length - 1].end = start;
-      result.push({
-        title: match[2].trim(),
-        level: match[1].length,
-        start,
-        end: lines.length,
-      });
-    }
+  for (const node of nodes) {
+    if (node.type !== 'heading') continue;
+    const start = node.position!.start.line - 1;
+    if (result.length) result[result.length - 1].end = start;
+    result.push({
+      title: lines[start]
+        .trim()
+        .replace(/^#{1,6}\s+/, '')
+        .replace(/\s+#+\s*$/, ''),
+      level: node.depth,
+      start,
+      end: lines.length,
+    });
   }
   return result;
 }
@@ -73,17 +69,7 @@ function headings(lines: string[]): Heading[] {
 function metadata(lines: string[]): string[] {
   const result: string[] = [];
   let section = '';
-  let fence: string | undefined;
   for (const line of lines) {
-    const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
-    if (marker) {
-      if (!fence) fence = marker;
-      else if (marker[0] === fence[0] && marker.length >= fence.length) {
-        fence = undefined;
-      }
-      continue;
-    }
-    if (fence) continue;
     const heading = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
     if (heading) section = heading[1].toLowerCase();
     if (
@@ -104,9 +90,7 @@ function resolveProject(
   const appliesTo = lines.filter((line) => /^applies_to:/i.test(line));
   const explicit = lines.filter((line) => /^cwd:/i.test(line));
   const scopeLines =
-    appliesTo.length > 0 || explicit.length > 0
-      ? [...appliesTo, ...explicit]
-      : lines;
+    appliesTo.length || explicit.length ? [...appliesTo, ...explicit] : lines;
   const ambiguous = {
     reason:
       'Multiple or alternative project scopes. Choose one project in a reviewed source export.',
@@ -115,7 +99,7 @@ function resolveProject(
     reason:
       'Unsupported project scope annotation. Use an explicit cwd in a reviewed source export.',
   };
-  const values = new Set<string>();
+  const values = new Map<string, string>();
   for (const line of scopeLines) {
     const scope = line.split(/;\s*reuse_rule\s*=/i)[0];
     const assignment = /\bcwd\s*[=:]\s*/i.exec(scope);
@@ -191,11 +175,20 @@ function resolveProject(
       suffix =
         end < 0 ? '' : suffix.slice(end + (parenthetical ? 1 : 0)).trim();
     }
-    if (/(?:^|[\s,;|(\x60])(?:\/|[A-Za-z]:[\\/])/.test(suffix)) {
+    if (/(?:^|[\s,;|(`])(?:\/|[A-Za-z]:[\\/])/.test(suffix)) {
       return ambiguous;
     }
-    if (suffix && !/^[,;)]/.test(suffix)) return unsupported;
-    values.add(value);
+    if (
+      suffix &&
+      !/^(?:[,;)]\s*)*(?:(?:updated_at|thread_id)\s*[=:]\s*[^\s,;)]+(?:[,;)]\s*)*)*$/i.test(
+        suffix,
+      )
+    )
+      return unsupported;
+    const key =
+      value.replace(/^[A-Za-z]:[\\/]/.test(value) ? /[\\/]+$/ : /\/+$/, '') ||
+      value;
+    if (!values.has(key)) values.set(key, value);
   }
   if (!values.size) {
     return {
@@ -203,7 +196,9 @@ function resolveProject(
         'Missing project metadata (cwd). Add an explicit absolute cwd to a reviewed source export.',
     };
   }
-  return values.size === 1 ? { sourceProject: [...values][0] } : ambiguous;
+  return values.size === 1
+    ? { sourceProject: [...values.values()][0] }
+    : ambiguous;
 }
 
 function sourceDate(lines: string[]): string | undefined {
@@ -229,59 +224,39 @@ function sourceDate(lines: string[]): string | undefined {
 
 function entries(
   lines: string[],
+  nodes: MarkdownNode[],
   section: Heading,
   warnings: string[],
   sourceFile: string,
 ): Array<{ content: string; line: number }> {
   const result: Array<{ content: string; line: number }> = [];
-  let current: { content: string; line: number } | undefined;
-  let blank = false;
-  let fence: string | undefined;
-  for (let index = section.start + 1; index < section.end; index++) {
-    const line = lines[index];
-    const marker = line.match(/^\s*(`{3,}|~{3,})/)?.[1];
-    if (marker) {
-      if (!fence) {
-        if (current) result.push(current);
-        current = undefined;
-        fence = marker;
-        warnings.push(
-          `${sourceFile}:${index + 1}: fenced code or transcript skipped.`,
-        );
-      } else if (marker[0] === fence[0] && marker.length >= fence.length) {
-        fence = undefined;
-      }
+  for (const node of nodes) {
+    const start = node.position!.start.line - 1;
+    if (start <= section.start || start >= section.end) continue;
+    if (
+      node.type === 'heading' ||
+      node.type === 'thematicBreak' ||
+      node.type === 'code'
+    )
+      continue;
+    if (node.type !== 'list' && node.type !== 'paragraph') {
+      warnings.push(
+        `${sourceFile}:${start + 1}: unsupported Markdown block skipped.`,
+      );
       continue;
     }
-    if (fence) continue;
-    if (/^\s*(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$/.test(line)) {
-      if (current) result.push(current);
-      current = undefined;
-      blank = false;
-      continue;
+    for (const item of node.type === 'list' ? node.children : [node]) {
+      const first = item.position!.start.line - 1;
+      const content = lines
+        .slice(first, item.position!.end.line)
+        .join('\n')
+        .replace(node.type === 'list' ? /^\s*(?:[-*+]|\d+[.)])\s+/ : /$^/, '')
+        .replace(/\s*\[Task\s+\d+(?:\s*[,;]\s*(?:Task\s+)?\d+)*\]\s*$/gim, '')
+        .trim();
+      result.push({ content, line: first + 1 });
     }
-    const bullet = line.match(/^(?:[-*+]|\d+[.)])\s+(.+)/);
-    if (bullet) {
-      if (current) result.push(current);
-      current = { content: bullet[1], line: index + 1 };
-    } else if (line.trim() === '') {
-      blank = true;
-      continue;
-    } else if (current && (!blank || /^\s+/.test(line))) {
-      current.content += `${blank ? '\n\n' : '\n'}${line}`;
-    } else {
-      if (current) result.push(current);
-      current = { content: line.trim(), line: index + 1 };
-    }
-    blank = false;
   }
-  if (current) result.push(current);
-  return result.map((entry) => ({
-    ...entry,
-    content: entry.content
-      .replace(/\s*\[Task\s+\d+(?:\s*[,;]\s*(?:Task\s+)?\d+)*\]\s*$/gim, '')
-      .trim(),
-  }));
+  return result;
 }
 
 function candidateName(content: string): string {
@@ -307,7 +282,24 @@ export function parseCodexMemories(files: SourceFile[]): {
       continue;
     }
     const lines = file.content.replace(/\r\n?/g, '\n').split('\n');
-    const allHeadings = headings(lines);
+    const tree = markdown.parse(lines.join('\n'));
+    const codeBlocks: Array<{ start: number; end: number }> = [];
+    const pending = [...tree.children];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.type === 'code' || node.type === 'html') {
+        const start = node.position!.start.line - 1;
+        const end = node.position!.end.line;
+        codeBlocks.push({ start, end });
+        for (let index = start; index < end; index++) lines[index] = '';
+      } else if (
+        'children' in node &&
+        node.type !== 'paragraph' &&
+        node.type !== 'heading'
+      )
+        pending.push(...node.children);
+    }
+    const allHeadings = headings(tree.children, lines);
     const summary = file.path === 'memory_summary.md';
     const sectionTypes = summary ? SUMMARY_SECTIONS : HANDBOOK_SECTIONS;
     const groupOccurrences = new Map<string, number>();
@@ -356,14 +348,6 @@ export function parseCodexMemories(files: SourceFile[]): {
         continue;
       }
       recognized++;
-      const nested = allHeadings.find(
-        (next) => next.start === heading.end && next.level > heading.level,
-      );
-      if (nested) {
-        warnings.push(
-          `${file.path}:${nested.start + 1}: nested memory subsections skipped; move their entries into a supported section in a reviewed source export.`,
-        );
-      }
       let sourceMetadata = groupMetadata;
       if (task) {
         const end =
@@ -387,9 +371,40 @@ export function parseCodexMemories(files: SourceFile[]): {
       const sectionKey = `${groupKey}\0${task?.title ?? ''}\0${section}`;
       const occurrence = (sectionOccurrences.get(sectionKey) ?? 0) + 1;
       sectionOccurrences.set(sectionKey, occurrence);
+      const end =
+        allHeadings.find(
+          (next) => next.start > heading.start && next.level <= heading.level,
+        )?.start ?? lines.length;
+      const nested = allHeadings
+        .filter(
+          (next) =>
+            next.start > heading.start &&
+            next.start < end &&
+            sectionTypes.has(next.title.toLowerCase()),
+        )
+        .map((next) => ({
+          start: next.start,
+          end:
+            allHeadings.find(
+              (after) => after.start > next.start && after.level <= next.level,
+            )?.start ?? lines.length,
+        }));
+      const belongs = (line: number) =>
+        !nested.some((range) => line > range.start && line < range.end);
+      for (const block of codeBlocks) {
+        if (
+          block.start > heading.start &&
+          block.start < end &&
+          belongs(block.start)
+        )
+          warnings.push(
+            `${file.path}:${block.start + 1}-${block.end}: fenced code, transcript, or HTML skipped.`,
+          );
+      }
       for (const [ordinal, entry] of entries(
         lines,
-        heading,
+        tree.children.filter((node) => belongs(node.position!.start.line - 1)),
+        { ...heading, end },
         warnings,
         file.path,
       ).entries()) {

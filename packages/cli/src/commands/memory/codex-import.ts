@@ -19,6 +19,7 @@ import {
   scanAllUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from '@qwen-code/qwen-code-core/memory/scan.js';
+import { sanitizeAutoMemoryPromptField } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import { buildManagedAutoMemoryIndex } from '@qwen-code/qwen-code-core/memory/indexer.js';
 import { scanForSecrets } from '@qwen-code/qwen-code-core/memory/secret-scanner.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
@@ -310,7 +311,23 @@ async function validateDestination(
 function renderDocument(entry: ImportEntry): string {
   const field = (value: string) =>
     JSON.stringify(value.replace(/\p{Cc}/gu, ' ').trim());
-  return `---\nname: ${field(entry.name)}\ndescription: ${field(`${entry.name}; source date ${entry.updatedAt ?? 'unknown'}`)}\ntype: ${entry.type}\ncodex_source: ${field(`${entry.sourceFile}:${entry.sourceLine}`)}\ncodex_updated_at: ${field(entry.updatedAt ?? 'unknown')}\n---\n\n${entry.content}\n`;
+  const category = {
+    user: 'basic_information',
+    feedback: 'communication_preference',
+    project: 'project_introduction',
+    reference: 'tool_experience',
+  }[entry.type];
+  const topic = sanitizeAutoMemoryPromptField(entry.name, 64);
+  const keywords = [
+    ...new Set([
+      sanitizeAutoMemoryPromptField(topic.toLocaleLowerCase('en-US'), 64),
+      entry.type,
+      'codex',
+    ]),
+  ]
+    .filter(Boolean)
+    .slice(0, 2);
+  return `---\nname: ${field(entry.name)}\ndescription: ${field(`${entry.name}; source date ${entry.updatedAt ?? 'unknown'}`)}\ntype: ${entry.type}\ncategory: ${category}\nkeywords: ${JSON.stringify(keywords)}\nusage_scenarios: ${JSON.stringify([topic || entry.type])}\ncodex_source: ${field(`${entry.sourceFile}:${entry.sourceLine}`)}\ncodex_updated_at: ${field(entry.updatedAt ?? 'unknown')}\n---\n\n${entry.content}\n`;
 }
 
 async function plan(options: CodexImportOptions) {
@@ -623,6 +640,7 @@ export async function runCodexImport(
     );
   }
   const locks: Array<{ root: string; handle: fs.FileHandle }> = [];
+  const errors: unknown[] = [];
   try {
     const roots = [
       ...new Set(
@@ -632,7 +650,15 @@ export async function runCodexImport(
               selectedIds.has(entry.id) &&
               (entry.status === 'ready' ||
                 entry.status === 'duplicate' ||
-                entry.status === 'previously-imported'),
+                (entry.status === 'previously-imported' &&
+                  planned.destinations
+                    .get(entry.targetRoot!)
+                    ?.docs.some(
+                      (doc) =>
+                        doc.filename ===
+                        planned.destinations.get(entry.targetRoot!)!.ledger
+                          .records[entry.id]?.file,
+                    ))),
           )
           .map((entry) => entry.targetRoot!),
       ),
@@ -647,8 +673,17 @@ export async function runCodexImport(
           destination.project ? [destination.project] : [],
         ),
       );
-      const handle = await fs.open(path.join(root, LOCK), 'wx', 0o600);
-      locks.push({ root, handle });
+      try {
+        const handle = await fs.open(path.join(root, LOCK), 'wx', 0o600);
+        locks.push({ root, handle });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+          throw new Error(
+            `Import lock exists: ${path.join(root, LOCK)}. Wait for the active import. If it was interrupted, confirm no importer is running before removing this lock and retrying.`,
+            { cause: error },
+          );
+        throw error;
+      }
     }
     const sourceDigest = planned.preview.sourceDigest;
     planned = await plan(options);
@@ -721,11 +756,24 @@ export async function runCodexImport(
         { encoding: 'utf8', mode: 0o600, noFollow: true },
       );
     }
-    return planned.preview;
-  } finally {
-    for (const { root, handle } of locks.reverse()) {
-      await handle.close();
-      await fs.unlink(path.join(root, LOCK));
-    }
+  } catch (error) {
+    errors.push(error);
   }
+  const released = await Promise.allSettled(
+    locks.map(async ({ root, handle }) => {
+      try {
+        await handle.close();
+      } finally {
+        await fs.unlink(path.join(root, LOCK));
+      }
+    }),
+  );
+  const failures = released.filter((result) => result.status === 'rejected');
+  if (failures.length)
+    throw new AggregateError(
+      [...errors, ...failures.map((result) => result.reason)],
+      'Could not release import locks. Confirm no importer is running before removing the remaining locks.',
+    );
+  if (errors.length) throw errors[0];
+  return planned.preview;
 }

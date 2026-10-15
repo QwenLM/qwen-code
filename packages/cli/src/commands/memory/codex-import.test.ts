@@ -10,7 +10,13 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseAutoMemoryTopicDocument } from '@qwen-code/qwen-code-core/memory/scan.js';
+import { validateStructuredAutoMemoryDocument } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import { runCodexImport } from './codex-import.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, unlink: vi.fn(actual.unlink) };
+});
 
 vi.mock('../../serve/fast-path-settings.js', () => ({
   loadServeFastPathSettings: vi.fn(() => ({})),
@@ -959,8 +965,97 @@ ${scope}
     await fs.writeFile(lock, 'another writer');
     await expect(
       runCodexImport({ ...options(), selectedIds: [entry.id] }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('confirm no importer is running');
     expect(await fs.readFile(lock, 'utf8')).toBe('another writer');
     expect(await files(entry.targetRoot!)).toEqual(['.codex-import.lock']);
+    await fs.unlink(lock);
+    expect(
+      (await runCodexImport({ ...options(), selectedIds: [entry.id] }))
+        .entries[0].status,
+    ).toBe('imported');
+  });
+  it('writes native structured metadata without a migration step', async () => {
+    await fs.writeFile(
+      path.join(source, 'memory_summary.md'),
+      `# User Profile\n- user\n- ${'İ'.repeat(80)}\n# User preferences\n- feedback\n`,
+    );
+    const entries = (await preview()).entries;
+    await runCodexImport({
+      ...options(),
+      selectedIds: entries.map((entry) => entry.id),
+    });
+    for (const entry of entries) {
+      const content = await fs.readFile(
+        path.join(entry.targetRoot!, `codex-${entry.id}.md`),
+        'utf8',
+      );
+      expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+        valid: true,
+        missingOrInvalidFields: [],
+      });
+      expect(
+        parseAutoMemoryTopicDocument('synthetic.md', content)?.body,
+      ).toContain(entry.content);
+    }
+  });
+
+  it('repairs an interrupted index write without changing topics or resurrecting forgotten entries', async () => {
+    const entry = (await preview()).entries[0];
+    const index = path.join(entry.targetRoot!, 'MEMORY.md');
+    const topic = path.join(entry.targetRoot!, `codex-${entry.id}.md`);
+    const ledger = path.join(entry.targetRoot!, '.codex-import.json');
+    await fs.mkdir(index, { recursive: true });
+    await expect(
+      runCodexImport({ ...options(), selectedIds: [entry.id] }),
+    ).rejects.toThrow();
+    const original = await fs.readFile(topic, 'utf8');
+    const records = await fs.readFile(ledger, 'utf8');
+    await fs.rmdir(index);
+    await runCodexImport({
+      ...options(),
+      selectedIds: [entry.id],
+      dryRun: true,
+    });
+    await expect(fs.stat(index)).rejects.toMatchObject({ code: 'ENOENT' });
+    await runCodexImport({ ...options(), selectedIds: [entry.id] });
+    expect(await fs.readFile(index, 'utf8')).toContain(`codex-${entry.id}.md`);
+    expect(await fs.readFile(topic, 'utf8')).toBe(original);
+    expect(await fs.readFile(ledger, 'utf8')).toBe(records);
+    await fs.unlink(topic);
+    await fs.unlink(index);
+    await runCodexImport({ ...options(), selectedIds: [entry.id] });
+    await expect(fs.stat(topic)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(index)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('attempts every lock cleanup even when one release fails', async () => {
+    await fs.writeFile(
+      path.join(source, 'memory_summary.md'),
+      '# User Profile\n- Maintains synthetic tools.\n',
+    );
+    const entries = (await preview()).entries;
+    const roots = entries.map((entry) => entry.targetRoot!).sort();
+    const remaining = path.join(roots[0], '.codex-import.lock');
+    const { unlink } =
+      await vi.importActual<typeof import('node:fs/promises')>(
+        'node:fs/promises',
+      );
+    const failure = vi.spyOn(fs, 'unlink').mockImplementation(async (file) => {
+      if (file === remaining) throw new Error('Synthetic cleanup failure');
+      return unlink(file);
+    });
+    try {
+      await expect(
+        runCodexImport({
+          ...options(),
+          selectedIds: entries.map((entry) => entry.id),
+        }),
+      ).rejects.toThrow('Could not release import locks');
+      expect(await fs.readFile(remaining, 'utf8')).toBe('');
+      await expect(
+        fs.stat(path.join(roots[1], '.codex-import.lock')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      failure.mockRestore();
+    }
   });
 });
