@@ -53,21 +53,27 @@ on:
 
 concurrency:
   # Event + source repo + ref, not ref alone. Without the event the group
-  # collapses onto `Qwen Code CI-refs/heads/main`, shared with the nightly.
-  # Without the source repo, same-named branches across forks collide — they
-  # evaluate in the base repo's namespace, so a fork whose default branch is
-  # `main` shares a group with a victim PR's run. Supersede within a PR is
-  # kept: one branch backs one open PR per fork.
-  # A push to `main` supersedes too. A shared group holds at most one running
-  # plus one pending run, and a newer pending run REPLACES the older one even
-  # with cancel-in-progress: false — so back-to-back merges were already
-  # dropping each other's run, only silently and one merge behind. Make it
-  # explicit: only the newest tree matters and it covers every merged change,
-  # the stance e2e.yml already takes (#5859).
-  # Release branches alone are never cancelled.
+  # collapses onto `Qwen Code CI-refs/heads/main`, shared with the nightly
+  # (60-minute lanes, neither cancelling on `main`). Without the source repo,
+  # same-named branches across forks collide — they evaluate in the base
+  # repo's namespace and PR runs DO cancel in progress, so a fork whose
+  # default branch is `main` cancels a victim PR's run on every push.
+  # Supersede within a PR is kept: one branch backs one open PR per fork.
+  # `main` never cancels in progress, and that is intended rather than
+  # accidental: a shared group holds at most one running plus one pending
+  # run, and a newer pending run REPLACES the older one even with
+  # cancel-in-progress: false, so back-to-back merges still coalesce onto the
+  # newest tree — but the in-flight run always finishes and reports. Merges
+  # land every ~18min (median) against this ~30min lane, and with no merge
+  # queue this run is the only fast witness of a merged tree; cancelling it
+  # starved the suite once already — e2e.yml measured 67 of 100 push runs
+  # cancelled and only 25 ever reported (#5859). The coverage upload is
+  # `always()`-gated, so a cancelled run would also publish partial coverage
+  # under the complete run's artifact name. Release branches are treated the
+  # same way.
   group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
   cancel-in-progress: |-
-    ${{ !startsWith(github.ref, 'refs/heads/release/') }}
+    ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
 permissions:
   checks: 'write'

@@ -625,12 +625,13 @@ describe('post-merge push lane', () => {
     expect(ci.jobs.post_coverage_comment).toBeUndefined();
   });
 
-  it('scopes the concurrency group and supersedes on main', () => {
+  it('scopes the concurrency group and keeps main uncancellable', () => {
     // All three components, the way e2e-workflow.test.js pins its own.
     //
     // Event: unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
-    // and the post-merge run shares it with the nightly and with any PR from a
-    // fork branch named literally `refs/heads/main` — a legal ref name.
+    // and the post-merge run shares it with the nightly (60-minute lanes, no
+    // cancellation on main) and with any PR from a fork branch named literally
+    // `refs/heads/main` — a legal ref name.
     //
     // Repo + ref: `head_ref` alone is not unique. Two PRs with the same head
     // branch name — including from different forks, which evaluate groups in
@@ -639,18 +640,21 @@ describe('post-merge push lane', () => {
     // the most common head_ref there is. Dropping the ref half entirely would
     // collapse every PR into one group and leave this suite green.
     //
-    // cancel-in-progress: main is included on purpose. A shared group holds at
-    // most one running plus one pending run, and a newer pending run REPLACES
-    // the older one even while this reads `false` — so back-to-back merges were
-    // already dropping each other's run, only silently and one merge behind.
-    // Only the newest tree matters and it covers every merged change, the
-    // stance e2e.yml already takes (#5859). Pinning the literal keeps a later
-    // "make main uncancellable again" change from landing unnoticed.
+    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
+    // accident. A shared group holds at most one running plus one pending run,
+    // and a newer pending run REPLACES the older one even while this reads
+    // `false`, so back-to-back merges still coalesce onto the newest tree —
+    // but the in-flight run always finishes and reports, which matters
+    // because with no merge queue this lane is the only fast witness of a
+    // merged tree and its coverage upload is `always()`-gated. The history of
+    // flipping it the other way is recorded once already: 67 of 100 push runs
+    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
+    // a later "make main cancellable" change from landing unnoticed.
     expect(String(ci.concurrency.group)).toBe(
       '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );
     expect(String(ci.concurrency['cancel-in-progress']).trim()).toBe(
-      "${{ !startsWith(github.ref, 'refs/heads/release/') }}",
+      "${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}",
     );
   });
 });
