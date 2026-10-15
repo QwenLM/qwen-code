@@ -40,6 +40,7 @@ public final class ManagedSchemaRows {
                     "scope_id",
                     "target_id",
                     "agent_id",
+                    "model_id",
                     "channel_id",
                     "schedule_id",
                     "record_id",
