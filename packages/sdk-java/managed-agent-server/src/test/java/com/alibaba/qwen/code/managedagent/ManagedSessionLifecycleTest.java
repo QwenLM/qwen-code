@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -622,16 +623,16 @@ class ManagedSessionLifecycleTest {
             store.claimRename(candidate, "old", Duration.ofMinutes(1)).orElseThrow();
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), null);
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
-            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'"
+            jdbc.update("UPDATE ma_operation SET claim_until = 0"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("PENDING");
             var current = store.claimRename(candidate, "new", Duration.ofMinutes(1)).orElseThrow();
-            var row = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
+            var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId);
             store.abandonSessionRename(tenant, "rename", sessionId, command.renameRevision(), "old");
             store.retryRename(candidate, "old", 0);
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
+            assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId)).isEqualTo(row);
             assertThat(store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title").renameRevision())
                     .isEqualTo(command.renameRevision());
@@ -921,7 +922,7 @@ class ManagedSessionLifecycleTest {
         // completed and it replays; timing out here would also prove the row was never
         // re-queued.
         assertThat(jdbc.update("UPDATE ma_operation"
-                        + " SET available_at = 0, claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ?"
+                        + " SET available_at = 0, claim_until = 0 WHERE tenant_id = ?"
                         + " AND session_id = ?", tenant, sessionId)).isEqualTo(1);
         if (!"lookup".equals(phase)) {
             await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
@@ -940,8 +941,7 @@ class ManagedSessionLifecycleTest {
             if ("completion".equals(phase)) {
                 // Reconcile the original Harness result, retaining its owner and generation.
                 assertThat(harness.title(sessionId)).isEqualTo("renamed");
-                var original = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_kind = 'RENAME'"
-                        + " AND tenant_id = ? AND session_id = ?", tenant, sessionId);
+                var original = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?", tenant, sessionId);
                 var delivery = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
                         "key", "renamed", ((Number) original.get("target_revision")).longValue(),
                         ((Number) original.get("attempt_count")).intValue(), ((Number) original.get("claim_generation")).longValue());

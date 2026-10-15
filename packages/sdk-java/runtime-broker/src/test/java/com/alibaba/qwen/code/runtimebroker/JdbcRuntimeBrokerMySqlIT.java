@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -98,7 +100,7 @@ class JdbcRuntimeBrokerMySqlIT {
                     assertThrows(TimeoutException.class, () -> pending.get(100, TimeUnit.MILLISECONDS));
                 }
                 try (var insert = lock.prepareStatement("INSERT INTO ma_session_head"
-                        + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))")) {
+                        + " (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")")) {
                     insert.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(prefix));
                     insert.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey("harness"));
                     insert.setString(3, prefix);
@@ -179,7 +181,7 @@ class JdbcRuntimeBrokerMySqlIT {
                 claim.withDrainRequested(true, Instant.now()).withState(RuntimeBindingRecord.State.DRAINING, claim.getLease(), Instant.now()));
         assertNotNull(draining);
         try (var connection = source.getConnection(); var update = connection.prepareStatement(
-                "UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMPADD(SECOND, -1, UTC_TIMESTAMP(6)) WHERE binding_id = ?")) {
+                "UPDATE ma_runtime_binding SET operation_lease_until = (" + ManagedSchemaTime.SQL_NOW + ") - 1000 WHERE binding_id = ?")) {
             update.setString(1, ready.getBindingId());
             assertEquals(1, update.executeUpdate());
         }

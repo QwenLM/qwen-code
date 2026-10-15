@@ -44,6 +44,79 @@ class RuntimeHarnessDrainTest {
         return source();
     }
 
+    @Test
+    void lifecycleUpsertsAdvanceModificationTimeOnlyWhenValuesChange() throws Exception {
+        JdbcRepositorySupport.transaction(source, connection -> {
+            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness", "first");
+            return null;
+        });
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT gmt_create, gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 0);
+                assertTrue(row.getLong(2) > 0);
+            }
+            statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
+            JdbcRepositorySupport.transaction(source, transaction -> {
+                JdbcRuntimeBindingRepository.beginHarnessLifecycle(transaction, "tenant", "harness", "first");
+                return null;
+            });
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getLong(1));
+            }
+            JdbcRepositorySupport.transaction(source, transaction -> {
+                JdbcRuntimeBindingRepository.beginHarnessLifecycle(transaction, "tenant", "harness", "second");
+                return null;
+            });
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 1);
+            }
+            statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
+            bindings.requestHarnessDrain("tenant", "harness");
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 1);
+            }
+            statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
+            bindings.requestHarnessDrain("tenant", "harness");
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getLong(1));
+            }
+        }
+    }
+
+    @Test
+    void storageFenceUpsertPreservesCreationTimeAndRejectedOrRepeatedModificationTime() throws Exception {
+        bindings.requestStorageFence("tenant", "storage", "migration");
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            long created;
+            try (var row = statement.executeQuery("SELECT gmt_create, gmt_modified FROM ma_storage")) {
+                assertTrue(row.next());
+                created = row.getLong(1);
+                assertTrue(created > 0);
+                assertTrue(row.getLong(2) > 0);
+            }
+            statement.executeUpdate("UPDATE ma_storage SET fence_operation_id = NULL, gmt_modified = 1");
+            bindings.requestStorageFence("tenant", "storage", "migration");
+            try (var row = statement.executeQuery("SELECT gmt_create, gmt_modified FROM ma_storage")) {
+                assertTrue(row.next());
+                assertEquals(created, row.getLong(1));
+                assertTrue(row.getLong(2) > 1);
+            }
+            statement.executeUpdate("UPDATE ma_storage SET gmt_modified = 1");
+            bindings.requestStorageFence("tenant", "storage", "migration");
+            assertThrows(RuntimeBrokerException.class,
+                    () -> bindings.requestStorageFence("tenant", "storage", "conflict"));
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_storage")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getLong(1));
+            }
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void resourceDrainRefusesPrivateCsiBeforeCleanupOrObservation(boolean stoppedOnly) throws Exception {
@@ -620,7 +693,7 @@ class RuntimeHarnessDrainTest {
             provisioner.original = original;
             replacement.requestHarnessDrain("tenant", "harness");
             try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                    "UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?")) {
+                    "UPDATE ma_runtime_binding SET operation_lease_until = 946684800000 WHERE binding_id = ?")) {
                 statement.setString(1, original.getBindingId());
                 statement.executeUpdate();
             }
