@@ -107,11 +107,19 @@ vi.mock('./ChatPane', () => ({
       <div
         data-testid="chat-pane"
         data-plan-visible={String(props.planControlVisible)}
+        data-model-management={JSON.stringify(props.modelManagement)}
         data-pane-workspace={props.workspaceCwd}
         data-session-details={props.sessionSummary?.sessionId}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
+        data-context-controls={
+          props.registerContextUsageControls ? 'true' : 'false'
+        }
+        data-open-context-usage={props.onOpenContextUsage ? 'true' : 'false'}
+        data-before-context-compress={
+          props.onBeforeContextCompress ? 'true' : 'false'
+        }
         data-hidden={props.hidden ? 'true' : 'false'}
         data-report-catalog-turn-completion={
           props.reportCatalogTurnCompletion ? 'true' : 'false'
@@ -239,6 +247,18 @@ function openPicker(): void {
 }
 
 describe('SplitView', () => {
+  it('forwards model management policy to every pane', () => {
+    const modelManagement = { allowAdd: false, allowDelete: true };
+    render({ sessionIds: ['s1', 's2'], modelManagement });
+    const panes = container!.querySelectorAll('[data-testid="chat-pane"]');
+    expect(panes).toHaveLength(2);
+    for (const pane of panes) {
+      expect(pane.getAttribute('data-model-management')).toBe(
+        JSON.stringify(modelManagement),
+      );
+    }
+  });
+
   it('keeps a newly added controlled pane active without relying on composer autofocus', () => {
     function ControlledSplit() {
       const [ids, setIds] = React.useState(['s1', 's2']);
@@ -508,8 +528,18 @@ describe('SplitView', () => {
   });
 
   it('renders one pane per initial session, each under its own provider', () => {
-    render({ sessionIds: ['s1', 's2'] });
+    render({
+      sessionIds: ['s1', 's2'],
+      registerContextUsageControls: vi.fn(),
+      onBeforeContextCompress: vi.fn(),
+      onOpenContextUsage: vi.fn(),
+    });
     expect(panes()).toHaveLength(2);
+    for (const pane of panes()) {
+      expect(pane.getAttribute('data-context-controls')).toBe('true');
+      expect(pane.getAttribute('data-open-context-usage')).toBe('true');
+      expect(pane.getAttribute('data-before-context-compress')).toBe('true');
+    }
     expect(titles()).toEqual(['One', 'Two']);
     const providers = container!.querySelectorAll('[data-session]');
     expect(providers[0].getAttribute('data-session')).toBe('s1');

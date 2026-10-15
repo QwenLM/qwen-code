@@ -16,12 +16,21 @@ import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
+// `session/prompt` is the only request here that waits for a model round trip,
+// and the lanes running this file point it at a real endpoint on a shared
+// runner pool: a healthy turn measures 15-28s and swings several times that
+// night to night, which left the release gate one slow turn away from a red
+// nightly (#12880). Stays under the 300s per-attempt `testTimeout` — the other
+// requests a test makes are local RPCs that answer in milliseconds — so this
+// fixture still reports the reason itself instead of vitest timing out.
+const PROMPT_TIMEOUT_MS = 180_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const IS_SANDBOX =
   process.env['QWEN_SANDBOX'] &&
   process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
 
 type PendingRequest = {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
@@ -100,6 +109,7 @@ function setupAcpTest(
 ) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
+  let disposed = false;
   const sessionUpdates: SessionUpdateNotification[] = [];
   const permissionRequests: PermissionRequest[] = [];
   const stderr: string[] = [];
@@ -146,6 +156,32 @@ function setupAcpTest(
     stderr.push(chunk.toString());
   });
 
+  // A dead agent otherwise manifests as a request timeout: the JSON-RPC reply
+  // never arrives, so the caller waits out the whole budget and reports
+  // "timed out" while the exit reason sits unread in the log (#12871). Reject
+  // the in-flight requests with that reason as soon as the child is gone.
+  // `close` rather than `exit` so stderr has finished draining and the tail
+  // below is the whole story. `cleanup()` sets `disposed` before killing, so
+  // teardown cannot reject a promise nobody awaits — an unhandled rejection is
+  // fatal on the github-hosted Linux lane (`dangerouslyIgnoreUnhandledErrors`
+  // is off there).
+  agent.once('close', (code, signal) => {
+    if (disposed) {
+      return;
+    }
+    const stderrTail = stderr.join('').trimEnd().slice(-500);
+    pending.forEach(({ method, timeout, reject }, id) => {
+      clearTimeout(timeout);
+      reject(
+        new Error(
+          `Request ${id} (${method}) rejected: agent exited (code=${code} signal=${signal})` +
+            (stderrTail ? `\nlast agent stderr:\n${stderrTail}` : ''),
+        ),
+      );
+    });
+    pending.clear();
+  });
+
   const rl = createInterface({ input: agent.stdout });
 
   const send = (json: unknown) => {
@@ -159,11 +195,13 @@ function setupAcpTest(
   const sendRequest = (method: string, params?: unknown) =>
     new Promise<unknown>((resolve, reject) => {
       const id = nextRequestId++;
+      const budget =
+        method === 'session/prompt' ? PROMPT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
       const timeout = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`Request ${id} (${method}) timed out`));
-      }, REQUEST_TIMEOUT_MS);
-      pending.set(id, { resolve, reject, timeout });
+      }, budget);
+      pending.set(id, { method, resolve, reject, timeout });
       send({ jsonrpc: '2.0', id, method, params });
     });
 
@@ -301,10 +339,11 @@ function setupAcpTest(
     });
 
   const cleanup = async () => {
+    disposed = true;
     rl.close();
-    agent.kill();
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
+    agent.kill();
     await waitForExit();
     await removeScratchDir(qwenHome);
   };
@@ -874,7 +913,7 @@ function setupAcpTest(
         });
         expect(promptResult).toBeDefined();
       } catch (e) {
-        // Only the harness's own 60s request timeout is acceptable — LLM
+        // Only the harness's own `session/prompt` timeout is acceptable — LLM
         // behavior is non-deterministic. JSON-RPC errors (errors with a
         // `response` property) indicate a real problem and must be surfaced.
         if (
@@ -1074,6 +1113,108 @@ function setupAcpTest(
       const testFilePath = path.join(rig.testDir!, 'test.txt');
       const fileExists = fs.existsSync(testFilePath);
       expect(fileExists).toBe(false);
+    } catch (e) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+      throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
+  it('runs a write_file tool call to completion over ACP', async () => {
+    const rig = new TestRig();
+    await rig.setup('acp tool call completion');
+    const targetPath = join(rig.testDir!, 'acp-tool.txt');
+    const toolCallId = 'call_acp_write_file';
+    let streamingRequestIndex = 0;
+    const fakeServer = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true) {
+        return { content: '{"selected_memories":[]}' };
+      }
+      if (streamingRequestIndex++ === 0) {
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'write_file',
+              { file_path: targetPath, content: 'written over ACP' },
+              toolCallId,
+            ),
+          ],
+        };
+      }
+      return { content: 'Done.' };
+    });
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      const promptResult = await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [
+          {
+            type: 'text',
+            text: 'Write "written over ACP" to acp-tool.txt',
+          },
+        ],
+      });
+      expect(promptResult).toBeDefined();
+
+      const writeFileStatuses: Array<string | undefined> = [];
+      sessionUpdates.forEach((update) => {
+        if (update.update?.sessionUpdate !== 'tool_call_update') {
+          return;
+        }
+        const toolUpdate = update.update as {
+          status?: string;
+          _meta?: { toolName?: string };
+        };
+        if (toolUpdate._meta?.toolName === 'write_file') {
+          writeFileStatuses.push(toolUpdate.status);
+        }
+      });
+      expect(
+        writeFileStatuses,
+        'expected a tool_call_update that reports the write_file call completed',
+      ).toContain('completed');
+
+      // The terminal status alone would also hold if the tool reported success
+      // without touching the disk, so assert the write itself.
+      expect(readFileSync(targetPath, 'utf8')).toBe('written over ACP');
+
+      const resultRequest = fakeServer.requests.find(({ body }) =>
+        Array.isArray(body['messages'])
+          ? (body['messages'] as Array<Record<string, unknown>>).some(
+              (message) =>
+                message['role'] === 'tool' &&
+                message['tool_call_id'] === toolCallId,
+            )
+          : false,
+      );
+      expect(
+        resultRequest,
+        'expected the write_file result to be sent back to the model',
+      ).toBeDefined();
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;

@@ -24,6 +24,7 @@ import {
 import { extractHttpStatus } from './httpErrors.js';
 import {
   HistoricalTranscriptPageTooLargeError,
+  HistoricalTranscriptWindowFullError,
   HistoricalTranscriptPageTable,
   type HistoricalTranscriptPage,
   type HistoricalTranscriptRange,
@@ -37,6 +38,48 @@ class TurnIndexPageTooLargeError extends Error {
     super('Turn-index page exceeds the cache budget');
     this.name = 'TurnIndexPageTooLargeError';
   }
+}
+
+export interface ConversationSearchHit {
+  sessionId: string;
+  snapshot: string;
+  revision: number;
+  recordId: string;
+  liveBlockId?: string;
+  turnId: string;
+  turnOrdinal: number;
+  role: 'user' | 'assistant';
+  snippet: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface ConversationSearchResult {
+  hits: ConversationSearchHit[];
+  messageCount: number;
+  matchCount: number;
+  complete: boolean;
+  truncated: boolean;
+}
+
+export interface ConversationSearchOptions extends HistoryViewportRequest {
+  onProgress?: (result: ConversationSearchResult) => void;
+  stopAfterMessages?: number;
+}
+
+export function createConversationSearchSnippet(text: string, query: string) {
+  if (!query) return undefined;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(escaped, 'iu').exec(text);
+  if (!match) return undefined;
+  const start = Math.max(0, match.index - 60);
+  const prefix = start > 0 ? '…' : '';
+  const end = Math.min(text.length, match.index + match[0].length + 140);
+  return {
+    snippet: prefix + text.slice(start, end) + (end < text.length ? '…' : ''),
+    matchStart: prefix.length + match.index - start,
+    matchEnd: prefix.length + match.index - start + match[0].length,
+  };
 }
 
 export interface DaemonTurnIndexPage {
@@ -149,6 +192,19 @@ export interface HistoryViewportRequest {
 
 export interface DaemonHistoryNavigationStore
   extends DaemonTurnNavigationStore {
+  scanConversation(
+    query: string,
+    options: ConversationSearchOptions,
+  ): Promise<ConversationSearchResult>;
+  resolveMessageRecord(
+    recordId: string,
+    request: HistoryViewportRequest,
+  ): Promise<ConversationSearchHit | undefined>;
+  locateViewportSearchHit(
+    hit: ConversationSearchHit,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation>;
   locateViewportOrdinal(
     ordinal: number,
     request: HistoryViewportRequest,
@@ -225,6 +281,7 @@ export function createDaemonTurnNavigationStore(
   let liveRecordIds = new Set<string>();
   let liveBlockIdByPromptId = new Map<string, string>();
   let lastLiveBlocks: readonly DaemonTranscriptBlock[] | undefined;
+  const boundaryLoads = new Map<string, Promise<void>>();
   let headRequest: Promise<void> | undefined;
   let headReadGeneration = 0;
   let ownerRevision = 0;
@@ -794,10 +851,477 @@ export function createDaemonTurnNavigationStore(
     }
   }
 
+  async function scanConversation(
+    query: string,
+    request: ConversationSearchOptions,
+    targetRecordId?: string,
+  ): Promise<ConversationSearchResult> {
+    const result: ConversationSearchResult = {
+      hits: [],
+      messageCount: 0,
+      matchCount: 0,
+      complete: false,
+      truncated: false,
+    };
+    const activeClient = client;
+    const activeSessionId = sessionId;
+    if (!activeClient || !activeSessionId || snapshot.mode === 'legacy')
+      return result;
+    const remainingLive = new Set(
+      (lastLiveBlocks ?? []).filter(
+        (block) => block.kind === 'user' || block.kind === 'assistant',
+      ),
+    );
+    const liveByRecord = new Map<string, DaemonTranscriptBlock[]>();
+    const liveByBlockId = new Map(
+      [...remainingLive].map((block) => [block.id, block]),
+    );
+    const unstampedByPrompt = new Map<string, DaemonTranscriptBlock[]>();
+    const promptKey = (block: DaemonTranscriptBlock, promptId?: string) => {
+      if (block.kind !== 'user' && block.kind !== 'assistant') return undefined;
+      const id = block.promptId ?? block.meta?.['promptId'] ?? promptId;
+      return typeof id === 'string' ? `${block.kind}:${id}` : undefined;
+    };
+    for (const block of remainingLive) {
+      for (const id of block.sourceRecordIds ?? [])
+        liveByRecord.set(id, [...(liveByRecord.get(id) ?? []), block]);
+      const key = promptKey(block);
+      if (!block.sourceRecordIds?.length && key)
+        unstampedByPrompt.set(key, [
+          ...(unstampedByPrompt.get(key) ?? []),
+          block,
+        ]);
+    }
+    const retainedTextLimit = Math.max(
+      60,
+      query.length,
+      ...[...remainingLive].map((block) =>
+        block.kind === 'user' || block.kind === 'assistant'
+          ? block.text.length
+          : 0,
+      ),
+    );
+    const revision = viewportSnapshot.revision;
+    const current = () =>
+      request.isCurrent() &&
+      viewportSnapshot.revision === revision &&
+      isCurrentClient(activeClient);
+    const check = () => {
+      if (!current()) throw new Error('Conversation search cancelled');
+    };
+    check();
+    const readIndex = async (snapshot?: string, start?: number) => {
+      const page = await activeClient.getTurnIndexPage({
+        limit: indexPageSize,
+        ...(snapshot === undefined ? {} : { snapshot, start }),
+      });
+      check();
+      validateIndexResponse(page, activeSessionId, snapshot, indexPageSize);
+      return page;
+    };
+    let index = await readIndex();
+    const searchSnapshot = index.snapshot;
+    if (index.totalTurns === 0)
+      return { ...result, messageCount: remainingLive.size, complete: true };
+    if (index.start !== 0) index = await readIndex(searchSnapshot, 0);
+    let indexOffset = 0;
+    let nextTurn = index.turns[indexOffset];
+    if (!nextTurn || nextTurn.ordinal !== 0)
+      throw new Error('Conversation search index is incomplete');
+    let currentTurn: DaemonSessionTurnIndexEntry | undefined;
+    let page = await activeClient.getTranscriptPage({
+      atRecordId: nextTurn.turnId,
+      snapshot: searchSnapshot,
+      limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+    });
+    let lastRecordId: string | undefined;
+    let lastMatchedRecordId: string | undefined;
+    let lastEchoBlockId: string | undefined;
+    let previousText = '';
+    let messageTextLength = 0;
+    let previousCursor: string | undefined;
+    while (true) {
+      check();
+      validateHistoricalResponse(page, activeSessionId);
+      const materialized = activeClient.materializeTranscriptEvents(
+        page.events,
+        1,
+        new Set(),
+      );
+      const recordTurns = new Map<string, DaemonSessionTurnIndexEntry>();
+      for (const recordId of materialized.encounteredRecordIds) {
+        check();
+        if (nextTurn && recordId === nextTurn.turnId) {
+          currentTurn = nextTurn;
+          indexOffset += 1;
+          if (
+            indexOffset >= index.turns.length &&
+            currentTurn.ordinal + 1 < index.totalTurns
+          ) {
+            index = await readIndex(searchSnapshot, currentTurn.ordinal + 1);
+            if (index.start !== currentTurn.ordinal + 1 || !index.turns.length)
+              throw new Error('Conversation search index did not advance');
+            indexOffset = 0;
+          }
+          nextTurn = index.turns[indexOffset];
+        }
+        if (currentTurn) recordTurns.set(recordId, currentTurn);
+      }
+      for (const block of materialized.blocks) {
+        check();
+        const ids = block.sourceRecordIds ?? [];
+        const messageTurn = ids.map((id) => recordTurns.get(id)).find(Boolean);
+        if (
+          (block.kind !== 'user' && block.kind !== 'assistant') ||
+          !ids.length
+        )
+          continue;
+        // 同一持久化消息可能投影为相邻块；只计一次，避免跨页重复结果。
+        const recordId = ids[0]!;
+        const sameMessage = recordId === lastRecordId;
+        const text = sameMessage ? previousText + block.text : block.text;
+        messageTextLength =
+          (sameMessage ? messageTextLength : 0) + block.text.length;
+        previousText = text.slice(-retainedTextLimit);
+        if (!sameMessage) lastEchoBlockId = undefined;
+        let matchedLive = false;
+        for (const id of ids) {
+          for (const live of liveByRecord.get(id) ?? [])
+            matchedLive = remainingLive.delete(live) || matchedLive;
+        }
+        let echo: DaemonTranscriptBlock | undefined;
+        if (
+          !sameMessage &&
+          !matchedLive &&
+          block.kind === 'user' &&
+          messageTurn
+        ) {
+          const blockId =
+            livePromptAliases.get(messageTurn.turnId)?.blockId ??
+            provisionals.find((turn) => turn.promptId === messageTurn.promptId)
+              ?.blockId;
+          const candidate = blockId ? liveByBlockId.get(blockId) : undefined;
+          if (candidate?.kind === 'user' && remainingLive.has(candidate))
+            echo = candidate;
+        }
+        if (!matchedLive && !echo && !lastEchoBlockId) {
+          const key = promptKey(block, messageTurn?.promptId);
+          const candidates = key ? unstampedByPrompt.get(key) : undefined;
+          const index = candidates?.findIndex(
+            (candidate) =>
+              remainingLive.has(candidate) &&
+              (candidate.kind === 'user' || candidate.kind === 'assistant') &&
+              candidate.text.length === messageTextLength &&
+              candidate.text === text,
+          );
+          if (index !== undefined && index >= 0)
+            echo = candidates?.splice(index, 1)[0];
+        }
+        if (echo) {
+          remainingLive.delete(echo);
+          lastEchoBlockId = echo.id;
+          const previousHit = result.hits.at(-1);
+          if (sameMessage && previousHit?.recordId === recordId)
+            previousHit.liveBlockId = echo.id;
+        }
+        if (!sameMessage) result.messageCount += 1;
+        lastRecordId = ids.at(-1);
+        const match = targetRecordId
+          ? ids.includes(targetRecordId)
+            ? { snippet: '', matchStart: 0, matchEnd: 0 }
+            : undefined
+          : createConversationSearchSnippet(text, query);
+        if (match && messageTurn && recordId !== lastMatchedRecordId) {
+          lastMatchedRecordId = recordId;
+          result.matchCount += 1;
+          if (result.hits.length < 200)
+            result.hits.push({
+              sessionId: activeSessionId,
+              snapshot: searchSnapshot,
+              revision,
+              recordId: targetRecordId ?? recordId,
+              ...(lastEchoBlockId ? { liveBlockId: lastEchoBlockId } : {}),
+              turnId: messageTurn.turnId,
+              turnOrdinal: messageTurn.ordinal,
+              role: block.kind,
+              ...match,
+            });
+          else result.truncated = true;
+          if (targetRecordId) return result;
+        }
+        if (
+          request.stopAfterMessages !== undefined &&
+          result.messageCount >= request.stopAfterMessages
+        ) {
+          return result;
+        }
+      }
+      request.onProgress?.({ ...result, hits: [...result.hits] });
+      check();
+      if (!page.hasMore) {
+        if (nextTurn)
+          throw new Error(
+            'Conversation search transcript omitted navigation turns',
+          );
+        return {
+          ...result,
+          messageCount: result.messageCount + remainingLive.size,
+          complete: true,
+        };
+      }
+      if (!page.nextCursor || page.nextCursor === previousCursor)
+        throw new Error('Conversation search history did not advance');
+      previousCursor = page.nextCursor;
+      page = await activeClient.getTranscriptPage({
+        cursor: page.nextCursor,
+        limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+      });
+    }
+  }
+
+  async function locateViewportSearchHit(
+    hit: ConversationSearchHit,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation> {
+    const activeClient = client;
+    const capturedSession = sessionEpoch;
+    try {
+      return await walkViewportSearchHit(hit, request, () => {});
+    } catch (error) {
+      if (!(error instanceof HistoricalTranscriptWindowFullError)) throw error;
+    }
+    const entry = findIndexEntry(hit.turnOrdinal);
+    const valid = () =>
+      request.isCurrent() &&
+      hit.sessionId === sessionId &&
+      hit.revision === viewportSnapshot.revision &&
+      capturedSession === sessionEpoch &&
+      activeClient !== undefined &&
+      isCurrentClient(activeClient);
+    if (!valid() || !activeClient || entry?.entry.turnId !== hit.turnId)
+      throw new Error('Conversation search result expired');
+    let response = await activeClient.getTranscriptPage({
+      atRecordId: hit.turnId,
+      snapshot: entry.page.snapshot,
+      limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+    });
+    let previousCursor: string | undefined;
+    while (valid()) {
+      validateHistoricalResponse(response, sessionId);
+      if (!previousCursor && response.targetRecordId !== hit.turnId)
+        throw new Error(
+          'Anchored transcript response did not contain its target',
+        );
+      const liveBlock = lastLiveBlocks?.find((block) =>
+        block.sourceRecordIds?.includes(hit.recordId),
+      );
+      if (liveBlock) {
+        const location: DaemonTurnLocation = {
+          turnId: hit.turnId,
+          blockId: liveBlock.id,
+          view: 'live',
+        };
+        publish({
+          selected: {
+            ordinal: hit.turnOrdinal,
+            turnId: hit.turnId,
+            status: 'ready',
+            location,
+          },
+          ...(snapshot.error?.operation === 'locate'
+            ? { error: undefined }
+            : {}),
+        });
+        return location;
+      }
+      const materialized = activeClient.materializeTranscriptEvents(
+        response.events,
+        1,
+        new Set(),
+      );
+      if (
+        materialized.blocks.some((block) =>
+          block.sourceRecordIds?.includes(hit.recordId),
+        )
+      ) {
+        // Keep the reading pin through every await. Only the final, exact page
+        // replaces it; failed admission rolls back before the caller re-pins.
+        releaseAnchor();
+        if (!valid()) throw new Error('Conversation search result expired');
+        const target = pageTable.admitAnchor(
+          hit.turnOrdinal,
+          hit.turnId,
+          entry.page.snapshot,
+          {
+            ...response,
+            targetRecordId: hit.turnId,
+            hasOlder: Boolean(previousCursor) || response.hasOlder,
+          },
+          hit.recordId,
+        );
+        const blockId = pageTable
+          .getSnapshot()
+          .pages.get(target.pageId)!
+          .blocks.find((block) =>
+            block.sourceRecordIds?.includes(hit.recordId),
+          )!.id;
+        const location: DaemonTurnLocation = {
+          ...target,
+          blockId,
+          turnId: hit.turnId,
+          view: 'historical',
+        };
+        publish({
+          selected: {
+            ordinal: hit.turnOrdinal,
+            turnId: hit.turnId,
+            status: 'ready',
+            location,
+          },
+          ...(snapshot.error?.operation === 'locate'
+            ? { error: undefined }
+            : {}),
+        });
+        return location;
+      }
+      if (
+        !response.hasMore ||
+        !response.nextCursor ||
+        response.nextCursor === previousCursor
+      )
+        throw new Error('Conversation search message is unavailable');
+      previousCursor = response.nextCursor;
+      response = await activeClient.getTranscriptPage({
+        cursor: previousCursor,
+        limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+      });
+    }
+    throw new Error('Conversation search result expired');
+  }
+
+  async function walkViewportSearchHit(
+    hit: ConversationSearchHit,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation> {
+    const activeClient = client;
+    const capturedSession = sessionEpoch;
+    const finishLiveLocation = (location: DaemonTurnLocation) => {
+      publish({
+        selected: {
+          ordinal: hit.turnOrdinal,
+          turnId: hit.turnId,
+          status: 'ready',
+          location,
+        },
+        ...(snapshot.error?.operation === 'locate' ? { error: undefined } : {}),
+      });
+      return location;
+    };
+    const valid = () =>
+      request.isCurrent() &&
+      hit.sessionId === sessionId &&
+      hit.revision === viewportSnapshot.revision &&
+      capturedSession === sessionEpoch &&
+      activeClient !== undefined &&
+      isCurrentClient(activeClient);
+    if (!valid()) throw new Error('Conversation search result expired');
+    await loadOrdinal(hit.turnOrdinal);
+    if (
+      !valid() ||
+      findIndexEntry(hit.turnOrdinal)?.entry.turnId !== hit.turnId
+    )
+      throw new Error('Conversation search result expired');
+    const location = await locateOrdinal(
+      hit.turnOrdinal,
+      { isCurrent: valid },
+      releaseAnchor,
+      hit.recordId === hit.turnId ? undefined : hit.recordId,
+    );
+    let rangeId = location.rangeId;
+    while (valid()) {
+      const liveBlock = lastLiveBlocks?.find((block) =>
+        block.sourceRecordIds?.includes(hit.recordId),
+      );
+      if (liveBlock)
+        return finishLiveLocation({
+          turnId: hit.turnId,
+          blockId: liveBlock.id,
+          view: 'live',
+        });
+      const table = pageTable.getSnapshot();
+      for (const range of table.ranges) {
+        for (const pageId of range.pageIds) {
+          const block = table.pages
+            .get(pageId)
+            ?.blocks.find((item) =>
+              item.sourceRecordIds?.includes(hit.recordId),
+            );
+          if (block)
+            return {
+              turnId: hit.turnId,
+              blockId: block.id,
+              view: 'historical',
+              rangeId: range.id,
+              pageId,
+            };
+        }
+      }
+      if (location.view === 'live') {
+        const alias = livePromptAliases.get(hit.turnId);
+        if (hit.role === 'user' && hit.recordId === hit.turnId && alias)
+          return finishLiveLocation(alias);
+        break;
+      }
+      if (!rangeId) break;
+      const range = table.ranges.find((item) => item.id === rangeId);
+      if (
+        !range ||
+        (range.newer.kind !== 'loadable' &&
+          range.newer.kind !== 'cached' &&
+          range.newer.kind !== 'live' &&
+          range.newer.kind !== 'loading' &&
+          !(range.newer.kind === 'error' && range.newer.retryable))
+      )
+        break;
+      if (range.newer.kind === 'cached') {
+        rangeId = range.newer.rangeId;
+        continue;
+      }
+      if (range.newer.kind === 'loading') {
+        const pending = boundaryLoads.get(
+          `${sessionEpoch}:${chainEpoch}:${range.id}:newer`,
+        );
+        if (!pending) break;
+        await pending;
+        continue;
+      }
+      const edge = range.pageIds.at(-1);
+      releaseAnchor();
+      if (edge) pageTable.select(range.id, edge);
+      await loadViewportBoundary(
+        range.id,
+        'newer',
+        { isCurrent: valid },
+        releaseAnchor,
+      );
+      if (
+        pageTable
+          .getSnapshot()
+          .ranges.find((item) => item.id === range.id)
+          ?.pageIds.at(-1) === edge
+      )
+        break;
+    }
+    throw new Error('Conversation search message is unavailable');
+  }
+
   async function locateOrdinal(
     ordinal: number,
     request?: HistoryViewportRequest,
     releaseAnchor?: () => void,
+    targetRecordId?: string,
   ): Promise<DaemonTurnLocation> {
     assertOrdinal(ordinal);
     const generation = ++selectionGeneration;
@@ -816,7 +1340,14 @@ export function createDaemonTurnNavigationStore(
       const entryWithSnapshot = findIndexEntry(ordinal);
       if (!entryWithSnapshot) throw new Error('Turn metadata is unavailable');
       const existing = snapshot.locations.get(entryWithSnapshot.entry.turnId);
-      if (existing) {
+      if (
+        existing &&
+        (existing.view !== 'live' ||
+          !targetRecordId ||
+          lastLiveBlocks?.some((block) =>
+            block.sourceRecordIds?.includes(targetRecordId),
+          ))
+      ) {
         if (
           existing.view === 'historical' &&
           existing.rangeId &&
@@ -859,7 +1390,7 @@ export function createDaemonTurnNavigationStore(
         );
       }
       const live = findLiveLocation(entryWithSnapshot.entry.turnId);
-      if (live) {
+      if (live && !targetRecordId) {
         publish({
           selected: {
             ordinal,
@@ -879,6 +1410,7 @@ export function createDaemonTurnNavigationStore(
         entryWithSnapshot.entry.turnId,
         entryWithSnapshot.page.snapshot,
         response,
+        targetRecordId,
       );
       const location: DaemonTurnLocation = {
         turnId: entryWithSnapshot.entry.turnId,
@@ -898,6 +1430,12 @@ export function createDaemonTurnNavigationStore(
       });
       return location;
     } catch (error) {
+      if (
+        generation === selectionGeneration &&
+        request?.isCurrent() === false
+      ) {
+        publish({ selected: undefined });
+      }
       if (
         generation === selectionGeneration &&
         request?.isCurrent() !== false
@@ -921,7 +1459,28 @@ export function createDaemonTurnNavigationStore(
     }
   }
 
-  async function loadBoundary(
+  function loadBoundary(
+    rangeId: string,
+    direction: 'older' | 'newer',
+    viewportRequest?: HistoryViewportRequest,
+    beforeAdmit?: () => void,
+  ): Promise<void> {
+    const key = `${sessionEpoch}:${chainEpoch}:${rangeId}:${direction}`;
+    const pending = boundaryLoads.get(key);
+    if (pending) return pending;
+    const load = performBoundaryLoad(
+      rangeId,
+      direction,
+      viewportRequest,
+      beforeAdmit,
+    ).finally(() => {
+      if (boundaryLoads.get(key) === load) boundaryLoads.delete(key);
+    });
+    boundaryLoads.set(key, load);
+    return load;
+  }
+
+  async function performBoundaryLoad(
     rangeId: string,
     direction: 'older' | 'newer',
     viewportRequest?: HistoryViewportRequest,
@@ -1060,6 +1619,14 @@ export function createDaemonTurnNavigationStore(
         .getSnapshot()
         .ranges.find((item) => item.id === rangeId);
       if (!currentRange || currentRange[direction].kind !== 'loading') return;
+      if (
+        viewportRequest &&
+        error instanceof HistoricalTranscriptWindowFullError
+      ) {
+        pageTable.cancelBoundaryLoad(rangeId, direction, request);
+        publish(clearBoundaryError());
+        throw error;
+      }
       if (isTranscriptTooLarge(error)) {
         enterTooLargeFallback();
       } else {
@@ -1496,6 +2063,10 @@ export function createDaemonTurnNavigationStore(
     loadOrdinal,
     locateOrdinal,
     locateViewportOrdinal: locateOrdinal,
+    scanConversation,
+    resolveMessageRecord: async (recordId, request) =>
+      (await scanConversation('', request, recordId)).hits[0],
+    locateViewportSearchHit,
     refreshHead,
     loadOlder: (rangeId) => loadBoundary(rangeId, 'older'),
     loadNewer: (rangeId) => loadBoundary(rangeId, 'newer'),

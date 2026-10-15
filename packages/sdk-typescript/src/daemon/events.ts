@@ -290,8 +290,12 @@ export interface DaemonSessionDiedData {
 export type DaemonSessionClosedReason = 'client_close' | (string & {});
 
 export interface DaemonSessionClosedData {
+  cause?: 'workspace_runtime_stop' | (string & {});
+  persistenceUnconfirmed?: boolean;
   sessionId: string;
   reason: DaemonSessionClosedReason;
+  exitCode?: number | null;
+  signalCode?: string | null;
   closedBy?: string;
   [key: string]: unknown;
 }
@@ -2683,7 +2687,12 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['reason']) &&
-    isOptionalStringOrNull(value['closedBy'])
+    isOptionalStringOrNull(value['closedBy']) &&
+    isOptionalNumberOrNull(value['exitCode']) &&
+    isOptionalStringOrNull(value['signalCode']) &&
+    (value['cause'] === undefined || typeof value['cause'] === 'string') &&
+    (value['persistenceUnconfirmed'] === undefined ||
+      typeof value['persistenceUnconfirmed'] === 'boolean')
   );
 }
 

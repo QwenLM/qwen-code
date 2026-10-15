@@ -57,6 +57,10 @@ export function countAllInlineImages(contents: Content[]): number {
   return count;
 }
 
+export function hasImagePayloadReferences(contents: Content[]): boolean {
+  return collectReferencedImageIds(contents).size > 0;
+}
+
 /**
  * Replace image payloads in-place with text references, storing the
  * originals in the provided store. This mutates the history so that
@@ -133,16 +137,18 @@ export function buildReattachParts(
       text: reattachContextText(recent.map((img) => img.id)),
       partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
-    ...recent.map(storedImageToPart),
+    ...recent.flatMap(labeledReattachParts),
   ];
 }
 
 /**
- * `partMetadata` key stamped on the leading text marker of the volatile
- * reattach region. `buildReattachParts` re-generates that region on every
- * request, so the DashScope cache pass uses this marker to place the
- * conversation breakpoint *before* the reattached images instead of after
- * them — keeping the cached prefix stable across turns (issue #11627).
+ * `partMetadata` key stamped on the first part of a trailing volatile region:
+ * one that is re-generated per request and never enters stored history.
+ * `buildReattachParts` marks the reattach region's leading text marker, and
+ * `appendAutoMemoryContext` marks the request-only auto-memory catalog. The
+ * provider cache passes use this marker to place the conversation breakpoint
+ * *before* the volatile tail instead of after it — keeping the cached prefix
+ * stable across turns (issue #11627).
  * It is client-side metadata only: the OpenAI-compatible converters never
  * serialize `partMetadata`, and the native SDK generator strips it in
  * `LlmContentGenerator.stripPartFields` before the request is built, so it
@@ -151,10 +157,12 @@ export function buildReattachParts(
 export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
 
 /**
- * Number of trailing parts of the last content that belong to the reattach
- * region, or 0 when the request ends without one. Each reattach part (one
- * text marker + N inline images) converts to exactly one OpenAI content
- * block, so this equals the trailing reattach block count on the wire.
+ * Number of trailing parts of the last content that belong to a volatile
+ * region, or 0 when the request ends without one. Each such part (one
+ * text marker, then a text label and an inline image per replayed image; or
+ * the catalog's single text part) converts to exactly one content block on
+ * both the OpenAI-compatible and the Anthropic wire, so this equals the
+ * trailing volatile block count.
  */
 export function trailingReattachPartCount(contents: ContentListUnion): number {
   const last = Array.isArray(contents) ? contents.at(-1) : undefined;
@@ -238,7 +246,7 @@ export function prepareImagePayloadsForRequest(
     {
       text: reattachContextText([...reattachById.keys()]),
     },
-    ...[...reattachById.values()].map(storedImageToPart),
+    ...[...reattachById.values()].flatMap(labeledReattachParts),
   ];
 
   const last = transformed.at(-1);
@@ -371,8 +379,24 @@ function imageReferenceText(stored: StoredImagePayload): string {
 function reattachContextText(ids: readonly string[]): string {
   return (
     'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
-    ids.map((id) => `Image #${id}`).join(', ')
+    ids.map((id) => `Image #${id}`).join(', ') +
+    '. Each one is labeled with its id below.'
   );
+}
+
+// A lone id list above N unlabeled images cannot be mapped back to them, so
+// a one-image turn followed by several replays reads as "the old images are
+// the new ones" (#12544). Label every replayed image with its id. The label
+// deliberately makes no claim about which turn an image belongs to: this
+// module cannot tell where the current turn starts, and a wrong claim in
+// either direction misleads the model more than the header's caveat does.
+function labeledReattachParts(stored: StoredImagePayload): Part[] {
+  return [
+    {
+      text: `Image #${stored.id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+    },
+    storedImageToPart(stored),
+  ];
 }
 
 function safeImageMimeType(mimeType: string): string {

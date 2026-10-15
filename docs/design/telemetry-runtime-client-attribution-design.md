@@ -12,7 +12,7 @@
 - TS/Python/Java SDK 的主入口（`query()`）直接 spawn CLI（stream-json 模式），自带 `--channel=SDK`
 - `--acp` 未显式指定 channel 时回退为 `ACP`（`packages/cli/src/config/config.ts` 的 ACP fallback）
 
-但 `qwen serve`（daemon）的 spawn 工厂启动的是不带 channel 的 `qwen --acp` 子进程（`packages/acp-bridge/src/spawnChannel.ts`），因此**经 daemon 承载的会话——SDK 的 daemon 客户端入口（如 TS SDK 的 `DaemonClient`/`DaemonSessionClient`）、Web Shell、Tauri 桌面 shell——全部上报为 `ACP`**，无法区分。Tauri shell 启动 daemon 时设置了 `QWEN_CODE_DESKTOP=1`（`packages/desktop-shell/src-tauri/src/runtime.rs`），但 telemetry 从未读取该变量。
+但 `qwen serve`（daemon）的 spawn 工厂启动的是不带 channel 的 `qwen --acp` 子进程（`packages/acp-bridge/src/spawnChannel.ts`），因此**经 daemon 承载的会话——SDK 的 daemon 客户端入口（如 TS SDK 的 `DaemonClient`/`DaemonSessionClient`）、Web Shell、Tauri 桌面 shell——全部上报为 `ACP`**，无法区分。Tauri shell 启动 daemon 时设置了 `QWEN_CODE_DESKTOP=1`（`packages/desktop/src-tauri/src/runtime.rs`），但 telemetry 从未读取该变量。
 
 `app.channel` 是来自 `~/.qwen/source.json` 的**安装来源**，与入口归因是不同概念，不应被重载。
 

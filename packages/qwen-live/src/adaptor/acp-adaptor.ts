@@ -46,6 +46,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type { Client } from '@agentclientprotocol/sdk';
 import { LiveLogger } from '../logger.js';
@@ -893,7 +894,17 @@ export class AcpAdaptor implements BackendAdaptor {
     if (kind === 'agent_message_chunk') {
       const content = isRecord(update['content']) ? update['content'] : {};
       const text = content['text'];
-      if (typeof text === 'string') {
+      // Discrete/background frames (status prose, the background turn's own
+      // reply) are transcript activities, never the foreground job's answer.
+      const meta = isRecord(update['_meta']) ? update['_meta'] : {};
+      const isAnswerChunk =
+        meta['qwenDiscreteMessage'] !== true &&
+        meta['backgroundTurn'] === undefined;
+      if (
+        typeof text === 'string' &&
+        activity?.kind === 'message' &&
+        isAnswerChunk
+      ) {
         state.turnBuffer = `${state.turnBuffer}${stripControlSequences(text)}`;
         if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
           state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
@@ -998,9 +1009,7 @@ export class AcpAdaptor implements BackendAdaptor {
       }
       return {};
     }
-    throw Object.assign(new Error(`method not found: ${method}`), {
-      code: -32601,
-    });
+    throw RequestError.methodNotFound(method);
   }
 }
 

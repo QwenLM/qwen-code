@@ -6,7 +6,6 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fsPromises from 'node:fs/promises';
-import * as nodePath from 'node:path';
 import * as os from 'node:os';
 import { getFolderStructure } from './getFolderStructure.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -20,12 +19,18 @@ describe('getFolderStructure', () => {
     await fsPromises.mkdir(fullPath, { recursive: true });
   }
 
-  async function createTestFile(...pathSegments: string[]) {
-    const fullPath = path.join(testRootDir, ...pathSegments);
-    await fsPromises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fsPromises.writeFile(fullPath, '');
-    return fullPath;
+  // Creates an empty file at each path, given as segments under the root.
+  async function createTestFiles(...files: string[][]) {
+    for (const pathSegments of files) {
+      const fullPath = path.join(testRootDir, ...pathSegments);
+      await fsPromises.mkdir(path.dirname(fullPath), { recursive: true });
+      await fsPromises.writeFile(fullPath, '');
+    }
   }
+
+  // The lines every rendering starts with: the item budget, then the root.
+  const treeHeader = (maxItems: number) =>
+    `Showing up to ${maxItems} items:\n\n${testRootDir}${path.sep}`;
 
   beforeEach(async () => {
     testRootDir = await fsPromises.mkdtemp(
@@ -37,53 +42,37 @@ describe('getFolderStructure', () => {
     await fsPromises.rm(testRootDir, { recursive: true, force: true });
   });
 
+  const createABFiles = () =>
+    createTestFiles(['fileA1.ts'], ['fileA2.js'], ['subfolderB', 'fileB1.md']);
+
   it('should return basic folder structure', async () => {
-    await createTestFile('fileA1.ts');
-    await createTestFile('fileA2.js');
-    await createTestFile('subfolderB', 'fileB1.md');
+    await createABFiles();
 
     const structure = await getFolderStructure(testRootDir);
-    expect(structure.trim()).toBe(
-      `
-Showing up to 20 items:
-
-${testRootDir}${path.sep}
+    expect(structure.trim()).toBe(`${treeHeader(20)}
 ├───fileA1.ts
 ├───fileA2.js
 └───subfolderB${path.sep}
-    └───fileB1.md
-`.trim(),
-    );
+    └───fileB1.md`);
   });
 
   it('should handle an empty folder', async () => {
     const structure = await getFolderStructure(testRootDir);
-    expect(structure.trim()).toBe(
-      `
-Showing up to 20 items:
-
-${testRootDir}${path.sep}
-`
-        .trim()
-        .trim(),
-    );
+    expect(structure.trim()).toBe(treeHeader(20));
   });
 
   it('should ignore folders specified in ignoredFolders (default)', async () => {
-    await createTestFile('.hiddenfile');
-    await createTestFile('file1.txt');
+    await createTestFiles(['.hiddenfile'], ['file1.txt']);
     await createEmptyDir('emptyFolder');
-    await createTestFile('node_modules', 'somepackage', 'index.js');
-    await createTestFile('subfolderA', 'fileA1.ts');
-    await createTestFile('subfolderA', 'fileA2.js');
-    await createTestFile('subfolderA', 'subfolderB', 'fileB1.md');
+    await createTestFiles(
+      ['node_modules', 'somepackage', 'index.js'],
+      ['subfolderA', 'fileA1.ts'],
+      ['subfolderA', 'fileA2.js'],
+      ['subfolderA', 'subfolderB', 'fileB1.md'],
+    );
 
     const structure = await getFolderStructure(testRootDir);
-    expect(structure.trim()).toBe(
-      `
-Showing up to 20 items:
-
-${testRootDir}${path.sep}
+    expect(structure.trim()).toBe(`${treeHeader(20)}
 ├───.hiddenfile
 ├───file1.txt
 ├───emptyFolder${path.sep}
@@ -92,84 +81,57 @@ ${testRootDir}${path.sep}
     ├───fileA1.ts
     ├───fileA2.js
     └───subfolderB${path.sep}
-        └───fileB1.md
-`.trim(),
-    );
+        └───fileB1.md`);
   });
 
   it('should ignore folders specified in custom ignoredFolders', async () => {
-    await createTestFile('.hiddenfile');
-    await createTestFile('file1.txt');
+    await createTestFiles(['.hiddenfile'], ['file1.txt']);
     await createEmptyDir('emptyFolder');
-    await createTestFile('node_modules', 'somepackage', 'index.js');
-    await createTestFile('subfolderA', 'fileA1.ts');
+    await createTestFiles(
+      ['node_modules', 'somepackage', 'index.js'],
+      ['subfolderA', 'fileA1.ts'],
+    );
 
     const structure = await getFolderStructure(testRootDir, {
       ignoredFolders: new Set(['subfolderA', 'node_modules']),
     });
-    const expected = `
-Showing up to 20 items:
-
-${testRootDir}${path.sep}
+    expect(structure.trim()).toBe(`${treeHeader(20)}
 ├───.hiddenfile
 ├───file1.txt
 ├───emptyFolder${path.sep}
 ├───node_modules${path.sep}...
-└───subfolderA${path.sep}...
-`.trim();
-    expect(structure.trim()).toBe(expected);
+└───subfolderA${path.sep}...`);
   });
 
   it('should filter files by fileIncludePattern', async () => {
-    await createTestFile('fileA1.ts');
-    await createTestFile('fileA2.js');
-    await createTestFile('subfolderB', 'fileB1.md');
+    await createABFiles();
 
     const structure = await getFolderStructure(testRootDir, {
       fileIncludePattern: /\.ts$/,
     });
-    const expected = `
-Showing up to 20 items:
-
-${testRootDir}${path.sep}
+    expect(structure.trim()).toBe(`${treeHeader(20)}
 ├───fileA1.ts
-└───subfolderB${path.sep}
-`.trim();
-    expect(structure.trim()).toBe(expected);
+└───subfolderB${path.sep}`);
   });
 
   it('should handle maxItems truncation for files within a folder', async () => {
-    await createTestFile('fileA1.ts');
-    await createTestFile('fileA2.js');
-    await createTestFile('subfolderB', 'fileB1.md');
+    await createABFiles();
 
-    const structure = await getFolderStructure(testRootDir, {
-      maxItems: 3,
-    });
-    const expected = `
-Showing up to 3 items:
-
-${testRootDir}${path.sep}
+    const structure = await getFolderStructure(testRootDir, { maxItems: 3 });
+    expect(structure.trim()).toBe(`${treeHeader(3)}
 ├───fileA1.ts
 ├───fileA2.js
 └───subfolderB${path.sep}
-    └───...
-`.trim();
-    expect(structure.trim()).toBe(expected);
+    └───...`);
   });
 
   it('should handle maxItems truncation for subfolders', async () => {
     for (let i = 0; i < 5; i++) {
-      await createTestFile(`folder-${i}`, 'child.txt');
+      await createTestFiles([`folder-${i}`, 'child.txt']);
     }
 
-    const structure = await getFolderStructure(testRootDir, {
-      maxItems: 4,
-    });
-    const expectedRevised = `
-Showing up to 4 items:
-
-${testRootDir}${path.sep}
+    const structure = await getFolderStructure(testRootDir, { maxItems: 4 });
+    expect(structure.trim()).toBe(`${treeHeader(4)}
 ├───folder-0${path.sep}
 │   └───...
 ├───folder-1${path.sep}
@@ -178,28 +140,21 @@ ${testRootDir}${path.sep}
 │   └───...
 ├───folder-3${path.sep}
 │   └───...
-└───...
-`.trim();
-    expect(structure.trim()).toBe(expectedRevised);
+└───...`);
   });
 
   it('should handle maxItems that only allows the root folder itself', async () => {
-    await createTestFile('fileA1.ts');
-    await createTestFile('fileA2.ts');
-    await createTestFile('subfolderB', 'fileB1.ts');
+    await createTestFiles(
+      ['fileA1.ts'],
+      ['fileA2.ts'],
+      ['subfolderB', 'fileB1.ts'],
+    );
 
-    const structure = await getFolderStructure(testRootDir, {
-      maxItems: 1,
-    });
-    const expected = `
-Showing up to 1 items:
-
-${testRootDir}${path.sep}
+    const structure = await getFolderStructure(testRootDir, { maxItems: 1 });
+    expect(structure.trim()).toBe(`${treeHeader(1)}
 ├───fileA1.ts
 ├───...
-└───...
-`.trim();
-    expect(structure.trim()).toBe(expected);
+└───...`);
   });
 
   it('should handle non-existent directory', async () => {
@@ -211,47 +166,32 @@ ${testRootDir}${path.sep}
   });
 
   it('should handle deep folder structure within limits', async () => {
-    await createTestFile('level1', 'level2', 'level3', 'file.txt');
+    await createTestFiles(['level1', 'level2', 'level3', 'file.txt']);
 
-    const structure = await getFolderStructure(testRootDir, {
-      maxItems: 10,
-    });
-    const expected = `
-Showing up to 10 items:
-
-${testRootDir}${path.sep}
+    const structure = await getFolderStructure(testRootDir, { maxItems: 10 });
+    expect(structure.trim()).toBe(`${treeHeader(10)}
 └───level1${path.sep}
     └───level2${path.sep}
         └───level3${path.sep}
-            └───file.txt
-`.trim();
-    expect(structure.trim()).toBe(expected);
+            └───file.txt`);
   });
 
   it('should truncate deep folder structure if maxItems is small', async () => {
-    await createTestFile('level1', 'level2', 'level3', 'file.txt');
+    await createTestFiles(['level1', 'level2', 'level3', 'file.txt']);
 
-    const structure = await getFolderStructure(testRootDir, {
-      maxItems: 3,
-    });
-    const expected = `
-Showing up to 3 items:
-
-${testRootDir}${path.sep}
+    const structure = await getFolderStructure(testRootDir, { maxItems: 3 });
+    expect(structure.trim()).toBe(`${treeHeader(3)}
 └───level1${path.sep}
     └───level2${path.sep}
         └───level3${path.sep}
-            └───...
-`.trim();
-    expect(structure.trim()).toBe(expected);
+            └───...`);
   });
 
-  // A folder queued but never expanded was rendered as a bare leaf, which is
-  // exactly how a genuinely empty folder renders. The same tree therefore
-  // described `withContents` as empty or not depending only on the budget.
+  // A folder queued but never expanded was rendered as a bare leaf, exactly
+  // like a genuinely empty folder, so the same tree described `withContents`
+  // as empty or not depending only on the budget.
   it('marks a folder whose contents the budget never reached', async () => {
-    await createTestFile('a.txt');
-    await createTestFile('withContents', 'hidden.txt');
+    await createTestFiles(['a.txt'], ['withContents', 'hidden.txt']);
 
     const truncated = await getFolderStructure(testRootDir, { maxItems: 2 });
     const complete = await getFolderStructure(testRootDir, { maxItems: 50 });
@@ -271,9 +211,7 @@ ${testRootDir}${path.sep}
   // The other direction: a folder that really is empty and really was read
   // must not gain a marker suggesting there is more to see.
   it('does not mark an empty folder that was fully read', async () => {
-    await fsPromises.mkdir(path.join(testRootDir, 'genuinelyEmpty'), {
-      recursive: true,
-    });
+    await createEmptyDir('genuinelyEmpty');
 
     const structure = await getFolderStructure(testRootDir, { maxItems: 50 });
 
@@ -281,28 +219,38 @@ ${testRootDir}${path.sep}
     expect(structure).not.toContain('...');
   });
 
+  // Writes `ignoreFile` with `rules`, then files the rules may hide or keep.
+  async function createIgnoreFixture(ignoreFile: string, rules: string) {
+    await fsPromises.writeFile(path.join(testRootDir, ignoreFile), rules);
+    await createTestFiles(
+      ['file1.txt'],
+      ['node_modules', 'some-package', 'index.js'],
+      ['ignored.txt'],
+      ['.gemini', 'config.yaml'],
+      ['.gemini', 'logs.json'],
+    );
+  }
+
+  const structureWithFileService = (
+    options: Parameters<typeof getFolderStructure>[1] = {},
+  ) =>
+    getFolderStructure(testRootDir, {
+      fileService: new FileDiscoveryService(testRootDir),
+      ...options,
+    });
+
   describe('with gitignore', () => {
     beforeEach(async () => {
-      await fsPromises.mkdir(path.join(testRootDir, '.git'), {
-        recursive: true,
-      });
+      await createEmptyDir('.git');
     });
 
     it('should ignore files and folders specified in .gitignore', async () => {
-      await fsPromises.writeFile(
-        nodePath.join(testRootDir, '.gitignore'),
+      await createIgnoreFixture(
+        '.gitignore',
         'ignored.txt\nnode_modules/\n.gemini/*\n!/.gemini/config.yaml',
       );
-      await createTestFile('file1.txt');
-      await createTestFile('node_modules', 'some-package', 'index.js');
-      await createTestFile('ignored.txt');
-      await createTestFile('.gemini', 'config.yaml');
-      await createTestFile('.gemini', 'logs.json');
 
-      const fileService = new FileDiscoveryService(testRootDir);
-      const structure = await getFolderStructure(testRootDir, {
-        fileService,
-      });
+      const structure = await structureWithFileService();
 
       expect(structure).not.toContain('ignored.txt');
       expect(structure).toContain(`node_modules${path.sep}...`);
@@ -313,15 +261,12 @@ ${testRootDir}${path.sep}
 
     it('should not ignore files if respectGitIgnore is false', async () => {
       await fsPromises.writeFile(
-        nodePath.join(testRootDir, '.gitignore'),
+        path.join(testRootDir, '.gitignore'),
         'ignored.txt',
       );
-      await createTestFile('file1.txt');
-      await createTestFile('ignored.txt');
+      await createTestFiles(['file1.txt'], ['ignored.txt']);
 
-      const fileService = new FileDiscoveryService(testRootDir);
-      const structure = await getFolderStructure(testRootDir, {
-        fileService,
+      const structure = await structureWithFileService({
         fileFilteringOptions: {
           respectQwenIgnore: false,
           respectGitIgnore: false,
@@ -334,40 +279,22 @@ ${testRootDir}${path.sep}
   });
 
   describe('with qwenignore', () => {
-    it('should ignore qwenignore files by default', async () => {
-      await fsPromises.writeFile(
-        nodePath.join(testRootDir, '.qwenignore'),
-        'ignored.txt\nnode_modules/\n.gemini/\n!/.gemini/config.yaml',
-      );
-      await createTestFile('file1.txt');
-      await createTestFile('node_modules', 'some-package', 'index.js');
-      await createTestFile('ignored.txt');
-      await createTestFile('.gemini', 'config.yaml');
-      await createTestFile('.gemini', 'logs.json');
+    const qwenignoreRules =
+      'ignored.txt\nnode_modules/\n.gemini/\n!/.gemini/config.yaml';
 
-      const fileService = new FileDiscoveryService(testRootDir);
-      const structure = await getFolderStructure(testRootDir, {
-        fileService,
-      });
+    it('should ignore qwenignore files by default', async () => {
+      await createIgnoreFixture('.qwenignore', qwenignoreRules);
+
+      const structure = await structureWithFileService();
       expect(structure).not.toContain('ignored.txt');
       expect(structure).toContain(`node_modules${path.sep}...`);
       expect(structure).not.toContain('logs.json');
     });
 
     it('should not ignore files if respectQwenIgnore is false', async () => {
-      await fsPromises.writeFile(
-        nodePath.join(testRootDir, '.qwenignore'),
-        'ignored.txt\nnode_modules/\n.gemini/\n!/.gemini/config.yaml',
-      );
-      await createTestFile('file1.txt');
-      await createTestFile('node_modules', 'some-package', 'index.js');
-      await createTestFile('ignored.txt');
-      await createTestFile('.gemini', 'config.yaml');
-      await createTestFile('.gemini', 'logs.json');
+      await createIgnoreFixture('.qwenignore', qwenignoreRules);
 
-      const fileService = new FileDiscoveryService(testRootDir);
-      const structure = await getFolderStructure(testRootDir, {
-        fileService,
+      const structure = await structureWithFileService({
         fileFilteringOptions: {
           respectQwenIgnore: false,
           respectGitIgnore: true, // Explicitly disable gemini ignore only

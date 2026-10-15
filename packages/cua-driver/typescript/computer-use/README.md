@@ -10,19 +10,13 @@ connected driver's inventory. It does not infer the target from the CLI or Node
 host and does not capture the desktop. Missing or invalid platform metadata
 raises `driver_platform_unavailable`; update the driver and SDK before continuing.
 
-The single [Computer Use Skill](./SKILL.md) routes to one platform resource:
-
-- [macOS](./references/macos.md): App handles, compact app state and text operations.
-- [Windows/Linux](./references/windows-linux.md): existing exact-window targeting.
-
-Skill resources stay beside the entrypoint on the CLI host. Read the selected
-resource relative to the Skill's displayed base directory, even when the driver
-controls another machine. After changing connections, query the platform again.
+The single [Computer Use Skill](./SKILL.md) contains the complete App workflow
+for all three platforms. After changing connections, query the platform again.
 
 ## App workflow
 
-On macOS, bind an application by name, identifier or installation path. The
-handle resolves its current native AX window and owns targeting internally:
+On macOS, Linux and Windows, bind an application by name, identifier or installation path. The
+handle resolves its current native window or owned dialog and owns targeting internally:
 
 ```js
 import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
@@ -40,20 +34,20 @@ await computer.close();
 `getApp()` binds identity without launching. `getState()` can open a discovered
 stopped app through the native background launcher; actions never restart an app.
 Ambiguous names or identifiers require a unique installation path from
-the caller. Public macOS `listApps()` returns only `id`, `displayName` and
+the caller. Public `listApps()` returns only `id`, `displayName` and
 `isRunning`; internal process and window addressing stays on the app handle.
-Native selection uses the focused AX window, main window, then one unambiguous
-AX window, including attached sheets and the actual owning process. If a running
-app hides its remaining surface from AX, observation briefly reopens that app
-surface, captures it, and restores the previous foreground app.
+Native selection uses focused/main AX windows and sheets on macOS, native
+active/stacking order and transient ownership on X11, and foreground/Z-order
+plus owned popup relationships on Windows. Ambiguous or unavailable targets
+fail without dispatching input. Wayland requires compositor support for window
+discovery and activation; an unsupported desktop reports the limitation.
 
 App methods accept short observed IDs or screenshot coordinates, and do not
 accept process IDs, window IDs, opaque tokens or delivery options.
-`getState()` returns `{ app, window, mode, text, screenshot? }`. Native AX
-projection preserves controls, meaningful disabled state and text, removes
-redundant layout/text structure, and renders compact full/diff/no-change output.
-Normal window observations include immediate menu-bar items. A selected open
-menu supplies its own context, including nested and disabled commands.
+`getState()` returns `{ app, window, mode, text, screenshot? }`. Native accessibility projections preserve controls, meaningful state and text
+and render compact full/diff/no-change output. macOS additionally removes
+redundant layout/text structure and includes immediate menu-bar items. Its
+selected open menu supplies nested and disabled commands.
 Normal actions do not emit another full tree or image.
 
 App text defaults to at most 12,000 characters; `maxTextChars` (minimum 512)
@@ -115,8 +109,7 @@ These operations are macOS-only and reject other driver platforms before mutatio
 ## Exact-window SDK compatibility
 
 The lower-level `ComputerUse` methods remain available to programmatic clients.
-The bundled model Skill uses this workflow on Windows/Linux and the App workflow
-on macOS. The rest of this document describes the existing exact-window contract.
+The bundled model Skill uses the App workflow on all platforms. The rest of this document describes the existing exact-window contract.
 
 ## Observation revisions
 
@@ -135,7 +128,7 @@ compatibility alias; passing both names is rejected. If a base is stale, the
 native driver returns a full resync and the wrapper adopts the replacement
 revision. The wrapper never computes a second semantic diff.
 
-On macOS, successful AX reads bounded by traversal limits retain a separate
+Successful native accessibility reads bounded by traversal limits retain a separate
 baseline. Identical captured state returns `no_change`; changed bounded state
 returns full, since nodes outside the budget cannot be reported as deleted.
 `diagnostics.captureComplete` remains false and `captureTruncated` is true.
@@ -189,7 +182,14 @@ Actions that support input delivery resolve their mode in this order:
 
 1. the action's explicit `deliveryMode`;
 2. `QWEN_CUA_SDK_DEFAULT_DELIVERY_MODE` (`background` or `foreground`);
-3. `background`.
+3. the connected platform's default: Linux permits guarded focus preparation;
+   Windows and the macOS exact-window compatibility API retain `background`.
+
+On Linux, ordinary callers omit delivery options. The facade passes the existing
+`foreground` permission ceiling internally, allowing the native driver to choose
+semantic or target-addressed input and prepare exact-window focus when needed.
+This uses the connected platform, not the Node host OS. Explicit overrides remain
+available to legacy programmatic clients.
 
 The resolved value is passed to the typed driver for every supported action.
 Use the environment default when a whole isolated process, such as a test
@@ -198,35 +198,36 @@ overrides it. Invalid environment values fail facade creation, and the public
 JavaScript option remains camelCase: `delivery_mode` is rejected instead of
 being silently ignored.
 
-## Windows/Linux exact-window usage
+## Exact-window usage
 
-On macOS, use the App workflow above. The lower-level discovery records below
-remain available on Windows and Linux.
+Programmatic clients can still select an exact window from `listWindows()`.
+Use application-specific criteria to identify it before dispatching input.
 
 ```js
 import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
 
 const computer = await ComputerUse.create(); // configured in-process runtime + trusted session
 try {
-  const apps = await computer.listApps();
-  const windows = await computer.listWindows({ pid: apps[0].pid });
+  const windows = await computer.listWindows();
+  const target = windows.find((window) => window.title === "Task document");
+  if (!target) throw new Error("Open the task document first");
 
   const first = await computer.observeWindow({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
   });
   // ... deliver first.text downstream, act on element tokens ...
-  await computer.click({ pid: apps[0].pid, elementToken: first.elements[0].element_token });
+  await computer.click({ pid: target.pid, elementToken: first.elements[0].element_token });
 
   const second = await computer.observeWindow({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
   });
   console.log(second.mode); // "diff" | "no_change" | "full"
 
   await computer.drag({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
     fromX: 100,
     fromY: 100,
     toX: 300,
@@ -235,8 +236,8 @@ try {
   });
 
   const complete = await computer.observeWindow({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
     disableDiff: true,
   });
   console.log(complete.mode); // "full"

@@ -11,10 +11,20 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  realpathSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { seedParseArgs } from './lib/test-utils.js';
+import { isLedgerOnlyCandidate, seedParseArgs } from './lib/test-utils.js';
 import {
   COMPOSE_FLOOR_ENV,
   DEADLINE_ENV,
@@ -23,6 +33,21 @@ import {
 } from './lib/deadline.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
+// The flag ruling, overridable so a test can make it fail the way a bug would
+// (a non-TypeError) — the handler must not mistake that for a usage error.
+// Null means the real `validateDeadlineFlag`.
+const validateOverride = vi.hoisted(() => ({
+  impl: null as null | (() => void),
+}));
+vi.mock('./lib/deadline.js', async (orig) => {
+  const actual = await orig<Record<string, unknown>>();
+  const real = actual['validateDeadlineFlag'] as (...args: unknown[]) => void;
+  return {
+    ...actual,
+    validateDeadlineFlag: (...args: unknown[]) =>
+      validateOverride.impl !== null ? validateOverride.impl() : real(...args),
+  };
+});
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
 const visibilityMock = vi.hoisted(() => vi.fn((): string[] | null => []));
 vi.mock('../../config/settings.js', async (orig) => ({
@@ -79,8 +104,21 @@ function capture(over: Record<string, unknown> = {}) {
   });
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'capture-local-'));
+  // Every real round runs under a published identity, and the candidate
+  // anchors nothing without one (it carries the findings ledger alone) — so
+  // the fixtures publish one, and the test about the
+  // empty case blanks it itself.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
+  // `realpathSync`: several path comparisons in this command family resolve
+  // real paths against lexical ones, and `tmpdir()` IS a symlink on macOS
+  // (`/var/folders/…` → `/private/var/folders/…`). Without the wrap a test
+  // can fail on a developer's Mac while CI stays green on its real-path
+  // TMPDIR — the trap this directory's sibling suites hit.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'capture-local-')));
   cwd = process.cwd();
   process.chdir(dir);
   errs = [];
@@ -96,6 +134,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
@@ -161,7 +202,91 @@ describe('capture-local (command boundary)', () => {
     expect(plan.chunks.length).toBeGreaterThan(0);
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
-    expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+    const writtenDiff = readFileSync(plan.diffPathAbsolute, 'utf8');
+    expect(writtenDiff).toBe(DIFF);
+    // The identity must digest the SAME bytes the plan was built from: this
+    // command carries its diff as `diffBytes`, and any other string passed at
+    // the call site would stay type-correct while naming nothing.
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(writtenDiff, 'utf8').digest('hex'),
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses the round on a symlinked `.qwen/tmp`, before writing anything',
+    () => {
+      // The scratch directory is deterministic and in-repo: a contributor
+      // branch can commit `.qwen/tmp` (or `.qwen`) as a link — gitignore
+      // does not stop `git add -f` — and every side file of the round (the
+      // diff, the plan, the stop sidecar, the candidate) would land wherever
+      // it points, with the plan then read back from there. Guarding the
+      // writers one at a time re-found the class every round; the round is
+      // refused at the directory instead, and nothing reaches the victim.
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      mkdirSync(join(dir, '.qwen'), { recursive: true });
+      symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
+      try {
+        capture();
+        // Reported, not thrown: the handler prints one line and exits 1 — a
+        // runtime refusal, not the usage class. ONE prefix: the guard names
+        // the command itself, and the handler must not name it again.
+        expect(() => run(join(dir, 'plan.json'))).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(errs.join('')).toMatch(
+          /^capture-local: \.qwen[/\\]tmp is a symbolic link/,
+        );
+        expect(errs.join('')).not.toContain('capture-local: capture-local:');
+        expect(existsSync(join(dir, 'plan.json'))).toBe(false);
+        expect(readdirSync(elsewhere)).toEqual([]);
+
+        // `.qwen` itself as the link: same refusal, same empty victim.
+        rmSync(join(dir, '.qwen'), { recursive: true, force: true });
+        symlinkSync(elsewhere, join(dir, '.qwen'));
+        capture();
+        process.exitCode = undefined;
+        errs = [];
+        expect(() => run(join(dir, 'plan.json'))).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(errs.join('')).toMatch(
+          /^capture-local: \.qwen is a symbolic link/,
+        );
+        expect(readdirSync(elsewhere)).toEqual([]);
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('writes the cache candidate WITHOUT an identity when the runtime published none (R24-1)', () => {
+    // A local round posts no marker, so the candidate is the only write path
+    // its findings ledger has. Withheld, round N+1 saw no ledger and re-filed
+    // round N's open Criticals under fresh ids. Written with the key OMITTED
+    // (never `''`, which `cache-commit` refuses), it promotes as the ledger
+    // alone and anchors nothing.
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
+    const savedModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_MODEL'] = '';
+    try {
+      capture();
+      run(join(dir, 'plan.json'));
+      const plan = JSON.parse(
+        readFileSync(join(dir, 'plan.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(plan['diffPath']).toBeTruthy();
+      expect(plan['cacheCandidatePath']).toBeTruthy();
+      expect(typeof plan['cacheCandidateStateId']).toBe('string');
+      const candidate = JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      expect('lastModelId' in candidate).toBe(false);
+      expect(errs.join('\n')).toContain('published no model identity');
+    } finally {
+      if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
+      else process.env['QWEN_CODE_MODEL'] = savedModel;
+    }
   });
 
   it('creates the output directory the caller chose', () => {
@@ -278,7 +403,7 @@ describe('capture-local (command boundary)', () => {
     expect(plan.effort).toBeUndefined();
   });
 
-  it('withholds the cache candidate when the visibility bits cannot be enumerated', () => {
+  it('writes no anchor when the visibility bits cannot be enumerated', () => {
     // The candidate records the identity of the tree this round reviewed;
     // an oracle the capture cannot run leaves that identity uncertified, so
     // the write fails closed exactly like the decided stops do.
@@ -286,12 +411,22 @@ describe('capture-local (command boundary)', () => {
     visibilityMock.mockReturnValue(null);
     run('plan.json');
     expect(
-      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
-    ).toBe(false);
+      isLedgerOnlyCandidate(
+        join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
     expect(errs.join('')).toContain('could not be enumerated');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      )['ledgerOnly'],
+    ).toBe('the tracked-file visibility bits could not be enumerated');
   });
 
-  it('withholds the cache candidate while tracked paths carry a visibility bit', () => {
+  it('writes no anchor while tracked paths carry a visibility bit', () => {
     // `hash-object` reads through a set --assume-unchanged/--skip-worktree
     // bit while `git diff` cannot see the edit it hides — the candidate
     // would record the identity of bytes this round never reviewed.
@@ -299,9 +434,41 @@ describe('capture-local (command boundary)', () => {
     visibilityMock.mockReturnValue(['src/pay.ts']);
     run('plan.json');
     expect(
-      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
-    ).toBe(false);
-    expect(errs.join('')).toContain('the cache candidate is withheld');
+      isLedgerOnlyCandidate(
+        join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
+    expect(errs.join('')).toContain('findings ledger only, no anchor');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      )['ledgerOnly'],
+    ).toBe('tracked-file visibility bits hide bytes from the diff');
+  });
+
+  it('escapes the classes JSON.stringify passes raw, not just C0', () => {
+    // This sink kept its own C0+DEL copy of the rule long after `inertText`
+    // was extracted "so the newer sinks cannot each re-derive it (and
+    // re-forget it)" — so U+2028 (a forged second line wherever the message
+    // is re-rendered), the 8-bit C1 introducers and the invisible Cf class
+    // all reached the terminal verbatim and UNQUOTED from here.
+    capture({
+      untracked: [
+        `evil${String.fromCodePoint(0x2028)}fake.ts`,
+        `bidi${String.fromCodePoint(0x202e)}.ts`,
+      ],
+      skipped: [],
+    });
+    run('plan.json');
+
+    const out = errs.join('');
+    expect(out).not.toContain(String.fromCodePoint(0x2028));
+    expect(out).not.toContain(String.fromCodePoint(0x202e));
+    expect(out).toContain('\\u2028');
+    expect(out).toContain('\\u202e');
   });
 
   it('escapes a filename carrying terminal control characters', () => {
@@ -497,18 +664,103 @@ describe('capture-local — the --deadline flag the handler records', () => {
     expect(captureMock).not.toHaveBeenCalled();
     expect(existsSync(out)).toBe(false);
   });
+});
 
-  it('anything else the capture throws exits 1 with the same one-line shape', () => {
-    // The contract plan-diff already keeps: a usage error is exit 2, any
-    // other failure exit 1, neither an uncaught crash banner.
+describe('capture-local — the handler’s error contract', () => {
+  it('an --out that names a directory is a usage error — exit 2, one line, ruled before the tree is captured', () => {
+    // The check its siblings make before any work. Without it the capture
+    // and hashing ran to completion before the plan write failed with
+    // EISDIR (one line, exit 1).
+    captureMock.mockClear();
+    const existing = join(dir, 'plans');
+    mkdirSync(existing);
+    for (const out of [existing, join(dir, 'not-yet') + '/']) {
+      process.exitCode = undefined;
+      errs = [];
+      expect(() => run(out)).not.toThrow();
+      expect(process.exitCode).toBe(2);
+      const line = errs.join('');
+      expect(line).toMatch(
+        /^capture-local: --out names a directory, not a file: /,
+      );
+      expect(line).not.toContain('    at ');
+    }
+    // A repeated --out arrives as an array: the same one-line shape, with a
+    // message that names the mistake instead of a `.trim` crash.
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(['a.json', 'b.json'] as unknown as string)).not.toThrow();
+    expect(process.exitCode).toBe(2);
+    expect(errs.join('')).toMatch(
+      /^capture-local: --out must be given once, as a file path\n?$/,
+    );
+    expect(captureMock).not.toHaveBeenCalled();
+    process.exitCode = undefined;
+  });
+
+  it('an internal fault prints one line and exits 1 — and its stack after it under --debug', () => {
+    // plan-diff's contract for the default output: one line for the
+    // operator. The stack says where the fault happened, for whoever has to
+    // find it, and follows the line only when debug output is asked for.
+    const out = join(dir, 'boom.json');
     captureMock.mockImplementation(() => {
       throw new Error('git is not installed');
     });
     process.exitCode = undefined;
     errs = [];
-    expect(() => run(join(dir, 'boom.json'))).not.toThrow();
+    expect(() => run(out)).not.toThrow();
     expect(process.exitCode).toBe(1);
-    expect(errs.join('')).toContain('capture-local: git is not installed');
+    expect(errs.join('')).toContain('capture-local: git is not installed\n');
+    expect(errs.join('')).not.toContain('    at ');
+
+    process.exitCode = undefined;
+    errs = [];
+    expect(() => run(out, { debug: true })).not.toThrow();
+    expect(process.exitCode).toBe(1);
+    expect(errs.join('')).toMatch(
+      /capture-local: git is not installed\nError: git is not installed\n\s+at /,
+    );
+
+    // Only the flag: debug variables in the environment (set for other
+    // tools, or by the dev launcher) leave the operator's one line alone.
+    vi.stubEnv('DEBUG', '1');
+    vi.stubEnv('QWEN_DEBUG', '1');
+    vi.stubEnv('NODE_ENV', 'development');
+    try {
+      process.exitCode = undefined;
+      errs = [];
+      run(out);
+      expect(process.exitCode).toBe(1);
+      expect(errs.join('')).toContain('capture-local: git is not installed\n');
+      expect(errs.join('')).not.toContain('    at ');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(existsSync(out)).toBe(false);
+    process.exitCode = undefined;
+  });
+
+  it('a ruling that fails with anything but a usage error exits 1, still before the capture', () => {
+    // The ruling's TypeErrors are usage errors (exit 2, above). Anything
+    // else out of it is a fault in the ruling: exit 1, and the tree is still
+    // never captured on the way out.
+    const out = join(dir, 'ruling.json');
+    captureMock.mockClear();
+    validateOverride.impl = () => {
+      throw new Error('environment unreadable');
+    };
+    try {
+      process.exitCode = undefined;
+      errs = [];
+      expect(() => run(out, { deadline: '120' })).not.toThrow();
+      expect(process.exitCode).toBe(1);
+      expect(errs.join('')).toContain(
+        'capture-local: environment unreadable\n',
+      );
+      expect(captureMock).not.toHaveBeenCalled();
+    } finally {
+      validateOverride.impl = null;
+    }
     process.exitCode = undefined;
   });
 });

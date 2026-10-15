@@ -448,7 +448,11 @@ describe('releaseWorktree', () => {
     },
   );
 
-  it('degrades through the result — never throws — when the cwd is deleted mid-release', () => {
+  it('degrades through the result — never throws — when the cwd is deleted mid-release', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // The never-throws contract starts before the first git call: `resolve`
     // of the RELATIVE path production callers pass reads the cwd, and so does
     // `redirectedAncestor`'s default `stopAt = process.cwd()` — both threw
@@ -629,7 +633,11 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
     }
   });
 
-  it('answers "could not be run" when the process cwd no longer exists', () => {
+  it('answers "could not be run" when the process cwd no longer exists', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // The launch-dir pre-check reads `process.cwd()`, which throws ENOENT once
     // the directory is gone. Left outside the try it took the whole probe with
     // it — and `releaseWorktree`'s documented never-throws contract, cleanup's

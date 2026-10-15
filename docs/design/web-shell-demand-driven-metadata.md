@@ -12,7 +12,7 @@ provider independently fetches the branch during initialization and session load
 Source-filtered session lists also issue a discovery request before every read.
 
 This change gates those reads by their consumers. It does not change endpoints,
-workspace ownership, session-list refresh timing, or the workspace management table. The Git dialogs remain available for the active workspace.
+workspace ownership, session-list refresh timing, or the workspace management table. The Git dialogs remain available for the active workspace, and a trusted workspace reaches its own through its hover details.
 
 ## Behavior
 
@@ -25,7 +25,7 @@ workspace ownership, session-list refresh timing, or the workspace management ta
   reopening refreshes it. No new cache lifetime or request scheduler is added.
 - Trusted-workspace and real-path guards remain in place. Custom headers only
   request overview facets when their consuming header menu is open.
-- Remove the sidebar header Git button. The hover popover's branch row shows a plain-text summary on the right (for example, “6 modified · 11 stashed”), using the existing translated Git status phrases. Its terminal action uses `square-terminal`. Branch checkout, Changes, and Commit for a non-active workspace now require selecting that workspace first; the hover summary is not an interactive Git picker. Git status loads only while these details or a Git-dependent workspace menu is open; closing them stops the 60-second and focus refreshes.
+- Remove the sidebar header Git button. The hover popover's branch row carries the summary on the right (for example, “6 modified · 11 stashed”), using the existing translated Git status phrases, and a severity dot beside the branch name; its terminal action uses `square-terminal`. The row is that workspace's own Git entry point: it opens the branch picker — checkout, pull/push, View Changes, Commit — so a non-active workspace no longer has to be selected first. The picker is a nested layer: the details stay pinned while it is open — a picker left open keeps them up until it is dismissed — and collapse when it closes. A row with no Git wiring (an untrusted workspace, or one without a real path) keeps the plain-text summary, and a detached HEAD names no branch, so it shows no row. Git status loads only while these details or a Git-dependent workspace menu is open; closing them stops the 60-second and focus refreshes.
 - Chat Git reads run only when the visible composer includes `gitBranch`, or the environment panel is visible and includes the environment card. A configured but closed panel does not trigger reads. Omitting `composerToolbarActions` preserves the default toolbar choices; an explicit array without `gitBranch` disables that consumer.
 - `WebShellWithProviders` disables redundant provider Git prefetches and lets
   the UI own those reads. Attached sessions can display the fetched branch

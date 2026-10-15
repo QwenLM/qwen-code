@@ -195,7 +195,7 @@ for (const theme of ['light', 'dark']) {
     ).toBeInViewport();
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(percentage).toBeVisible();
-    const tooltip = page.locator('[data-slot="tooltip-content"]');
+    const tooltip = page.locator('[data-web-shell-context-popover]');
     await page.getByRole('button', { name: 'Ultra wide', exact: true }).focus();
     await page.keyboard.press('Tab');
     await expect(usage).toBeFocused();
@@ -209,44 +209,54 @@ for (const theme of ['light', 'dark']) {
     await usage.hover();
     await expect(tooltip).toContainText('60,000 tokens');
     await expect(tooltip).toContainText('100,000 tokens');
-    await expect(tooltip.locator('dt')).toHaveCount(2);
+    await expect(tooltip.locator('dt')).toHaveCount(3);
+    await expect(tooltip).toContainText('Remaining40,000 tokens');
     for (const label of await tooltip.locator('dt').all()) {
       await expect(label).toHaveCSS('color', secondaryColor);
     }
-    await expect(tooltip).toContainText(
+    // The main composer has a details panel, so the popover points at that
+    // instead of advertising a transcript snapshot.
+    await expect(tooltip).not.toContainText(
       'Click to view the breakdown in the conversation.',
     );
     await expect(
-      tooltip.getByText('Click to view the breakdown in the conversation.', {
-        exact: true,
-      }),
-    ).toHaveCSS('color', secondaryColor);
+      tooltip.getByRole('button', { name: 'View details', exact: true }),
+    ).toBeVisible();
     expect(contextRequests).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath(`context-hover-${theme}.png`),
     });
-    await usage.click();
     const history = page.locator('[data-web-shell-message-list]');
     const cards = history.getByRole('group', {
       name: 'Context Usage',
       exact: true,
     });
+
+    // The transcript detail card is still reachable, through the command. It is
+    // produced before the panel is ever opened, so the overflow checks below
+    // measure a chat column that is not mid-transition.
+    await editor.fill('/context detail');
+    await page
+      .getByRole('button', { name: 'Send message', exact: true })
+      .click();
     await expect(cards).toHaveCount(1);
-    await expect(cards.first()).toContainText('60.0%');
-    expect(contextRequests).toEqual([false]);
-    await cards.first().getByRole('button', { name: 'View details' }).click();
-    await expect(cards).toHaveCount(2);
     await expect(
       history.getByRole('region', { name: 'Context Usage', exact: true }),
     ).toHaveCount(0);
-    expect(contextRequests).toEqual([false, true]);
+    expect(contextRequests).toEqual([true]);
     const detailCard = cards.last();
-    await expect(detailCard.locator('details[open]')).toHaveCount(4);
+    await expect(detailCard.locator('[class*="total"]')).toHaveText(
+      '60.0k / 100.0k tokens',
+    );
+    await expect(detailCard.locator('details[open]')).toHaveCount(5);
+    await expect(
+      detailCard.locator('summary').filter({ hasText: 'Built-in tools' }),
+    ).toHaveAccessibleName('Built-in tools 10.0k (10.0%)');
     await expect(
       detailCard
         .locator('summary')
         .filter({ hasText: 'Built-in tools' })
-        .locator('span'),
+        .locator('[class*="ratio"]'),
     ).toHaveCSS('color', secondaryColor);
     await expect(detailCard.getByText(longName, { exact: true })).toBeVisible();
     await expect(detailCard.getByText(longName, { exact: true })).toHaveCSS(
@@ -278,12 +288,24 @@ for (const theme of ['light', 'dark']) {
       .click();
 
     const panel = page.locator('[class*="panel"][aria-busy]');
-    await expect(panel).toContainText('60.0k tokens (60.0%)');
+    await expect(panel).toContainText('60.0k (60.0%)');
+    await panel.locator('details > summary').first().click();
     const tools = panel
-      .locator('details')
+      .locator('details details')
       .filter({ hasText: 'Built-in tools' });
-    await expect(tools.locator('summary')).toHaveText('Built-in tools (2)');
-    await expect(tools.locator('summary span')).toHaveCSS(
+    await expect(tools.locator('summary')).toHaveText(
+      'Built-in tools 10.0k (10.0%)',
+    );
+    const plainCategoryLabel = await panel
+      .getByText('System prompt', { exact: true })
+      .boundingBox();
+    const expandableCategoryLabel = await tools
+      .getByText('Built-in tools', { exact: true })
+      .boundingBox();
+    expect(plainCategoryLabel).not.toBeNull();
+    expect(expandableCategoryLabel).not.toBeNull();
+    expect(expandableCategoryLabel!.x).toBe(plainCategoryLabel!.x);
+    await expect(tools.locator('summary [class*="ratio"]')).toHaveCSS(
       'color',
       secondaryColor,
     );
@@ -303,7 +325,9 @@ for (const theme of ['light', 'dark']) {
     await expect(
       panel.getByText('run_shell_command', { exact: true }),
     ).toBeHidden();
-    for (const summary of await panel.locator('summary').all()) {
+    for (const summary of await panel
+      .locator('details details > summary')
+      .all()) {
       await summary.click();
     }
     await expect(panel.getByText(longName, { exact: true })).toBeVisible();
@@ -376,7 +400,12 @@ for (const theme of ['light', 'dark']) {
         'background-color',
         color,
       );
-      await usage.click();
+      // The ring opens the panel instead of posting a card, so the transcript
+      // reading under test comes from the slash command.
+      await editor.fill('/context');
+      await page
+        .getByRole('button', { name: 'Send message', exact: true })
+        .click();
       await expect(tooltip).toHaveCount(0);
       await expect(cards.last().locator('[class*="percentage"]')).toHaveText(
         `${tokens / 1000}.0%`,
@@ -391,7 +420,7 @@ for (const theme of ['light', 'dark']) {
           .locator('[class*="row"]')
           .filter({ has: page.getByText('Used', { exact: true }) })
           .locator('[class*="value"]');
-        await expect(usedValue).toHaveText('120.0k tokens (>100%)');
+        await expect(usedValue).toHaveText('120.0k (>100%)');
         await expect(usedValue).toHaveCSS('color', errorColor);
         await expect(usedValue).toHaveCSS('text-align', 'right');
       }

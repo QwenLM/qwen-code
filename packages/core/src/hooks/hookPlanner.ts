@@ -5,13 +5,27 @@
  */
 
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
+import type { HookExecutionOwner } from './hook-execution-context.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { getAliasSetForTool } from '../tools/tool-utils.js';
+import { getToolNameAliases } from '../permissions/rule-parser.js';
 import { matchesHookPattern } from './hook-matcher.js';
 
+/**
+ * Names a tool hook matcher may use for a tool: its runtime id, display name
+ * and legacy names, plus every name a permission rule accepts for the same
+ * tool (which includes Claude Code's `Bash`, `Read` and `Write`). Each name
+ * identifies this one tool; permission meta-categories are not applied, so
+ * `Read` matches `read_file` but not `grep_search`.
+ */
 export function getToolMatcherTargets(toolName: string): string[] {
-  return [...getAliasSetForTool(toolName)];
+  return [
+    ...new Set([
+      ...getAliasSetForTool(toolName),
+      ...getToolNameAliases(toolName),
+    ]),
+  ];
 }
 
 type HookMatcherTargetKind =
@@ -107,8 +121,19 @@ export class HookPlanner {
   createExecutionPlan(
     eventName: HookEventName,
     context?: HookEventContext,
+    owner?: HookExecutionOwner,
   ): HookExecutionPlan | null {
-    const hookEntries = this.hookRegistry.getHooksForEvent(eventName);
+    const hookEntries = this.hookRegistry
+      .getHooksForEvent(eventName)
+      .filter(
+        (entry) =>
+          (entry.agentScope === undefined ||
+            (owner !== undefined &&
+              entry.owner !== undefined &&
+              entry.owner.sessionId === owner.sessionId &&
+              entry.owner.agentId === owner.agentId)) &&
+          (entry.isSourceTrusted?.() ?? true),
+      );
 
     if (hookEntries.length === 0) {
       return null;

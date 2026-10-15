@@ -327,6 +327,73 @@ describe('CommandService', () => {
     expect(syncExtension?.extensionName).toBe('git-helper');
   });
 
+  // Shaped like SavedWorkflowLoader's extension commands.
+  const extensionWorkflowCommand = (name: string): SlashCommand => ({
+    ...createMockCommand(name, CommandKind.FILE),
+    source: 'workflow-command',
+    modelInvocable: true,
+    whenToUse: 'When the user asks for an audit',
+    extensionName: 'gcp',
+    workflowName: name,
+  });
+
+  it('renames an extension workflow that collides with its skill, keeping both reachable and disableable', async () => {
+    const loaders = () => [
+      new MockCommandLoader([
+        { ...skillCommand('gcp:audit'), modelInvocable: true },
+      ]),
+      new MockCommandLoader([extensionWorkflowCommand('gcp:audit')]),
+    ];
+
+    const service = await CommandService.create(
+      loaders(),
+      new AbortController().signal,
+    );
+    expect(commandNamed(service, 'gcp:audit')?.kind).toBe(CommandKind.SKILL);
+    expect(commandNamed(service, 'gcp.gcp:audit')?.source).toBe(
+      'workflow-command',
+    );
+    // Both stay reachable in every mode and for the model, under distinct
+    // names; the renamed workflow command still runs `gcp:audit` by name.
+    expect(service.getCommandsForMode('acp').map((cmd) => cmd.name)).toEqual(
+      expect.arrayContaining(['gcp:audit', 'gcp.gcp:audit']),
+    );
+    expect(service.getModelInvocableCommands().map((cmd) => cmd.name)).toEqual(
+      expect.arrayContaining(['gcp:audit', 'gcp.gcp:audit']),
+    );
+
+    const disabled = await CommandService.create(
+      loaders(),
+      new AbortController().signal,
+      new Set(['gcp:audit']),
+    );
+    expect(
+      disabled.getCommands().filter((cmd) => cmd.name.includes('audit')),
+    ).toEqual([]);
+  });
+
+  it('lets a same-named custom command, which loads last, keep the slash command over an extension workflow', async () => {
+    const service = await CommandService.create(
+      [
+        new MockCommandLoader([extensionWorkflowCommand('gcp:audit')]),
+        new MockCommandLoader([
+          {
+            ...createMockCommand('gcp:audit', CommandKind.FILE),
+            source: 'skill-dir-command',
+          },
+        ]),
+      ],
+      new AbortController().signal,
+    );
+
+    expect(
+      service
+        .getCommands()
+        .filter((cmd) => cmd.name.includes('audit'))
+        .map((cmd) => cmd.source),
+    ).toEqual(['skill-dir-command']);
+  });
+
   it('should handle user/project command override correctly', async () => {
     const builtinCommand = createMockCommand('help', CommandKind.BUILT_IN);
     const userCommand = createMockCommand('help', CommandKind.FILE);

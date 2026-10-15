@@ -761,7 +761,8 @@ unsafe fn app_target_window_id(window: AXUIElementRef) -> Option<u32> {
 }
 
 /// The returned menu-bar item owns its retain. Only an explicitly selected
-/// item establishes menu context; cached children of a closed menu do not.
+/// item with a visible submenu establishes menu context; cached children of a
+/// closed menu do not.
 pub unsafe fn copy_open_menu_context(app: AXUIElementRef) -> (Option<AXUIElementRef>, bool) {
     let (bar, complete) = copy_selected_menu_bar_item(app);
     if bar.is_some() || !complete {
@@ -769,7 +770,16 @@ pub unsafe fn copy_open_menu_context(app: AXUIElementRef) -> (Option<AXUIElement
     }
     let mut pid = 0;
     if AXUIElementGetPid(app, &mut pid) == kAXErrorSuccess {
-        (super::menu::copy_current(pid), true)
+        let Some(menu) = super::menu::copy_current(pid) else {
+            return (None, true);
+        };
+        let (visible, complete) = menu_visibility(menu);
+        if visible && complete {
+            (Some(menu), true)
+        } else {
+            CFRelease(menu as CFTypeRef);
+            (None, complete)
+        }
     } else {
         (None, false)
     }
@@ -790,10 +800,25 @@ unsafe fn copy_selected_menu_bar_item(app: AXUIElementRef) -> (Option<AXUIElemen
         let read = copy_bool_attr_with_status(item, "AXSelected");
         complete &= read.complete;
         if read.value == Some(true) {
-            selected.push(item);
-        } else {
-            CFRelease(item as CFTypeRef);
+            let children = copy_children_with_status(item);
+            complete &= children.complete;
+            let mut visible = false;
+            for child in children.elements {
+                let role = copy_string_attr_with_status(child, "AXRole");
+                complete &= role.complete;
+                if role.value.as_deref() == Some("AXMenu") {
+                    let (open, menu_complete) = menu_visibility(child);
+                    visible |= open;
+                    complete &= menu_complete;
+                }
+                CFRelease(child as CFTypeRef);
+            }
+            if visible {
+                selected.push(item);
+                continue;
+            }
         }
+        CFRelease(item as CFTypeRef);
     }
     if complete && selected.len() == 1 {
         (selected.pop(), true)
@@ -807,6 +832,20 @@ unsafe fn copy_selected_menu_bar_item(app: AXUIElementRef) -> (Option<AXUIElemen
         }
         (None, complete)
     }
+}
+
+unsafe fn menu_visibility(menu: AXUIElementRef) -> (bool, bool) {
+    let _ = AXUIElementSetMessagingTimeout(menu, 0.1);
+    let children = copy_element_array_attr(menu, "AXVisibleChildren");
+    let visible = !children.elements.is_empty();
+    for child in children.elements {
+        CFRelease(child as CFTypeRef);
+    }
+    if visible && children.complete {
+        return (true, true);
+    }
+    let frame = element_screen_rect_with_status(menu);
+    (frame.value.is_some(), children.complete && frame.complete)
 }
 
 /// Get the children of an AX element.

@@ -60,6 +60,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
   });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
@@ -157,7 +158,7 @@ function brandLogoImage(): HTMLImageElement | null {
 
 /** The built-in inline mark — the one every unconfigured deployment sees. */
 function builtInMark(): Element | null {
-  return container.querySelector('svg[viewBox="0 0 141.38 140"]');
+  return container.querySelector('svg[viewBox="17.5 27.7 135.6 135.6"]');
 }
 
 beforeEach(() => {

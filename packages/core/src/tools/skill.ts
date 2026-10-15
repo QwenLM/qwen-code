@@ -14,7 +14,7 @@ import type {
 } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
-import type { SkillConfig } from '../skills/types.js';
+import { skillRestrictionNames, type SkillConfig } from '../skills/types.js';
 import {
   logSkillLaunch,
   recordSkillInvocation,
@@ -39,6 +39,7 @@ import {
   ReviewWorkflowActivationError,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  skillModelInvocationBlock,
 } from './skill-utils.js';
 
 /**
@@ -79,6 +80,26 @@ Important:
   - \`reference.md\` -> \`/path/to/skill/reference.md\`
 </skills_instructions>`;
 
+/** Why resume declines to re-arm a skill the model could not invoke now. */
+const SKILL_RESTORE_BLOCK_REASONS = {
+  disabled: 'it is disabled',
+  inactive: 'its `paths:` activation has not fired',
+  hidden: 'it is hidden from model invocation',
+} as const;
+
+function logSkillNotRestored(skill: SkillConfig, reason: string): void {
+  // Emptiness, not truthiness: the parser assigns `{}` for an empty or
+  // all-unknown `hooks:` block, and such a skill has nothing to lose.
+  const declaresSideEffects =
+    (skill.allowedTools?.length ?? 0) > 0 ||
+    Object.keys(skill.hooks ?? {}).length > 0;
+  if (declaresSideEffects) {
+    debugLogger.warn(
+      `Not re-applying the hooks and allowedTools of skill "${skill.name}" on resume: ${reason}.`,
+    );
+  }
+}
+
 /**
  * Skill tool that enables the model to access skill definitions. The tool keeps
  * an in-memory set of the currently available skills (for validation) but exposes
@@ -102,7 +123,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
-  private loadedSkillContents: Set<string> = new Set();
+  private loadedSkillContents = new Map<string, string>();
+  private loadedSkillContentByName = new Map<
+    string,
+    { content: string; restrictionNames: string[] }
+  >();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -185,6 +210,35 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         this.skillManager,
         this.config,
       );
+      const discoveredByName = new Map(
+        (this.skillManager.getCachedSkills() ?? []).map((skill) => [
+          skill.name,
+          skill,
+        ]),
+      );
+      const disabledNames = this.config.getDisabledSkillNames();
+      for (const name of this.loadedSkillNames) {
+        const skill = discoveredByName.get(name);
+        const loaded = this.loadedSkillContentByName.get(name);
+        if (
+          !skill &&
+          this.skillManager.hasDiscoveryErrors() &&
+          !(loaded?.restrictionNames ?? skillRestrictionNames({ name })).some(
+            (entry) => disabledNames.has(entry),
+          )
+        ) {
+          continue;
+        }
+        if (
+          !skill ||
+          !this.config.isSkillEnabled(skill) ||
+          loaded?.content !==
+            buildSkillLlmContent(path.dirname(skill.filePath), skill.body)
+        ) {
+          this.loadedSkillNames.delete(name);
+          this.loadedSkillContentByName.delete(name);
+        }
+      }
       this.availableSkills = collected.availableSkills;
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
@@ -319,9 +373,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.config,
       this.skillManager,
       params,
-      (name: string, content?: string) => {
+      (name: string, content?: string, skill?: SkillConfig) => {
         this.loadedSkillNames.add(name);
-        if (content !== undefined) this.loadedSkillContents.add(content);
+        if (content !== undefined) {
+          this.loadedSkillContents.set(content, name);
+          this.loadedSkillContentByName.set(name, {
+            content,
+            restrictionNames: skillRestrictionNames(skill ?? { name }),
+          });
+        }
       },
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
@@ -340,53 +400,89 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Returns the set of skill names that have been successfully loaded
-   * (invoked) during the current session. Used by /context to attribute
-   * loaded skill body tokens separately from the tool-definition cost.
+   * Returns the skill names whose current content is already loaded.
+   * Historical bodies remain available through getLoadedSkillContents().
    */
   getLoadedSkillNames(): ReadonlySet<string> {
     return this.loadedSkillNames;
   }
 
   getLoadedSkillContents(): ReadonlySet<string> {
+    return new Set(this.loadedSkillContents.keys());
+  }
+
+  /** Maps exact emitted bodies to skill names, retained across refreshes. */
+  getLoadedSkillContentNames(): ReadonlyMap<string, string> {
     return this.loadedSkillContents;
   }
 
-  restoreLoadedSkillsFromHistory(history: Content[]): void {
+  async restoreLoadedSkillsFromHistory(history: Content[]): Promise<void> {
     this.clearLoadedSkills();
 
-    const cachedSkills = this.skillManager.getCachedSkills() ?? [];
-    const skillByName = new Map<string, { name: string; output: string }>();
-    for (const skill of cachedSkills) {
+    // `null` means no refresh has committed yet, not an empty cache: reading
+    // it as empty would skip every skill in the history, gates included.
+    let cachedSkills = this.skillManager.getCachedSkills();
+    if (cachedSkills === null) {
+      try {
+        await this.skillManager.listSkills();
+        cachedSkills = this.skillManager.getCachedSkills();
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to load skills while restoring a resumed session:',
+          error,
+        );
+      }
+    }
+
+    // Exact names, as the live path resolves them: a case-folded key would
+    // bind `deploy` and `Deploy` to one entry.
+    const skillByName = new Map<
+      string,
+      { name: string; output: string; config: SkillConfig }
+    >();
+    for (const skill of cachedSkills ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
-      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+      skillByName.set(skill.name, { name: skill.name, output, config: skill });
     }
     // Pre-rename transcripts request the authored spelling; fall back to it
     // only where no skill owns that name outright, or a resumed session
     // misses the restore and re-injects a body on the next invocation.
-    for (const skill of cachedSkills) {
-      const authored = (skill.authoredName ?? '').trim().toLowerCase();
-      const registryName = skill.name.toLowerCase();
-      if (authored && authored !== registryName && !skillByName.has(authored)) {
-        skillByName.set(authored, skillByName.get(registryName)!);
+    for (const skill of cachedSkills ?? []) {
+      const authored = (skill.authoredName ?? '').trim();
+      if (authored && authored !== skill.name && !skillByName.has(authored)) {
+        skillByName.set(authored, skillByName.get(skill.name)!);
       }
     }
 
-    const restoreSkill = (requestedName: unknown, output: unknown) => {
-      if (typeof requestedName !== 'string' || typeof output !== 'string')
-        return;
-      const skill = skillByName.get(requestedName.toLowerCase());
-      if (
-        !skill ||
-        (output !== skill.output && !output.startsWith(`${skill.output}\n`))
-      ) {
+    const restored = new Map<string, SkillConfig>();
+    const unmatched = new Map<string, SkillConfig>();
+    const restoreSkill = (
+      requestedName: unknown,
+      output: unknown,
+      rearm: boolean,
+    ): void => {
+      if (typeof requestedName !== 'string' || typeof output !== 'string') {
         return;
       }
-      this.loadedSkillContents.add(skill.output);
+      const skill = skillByName.get(requestedName);
+      if (!skill) return;
+      if (output !== skill.output && !output.startsWith(`${skill.output}\n`)) {
+        // Refusals, truncated or persisted bodies and bodies of an edited
+        // SKILL.md all land here. None can be checked against the file on
+        // disk, so none may grant what its current frontmatter declares.
+        if (rearm) unmatched.set(skill.name, skill.config);
+        return;
+      }
+      this.loadedSkillContents.set(skill.output, skill.name);
       this.loadedSkillNames.add(skill.name);
+      this.loadedSkillContentByName.set(skill.name, {
+        content: skill.output,
+        restrictionNames: skillRestrictionNames(skill.config),
+      });
+      if (rearm) restored.set(skill.name, skill.config);
     };
 
     const pendingSkillCalls = new Map<string, string>();
@@ -442,7 +538,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
               'skill' in result.args &&
               'output' in result
             ) {
-              restoreSkill(result.args.skill, result.output);
+              // A script can print this line itself, so it restores the
+              // body only and never re-arms grants or hooks.
+              restoreSkill(result.args.skill, result.output, false);
             }
           }
           continue;
@@ -458,8 +556,51 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const requestedName = pendingSkillCalls.get(response.id);
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
-        restoreSkill(requestedName, output);
+        restoreSkill(requestedName, output, true);
       }
+    }
+
+    // Awaited so every grant and hook is in force before the resumed session
+    // takes its first turn.
+    for (const skill of restored.values()) {
+      await this.restoreSkillSideEffects(skill);
+    }
+    for (const [name, skill] of unmatched) {
+      if (!this.loadedSkillNames.has(name)) {
+        logSkillNotRestored(
+          skill,
+          'no recorded response matches SKILL.md on disk',
+        );
+      }
+    }
+  }
+
+  /**
+   * Re-applies a restored skill's `allowedTools` and `hooks:`. Both live only
+   * in process memory, so without this a resumed session keeps the skill's
+   * instructions in context while its `PreToolUse` gate is gone (#11180).
+   */
+  private async restoreSkillSideEffects(skill: SkillConfig): Promise<void> {
+    // Skip a skill the model could not invoke now. Hooks go with the grant: a
+    // `PreToolUse` hook can answer `permissionDecision: 'allow'`, so re-arming
+    // one can widen permissions as easily as narrow them.
+    const blocked = skillModelInvocationBlock(
+      this.config,
+      this.skillManager,
+      skill,
+    );
+    if (blocked) {
+      logSkillNotRestored(skill, SKILL_RESTORE_BLOCK_REASONS[blocked]);
+      return;
+    }
+    try {
+      await applySkillSideEffects(this.config, skill);
+    } catch (error) {
+      if (!(error instanceof ReviewWorkflowActivationError)) throw error;
+      debugLogger.warn(
+        `Review workflow activation failed while restoring skill "${skill.name}" on resume:`,
+        error,
+      );
     }
   }
 
@@ -472,6 +613,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
     this.loadedSkillContents.clear();
+    this.loadedSkillContentByName.clear();
   }
 
   /**
@@ -498,7 +640,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly config: Config,
     private readonly skillManager: SkillManager,
     params: SkillParams,
-    private readonly onSkillLoaded: (name: string, content?: string) => void,
+    private readonly onSkillLoaded: (
+      name: string,
+      content?: string,
+      skill?: SkillConfig,
+    ) => void,
     private readonly commandExecutor:
       | ((
           name: string,
@@ -798,7 +944,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
-      this.onSkillLoaded(this.params.skill, llmContent);
+      this.onSkillLoaded(this.params.skill, llmContent, skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {

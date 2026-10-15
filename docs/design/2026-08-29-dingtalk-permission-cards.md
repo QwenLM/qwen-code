@@ -1,5 +1,7 @@
 # DingTalk Tool Permission Cards
 
+[English](2026-08-29-dingtalk-permission-cards.md) | [简体中文](2026-08-29-dingtalk-permission-cards.zh-CN.md)
+
 ## Context
 
 The DingTalk channel already presents running status and `ask_user_question` interactions with native cards. Ordinary non-YOLO tool permission requests still expose `/approve`, `/approve-always`, and `/deny` commands as plain text. This change extends the existing Channel presentation boundary without changing ACP, daemon routing, permission semantics, or other channel adapters.

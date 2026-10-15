@@ -30,7 +30,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.20.6'
+        default: '0.20.11'
       notarize:
         description:
           'Codesign + notarize the macOS artifacts (false to skip during
@@ -142,9 +142,11 @@ jobs:
           fi
           SKILL_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' packages/core/src/skills/bundled/computer-use/SKILL.md)
           USER_GUIDE_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
+          BROWSER_USE_SKILL_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' packages/core/src/skills/bundled/browser-use/SKILL.md)
           for PAIR in \
             "Computer Use skill Node REPL:$SKILL_NODE_REPL_VERSION" \
-            "Computer Use user guide Node REPL:$USER_GUIDE_NODE_REPL_VERSION"; do
+            "Computer Use user guide Node REPL:$USER_GUIDE_NODE_REPL_VERSION" \
+            "Browser Use skill Node REPL:$BROWSER_USE_SKILL_NODE_REPL_VERSION"; do
             LABEL=${PAIR%%:*}
             VALUE=${PAIR#*:}
             if [[ "$VALUE" != "$NODE_REPL_VERSION" ]]; then
@@ -697,14 +699,12 @@ jobs:
       - uses: 'actions/setup-node@v4'
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
       - name: 'Install npm 11'
         run: 'npm install --global npm@11.19.0'
       - name: 'Install workspace dependencies'
-        run: 'npm ci --ignore-scripts --no-audit --no-fund --progress=false'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only'
       - name: 'Test standalone Node REPL package'
         working-directory: 'packages/node-repl'
         run: |

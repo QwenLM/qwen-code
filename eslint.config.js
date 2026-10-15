@@ -13,10 +13,13 @@ import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
 import checkFile from 'eslint-plugin-check-file';
-import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
+import noCoreRootBarrelImport, {
+  CORE_BARREL_SPECIFIERS,
+} from './eslint-rules/no-core-root-barrel-import.js';
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
 import noCoreUtilsUpwardImport from './eslint-rules/no-core-utils-upward-import.js';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import { legacyCoreBarrelImports } from './eslint.legacy-core-barrel-imports.mjs';
 import noConfigObjectCreate from './eslint-rules/no-config-object-create.js';
 
 // General syntax restrictions applied to every TS/TSX source file. Hoisted so
@@ -56,6 +59,11 @@ export default tseslint.config(
       'node_modules/*',
       'packages/**/dist/**',
       'packages/web-templates/src/generated/**',
+      // Generated UTS #39 confusables table (6.5k-entry literal): the
+      // type-aware rules OOM the eslint heap on it, and generated data
+      // has no idiom to enforce. Regenerate via
+      // packages/web-shell/scripts/generate-confusables.mjs.
+      'packages/web-shell/client/utils/unicodeConfusables.ts',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -67,8 +75,9 @@ export default tseslint.config(
       'docs-site/out/**',
       '.qwen/**',
       'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
-      'packages/desktop-shell/runtime/**',
-      'packages/desktop-shell/src-tauri/target/**',
+      'packages/desktop/runtime/**',
+      'packages/core/src/skills/bundled/browser-use/runtime/**',
+      'packages/desktop/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
@@ -245,6 +254,9 @@ export default tseslint.config(
     files: [
       'packages/**/src/**/*.{ts,tsx}',
       'integrations/**/src/**/*.{ts,tsx}',
+      // web-shell is published and keeps its shipped sources in client/, not
+      // src/, so the globs above reach none of it.
+      'packages/web-shell/client/**/*.{ts,tsx}',
     ],
     ignores: extraneousDependencyTestFiles,
     rules: {
@@ -286,6 +298,33 @@ export default tseslint.config(
     rules: {
       'architecture/no-core-root-barrel-import': 'error',
       'architecture/no-core-utils-upward-import': 'error',
+    },
+  },
+  {
+    // Importing a value from core's package root evaluates all of core in
+    // every test whose import graph reaches the importing file, which is
+    // where most cli test time goes (#10908). Type-only imports are erased
+    // and stay allowed. Files that predate this rule are listed in
+    // eslint.legacy-core-barrel-imports.mjs; drop an entry when migrating it.
+    files: ['packages/cli/src/**/*.{ts,tsx}'],
+    ignores: [
+      '**/*.{test,spec}.{ts,tsx}',
+      '**/__tests__/**',
+      '**/fixtures/**',
+      ...legacyCoreBarrelImports,
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [...CORE_BARREL_SPECIFIERS].map((name) => ({
+            name,
+            allowTypeImports: true,
+            message:
+              "Import from the core module that defines the symbol, e.g. '@qwen-code/qwen-code-core/utils/debugLogger.js'. The package root evaluates all of core in every test that reaches this file (#10908).",
+          })),
+        },
+      ],
     },
   },
   {
@@ -473,8 +512,8 @@ export default tseslint.config(
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
       'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
-      // Desktop-shell skill helper scripts also run with `node`.
-      'packages/desktop-shell/.agents/skills/**/scripts/**/*.mjs',
+      // Desktop skill helper scripts also run with `node`.
+      'packages/desktop/.agents/skills/**/scripts/**/*.mjs',
     ],
     languageOptions: {
       globals: {
@@ -519,7 +558,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['packages/desktop-shell/bootstrap/**/*.js'],
+    files: ['packages/desktop/bootstrap/**/*.js'],
     languageOptions: {
       globals: {
         ...globals.browser,

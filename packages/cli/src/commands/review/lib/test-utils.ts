@@ -7,6 +7,7 @@
 import {
   appendFileSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -81,7 +82,7 @@ export function isolateOperatorReviewSettings(): {
   };
 }
 
-/** Seed the report `parse-args` tees, so the effort fallback has something to read. */
+/** Seed the report `parse-args --out` writes, so the effort fallback has something to read. */
 export function seedParseArgs(dir: string, effort: unknown): void {
   mkdirSync(join(dir, dirname(PARSE_ARGS_REPORT)), { recursive: true });
   writeFileSync(
@@ -254,4 +255,21 @@ export function plantAdminEntry(
   rmSync(join(tree, '.git'), { force: true });
   writeFileSync(join(tree, '.git'), `gitdir: ${entry}\n`);
   return entry;
+}
+
+/**
+ * Whether the capture's cache candidate at `path` is the ledger-only shape
+ * (#12657): present — a local round's ledger has nowhere else to live — but
+ * carrying NO anchor state. The invariant the old "withheld" assertions
+ * protected is the absence of an anchor, and that is what this checks.
+ */
+export function isLedgerOnlyCandidate(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const c = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  return (
+    typeof c['ledgerOnly'] === 'string' &&
+    typeof c['stateId'] === 'string' &&
+    c['stateId'].startsWith('ledger-') &&
+    ['files', 'headSha', 'lastModelId', 'untracked'].every((key) => !(key in c))
+  );
 }

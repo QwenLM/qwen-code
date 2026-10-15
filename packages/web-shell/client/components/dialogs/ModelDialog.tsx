@@ -83,14 +83,6 @@ function getModelKey(model: ModelDialogModel): string {
   ].join('\0');
 }
 
-function getModelSelectId(
-  model: ModelDialogModel,
-  isFastMode: boolean,
-): string {
-  if (!isFastMode) return model.id;
-  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
-}
-
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailRow}>
@@ -125,7 +117,7 @@ export function ModelDialog({
   const initialIndex =
     currentIdx >= 0
       ? currentIdx
-      : (mode === 'advisor' || mode === 'image') && currentModel
+      : (isFastMode || mode === 'advisor' || mode === 'image') && currentModel
         ? -1
         : 0;
   const [activeIndex, setActiveIndex] = useState(initialIndex);
@@ -157,8 +149,7 @@ export function ModelDialog({
 
   const confirm = (index: number) => {
     const model = availableModels[index];
-    if (model && !loading && !error)
-      onSelect(getModelSelectId(model, isFastMode));
+    if (model && !loading && !error) onSelect(model.id);
   };
 
   const { keyboardMode } = useListboxKeyboard({

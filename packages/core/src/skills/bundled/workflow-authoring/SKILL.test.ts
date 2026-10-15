@@ -24,7 +24,10 @@ import {
   WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../../agents/runtime/workflow-orchestrator.js';
-import { WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS } from '../../../agents/runtime/workflow-sandbox.js';
+import {
+  WORKFLOW_BATCH_LIMIT,
+  WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS,
+} from '../../../agents/runtime/workflow-sandbox.js';
 import { ToolDisplayNames, ToolNames } from '../../../tools/tool-names.js';
 import {
   DEFAULT_STALL_MS,
@@ -32,7 +35,17 @@ import {
   MAX_WORKFLOW_STALL_MS_ENV,
 } from '../../../agents/runtime/workflow-stall.js';
 import { WorkflowAgentFailedError } from '../../../agents/runtime/workflow-agent-failure.js';
-import type { WorkflowAgentDispatch } from '../../../agents/runtime/workflow-orchestrator.js';
+import {
+  DEFAULT_WORKFLOW_SIZE_GUIDELINE,
+  DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS,
+  DEFAULT_WORKFLOW_SIZE_WARNING_TOKENS,
+  WORKFLOW_SIZE_GUIDELINE_AGENTS,
+  WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL,
+} from '../../../agents/runtime/workflow-size.js';
+import {
+  WorkflowOrchestrator,
+  type WorkflowAgentDispatch,
+} from '../../../agents/runtime/workflow-orchestrator.js';
 import {
   buildWorkflowToolDescription,
   WorkflowTool,
@@ -100,7 +113,8 @@ describe('bundled workflow-authoring skill', () => {
     ['is not an agent dispatch'],
     ['nests one level only'],
     ['read `budget.total`'],
-    ['subagent completed without calling StructuredOutput'],
+    ['the third failed submission stops it'],
+    ['makes agent() resolve to null without starting the agent'],
     ['Unresolved names make the admitted agent() resolve to null'],
   ])('moved out of the tool description: %s', (anchor) => {
     it('is in the skill', () => {
@@ -153,6 +167,10 @@ describe('bundled workflow-authoring skill', () => {
       `${WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS / 1000} seconds for the script's synchronous code before its first \`await\`, with no override`,
     ],
     ['max(2, min(16, availableParallelism()-2))'],
+    [
+      `${WORKFLOW_BATCH_LIMIT} entries in each list of one \`parallel()\` or \`pipeline()\` call, with no override`,
+    ],
+    [`holds at most ${WORKFLOW_BATCH_LIMIT} entries`],
   ])('states the runtime limit: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });
@@ -163,6 +181,8 @@ describe('bundled workflow-authoring skill', () => {
     ['`node:vm` sandbox'],
     // meta: the full contract, including the field the approval dialog prints.
     ['optionally `whenToUse` and `phases: [{ title, detail? }]`'],
+    // whenToUse: what it does for a workflow an extension ships.
+    ['`whenToUse` also lists the workflow for the model to start'],
     // parallel(): the eager form is refused, after the dispatches were spent.
     ['`parallel([() => agent(...)])`'],
     ['a non-function element rejects the whole batch'],
@@ -170,6 +190,7 @@ describe('bundled workflow-authoring skill', () => {
     // Determinism: all of Date, and the workaround.
     ['so does all of `Date`'],
     ['`new Date()`'],
+    ['`Date()`, `new Date()`'],
     ['stamp the result after the workflow returns'],
     // pipeline(): null drops the item and skips its later stages.
     ['its remaining stages are skipped'],
@@ -192,13 +213,32 @@ describe('bundled workflow-authoring skill', () => {
     ['A different effort is a different resume cache key'],
     // disallowedTools only narrows, names what it accepts, and a schema agent
     // cannot deny its answer.
-    ['stallMs?, disallowedTools? })'],
+    ['stallMs?, disallowedTools?, tools? })'],
     ['never re-enable one'],
     ['`mcp__<server>__*`'],
     ["such as `'Bash'`, resolves the call to null"],
     ['include `structured_output` resolves to null'],
     ['not on their order or duplicates'],
     ['named by its tool name or its display name'],
+    // tools narrows to exact names, refuses patterns and exec, and fails the
+    // call rather than dispatching an agent that could only spend its turn.
+    ['never brings back a tool the floor below or a deny takes away'],
+    ['an MCP tool by the name the model sees'],
+    [
+      "Patterns (`'*'`, `mcp__<server>`, `mcp__<server>__*`), `exec` and an empty list reject the call",
+    ],
+    ['the agent keeps `exec`, which can call only the listed tools'],
+    ["An entry that names no tool, such as `'Bash'`"],
+    [
+      "shares no tool with the `agentType`'s own allowlist or whose every tool is denied",
+    ],
+    ['also given `structured_output`'],
+    ['is simply not given, as with an `agentType` allowlist'],
+    ['or one no subagent may use (such as `todo_write`)'],
+    [
+      'Built-in spellings, order and duplicates do not change the resume key; other spellings do',
+    ],
+    ['whatever their `agentType` or their `tools`'],
     // What the disallowed-tool floor means for a script. The tools themselves
     // are checked against the orchestrator's own list below.
     ['cannot fan out further'],
@@ -210,6 +250,8 @@ describe('bundled workflow-authoring skill', () => {
       'inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any other thunk rejection',
     ],
     ['so null-check a `workflow()` result too'],
+    // The name-only lock reaches nested calls too.
+    ['`workflow({ scriptPath })` throws the same way; nest by name'],
     // isolation: every refusal, and the workaround for the nested one.
     ['when the session is already inside a worktree'],
     ['pass it as `workingDir`'],
@@ -219,11 +261,28 @@ describe('bundled workflow-authoring skill', () => {
     // Labels: the failures list carries nothing else.
     ['Make it unique per dispatch'],
     // The journal: every line type, and what a bare `started` means.
+    ['a `launched` line when the run starts'],
     ['a `started` line when an agent is dispatched'],
+    // Resume: what is refused, and what to do instead.
+    ['journal is no longer on disk has nothing to resume'],
+    ['start it again without `resumeFromRunId`'],
+    ['would run two copies of its agents against one journal'],
+    ['listed as failed with an `interrupted` error'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
+    // budget: where total comes from, what spent() counts, what the gate
+    // does not stop, and the two ways to size work to it.
+    ['a `+500k`-style directive'],
+    ['`spent()` then counts every output token this turn'],
+    ['agents already running are not stopped by it'],
+    ['guard on `budget.total`'],
+    ['budget.remaining() > 50_000'],
+    ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
+    ["interactive TUI's ink renderer"],
+    ['OpenTUI renderer does not yet run client-scheduled tools'],
+    ["Workflow({ name: '<name>' })"],
   ])('states the script contract: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });
@@ -268,8 +327,9 @@ describe('bundled workflow-authoring skill', () => {
 describe('the worked example', () => {
   function extractExample(): string {
     const body = loadSkill().body;
-    const match = body.match(/```js\n([\s\S]*?)```/);
-    if (!match) throw new Error('SKILL.md has no ```js example');
+    const section = body.slice(body.indexOf('## Worked example'));
+    const match = section.match(/```js\n([\s\S]*?)```/);
+    if (!match) throw new Error('SKILL.md has no ```js worked example');
     return match[1];
   }
 
@@ -399,5 +459,85 @@ describe('the worked example', () => {
 
     expect(result.error?.message).toContain('args.target is required');
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+// The size guideline and the large-run thresholds are stated in prose here and
+// enforced in `workflow-size.ts`. Each sentence is built from the constant the
+// runtime uses, so moving a threshold without the reference turns this red.
+describe('bundled workflow-authoring skill — workflow size', () => {
+  it('states the guideline sizes the tool description offers', () => {
+    expect(DEFAULT_WORKFLOW_SIZE_GUIDELINE).toBe('medium');
+    expect(skillProse()).toContain(
+      `small (${WORKFLOW_SIZE_GUIDELINE_AGENTS.small} agents), medium (${WORKFLOW_SIZE_GUIDELINE_AGENTS.medium}, the default) or large (${WORKFLOW_SIZE_GUIDELINE_AGENTS.large})`,
+    );
+  });
+
+  it('states the large-run thresholds the runner checks', () => {
+    expect(skillProse()).toContain(
+      `(${DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS} when unrestricted) or projects past ~${DEFAULT_WORKFLOW_SIZE_WARNING_TOKENS / 1_000_000}M output tokens`,
+    );
+    expect(skillProse()).toContain('it is not stopped');
+  });
+
+  it('names the setting by its label and says a mid-session change is announced', () => {
+    expect(skillProse()).toContain(
+      `the ${WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL} setting`,
+    );
+    expect(skillProse()).toContain(
+      'arrives as a reminder that replaces the guideline in the description',
+    );
+  });
+
+  it('says a dynamic import() is refused before the script starts', () => {
+    expect(skillProse()).toContain(
+      'even in a branch that never runs — is refused before it starts, so none of its agents runs first',
+    );
+  });
+
+  it('says an oversized list rejects the whole call as an ordinary rejection', () => {
+    expect(skillProse()).toContain(
+      'A longer list rejects the whole call before any of its thunks or stages runs; it is never truncated.',
+    );
+    expect(skillProse()).toContain(
+      "inside an outer `parallel()`/`pipeline()` it becomes that slot's `null`",
+    );
+    expect(skillProse()).toContain(
+      'Batching does not lift the agent cap or the token budget.',
+    );
+  });
+
+  // The batching snippet is copied for inputs past the limit, so it is run.
+  // Its map must build thunks, not calls: an eager agent() there would start
+  // every agent before the first batch is even formed.
+  it('batches past the limit from thunks and keeps every result in order', async () => {
+    const body = loadSkill().body;
+    const snippet = body.match(/```js\n([\s\S]*?)```/)?.[1] ?? '';
+    expect(snippet).toContain('files.map((file) => () => agent(');
+    expect(snippet).toContain(`i += ${WORKFLOW_BATCH_LIMIT}`);
+    const files = WORKFLOW_BATCH_LIMIT + 3;
+    const prev = process.env[MAX_WORKFLOW_AGENTS_ENV];
+    process.env[MAX_WORKFLOW_AGENTS_ENV] = String(files);
+    try {
+      const outcome = await new WorkflowOrchestrator(
+        async (prompt) => prompt,
+      ).run({
+        script: `const files = Array.from({ length: ${files} }, (_, i) => 'f' + i);\n${snippet}\nreturn summaries;`,
+        args: undefined,
+      });
+      const summaries = outcome.result as string[];
+      expect(summaries).toHaveLength(files);
+      expect(summaries[0]).toBe('Summarize f0');
+      expect(summaries[files - 1]).toBe(`Summarize f${files - 1}`);
+    } finally {
+      if (prev === undefined) delete process.env[MAX_WORKFLOW_AGENTS_ENV];
+      else process.env[MAX_WORKFLOW_AGENTS_ENV] = prev;
+    }
+  });
+
+  it('says a non-deterministic script is refused before it starts', () => {
+    expect(skillProse()).toContain(
+      'is refused before it starts, so none of its agents runs first',
+    );
   });
 });

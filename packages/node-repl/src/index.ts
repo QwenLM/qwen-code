@@ -68,7 +68,16 @@ function isEntryPoint(): boolean {
 }
 
 if (isEntryPoint()) {
-  main().catch((error) => {
+  const [command, ...rest] = process.argv.slice(2);
+  // `desktop-relay` lends this server to a remote Qwen Code session; loaded
+  // lazily so the plain MCP server never pulls in its WebSocket client.
+  const run =
+    command === 'desktop-relay'
+      ? import('./desktop-relay/cli.js')
+          .then(({ runDesktopRelayCommand }) => runDesktopRelayCommand(rest))
+          .then((code) => process.exit(code))
+      : main();
+  run.catch((error) => {
     // stderr — stdout is the JSON-RPC protocol channel.
     process.stderr.write(
       `[node-repl] fatal: ${

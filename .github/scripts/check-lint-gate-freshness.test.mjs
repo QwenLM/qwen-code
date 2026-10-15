@@ -50,6 +50,7 @@ test('pins the gate file list', () => {
     'scripts/lint.js',
     'eslint.config.js',
     'eslint.legacy-filenames.mjs',
+    'eslint.legacy-core-barrel-imports.mjs',
     '.prettierrc.json',
     '.prettierignore',
     '.github/workflows/ci.yml',

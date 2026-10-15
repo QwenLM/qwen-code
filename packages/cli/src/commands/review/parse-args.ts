@@ -28,7 +28,11 @@ import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { isAoneCanonicalHost } from './lib/remote-match.js';
-import { lastReviewEffortPath } from './lib/paths.js';
+import {
+  ensureReviewTmpDir,
+  lastReviewEffortPath,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -218,9 +222,12 @@ export const deadlineOption = (command: {
       ? 'Ignored on a resumed run once it parses (the grammar and the ' +
         'default rule still apply; the plan keeps its recorded wall). '
       : '') +
-    'A QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over both. An ' +
-    "explicit deadline, like the environment's, applies the huge tier's " +
-    'round reduction; the default does not.',
+    'A QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over the ' +
+    "flag and the default. An explicit deadline, like the environment's, " +
+    "applies the huge tier's round reduction; the default does not. " +
+    'Pauses count against the wall and also price the next round; the ' +
+    'Review Deadline section of the code-review docs gives the ceilings ' +
+    '(about 3h20m / 5h20m / 7h20m on the 8h / 12h / 16h defaults).',
 });
 
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
@@ -1407,6 +1414,10 @@ export const parseArgsCommand: CommandModule = {
     );
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
+      // Step 0's write is the round's FIRST into `.qwen/tmp`: the scratch
+      // directory is refused here when the workspace redirected it, before
+      // this file — or anything after it — lands through the link.
+      if (writesIntoReviewTmp(out)) ensureReviewTmpDir('parse-args');
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, json, 'utf8');
     }

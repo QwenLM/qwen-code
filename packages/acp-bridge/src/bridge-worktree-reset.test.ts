@@ -220,6 +220,31 @@ describe('worktree reset session transfer', () => {
       }
     });
 
+    it('does not accept an idle mid-turn message it cannot start while armed', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        bridge.setSessionResetPending?.(session.sessionId);
+
+        // An idle session promotes the message into a prompt at once; when
+        // the barrier refuses that prompt, the message was not taken.
+        expect(
+          bridge.enqueueMidTurnMessage(session.sessionId, 'blocked', {
+            clientId: session.clientId,
+          }),
+        ).toEqual({ accepted: false });
+        expect(handle.agent.promptCalls).toHaveLength(0);
+        expect(bridge.getMidTurnMessages(session.sessionId)).toMatchObject({
+          messages: [],
+        });
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('blocks the trusted continueSession prompt source while armed', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),

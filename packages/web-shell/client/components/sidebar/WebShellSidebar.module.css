@@ -1,12 +1,18 @@
 .sidebar {
   position: relative;
-  width: var(--web-shell-sidebar-width, 260px);
-  min-width: var(--web-shell-sidebar-width, 260px);
+  width: min(
+    var(--web-shell-sidebar-width, 300px),
+    calc(var(--web-shell-sidebar-container-width, 100vw) / 2)
+  );
+  min-width: min(
+    var(--web-shell-sidebar-width, 300px),
+    calc(var(--web-shell-sidebar-container-width, 100vw) / 2)
+  );
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 12px 12px;
   overflow: hidden;
   background: var(--sidebar-background);
   border-right: 1px solid var(--sidebar-border);
@@ -28,14 +34,16 @@
 }
 
 .sidebar.mobileOpen {
+  /* The floor is container-capped: a rail layout's 276px minimum would
+     otherwise overflow a host narrower than that (e.g. a 250px embed). */
   width: clamp(
-    var(--web-shell-sidebar-min-width, 220px),
-    70%,
+    min(var(--web-shell-sidebar-min-width, 220px), 100%),
+    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
     var(--web-shell-sidebar-max-width, 420px)
   );
   min-width: clamp(
-    var(--web-shell-sidebar-min-width, 220px),
-    70%,
+    min(var(--web-shell-sidebar-min-width, 220px), 100%),
+    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
     var(--web-shell-sidebar-max-width, 420px)
   );
 }
@@ -224,13 +232,17 @@
   object-fit: contain;
 }
 
-.brandName {
-  min-width: 0;
-  overflow: hidden;
+.brandName,
+.sectionHeader {
   color: var(--sidebar-foreground);
   font-size: 18px;
   font-weight: 500;
   line-height: 20px;
+}
+
+.brandName {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -295,9 +307,73 @@
   margin-bottom: 12px;
 }
 
-.liveWorkspaceLabel {
+.liveWorkspaceHeader {
+  display: inline-flex;
   min-width: 0;
-  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+}
+
+.livePendingHeader,
+.livePendingSession {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--sidebar-foreground);
+  font-size: 13px;
+}
+
+.livePendingHeader {
+  color: var(--muted-foreground);
+}
+
+.livePendingSession {
+  padding-left: 32px;
+  color: var(--muted-foreground);
+}
+
+button.livePendingSession {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.livePendingSession:hover {
+  color: var(--sidebar-foreground);
+}
+
+.livePendingSession svg {
+  width: 14px;
+  height: 14px;
+  color: var(--primary);
+  animation: livePendingSpin 1s linear infinite;
+}
+
+.liveSessionSpinner {
+  width: 14px;
+  height: 14px;
+  color: var(--primary);
+  animation: livePendingSpin 1s linear infinite;
+}
+
+@keyframes livePendingSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .livePendingSession svg {
+    animation: none;
+  }
+  .liveSessionSpinner {
+    animation: none;
+  }
 }
 
 .projectsHeader {
@@ -334,6 +410,23 @@
   gap: 2px;
 }
 
+@media (hover: hover) and (pointer: fine) {
+  .projectsHeaderActions,
+  .projectsHeader:has(.projectsHeaderActions) .projectsHeaderToggle svg {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .projectsHeader:hover .projectsHeaderActions,
+  .projectsHeader:has(:focus-visible) .projectsHeaderActions,
+  .projectsHeader:has(.projectsHeaderActions):is(:hover, :has(:focus-visible))
+    .projectsHeaderToggle
+    svg {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .projectsHeaderActions .projectsHeaderAction {
   margin-left: 0;
 }
@@ -351,6 +444,7 @@
 }
 
 .projectsHeaderToggle svg,
+.liveWorkspaceHeader > svg:last-child,
 .projectsHeaderAction svg {
   width: 15px;
   height: 15px;
@@ -828,6 +922,58 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The branch row itself becomes a button when the workspace's Git picker is
+   wired, so the whole row is the target rather than a trailing control. */
+.sessionDetailsRowButton {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.sessionDetailsRowButton:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+/* Branch name and its severity dot stay tight together; the summary keeps its
+   own right-aligned column via margin-left: auto. */
+.sessionDetailsBranch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* The compact chip's badge dot, lifted beside the branch name: accent when the
+   tree is dirty, warning for an in-progress operation or detached HEAD, error
+   when conflicted. Absent on a clean tree. */
+.sessionDetailsGitDot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color, #4a9eff);
+}
+
+.sessionDetailsGitDot[data-tone='warning'] {
+  background: var(--warning-color, #d29922);
+}
+
+.sessionDetailsGitDot[data-tone='error'] {
+  background: var(--error-color, #e5534b);
+}
+
+/* The row's only hover cue: the branch icon and the chevron carry the muted
+   tone from `.sessionDetailsRow svg`, so a hover has to move them together. */
+.sessionDetailsRowButton:hover svg {
+  color: var(--popover-foreground);
+}
+
 .sessionDetailsRowIssue,
 .sessionDetailsRowIssue .sessionDetailsRowValue {
   color: var(--warning-color, #d29922);
@@ -1121,10 +1267,17 @@
   justify-content: flex-end;
 }
 
-.sessionMetaSlot:not(
-  :has(.sessionLoading, .sessionAttention, .sessionGitIcon, .sessionSourceIcon)
-) {
-  padding-right: 10px;
+@supports (selector(:has(*))) {
+  .sessionMetaSlot:not(
+    :has(
+      .sessionLoading,
+      .sessionAttention,
+      .sessionGitIcon,
+      .sessionSourceIcon
+    )
+  ) {
+    padding-right: 10px;
+  }
 }
 
 .sessionAttention {
@@ -1184,29 +1337,40 @@
   pointer-events: none;
 }
 
-.sessionActions:focus-within,
-.sessionActions:has([data-state='open']) {
-  opacity: 1;
-  pointer-events: auto;
+@supports (selector(:has(*))) {
+  .sessionActions:focus-within,
+  .sessionActions:has([data-state='open']) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (hover: hover) {
+    .sessionMetaSlot:has(.sessionActions:focus-within),
+    .sessionMetaSlot:has([data-state='open']) {
+      min-width: var(--session-actions-width, 78px);
+    }
+
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
+    .sessionMetaSlot:has([data-state='open']) .sessionLoading,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
+    .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
+      opacity: 0;
+    }
+
+    .sessionRow:hover:not(.runningSession)
+      .sessionMetaSlot:has(.sessionActions)
+      .sessionSourceIcon,
+    .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+      opacity: 0;
+    }
+  }
 }
 
 @media (hover: hover) {
-  .sessionMetaSlot:has(.sessionActions:focus-within),
-  .sessionMetaSlot:has([data-state='open']) {
-    min-width: var(--session-actions-width, 78px);
-  }
-
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
-  .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
-  .sessionMetaSlot:has([data-state='open']) .sessionLoading,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
-  .sessionMetaSlot:has([data-state='open']) .sessionAttention,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
-  .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
-    opacity: 0;
-  }
-
   .sessionRow:hover .sessionMetaSlot {
     min-width: var(--session-actions-width, 78px);
   }
@@ -1215,11 +1379,7 @@
   .sessionRow:hover:not(.runningSession) .sessionAttention,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
-  .sessionMetaSlot:hover .sessionAttention,
-  .sessionRow:hover:not(.runningSession)
-    .sessionMetaSlot:has(.sessionActions)
-    .sessionSourceIcon,
-  .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+  .sessionMetaSlot:hover .sessionAttention {
     opacity: 0;
   }
 
@@ -1364,6 +1524,7 @@
   z-index: 1100;
   width: 240px;
   max-height: min(320px, calc(100vh - 16px));
+  max-height: min(320px, calc(100dvh - 16px));
   padding: 6px;
   border: 1px solid var(--sidebar-border);
   border-radius: 8px;
@@ -1662,6 +1823,25 @@
   overflow: hidden;
 }
 
+.footerVersion {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.withVersion:not(.collapsed) .body {
+  margin-bottom: 76px;
+}
+
+.collapsed:has([data-web-shell-update]) .body {
+  margin-bottom: 264px;
+}
+
 .footerPrimary,
 .footerActions {
   display: flex;
@@ -1717,7 +1897,10 @@
 }
 
 .version {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1;
@@ -1742,6 +1925,15 @@
   margin-right: 0;
   padding-right: 0;
   margin-bottom: 220px;
+  scrollbar-gutter: auto;
+  /* A visible scrollbar inside the 32px rail has no value and would
+     re-take layout width (re-creating the icon offset) the moment the
+     session list overflows — hide it so the content box stays stable. */
+  scrollbar-width: none;
+}
+
+.collapsed .body::-webkit-scrollbar {
+  display: none;
 }
 
 .collapsed .newTaskNav {
@@ -1980,22 +2172,17 @@
   cursor: default;
 }
 
-@media (max-width: 760px) {
-  .sidebar {
-    display: none;
-  }
-
-  .sidebar.mobileOpen {
-    display: flex;
-    z-index: 50;
-  }
-
-  .resizeHandle {
-    display: none;
-  }
+.sidebar[data-compact] {
+  display: none;
+}
+.sidebar[data-compact].mobileOpen {
+  display: flex;
+  z-index: 50;
+}
+.sidebar[data-compact] .resizeHandle {
+  display: none;
 }
 
-/* Registered workspace count next to the Projects label. */
 .projectsHeaderCount {
   display: inline-flex;
   align-items: center;
@@ -2008,4 +2195,207 @@
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+
+.sessionBackgroundRunning {
+  color: var(--warning-color, #d29922);
+}
+
+/* Hover-gated: touch devices get no hover reveal, and a sticky tap-hover on
+   the background dot must not hide the always-visible row actions. */
+@media (hover: hover) {
+  .sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+.homeColumn {
+  display: contents;
+}
+
+.railLayout {
+  border-right: 0;
+  flex-direction: row;
+  padding: 0;
+  align-items: stretch;
+}
+
+.railLayout .body {
+  margin-bottom: 0;
+}
+
+.railLayout .rail {
+  display: flex;
+  flex: 0 0 56px;
+  width: 56px;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 6px 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  border-right: 1px solid var(--sidebar-border);
+}
+
+.railLayout .railPrimary,
+.railLayout .primaryNav,
+.railLayout .footer {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.railLayout .rail .pluginButton,
+.railLayout .rail .footerButton,
+.railLayout .rail .collapseButton {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  color: color-mix(
+    in srgb,
+    var(--sidebar-foreground) 50%,
+    var(--sidebar-background)
+  );
+}
+
+.railLayout
+  .rail
+  :is(.pluginButton, .footerButton, .collapseButton):is(
+    :hover,
+    :focus-visible,
+    [aria-current='page']
+  ) {
+  background: color-mix(
+    in srgb,
+    var(--sidebar-foreground) 7%,
+    var(--sidebar-background)
+  );
+  color: var(--sidebar-accent-foreground);
+}
+
+.rail .navIcon svg,
+.rail .collapseButton svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: 1.8;
+}
+
+.rail .navIcon {
+  position: relative;
+}
+
+.railLayout .footer {
+  position: static;
+  padding: 0;
+  border: 0;
+  margin-top: auto;
+}
+.railLayout .homeColumn {
+  border-right: 1px solid var(--sidebar-border);
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 12px 12px;
+}
+
+.railLayout .homeColumn[hidden] {
+  display: none;
+}
+
+.railLayout .homeFooter {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.moreMenu {
+  width: 240px;
+  max-height: var(--radix-popover-content-available-height);
+  overflow-y: auto;
+}
+
+.moreMenu .footer,
+.moreMenu .footerVersion,
+.moreMenu .footerPrimary,
+.moreMenu .footerActions {
+  position: static;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-height: 0;
+  width: 100%;
+  background: transparent;
+}
+
+.moreMenu .footerVersion:empty,
+.moreMenu .footerPrimary:empty {
+  display: none;
+}
+
+.moreMenu .footerButton,
+.moreMenu .collapseButton,
+.moreLocalFiles,
+.moreMenu [data-web-shell-update] {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.moreMenu .footerButtonLabel {
+  display: inline;
+}
+
+.moreMenu .navIcon {
+  width: 16px;
+  flex-basis: 16px;
+}
+
+.moreMenu button:hover,
+.moreMenu button:focus-visible {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.moreLocalFiles::after {
+  content: attr(aria-label);
+}
+
+.moreMenu .version {
+  padding: 4px 8px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 46px;
+  margin: -12px 0 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--sidebar-border);
 }

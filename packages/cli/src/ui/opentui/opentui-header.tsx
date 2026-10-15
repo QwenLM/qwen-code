@@ -29,7 +29,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { formatVersionLabel } from '../../utils/version.js';
-import { C } from './theme.js';
+import { C, GRADIENT, THEME_REVISION } from './theme.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import {
@@ -37,46 +37,76 @@ import {
   resolveCustomBanner,
 } from '../utils/customBanner.js';
 
-const LOGO_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
 
-function lerpHex(a: string, b: string, t: number): string {
-  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
-  const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+function rgbToHex(rgb: readonly number[]): string {
   return (
-    '#' +
-    pa
-      .map((v, i) =>
-        Math.round(v + (pb[i] - v) * t)
-          .toString(16)
-          .padStart(2, '0'),
-      )
-      .join('')
+    '#' + rgb.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')
   );
 }
 
-function gradientAt(stops: string[], t: number): string {
-  if (stops.length === 0) return C.accent;
-  if (stops.length === 1) return stops[0];
-  const seg = Math.min(stops.length - 1, Math.floor(t * (stops.length - 1)));
-  const lt = t * (stops.length - 1) - seg;
-  return lerpHex(stops[seg], stops[seg + 1], lt);
+/**
+ * One line of the wordmark, sampled the way ink samples it. `ink-gradient`
+ * wraps ink's `Transform`, which runs `gradient.multiline()` per laid-out
+ * line, so each line builds its own `tinygradient.rgb(steps)`: the segments
+ * between stops get `round((steps - 1) / segments)` substeps, rebalanced
+ * until they sum to `steps - 1`, and each segment then steps from its own
+ * start. Sharing one ramp across lines, or lerping on a plain
+ * `t = i / (len - 1)`, drifts a unit or two per channel and leaves a shorter
+ * line one step short of the last stop.
+ */
+function lineRamp(stops: string[], steps: number): string[] {
+  const rgb = stops.map(hexToRgb);
+  const segments = rgb.length - 1;
+  const substeps = Array.from({ length: segments }, () =>
+    Math.max(1, Math.round((steps - 1) / segments)),
+  );
+  let total = substeps.reduce((sum, n) => sum + n, 1);
+  while (total !== steps) {
+    const grow = total < steps;
+    const target = grow ? Math.min(...substeps) : Math.max(...substeps);
+    substeps[substeps.indexOf(target)] += grow ? 1 : -1;
+    total += grow ? 1 : -1;
+  }
+  const ramp: string[] = [];
+  for (let s = 0; s < segments; s++) {
+    const from = rgb[s];
+    const to = rgb[s + 1];
+    const n = substeps[s];
+    ramp.push(rgbToHex(from));
+    for (let i = 1; i < n; i++) {
+      ramp.push(rgbToHex(from.map((v, k) => ((to[k] - v) / n) * i + v)));
+    }
+  }
+  ramp.push(rgbToHex(rgb[segments]));
+  return ramp;
 }
 
-/** ASCII logo with the original horizontal gradient (themes GradientColors). */
+/** ASCII logo with the active theme's horizontal gradient (ink `ui.gradient`). */
 function GradientLogo({ logo }: { logo: string }) {
+  const stops = GRADIENT;
   const lines = logo.replace(/^\n/, '').split('\n');
-  const w = Math.max(...lines.map((l) => [...l].length), 1);
   return (
     <box flexDirection="column" flexShrink={0}>
-      {lines.map((line, li) => (
-        <box key={li} flexDirection="row">
-          {[...line].map((ch, ci) => (
-            <text key={ci} fg={gradientAt(LOGO_GRADIENT, ci / w)}>
-              {ch}
-            </text>
-          ))}
-        </box>
-      ))}
+      {lines.map((line, li) => {
+        const chars = [...line];
+        const ramp =
+          stops.length >= 2
+            ? lineRamp(stops, Math.max(chars.length, stops.length))
+            : [];
+        return (
+          <box key={li} flexDirection="row">
+            {chars.map((ch, ci) => (
+              <text key={ci} fg={ramp[ci]}>
+                {ch}
+              </text>
+            ))}
+          </box>
+        );
+      })}
     </box>
   );
 }
@@ -158,6 +188,7 @@ function buildBanner(config: Config, settings: LoadedSettings, width: number) {
     <box
       flexDirection="column"
       borderStyle="single"
+      borderColor={C.borderDefault}
       paddingX={1}
       width={infoPanelWidth}
       flexGrow={showLogo ? 0 : 1}
@@ -224,7 +255,10 @@ export function OpenTuiBanner({ config, settings }: OpenTuiBannerProps) {
     !config.getScreenReader() && !settings.merged.ui?.hideBanner;
   const banner = useMemo(
     () => (showBanner ? buildBanner(config, settings, width) : null),
-    [showBanner, config, settings, width],
+    // The palette is mutated in place and `settings` keeps its identity when
+    // `/theme` writes it, so the revision is the only dep that sees a repaint.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [showBanner, config, settings, width, THEME_REVISION],
   );
   return banner;
 }

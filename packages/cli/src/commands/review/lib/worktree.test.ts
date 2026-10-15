@@ -223,7 +223,7 @@ describe('worktreeResidue', () => {
     const marker = join(repo, 'PWNED-included');
     writeFileSync(
       join(repo, 'innocuous.cfg'),
-      `[filter "evil"]\n\tclean = touch ${marker} && cat\n`,
+      `[filter "evil"]\n\tclean = touch ${marker.replaceAll('\\', '/')} && cat\n`,
     );
     gitRepo('config', 'include.path', '../innocuous.cfg');
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
@@ -2000,7 +2000,7 @@ describe('discardWorktree', () => {
     ]);
     // The shape the reverse scan exists for: the tree's own pointer is
     // unreadable, so `adminDirOf` answers null and `worktree remove` fails.
-    writeFileSync(join(second, '.git'), 'not a gitfile\n');
+    overwriteGitfile(join(second, '.git'), 'not a gitfile\n');
 
     discardWorktree(repo, second);
 
@@ -2104,7 +2104,7 @@ describe('filterCommandsIn — the include walk', () => {
       writeFileSync(join(elsewhere, 'x.cfg'), '[filter "x"]\n\tclean = cat\n');
       writeFileSync(
         join(dir, 'config'),
-        `[include]\n\tpath = ${join(elsewhere, 'x.cfg')}\n`,
+        `[include]\n\tpath = ${join(elsewhere, 'x.cfg').replaceAll('\\', '/')}\n`,
       );
       expect(filterCommandsIn(dir, dir)).toEqual({
         filters: ['filter.x.clean'],
@@ -2206,13 +2206,29 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterBlankEnv([])).toEqual({});
   });
 
-  it('localFilterCommands: a discovery that fails is a hit, and a newline in the path does not mis-pair the dirs', () => {
+  it('localFilterCommands: a discovery that fails is a hit, not an empty screen', () => {
     // The old wrapper answered `[]` — "no filters" — when rev-parse failed,
-    // and split one newline-delimited answer for two flags, so a directory
-    // named with a newline paired the wrong dirs and screened nothing.
+    // so all four efficacy screens concluded there was nothing to blank and
+    // authorised worktree operations on an unscreened `.git/config`. This
+    // branch is platform-free by construction: a failed `git rev-parse`
+    // answers `[UNRESOLVED_REPO]` on any git, so it stays ungated and must
+    // run on the Windows lane too.
     expect(localFilterCommands(dir).join(' ')).toContain(
       'could not be resolved',
     );
+  });
+
+  it('localFilterCommands: a newline in the path does not mis-pair the dirs', (ctx) => {
+    if (process.platform === 'win32') {
+      // Win32 cannot create a directory whose name contains a newline, so
+      // there is no fixture to build. Only this half is Windows-impossible —
+      // the fail-closed branch above is not, and must not be gated with it.
+      ctx.skip();
+      return;
+    }
+    // The old wrapper split one newline-delimited answer for two flags, so a
+    // directory named with a newline paired the wrong dirs and screened
+    // nothing.
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-filter-nl-')));
     try {
       const repo = join(base, 'a\nb', 'repo');
@@ -2293,7 +2309,11 @@ describe('filterCommandsIn — the include walk', () => {
     }
   });
 
-  it('follows an include whose `..` the KERNEL resolves through a symlink, not lexically', () => {
+  it('follows an include whose `..` the KERNEL resolves through a symlink, not lexically', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // `<dir>/link` is a symlink, and `include.path = link/../evil.cfg` names a
     // payload ONE LEVEL ABOVE the link's target. git concatenates and lets the
     // kernel resolve, so it reads that payload; a lexical collapse — `resolve()`

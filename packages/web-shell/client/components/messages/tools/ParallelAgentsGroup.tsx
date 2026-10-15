@@ -509,6 +509,11 @@ export function ParallelAgentsGroup({
                         <span className={styles.rowTask}>
                           {truncateText(desc || localizedAgentType, 50)}
                         </span>
+                        {agent.backgroundResultPending && (
+                          <span className={styles.rowActivity}>
+                            · {t('background.pending')}
+                          </span>
+                        )}
                         {activity && (
                           <span className={styles.rowActivity}>
                             ({activity})

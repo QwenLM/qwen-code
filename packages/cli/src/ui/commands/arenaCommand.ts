@@ -433,6 +433,14 @@ export const arenaCommand: SlashCommand = {
         context: CommandContext,
         args: string,
       ): Promise<void | MessageActionReturn | OpenDialogActionReturn> => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {
@@ -492,6 +500,14 @@ export const arenaCommand: SlashCommand = {
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {
@@ -536,6 +552,14 @@ export const arenaCommand: SlashCommand = {
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {
@@ -587,6 +611,14 @@ export const arenaCommand: SlashCommand = {
         | OpenDialogActionReturn
         | ConfirmActionReturn
       > => {
+        if (context.services.config?.getShellExecutionSandbox?.()) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: 'Arena is unavailable in tool sandbox.',
+          };
+        }
+
         const executionMode = context.executionMode ?? 'interactive';
         if (executionMode !== 'interactive') {
           return {

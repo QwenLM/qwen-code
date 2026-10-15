@@ -284,22 +284,11 @@ export function buildHigherDisabled(settings: LoadedSettings): {
   };
 }
 
-/**
- * The block decision for a toggle request that arrives as a bare settings
- * string rather than a skill object: the daemon's skill routes persist the
- * name a client sent verbatim. A qualified name carries its authored
- * spelling after the prefix, which is the spelling a legacy entry holds;
- * a name without a prefix has one spelling and no legacy alias.
- */
 export function skillToggleBlockForName(
   settings: LoadedSettings,
-  skillName: string,
+  skill: { name: string; authoredName?: string },
 ): SkillToggleBlock | null {
-  const prefixEnd = skillName.indexOf(':');
-  return buildHigherDisabled(settings).blockIn({
-    name: skillName,
-    ...(prefixEnd > 0 ? { authoredName: skillName.slice(prefixEnd + 1) } : {}),
-  });
+  return buildHigherDisabled(settings).blockIn(skill);
 }
 
 function updateTarget(

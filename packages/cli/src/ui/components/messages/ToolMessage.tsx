@@ -22,6 +22,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutputDisplay,
+  AdvisorDisplay,
   McpToolProgressData,
   FileDiff,
   TerminalImageDisplay,
@@ -31,11 +32,12 @@ import {
   formatVisionBridgeNoticeDisplay,
   isVisionBridgeNoticeDisplay,
 } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import { AGENT_TOOL_NAMES } from '../../utils/agent-tool-names.js';
 import {
-  ToolNames,
-  ToolNamesMigration,
-} from '@qwen-code/qwen-code-core/tools/tool-names.js';
-import { isTerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+  formatAdvisorDisplay,
+  isAdvisorDisplay,
+  isTerminalImageDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -64,17 +66,7 @@ import {
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
 import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
-
-// Names that resolve to the agent tool: the canonical name plus whatever
-// legacy request aliases core's migration map declares (e.g. 'task').
-// Tool-usage stats key on the raw request name, so the scrollback
-// sub-agent count must accept all of them.
-const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
-  ToolNames.AGENT,
-  ...Object.entries(ToolNamesMigration)
-    .filter(([, canonical]) => canonical === ToolNames.AGENT)
-    .map(([legacy]) => legacy),
-]);
+import { AdvisorMessage } from './AdvisorMessage.js';
 
 // How many of the subagent's prior tool calls to list above an approval
 // prompt — enough to show what led up to the request without pushing the
@@ -179,6 +171,7 @@ type DisplayRendererResult =
   | { type: 'todo'; data: TodoResultDisplay }
   | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
+  | { type: 'advisor'; data: AdvisorDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
@@ -198,6 +191,13 @@ const useResultDisplayRenderer = (
 
     if (isTerminalImageDisplay(resultDisplay)) {
       return { type: 'image', data: resultDisplay };
+    }
+
+    if (isAdvisorDisplay(resultDisplay)) {
+      return {
+        type: 'advisor',
+        data: resultDisplay,
+      };
     }
 
     // Check for TodoResultDisplay
@@ -326,7 +326,8 @@ const useResultDisplayRenderer = (
       typeof resultDisplay === 'object' &&
       resultDisplay !== null &&
       'type' in resultDisplay &&
-      resultDisplay.type === 'ask_user_question_answers' &&
+      (resultDisplay.type === 'ask_user_question_answers' ||
+        resultDisplay.type === 'shell_result') &&
       'text' in resultDisplay &&
       typeof resultDisplay.text === 'string'
     ) {
@@ -1043,6 +1044,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
               />
             )}
+            {effectiveDisplayRenderer.type === 'advisor' && (
+              <AdvisorMessage
+                text={formatAdvisorDisplay(effectiveDisplayRenderer.data)}
+                model={effectiveDisplayRenderer.data.model ?? description}
+                containerWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+                isPending={isPending}
+              />
+            )}
             {effectiveDisplayRenderer.type === 'task' && config && (
               <SubagentExecutionRenderer
                 data={effectiveDisplayRenderer.data}
@@ -1157,7 +1167,35 @@ export const TOOL_ARGS_INLINE_MAX_LINES = 2;
 
 /**
  * One-line JSON for the `ui.showToolCallArgs` row, or undefined when there is
- * nothing worth adding.
+ * nothing worth adding. Serializes `args`, then defers to
+ * {@link formatInlineToolArgsJson} for the row itself.
+ */
+export function formatInlineToolArgs(
+  args: Record<string, unknown> | undefined,
+  description: string,
+  uncapped: boolean,
+  rowWidth?: number,
+): string | undefined {
+  if (!args || Object.keys(args).length === 0) {
+    return undefined;
+  }
+
+  let json: string;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    // Circular or otherwise unserializable args — the header line is all we
+    // can honestly show.
+    return undefined;
+  }
+
+  return formatInlineToolArgsJson(json, description, uncapped, rowWidth);
+}
+
+/**
+ * The `ui.showToolCallArgs` row over an already-serialized `json`, so a renderer
+ * that carries the call's arguments as text (OpenTUI's `tool-args` event) draws
+ * the same row as this one rather than keeping a second copy of the policy.
  *
  * Skipped when `description` already IS the args JSON: MCP invocations return
  * `safeJsonStringify(params)` from `getDescription()`, so rendering both would
@@ -1179,25 +1217,12 @@ export const TOOL_ARGS_INLINE_MAX_LINES = 2;
  * component). When given, the row is bounded to `TOOL_ARGS_INLINE_MAX_LINES`
  * wrapped rows rather than by character count alone — see that constant.
  */
-export function formatInlineToolArgs(
-  args: Record<string, unknown> | undefined,
+export function formatInlineToolArgsJson(
+  json: string,
   description: string,
   uncapped: boolean,
   rowWidth?: number,
 ): string | undefined {
-  if (!args || Object.keys(args).length === 0) {
-    return undefined;
-  }
-
-  let json: string;
-  try {
-    json = JSON.stringify(args);
-  } catch {
-    // Circular or otherwise unserializable args — the header line is all we
-    // can honestly show.
-    return undefined;
-  }
-
   const trimmedDescription = description.trim();
   if (trimmedDescription.startsWith('{')) {
     try {

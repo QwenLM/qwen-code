@@ -129,7 +129,9 @@ describe('persistMemoryPreferences', () => {
       retrieve: { useVector: false },
     });
     expect(resolved.updater.model).toBe('custom-memory-model');
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    }
     expect(readdirSync(dataDir)).toEqual(['config.json']);
   });
 
@@ -175,7 +177,9 @@ describe('persistMemoryPreferences', () => {
     });
     expect(saved.memory.observer).not.toHaveProperty('model');
     expect(resolved.observer.model).toBe('custom-memory-model');
-    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    }
     expect(readdirSync(dataDir)).toEqual(['config.json']);
   });
 

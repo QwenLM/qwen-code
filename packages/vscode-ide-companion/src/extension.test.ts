@@ -377,7 +377,7 @@ describe('activate', () => {
   });
 
   describe('diff vote command gate', () => {
-    it('derives fromDiffEditor from the diff scheme and honors the pending gate', async () => {
+    it('routes diff votes only when the managed diff has a request id', async () => {
       vi.spyOn(global, 'fetch').mockResolvedValue({
         ok: false,
         statusText: 'Internal Server Error',
@@ -431,11 +431,6 @@ describe('activate', () => {
       expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
 
       getPermissionRequestId.mockReturnValue(undefined);
-      await acceptHandler!(diffUri);
-      expect(provider.respondToPendingPermission).toHaveBeenCalledWith('allow');
-
-      provider.respondToPendingPermission.mockClear();
-      provider.hasPendingPermission.mockReturnValue(false);
       await acceptHandler!(diffUri);
       expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
 
@@ -552,9 +547,7 @@ describe('activate', () => {
       getPermissionRequestId.mockReturnValue(undefined);
       await cancelHandler(diffUri);
       expect(cancelDiff).toHaveBeenCalledTimes(1);
-      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
-        'cancel',
-      );
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
 
       hasDiff.mockRestore();
       getPermissionRequestId.mockRestore();

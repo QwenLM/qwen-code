@@ -31,6 +31,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   root = null;
+  vi.useRealTimers();
 });
 
 function mount(
@@ -66,6 +67,20 @@ describe('ChatContextHeader', () => {
     expect(view.querySelectorAll('button')).toHaveLength(1);
   });
 
+  it('renders the location slot only when provided', () => {
+    const withLocation = mount({
+      location: <span data-testid="fake-location">Remote · host</span>,
+    });
+    expect(
+      withLocation.querySelector('[data-testid="fake-location"]')?.textContent,
+    ).toBe('Remote · host');
+
+    const withoutLocation = mount();
+    expect(
+      withoutLocation.querySelector('[data-testid="fake-location"]'),
+    ).toBeNull();
+  });
+
   it('hides the right-panel action until content exists', () => {
     const view = mount();
 
@@ -80,6 +95,26 @@ describe('ChatContextHeader', () => {
     expect(
       view.querySelector('button[aria-label="Toggle environment information"]'),
     ).toBeNull();
+  });
+
+  it('lights the environment activity dot only while work is in progress', () => {
+    const idle = mount();
+    expect(
+      idle.querySelector('[data-testid="chat-header-environment-activity"]'),
+    ).toBeNull();
+
+    const running = mount({ environmentRunning: true });
+    const dot = running
+      .querySelector('button[aria-label="Toggle environment information"]')
+      ?.querySelector('[data-testid="chat-header-environment-activity"]');
+    expect(dot).not.toBeNull();
+    expect(
+      running.querySelectorAll(
+        '[data-testid="chat-header-environment-activity"]',
+      ),
+    ).toHaveLength(1);
+    // Decorative: the button keeps its own stable accessible name.
+    expect(dot?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('toggles each available panel independently', () => {
@@ -175,5 +210,35 @@ describe('ChatContextHeader', () => {
       'Toggle environment information',
       'Toggle right panel',
     ]);
+  });
+
+  it.each([
+    [
+      { workspaceName: 'api', workspacePath: '/work/api' },
+      'Workspace: api',
+      'api/work/api',
+    ],
+    [{ workspaceName: 'api' }, 'Workspace: api', 'api'],
+    [{}, 'No workspace', 'No workspace'],
+  ])('reveals the workspace details on hover: %j', (props, label, text) => {
+    vi.useFakeTimers();
+    const view = mount(props);
+    const icon = view.querySelector<HTMLElement>(
+      '[data-testid="chat-header-workspace"]',
+    )!;
+    expect(icon.getAttribute('aria-label')).toBe(label);
+    expect(icon.querySelector('.lucide-folder-closed')).not.toBeNull();
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    act(() => {
+      icon.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(text);
+  });
+
+  it('keeps the workspace icon out of the clickable actions', () => {
+    const view = mount({ workspaceName: 'api', workspacePath: '/work/api' });
+
+    expect(view.querySelectorAll('button')).toHaveLength(1);
   });
 });
