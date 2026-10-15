@@ -494,6 +494,7 @@ class RuntimeBrokerHttpServerTest {
             // Its retained result settles the execution without a second dispatch.
             fixture.transport.runtimeStatus = Map.of("state", "settled",
                     "result", Map.of("executionStatus", "success"));
+            awaitObservationCooldown();
             HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + id
                     + "?requestId=read&harnessSessionId=harness&runtimeSessionId=" + runtime))
                     .header("Authorization", "Bearer secret").GET().build();
@@ -503,6 +504,51 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(ToolExecutionRecord.State.SETTLED,
                     fixture.service.getExecution("harness", runtime, id).toCompletableFuture().join().getState());
             assertEquals(1, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void startResponsesNeverServeTheCooldownCache() throws Exception {
+        String runtime = "550e8400-e29b-41d4-a716-446655440305";
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", runtime, "bootstrap")
+                    .toCompletableFuture().join();
+            Map<String, Object> reference = Map.of("sessionId", runtime,
+                    "promptId", "turn", "callId", "worker-call",
+                    "capabilityDigest", "a".repeat(64), "policyRevision",
+                    "policy", "invocationId", "invocation", "argsDigest",
+                    "b".repeat(64));
+            String id = fixture.service.prepareExecution("harness", runtime,
+                    "provider", reference).toCompletableFuture().join()
+                    .getExecutionCallId();
+            Map<String, Object> start = Map.of("protocolVersion", 1,
+                    "requestId", "start", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime);
+            // The worker ran the call, but its execute answer is lost.
+            fixture.transport.runtimeStatus = Map.of("state", "executing");
+            assertEquals(200, fixture.post("/executions/" + id + ":start",
+                    start).statusCode());
+            // A cooled GET stamps the "executing" answer.
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri(
+                    "/executions/" + id
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId="
+                            + runtime))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> executing = fixture.client.send(read,
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, executing.statusCode(), executing.body());
+            assertEquals("executing", JSON.parseObject(executing.body())
+                    .getJSONObject("status").getString("state"));
+            // The worker finishes inside the cooldown window; a :start
+            // retry must answer from the Runtime, not the cache.
+            fixture.transport.runtimeStatus = Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "success"));
+            HttpResponse<String> retried = fixture.post("/executions/" + id
+                    + ":start", start);
+            assertEquals(200, retried.statusCode(), retried.body());
+            assertEquals("settled", JSON.parseObject(retried.body())
+                    .getJSONObject("status").getString("state"),
+                    "a mutation response must not serve the cooldown cache");
         }
     }
 
@@ -532,6 +578,7 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(1, fixture.transport.cancellations.get());
             fixture.transport.runtimeStatus = Map.of("state", "settled",
                     "result", Map.of("executionStatus", "cancelled"));
+            awaitObservationCooldown();
             HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + id
                     + "?requestId=read&harnessSessionId=harness&runtimeSessionId=" + runtime))
                     .header("Authorization", "Bearer secret").GET().build();
@@ -573,6 +620,7 @@ class RuntimeBrokerHttpServerTest {
             HttpRequest request = HttpRequest.newBuilder(fixture.uri(route)).header("Authorization", "Bearer secret").GET().build();
             assertEquals(409, fixture.client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
             fixture.transport.runtimeStatus = Map.of("state", "prepared");
+            awaitObservationCooldown();
             HttpResponse<String> prepared = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, prepared.statusCode(), prepared.body());
             assertEquals("prepared", JSON.parseObject(prepared.body()).getJSONObject("status").getString("state"));
@@ -585,6 +633,7 @@ class RuntimeBrokerHttpServerTest {
             assertEquals("prepared", JSON.parseObject(repeatedStart.body()).getJSONObject("status").getString("state"));
             assertEquals(1, fixture.transport.executions.get());
             fixture.transport.runtimeStatus = Map.of("state", "executing");
+            awaitObservationCooldown();
             HttpResponse<String> running = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, running.statusCode(), running.body());
             assertEquals("executing", JSON.parseObject(running.body()).getJSONObject("status").getString("state"));
@@ -593,6 +642,8 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
             fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
+            // A mutation's response never serves the cooldown cache, so no
+            // wait is needed before this cancel.
             HttpResponse<String> cancelling = fixture.post("/executions/" + id + ":cancel", Map.of(
                     "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
             assertEquals(200, cancelling.statusCode(), cancelling.body());
@@ -604,6 +655,7 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
             fixture.transport.runtimeStatus = Map.of("state", "settled", "result", Map.of("executionStatus", "cancelled"));
+            awaitObservationCooldown();
             HttpResponse<String> settled = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, settled.statusCode(), settled.body());
             assertEquals("settled", JSON.parseObject(settled.body()).getJSONObject("status").getString("state"));
@@ -782,6 +834,13 @@ class RuntimeBrokerHttpServerTest {
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");
+    }
+
+    // The HTTP face's automatic observation reuses the freshest answer for
+    // a short cooldown; a changed Runtime answer is observed once it lapses.
+    private static void awaitObservationCooldown() throws InterruptedException {
+        Thread.sleep(RuntimeBrokerService.UNKNOWN_LOOKUP_COOLDOWN.toMillis()
+                + 100);
     }
 
     private static final class Fixture implements AutoCloseable {

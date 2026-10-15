@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.aliyun.oss.OSSException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -30,6 +31,16 @@ public class ApiExceptionHandler {
             HttpServletRequest request, HttpServletResponse response) {
         return response(request, response, error.getStatus(), error.getCode(),
                 error.getMessage(), error.getDetails());
+    }
+
+    @ExceptionHandler(RuntimeBrokerException.class)
+    public ResponseEntity<Map<String, Object>> runtime(RuntimeBrokerException error,
+            HttpServletRequest request, HttpServletResponse response) {
+        HttpStatus status = HttpStatus.resolve(error.getStatusCode());
+        Map<String, Object> details = new LinkedHashMap<>(error.getDetails());
+        details.put("retryable", error.isRetryable());
+        return response(request, response, status == null ? HttpStatus.CONFLICT : status,
+                error.getCode(), error.getMessage(), details);
     }
 
     @ExceptionHandler(AsyncRequestNotUsableException.class)

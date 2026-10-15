@@ -368,29 +368,89 @@ export function assertToolPublicationPayload(
     ['toolName', 'input'],
   );
   requireValue(
-    payload['toolName'] === 'run_shell_command' &&
-      payload['input'] !== null &&
+    payload['input'] !== null &&
       typeof payload['input'] === 'object' &&
       !Array.isArray(payload['input']),
   );
   const input = payload['input'] as Record<string, ManagedSessionJsonValue>;
+  const toolName = payload['toolName'];
+  // H3: the detached capture family publishes background Shell and Monitor
+  // payloads beside the foreground Shell; each family keeps its own closed
+  // input shape.
+  if (toolName === 'run_shell_command') {
+    assertShellPublicationInput(input);
+  } else if (toolName === 'monitor') {
+    assertMonitorPublicationInput(input);
+  } else {
+    requireValue(false);
+  }
+  requireValue(
+    parsed.requestDigest ===
+      `sha256:${createHash('sha256').update(payloadJson).digest('hex')}` &&
+      parsed.reference.argsDigest === `sha256:${managedToolDigest(input)}`,
+  );
+}
+
+function assertShellPublicationInput(
+  input: Record<string, ManagedSessionJsonValue>,
+): void {
   requireValue(
     typeof input['command'] === 'string' &&
       input['command'].length > 0 &&
       Object.keys(input).every((key) =>
-        ['command', 'timeout', 'description'].includes(key),
+        [
+          'command',
+          'timeout',
+          'description',
+          'is_background',
+          'directory',
+        ].includes(key),
       ) &&
       (input['timeout'] === undefined ||
         (Number.isInteger(input['timeout']) &&
           (input['timeout'] as number) >= 1 &&
           (input['timeout'] as number) <= 600_000)) &&
       (input['description'] === undefined ||
-        typeof input['description'] === 'string'),
+        typeof input['description'] === 'string') &&
+      (input['is_background'] === undefined ||
+        typeof input['is_background'] === 'boolean') &&
+      (input['directory'] === undefined ||
+        (typeof input['directory'] === 'string' &&
+          input['directory'].length > 0)),
   );
+}
+
+function assertMonitorPublicationInput(
+  input: Record<string, ManagedSessionJsonValue>,
+): void {
   requireValue(
-    parsed.requestDigest ===
-      `sha256:${createHash('sha256').update(payloadJson).digest('hex')}` &&
-      parsed.reference.argsDigest === `sha256:${managedToolDigest(input)}`,
+    typeof input['command'] === 'string' &&
+      input['command'].length > 0 &&
+      Object.keys(input).every((key) =>
+        [
+          'command',
+          'description',
+          'max_events',
+          'idle_timeout_ms',
+          'directory',
+          'is_monitor',
+        ].includes(key),
+      ) &&
+      (input['description'] === undefined ||
+        typeof input['description'] === 'string') &&
+      (input['is_monitor'] === undefined ||
+        typeof input['is_monitor'] === 'boolean') &&
+      (input['max_events'] === undefined ||
+        (Number.isInteger(input['max_events']) &&
+          (input['max_events'] as number) >= 1 &&
+          (input['max_events'] as number) <= 10_000)) &&
+      (input['idle_timeout_ms'] === undefined ||
+        (Number.isInteger(input['idle_timeout_ms']) &&
+          (input['idle_timeout_ms'] as number) >= 1 &&
+          (input['idle_timeout_ms'] as number) <= 600_000)) &&
+      (input['directory'] === undefined ||
+        (typeof input['directory'] === 'string' &&
+          input['directory'].length > 0)),
   );
 }
 

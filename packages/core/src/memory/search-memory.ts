@@ -1002,7 +1002,7 @@ export async function executeSearchMemory(
       } else {
         missingRefs.push(ref);
         warnings.push(
-          `Memory ref ${JSON.stringify(ref)} disappeared before it could be read. Search again to refresh the memory snapshot.`,
+          `Memory ref ${JSON.stringify(ref)} was unavailable or changed while being read. Search again to refresh the memory snapshot.`,
         );
       }
     }

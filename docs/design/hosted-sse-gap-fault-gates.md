@@ -33,10 +33,13 @@ Workspace reader identity; the production authorization checks still run.
 ## Scenario
 
 1. Open both event streams and start one real private Hosted Edit.
-2. Park Edit in a FIFO read. Opening a nonblocking writer proves the reader has
-   entered; leave that writer empty. Capture the received prefixes and disconnect
-   both observers while the private Turn is active and no effect has completed.
-3. Release the FIFO. With both observers disconnected, require one `x` to `xx`
+2. After backup preparation, create `proof.txt.read-gate` before forwarding start.
+   The worker imports `hosted-file-read-gate.mjs`; its native Edit read writes
+   `proof.txt.read-entered` and waits before calling the original reader. Require
+   that marker and the regular file still containing `x`. Capture the received
+   prefixes and disconnect both observers while the private Turn is active and
+   no effect has completed.
+3. Remove the read gate. With both observers disconnected, require one `x` to `xx`
    effect and a successful original execution and private Turn. The relay commits
    the real final assistant message, then holds the real terminal event before
    committing its projection. The private stream projects committed messages,
@@ -49,9 +52,11 @@ Workspace reader identity; the production authorization checks still run.
    one successful terminal, expected text and private tool records, the original execution
    identity, one dispatch/effect, no cancellation and released storage ownership.
 
-All waits and HTTP calls are bounded. On failure close streams, release the
-terminal barrier and FIFO handles, and terminate/reap only fixture-owned workers. Keep
-the existing normal and FG6a–FG6d gates intact.
+All waits and HTTP calls are bounded. On failure the driver closes its streams
+and listeners; the parent fixture owns worker teardown. Cleanup must terminate
+and reap only fixture-owned workers without releasing an uncertain Edit merely
+to unblock it. Assertion-failure cleanup coverage remains a #13124 follow-up.
+Keep the existing normal and FG6a–FG6d gates intact.
 
 ## Implementation and validation
 
@@ -73,6 +78,7 @@ diff in open-ended and reverse audits until two consecutive rounds are clean;
 after round five accept only Critical fixes.
 
 Browser UI reconnection, replay pagination, retention/resync, slow-consumer overflow, process crash
-recovery, automatic continuation, Shell/provider controls and Windows FIFO
-support are outside this slice. D3's existing tests continue to cover its broader
-replay contracts. No unresolved design question remains.
+recovery, automatic continuation, Shell/provider controls and native Windows
+execution validation are outside this slice. The read barrier uses regular files;
+the current process fixture still relies on POSIX process cleanup. D3's existing
+tests continue to cover its broader replay contracts. No unresolved design question remains.

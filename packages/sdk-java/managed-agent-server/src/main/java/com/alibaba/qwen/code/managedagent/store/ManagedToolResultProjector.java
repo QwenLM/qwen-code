@@ -73,17 +73,26 @@ public class ManagedToolResultProjector {
     }
 
     public void project(Claim claim) {
-        try {
-            var statuses = jdbc.query("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+        if (!store.admitsLegacyProjection(claim)) {
+            return;
+        }
+        var data = publications.getIfAvailable();
+        try (var lease = data == null ? null : data.readLease(claim.source().sessionKey())) {
+            var statuses = jdbc.query("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     (row, index) -> row.getString(1), claim.source().tenantId(), claim.source().sessionId());
             if (statuses.stream().anyMatch(status -> List.of("DELETING", "DELETED").contains(status))) {
                 store.fail(claim, "SUPPRESSED", "session_unavailable");
                 return;
             }
-            Projection projection = resolve(claim.source());
+            Runnable guard = lease == null ? () -> ToolPublicationRetentionStore.requireLive(jdbc,
+                    claim.source().tenantId(), claim.source().sessionId()) : lease::check;
+            Projection projection = resolve(claim.source(), lease, guard);
             if (projection == null) {
                 store.fail(claim, "UNSUPPORTED", "unsupported_receipt_producer");
             } else {
+                if (lease != null) {
+                    lease.check();
+                }
                 store.complete(claim, projection, policy.version());
             }
         } catch (NoSuchElementException error) {
@@ -101,10 +110,12 @@ public class ManagedToolResultProjector {
         store.fail(claim, state, code);
     }
 
-    private Projection resolve(Source source) throws IOException {
+    private Projection resolve(Source source, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) throws IOException {
+        guard.run();
         store.verifySource(source);
-        var candidates = jdbc.queryForList("SELECT p.*, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication p WHERE scope_key = ? AND tenant_id = ?"
+        var candidates = jdbc.query("SELECT p.*, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_key = ? AND tenant_id = ?"
                         + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
+                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 ToolPublicationDataStore.scope(source.sessionKey()),
                 source.tenantId(), source.workspaceId(), source.sessionId(),
                 ToolPublicationContract.sha256(source.executionCallId().getBytes(StandardCharsets.UTF_8)));
@@ -122,9 +133,10 @@ public class ManagedToolResultProjector {
                         && binding.path("sessionKey").equals(source.sessionKey())
                         && source.executionCallId().equals(binding.path("executionCallId").asText())
                         && publicationId.equals(binding.path("publicationId").asText()), "Publication binding changed");
-        var turns = jdbc.queryForList("SELECT t.tenant_id, t.session_id, t.prompt_id, t.turn_id, s.workspace_id FROM managed_agent_turn t"
-                        + " JOIN managed_agent_session s ON s.tenant_id = t.tenant_id AND s.session_id = t.session_id"
+        var turns = jdbc.query("SELECT t.tenant_id, t.session_id, t.prompt_id, t.turn_id, s.workspace_id FROM ma_turn t"
+                        + " JOIN ma_session s ON s.tenant_id = t.tenant_id AND s.session_id = t.session_id"
                         + " WHERE t.tenant_id = ? AND t.session_id = ? AND t.prompt_id = ?",
+                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 source.tenantId(), source.sessionId(), binding.path("turnId").asText());
         if (turns.isEmpty()) {
             throw new NoSuchElementException("Public Turn mapping is missing");
@@ -142,7 +154,9 @@ public class ManagedToolResultProjector {
         ToolPublicationDataStore data = publications.getIfAvailable();
         JsonNode outcome;
         if (notStarted) {
+            guard.run();
             outcome = inlineOutcome(source);
+            guard.run();
         } else {
             require("REFERENCED".equals(publication.get("producer_phase"))
                             && source.outcomeRef().path("resourceId").asText().equals(publication.get("admission_resource_id"))
@@ -152,9 +166,9 @@ public class ManagedToolResultProjector {
             if (data == null) {
                 throw new IllegalStateException("Publication reader is unavailable");
             }
-            outcome = exact(data, source, publicationId, source.outcomeRef());
+            outcome = exact(data, source, publicationId, source.outcomeRef(), lease, guard);
             JsonNode terminal = ToolPublicationContract.readJson(data.readResource(source.sessionKey(), publicationId,
-                    (String) publication.get("terminal_resource_id")));
+                    (String) publication.get("terminal_resource_id"), lease, guard));
             require(terminal.equals(outcome.path("envelope")), "Original terminal envelope changed");
         }
         require(outcome.path("schemaVersion").asInt(-1) == 1, "Outcome version is invalid");
@@ -180,10 +194,12 @@ public class ManagedToolResultProjector {
             if (!manifestRef.isNull()) {
                 require("managed-tool-result-manifest".equals(manifestRef.path("kind").asText()),
                         "Manifest kind conflicts");
-                manifest = exact(data, source, publicationId, manifestRef);
+                manifest = exact(data, source, publicationId, manifestRef, lease, guard);
                 validateManifest(source, binding, envelope, manifest);
             } else {
-                require("unavailable".equals(capture.path("captureStatus").asText()), "Capture manifest is missing");
+                String status = capture.path("captureStatus").asText();
+                require("unavailable".equals(status) || "detached".equals(status),
+                        "Capture manifest is missing");
             }
         }
         String policyVersion = policy.version();
@@ -208,7 +224,7 @@ public class ManagedToolResultProjector {
                         .put("sha256", stream.path("digest").asText()).put("media_type", "application/octet-stream")
                         .put("availability", "available").put("created_at", createdAt);
                 Artifact artifact = new Artifact(descriptor, source, publicationId, binding, manifestRef, streamId, 0);
-                verified.put(id, reader.verified(artifact));
+                verified.put(id, reader.verified(artifact, lease, guard));
                 artifacts.add(artifact);
             }
         }
@@ -234,7 +250,7 @@ public class ManagedToolResultProjector {
             int length = (int) Math.min(8192, size);
             var stream = verified.get(selected.descriptor().path("id").asText());
             if (stream.rangeVerificationBytes(0, length) <= 1024 * 1024) {
-                byte[] bytes = reader.readRange(selected, stream, 0, length, () -> {});
+                byte[] bytes = reader.readRange(selected, stream, 0, length, guard);
                 String text = sanitizePreview(new String(bytes, StandardCharsets.UTF_8));
                 String bounded = boundPreview(text);
                 boolean truncated = size > length || bounded.length() < text.length();
@@ -273,10 +289,12 @@ public class ManagedToolResultProjector {
     }
 
     private JsonNode inlineOutcome(Source source) {
-        var rows = jdbc.queryForList("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                        + " FROM qwen_managed_session_resource WHERE tenant_id = ? AND workspace_id = ?"
-                        + " AND session_id = ? AND resource_id = ?", source.tenantId(), source.workspaceId(),
-                source.sessionId(), source.outcomeRef().path("resourceId").asText());
+        var rows = jdbc.query("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
+                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
+                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND deletion_operation_key IS NULL",
+                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
+                ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
+                source.tenantId(), source.workspaceId(), source.sessionId());
         require(rows.size() == 1, "Not-started outcome is missing");
         var row = rows.getFirst();
         require("MYSQL_INLINE".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
@@ -286,8 +304,8 @@ public class ManagedToolResultProjector {
         return verifyBytes(source.outcomeRef(), bytes);
     }
 
-    private static JsonNode exact(ToolPublicationDataStore data, Source source, String publication, JsonNode ref) {
-        return verifyBytes(ref, data.readResource(source.sessionKey(), publication, ref.path("resourceId").asText()));
+    private static JsonNode exact(ToolPublicationDataStore data, Source source, String publication, JsonNode ref, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        return verifyBytes(ref, data.readResource(source.sessionKey(), publication, ref.path("resourceId").asText(), lease, guard));
     }
 
     private static JsonNode verifyBytes(JsonNode ref, byte[] bytes) {

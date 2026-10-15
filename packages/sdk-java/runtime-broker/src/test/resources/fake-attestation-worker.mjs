@@ -225,5 +225,11 @@ function receipt(installation) {
 }
 
 const stop = () => server.close(() => process.exit(0));
-process.once('SIGTERM', stop);
+if (args.includes('--ignore-term')) {
+  // A wedged worker: SIGTERM lands but never stops it, so only the
+  // broker's forcible fallback can reclaim it.
+  process.on('SIGTERM', () => {});
+} else {
+  process.once('SIGTERM', stop);
+}
 process.once('SIGINT', stop);

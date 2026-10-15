@@ -854,6 +854,16 @@ const fakeWorkspace = {
       requiresOperatorAction: true,
     };
   },
+  async grantWorkspaceTrust() {
+    return {
+      v: 1,
+      workspaceCwd: TEST_WORKSPACE,
+      folderTrustEnabled: true,
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: 'TRUST_FOLDER',
+      requiresDaemonRestartForChanges: false,
+    };
+  },
   async getWorkspacePermissionsStatus() {
     return {
       v: 1,
@@ -7846,6 +7856,96 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     requestSpy.mockRestore();
   });
 
+  it('dispatches _qwen/workspace/trust/grant', async () => {
+    // The pre-write status must differ from the post-write grant result on
+    // the asserted fields, so the reply below can only be satisfied by the
+    // grant result — not by the dispatcher echoing the pre-write status.
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'untrusted', source: 'file' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    // A real grant notifies the trust monitor, whose reconcile closes this
+    // generation before the reply is built, so the spy closes it too.
+    const generationGuard = createWorkspaceGenerationGuard();
+    const grant = fakeWorkspace.grantWorkspaceTrust.bind(fakeWorkspace);
+    const grantSpy = vi
+      .spyOn(fakeWorkspace, 'grantWorkspaceTrust')
+      .mockImplementation(async (ctx) => {
+        generationGuard.close();
+        return grant(ctx);
+      });
+    await restartServer({ generationGuard });
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 216,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+    const frames = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frames[0]).toMatchObject({
+      id: 216,
+      result: {
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'trusted', source: 'file' },
+      },
+    });
+    expect(grantSpy).toHaveBeenCalledTimes(1);
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
+  });
+
+  it('rejects _qwen/workspace/trust/grant when folder trust is disabled', async () => {
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: false,
+        effective: { state: 'trusted', source: 'disabled' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    const grantSpy = vi.spyOn(fakeWorkspace, 'grantWorkspaceTrust');
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 217,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 217,
+      error: {
+        code: -32600,
+        message: 'Folder trust is disabled for this workspace',
+      },
+    });
+    expect(grantSpy).not.toHaveBeenCalled();
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
+  });
+
   it('dispatches _qwen/workspace/permissions', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -13068,6 +13168,36 @@ describe('ACP WebSocket transport security', () => {
     expect(res).toMatchObject({
       id: 2,
       result: { accepted: true, desiredState: 'untrusted' },
+    });
+    expect(tiers).toEqual(['mutation']);
+    ws.close();
+  });
+
+  it('classifies _qwen/workspace/trust/grant as a WS mutation method', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    const res = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    expect(res).toMatchObject({
+      id: 2,
+      result: { effective: { state: 'trusted' } },
     });
     expect(tiers).toEqual(['mutation']);
     ws.close();

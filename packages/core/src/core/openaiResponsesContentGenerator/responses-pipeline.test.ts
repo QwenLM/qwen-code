@@ -137,6 +137,7 @@ function makeCliConfig(
   proxy?: string,
   sessionId: string | (() => string) = '',
   allowDynamicHeaderValues = false,
+  freeform = false,
 ): Config {
   // getSessionId() is typed `string` and never returns undefined, so neither
   // may the mock: the reachable "no usable session" state is ''. connect()
@@ -147,6 +148,7 @@ function makeCliConfig(
     getSessionId: typeof sessionId === 'function' ? sessionId : () => sessionId,
     getCliVersion: () => '9.9.9-test',
     getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
+    getFreeform: () => freeform,
   } as unknown as Config;
 }
 
@@ -321,6 +323,31 @@ describe('ResponsesPipeline', () => {
       expect(body[key]).toEqual(value);
     }
   }
+
+  it.each([
+    { freeform: false, tool: 'function', call: 'function_call' },
+    { freeform: true, tool: 'custom', call: 'custom_tool_call' },
+  ])(
+    'uses $tool tools and matching history when Freeform=$freeform',
+    async ({ freeform, tool, call }) => {
+      const body = await sendBody(
+        pipe(undefined, makeCliConfig(undefined, '', false, freeform)),
+        {
+          model: 'gpt-6-astra',
+          contents: [
+            content('model', fnCall('exec', { source: 'text(1);' }, 'c1')),
+            content('user', fnResponse('exec', { output: '1' }, 'c1')),
+          ],
+          config: { tools: [{ functionDeclarations: [{ name: 'exec' }] }] },
+        },
+      );
+      expect(body.tools?.[0]?.type).toBe(tool);
+      expect(body.input.map((item) => item.type)).toEqual([
+        call,
+        `${call}_output`,
+      ]);
+    },
+  );
 
   it('POSTs to <baseUrl>/v1/responses with the converted request body', async () => {
     mockResponse([...deltaEvent('hi'), ...DONE_R1]);

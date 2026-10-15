@@ -134,6 +134,177 @@ describe('HttpHookRunner', () => {
     expect(result.output?.continue).toBe(true);
   };
 
+  describe('managed request evidence', () => {
+    it('proves cancellation during DNS validation did not send a request', async () => {
+      const abort = new AbortController();
+      const pending = httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        abort.signal,
+        true,
+        new AbortController().signal,
+      );
+      abort.abort();
+      expect(await pending).toMatchObject({
+        outcome: 'cancelled',
+        httpRequestState: 'not_started',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it.each(['response', 'body-loss', 'timeout', 'shutdown'])(
+      'preserves an in-flight managed response after user cancellation (%s)',
+      async (completion) => {
+        vi.useFakeTimers();
+        const caller = new AbortController();
+        const shutdown = new AbortController();
+        let stream!: ReadableStreamDefaultController<Uint8Array>;
+        let transport!: AbortSignal;
+        let started!: () => void;
+        const dispatched = new Promise<void>((resolve) => (started = resolve));
+        mockFetch.mockImplementationOnce(async (_url, options) => {
+          transport = options.signal;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+              transport.addEventListener('abort', () =>
+                controller.error(transport.reason),
+              );
+            },
+          });
+          started();
+          return new Response(body, {
+            headers: { 'content-type': 'application/json' },
+          });
+        });
+        try {
+          const pending = httpRunner.execute(
+            createMockConfig({ timeout: 1 }),
+            HookEventName.PreToolUse,
+            createMockInput(),
+            caller.signal,
+            true,
+            shutdown.signal,
+          );
+          await dispatched;
+          caller.abort();
+          expect(transport.aborted).toBe(false);
+          if (completion === 'response') {
+            stream.enqueue(new TextEncoder().encode('{"continue":false}'));
+            stream.close();
+          } else if (completion === 'body-loss') {
+            stream.error(new TypeError('response disconnected'));
+          } else if (completion === 'timeout') {
+            await vi.advanceTimersByTimeAsync(1000);
+          } else shutdown.abort();
+          const result = await pending;
+          expect(mockFetch).toHaveBeenCalledTimes(1);
+          expect(result.httpRequestState).toBe(
+            completion === 'response' ? 'response_received' : 'outcome_unknown',
+          );
+          if (completion === 'response')
+            expect(result.output).toMatchObject({ continue: false });
+          if (completion === 'timeout') expect(result.outcome).toBe('timeout');
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps a partially received JSON response unknown', async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"continue":false'));
+        },
+        pull(controller) {
+          controller.error(new TypeError('response body disconnected'));
+        },
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(result).toMatchObject({
+        outcome: 'non_blocking_error',
+        httpRequestState: 'outcome_unknown',
+      });
+    });
+
+    it('keeps timeout active while waiting for the response body', async () => {
+      mockFetch.mockImplementationOnce(async (_url, options) => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            options.signal.addEventListener('abort', () =>
+              controller.error(options.signal.reason),
+            );
+          },
+        });
+        return new Response(stream, {
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const result = await httpRunner.execute(
+        createMockConfig({ timeout: 0.01 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(result).toMatchObject({
+        outcome: 'timeout',
+        httpRequestState: 'outcome_unknown',
+      });
+    });
+
+    it('proves a blocked destination was not sent', async () => {
+      const result = await httpRunner.execute(
+        createMockConfig({ url: 'https://other.example/hook' }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(result.httpRequestState).toBe('not_started');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+    it('distinguishes a received failure response from a lost reply', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 503 });
+      const received = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(received).toMatchObject({
+        outcome: 'non_blocking_error',
+        httpRequestState: 'response_received',
+      });
+      mockFetch.mockRejectedValueOnce(new Error('reply lost'));
+      const lost = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(lost).toMatchObject({
+        outcome: 'non_blocking_error',
+        httpRequestState: 'outcome_unknown',
+      });
+    });
+  });
+
   describe('execute', () => {
     it('should fail for URL not in whitelist', () =>
       expectBlocked(

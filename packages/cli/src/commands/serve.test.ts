@@ -62,6 +62,25 @@ describe('serve command args', () => {
     );
   });
 
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
+  });
+
   it('defaults authenticated open to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['open-with-auth']).toBe(false);

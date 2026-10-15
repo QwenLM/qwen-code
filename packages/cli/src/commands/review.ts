@@ -16,6 +16,7 @@ import { findingsCommand } from './review/findings.js';
 import { recoverFindingsCommand } from './review/recover-findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
+import { captureTuiCommand } from './review/capture-tui.js';
 import { planDiffCommand } from './review/plan-diff.js';
 import { cacheCommitCommand } from './review/cache-commit.js';
 import { repoContextCommand } from './review/repo-context.js';
@@ -67,6 +68,7 @@ export const reviewCommand: CommandModule = {
       .command(commentBodyCommand)
       .command(fetchPrCommand)
       .command(captureLocalCommand)
+      .command(captureTuiCommand)
       .command(planDiffCommand)
       .command(cacheCommitCommand)
       .command(repoContextCommand)
@@ -102,7 +104,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, cache-commit, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, fix-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, cache-commit, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, fix-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

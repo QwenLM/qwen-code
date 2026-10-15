@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { summarizeReplay } from './replay-summary.js';
 import {
+  createAgentRecordTranscriptUpdate,
   createTranscriptReplayMachine,
   createTranscriptToolCallResultUpdate,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
@@ -256,6 +257,122 @@ describe('createTranscriptReplayMachine', () => {
       'assistant-1:0',
       'assistant-1:2',
     ]);
+  });
+
+  it('replays an agent_message record as an authored assistant message', () => {
+    const payload = {
+      displayText: 'Fixed the parser.',
+      author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+      runId: 'run-7',
+      status: 'completed',
+      totalTokens: 1200,
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('agent-rec-1', 'user', {
+        subtype: 'agent_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message from="claude-B">…' }],
+        },
+        systemPayload: payload,
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Fixed the parser.' },
+      _meta: {
+        source: 'agent_message',
+        qwenDiscreteMessage: true,
+        qwenAgentMessage: {
+          kind: 'agent_message',
+          author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+          runId: 'run-7',
+          status: 'completed',
+          totalTokens: 1200,
+        },
+        qwenTranscript: {
+          segmentId: 'agent:run-7',
+          sourceRecordIds: ['agent-rec-1'],
+        },
+      },
+    });
+    // Live emission uses the same helper, so it equals the replay.
+    expect(
+      createAgentRecordTranscriptUpdate({
+        recordId: 'agent-rec-1',
+        subtype: 'agent_message',
+        payload,
+        timestamp: '2026-07-14T00:00:00.000Z',
+      }),
+    ).toEqual(projected[0]);
+  });
+
+  it('keeps the squad a member reply answered for on its author', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('agent-rec-2', 'user', {
+        subtype: 'agent_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message from="alice">…' }],
+        },
+        systemPayload: {
+          displayText: 'Fixed in auth.ts.',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+          runId: 'run-8',
+          status: 'completed',
+        },
+      }),
+    );
+    const meta = projected[0]?._meta as
+      | { qwenAgentMessage?: { author?: Record<string, unknown> } }
+      | undefined;
+    expect(meta?.qwenAgentMessage?.author).toEqual({
+      agentId: 'ag_alice',
+      name: 'alice',
+      memberSquadName: 'crew',
+    });
+  });
+
+  it('replays an agent_mention record as a user message, not the envelope', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mention-rec-1', 'user', {
+        subtype: 'agent_mention',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_mention to="claude-B">…' }],
+        },
+        systemPayload: {
+          displayText: '@claude-B look at this',
+          mentionedAgentIds: ['agent-1'],
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: '@claude-B look at this' },
+      _meta: {
+        source: 'agent_mention',
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          mentionedAgentIds: ['agent-1'],
+        },
+        qwenTranscript: {
+          segmentId: 'mention:mention-rec-1',
+          sourceRecordIds: ['mention-rec-1'],
+        },
+      },
+    });
   });
 
   it('keeps raw function responses out of the safe result preview', () => {
@@ -1960,6 +2077,83 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().cumulativeUsage.promptTokens).toBe(100);
   });
 
+  it('replays only announced outer results alongside internal Code Mode evidence', () => {
+    const machine = createTranscriptReplayMachine();
+    updates(
+      machine,
+      record('calls', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'outer', name: 'exec', args: {} } },
+            { functionCall: { id: 'direct-goal', name: 'get_goal', args: {} } },
+          ],
+        },
+      }),
+    );
+    for (const [id, name, provenance] of [
+      ['nested-read', 'read_file', 'tool_result'],
+      ['nested-goal', 'get_goal', 'goal_runtime'],
+    ]) {
+      const item = {
+        ...record(id, 'tool_result', {
+          subtype: 'code_mode_tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id,
+                  name,
+                  response: { output: 'internal' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: id,
+            resultDisplay: 'internal',
+            status: 'success',
+          },
+        }),
+        provenance,
+      };
+      expect(updates(machine, item)).toEqual([]);
+    }
+    for (const [id, name, provenance] of [
+      ['outer', 'exec', 'execution_output'],
+      ['direct-goal', 'get_goal', 'goal_runtime'],
+    ]) {
+      const item = {
+        ...record(id, 'tool_result', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: { id, name, response: { output: 'visible' } },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: id,
+            resultDisplay: 'visible',
+            status: 'success',
+          },
+        }),
+        provenance,
+      };
+      expect(updates(machine, item)).toMatchObject([
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: id,
+          status: 'completed',
+        },
+      ]);
+    }
+    expect(machine.snapshot().pendingToolCalls).toEqual([]);
+    expect([...machine.finalize()]).toEqual([]);
+  });
+
   it('correlates an id-less result only to one same-name pending call', () => {
     const machine = createTranscriptReplayMachine();
     updates(
@@ -2855,6 +3049,23 @@ describe('ui_telemetry timing frames', () => {
     );
 
     expect(withTiming).toEqual(withoutTiming);
+  });
+
+  it('preserves request execution identity without creating a visible message', () => {
+    const [frame] = timings(
+      timingMachine(),
+      telemetry('execution-record', {
+        ...API_RESPONSE_EVENT,
+        execution_id: 'execution-1',
+      }),
+    );
+    expect(frame).toMatchObject({
+      executionId: 'execution-1',
+      kind: 'request',
+    });
+    expect(
+      timings(timingMachine(), telemetry('legacy', API_RESPONSE_EVENT))[0],
+    ).not.toHaveProperty('executionId');
   });
 
   it('keeps timing frames out of the replay state when it is off', () => {

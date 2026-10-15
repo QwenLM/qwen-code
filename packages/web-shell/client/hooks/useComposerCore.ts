@@ -609,6 +609,19 @@ function normalizeInlineTagRemovalChanges(
 
 let nextComposerTagTooltipId = 0;
 
+// Root.unmount() flushes pending sync work across ALL roots (#12826). Callers
+// pass the roots they captured before nulling the widget fields, so a fresh
+// root created by a later re-render is never unmounted here.
+function deferComposerTagRootUnmount(
+  contentRoot: Root | null,
+  tooltipRoot: Root | null,
+): void {
+  queueMicrotask(() => {
+    contentRoot?.unmount();
+    tooltipRoot?.unmount();
+  });
+}
+
 class ComposerTagWidget extends WidgetType {
   private contentRoot: Root | null = null;
   private tooltipRoot: Root | null = null;
@@ -714,8 +727,9 @@ class ComposerTagWidget extends WidgetType {
         chip.appendChild(content);
         renderedCustomContent = true;
       } catch (error) {
-        this.contentRoot?.unmount();
+        const contentRoot = this.contentRoot;
         this.contentRoot = null;
+        deferComposerTagRootUnmount(contentRoot, null);
         console.warn('[WebShell] inline tag renderContent failed', error);
       }
     }
@@ -801,8 +815,9 @@ class ComposerTagWidget extends WidgetType {
       tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
       chip.setAttribute('aria-describedby', tooltipElement.id);
     } catch (error) {
-      this.tooltipRoot?.unmount();
+      const tooltipRoot = this.tooltipRoot;
       this.tooltipRoot = null;
+      deferComposerTagRootUnmount(null, tooltipRoot);
       if (this.tag.tooltipText) {
         chip.title = this.tag.tooltipText;
       }
@@ -878,15 +893,9 @@ class ComposerTagWidget extends WidgetType {
     this.contentRoot = null;
     this.tooltipRoot = null;
     if (!contentRoot && !tooltipRoot) return;
-    // WidgetType.destroy() runs inside CodeMirror's update cycle. React's
-    // Root.unmount() flushes pending sync work across ALL roots
-    // (flushSyncWorkAcrossRoots), which would re-enter the editor mid-update
-    // ("Calls to EditorView.update are not allowed while an update is in
-    // progress", #12826). Defer the unmount out of the update cycle.
-    queueMicrotask(() => {
-      contentRoot?.unmount();
-      tooltipRoot?.unmount();
-    });
+    // WidgetType.destroy() runs inside CodeMirror's update cycle, so the
+    // unmount has to leave that cycle before React flushes sync work.
+    deferComposerTagRootUnmount(contentRoot, tooltipRoot);
   }
 
   ignoreEvent(): boolean {
@@ -1181,6 +1190,7 @@ export interface UseComposerCoreOptions {
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   attachmentsEnabled?: boolean;
   workspaceFeaturesEnabled?: boolean;
   composerTagIcons?: WebShellComposerTagIconMap;
@@ -1212,7 +1222,7 @@ const SESSION_DRAFT_STORAGE_PREFIX = 'qwen-web-shell-session-draft:';
 const PENDING_TASK_DRAFT_STORAGE_PREFIX = 'qwen-web-shell-pending-task-draft:';
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 2000;
 
-function getComposerDraftStorageKey(
+export function getComposerDraftStorageKey(
   sessionId: string | undefined,
   workspaceCwd: string | undefined,
 ): string | undefined {
@@ -1247,7 +1257,7 @@ function saveComposerDraft(storageKey: string | undefined, text: string): void {
   }
 }
 
-function clearComposerDraftIfMatches(
+export function clearComposerDraftIfMatches(
   storageKey: string | undefined,
   text: string,
 ): void {
@@ -1488,6 +1498,7 @@ export function useComposerCore(
     atWorkspaceCwd,
     composerScopeKey,
     disableLegacyHistoryFallback = false,
+    shellModeEnabled = true,
     attachmentsEnabled = true,
     workspaceFeaturesEnabled = true,
     composerTagIcons,
@@ -1726,7 +1737,23 @@ export function useComposerCore(
     },
     [],
   );
-  const [shellMode, setShellMode] = useState(false);
+  const [shellMode, setShellModeState] = useState(false);
+  const shellModeEnabledRef = useRef(shellModeEnabled);
+  shellModeEnabledRef.current = shellModeEnabled;
+  const setShellMode = useCallback<
+    React.Dispatch<React.SetStateAction<boolean>>
+  >((value) => {
+    setShellModeState((previous) =>
+      shellModeEnabledRef.current
+        ? typeof value === 'function'
+          ? value(previous)
+          : value
+        : false,
+    );
+  }, []);
+  useEffect(() => {
+    if (!shellModeEnabled) setShellModeState(false);
+  }, [shellModeEnabled]);
   const shellModeRef = useRef(shellMode);
   shellModeRef.current = shellMode;
   const atMenu = useAtMentionMenu({
@@ -1775,12 +1802,13 @@ export function useComposerCore(
   ]);
 
   const toggleShellMode = useCallback(() => {
+    if (!shellModeEnabledRef.current) return;
     if (followupStateRef.current?.isVisible) {
       onDismissFollowupRef.current?.();
     }
     setShellMode((value) => !value);
     viewRef.current?.focus();
-  }, []);
+  }, [setShellMode]);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
@@ -2569,7 +2597,11 @@ export function useComposerCore(
     promptHistoryStorageKey,
     promptHistoryFallbackStorageKey,
   );
-  const shellHistory = useInputHistory('qwen-web-shell-command-history');
+  const shellHistory = useInputHistory(
+    shellModeEnabled
+      ? 'qwen-web-shell-command-history'
+      : promptHistoryStorageKey,
+  );
 
   const {
     push,
@@ -3674,6 +3706,7 @@ export function useComposerCore(
         EditorView.inputHandler.of((view, from, to, insert) => {
           if (
             insert === '!' &&
+            shellModeEnabledRef.current &&
             view.state.doc.toString() === '' &&
             completionStatus(view.state) !== 'active'
           ) {
@@ -3682,6 +3715,7 @@ export function useComposerCore(
           }
           if (
             insert === '?' &&
+            onToggleShortcutsRef.current &&
             view.state.doc.toString() === '' &&
             completionStatus(view.state) !== 'active'
           ) {
@@ -4041,7 +4075,11 @@ export function useComposerCore(
       if (!view || view.hasFocus) return;
 
       event.preventDefault();
-      if (event.key === '!' && view.state.doc.toString() === '') {
+      if (
+        event.key === '!' &&
+        shellModeEnabledRef.current &&
+        view.state.doc.toString() === ''
+      ) {
         toggleShellMode();
         return;
       }

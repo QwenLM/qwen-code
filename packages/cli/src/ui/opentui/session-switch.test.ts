@@ -249,6 +249,30 @@ describe('handleResumeSession', () => {
     );
   });
 
+  it('re-initializes the client when rolling back after the core swap', async () => {
+    // The forward initialize succeeds; the failure lands at the transcript
+    // reset (after the core swap, before the UI commit). The rollback's
+    // startNewSession clears the reviewed-schema evidence, so the client
+    // must be re-initialized against the restored session — otherwise the
+    // next hidden deferred call is refused even though its tool_search
+    // block is still in context. Removing the rollback's initialize() reds
+    // this: the count stays at the forward call alone.
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+    vi.mocked(host.resetTranscript).mockImplementation(() => {
+      throw new Error('transcript boom');
+    });
+
+    await handleResumeSession(host, 'target-session');
+
+    expect(calls.startNewSession.map(([id]) => id)).toEqual([
+      'target-session',
+      'old-session',
+    ]);
+    expect(calls.clientInitialize).toBe(2);
+    expect(calls.swapAbort).toBe(1);
+  });
+
   it('blocks the switch while background work is running', async () => {
     const { config, calls } = createFakeConfig();
     const registry = config.getBackgroundTaskRegistry() as unknown as {

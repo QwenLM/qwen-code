@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.aliyun.oss.OSSException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -28,6 +29,9 @@ class ApiExceptionHandlerTest {
 
         assertThat(new ApiExceptionHandler().api(new ApiException(
                 HttpStatus.NOT_FOUND, "session_not_found", "gone"),
+                new MockHttpServletRequest(), response)).isNull();
+        assertThat(new ApiExceptionHandler().runtime(new RuntimeBrokerException(
+                409, "workspace_unavailable", "Maintenance", false),
                 new MockHttpServletRequest(), response)).isNull();
         assertThat(response.getContentAsByteArray()).isEmpty();
     }

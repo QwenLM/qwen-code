@@ -30,6 +30,7 @@ import { PermissionManager } from '../../permissions/permission-manager.js';
 import { DiscoveredTool } from '../tool-registry.js';
 import { AgentCore } from '../../agents/runtime/agent-core.js';
 import type { LlmChat } from '../../core/llm-chat.js';
+import type { Content, Part } from '@google/genai';
 import {
   EXECUTION_TOOL_NAMES,
   type ExecutionEnvironment,
@@ -263,8 +264,18 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
       },
     ];
     let round = 0;
-    const sendMessageStream = vi.fn(async function* () {
+    // Record turns like a real LlmChat: the tool_call review gate rebuilds
+    // its reviewed schemas from the subagent's own history.
+    const history: Content[] = [];
+    const sendMessageStream = vi.fn(async function* (
+      _model: string,
+      params: { message: Part[] },
+    ) {
+      history.push({ role: 'user', parts: params.message });
       const call = calls[round++];
+      if (call) {
+        history.push({ role: 'model', parts: [{ functionCall: call }] });
+      }
       yield {
         type: 'chunk',
         value: call
@@ -274,6 +285,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     });
     const chat = {
       getHistoryToolCallFingerprints: () => new Map(),
+      getHistoryShallow: () => history,
       sendMessageStream,
     } as unknown as LlmChat;
     try {

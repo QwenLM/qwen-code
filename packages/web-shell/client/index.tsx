@@ -48,6 +48,7 @@ export type {
 } from './components/managed/managed-tool-result-types';
 export {
   type ManagedAgentCommandOptions,
+  type ManagedAgentPendingAction,
   type ManagedAgentProvider,
   type ManagedAgentRequestOptions,
   type ManagedAgentRuntimeState,

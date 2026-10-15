@@ -78,42 +78,49 @@ function setup(
   return { run, dispatch, registry };
 }
 
-function payload(result: ToolResult) {
+function outputText(result: ToolResult): string {
   const body = result.llmContent;
-  const text = typeof body === 'string' ? body : (body as Part[])[0].text!;
-  return JSON.parse(text.split('\n')[0]) as {
-    status: string;
-    outputs: string[];
-    error?: string;
-    toolResults: Array<{
-      name: string;
-      args: Record<string, unknown>;
-      output: string;
-    }>;
-  };
+  if (typeof body === 'string') return body;
+  return (body as Part[]).find((part) => part.text !== undefined)?.text ?? '';
 }
 
 describe('exec context tool results', () => {
   it.each([false, true])(
-    'retains skill instructions without text(), including later failure: %s',
+    'does not add nested skill results without explicit text output, including later failure: %s',
     async (fail) => {
       const body = 'skill instruction '.repeat(4000);
-      const { run } = setup(
+      const { run, registry } = setup(
         ToolNames.SKILL,
         { modelOverride: 'skill-model' },
         body,
       );
+      const clearLoadedSkills = vi.fn();
+      Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
       const result = await run(
         `await tools.skill({skill: 'test'}); ${fail ? 'throw new Error("later failure");' : ''}`,
       );
-      expect(payload(result).toolResults).toEqual([
-        { name: 'skill', args: { skill: 'test' }, output: body },
-      ]);
-      expect(JSON.stringify(result.llmContent)).toContain(
-        fail ? 'later failure' : 'completed successfully',
-      );
+      if (fail) expect(outputText(result)).toContain('later failure');
+      else expect(outputText(result)).toBe('');
+      expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
       expect(result.modelOverride).toBe('skill-model');
       expect(result.error).toBeUndefined();
+      expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['text(r.output);', 'text({ output: r.output });'])(
+    'returns nested skill output only through text(): %s',
+    async (emit) => {
+      const body = 'skill instruction\n'.repeat(20);
+      const { run, registry } = setup(ToolNames.SKILL, {}, body);
+      const clearLoadedSkills = vi.fn();
+      Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+      const result = await run(
+        `const r = await tools.skill({skill: 'test'}); ${emit}`,
+      );
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
+      expect(outputText(result).match(/skill instruction/g)).toHaveLength(20);
+      expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
     },
   );
 
@@ -135,9 +142,8 @@ describe('exec context tool results', () => {
       { inlineData: { mimeType: 'image/png', data } },
     ]);
     const result = await run('text(await tools.capture_screen_context({}));');
-    expect(payload(result).toolResults[0].output).toBe(
-      'Untrusted app screenshot context',
-    );
+    expect(outputText(result)).toContain('Untrusted app screenshot context');
+    expect(outputText(result)).not.toContain('toolResults');
     expect(result.llmContent).toEqual([
       expect.objectContaining({ text: expect.not.stringContaining(data) }),
       { inlineData: { mimeType: 'image/png', data } },
@@ -164,9 +170,7 @@ describe('exec context tool results', () => {
     expect(JSON.stringify(result.llmContent)).not.toContain('after goal');
     if (source.includes('before goal'))
       expect(JSON.stringify(result.llmContent)).toContain('before goal');
-    expect(payload(result).toolResults[0].output).toBe(
-      'goal proposal recorded',
-    );
+    expect(outputText(result)).not.toContain('toolResults');
   });
 
   it('keeps nonterminal goal proposals callable without ending the script', async () => {

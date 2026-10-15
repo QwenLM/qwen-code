@@ -42,7 +42,55 @@ const VITEST_FAIL_PATTERN = /^FAIL\s+(.+)$/;
 // Anchoring on ` - ` rather than the first space keeps parametrized node ids
 // whose parameters contain spaces (`test_x[case one]`).
 const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
+// Maven Surefire prints one line per failed test as its class finishes:
+// `[ERROR] com.example.FooTest.caseName -- Time elapsed: 0.569 s <<< ERROR!`
+// (`<<< FAILURE!` for a failed assertion). The elapsed time varies run to
+// run, so the identifier is the class-and-method id ahead of it. The
+// class-level `Tests run: N ... <<< FAILURE! -- in <class>` line names no
+// method and is not a test.
+const MAVEN_FAIL_PATTERN =
+  /^\[ERROR\] (.+?) -- Time elapsed: [\d.]+ s <<< (?:ERROR|FAILURE)!$/;
+// The Flyway version guard (scripts/check-flyway-migrations.js) fails with a
+// ::error:: line, not a test report. Key it on the module and version —
+// stable across every merge stacked on a standing red, so the recurrences
+// land on one issue instead of one per commit. The runner consumes the
+// ::error:: command and writes ##[error] into the downloadable log (stderr is
+// wired to the same interceptor), so the anchor accepts both forms; the raw
+// form is what the guard prints and keeps the unit fixtures readable.
+const FLYWAY_FAIL_PATTERN =
+  /^(?:##\[error\]|::error::)(.+?): \d+ migrations claim version ([\d.]+):/;
+// The guard's two other failure modes — a migration location that moved and
+// a module directory that does not exist — are standing reds too, so they get
+// their own stable identity keyed on the module and the mode; without one
+// they fall back to the sha-keyed per-commit issue and each stacked merge
+// opens a fresh one. The location half is tightened to its real charset (the
+// guard emits its LOCATIONS constant joined with `/`): a runner-decoded
+// annotation is the runner's own rendering, and an unbounded [^;]+ would let
+// a filename-borne payload smuggle spaces and backticks into an id that is
+// rendered inside a code span in the issue body.
+const FLYWAY_CONFIG_PATTERN =
+  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [\w./-]+|found migration files outside [\w./-]+)/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
+// A Surefire id is a dotted `Class.method`, optionally with the parameter
+// types and invocation index of a parameterized case.
+const JAVA_ID_PATTERN = /^(?:[\w$]+\.)+[\w$]+(?:\([^)]*\))?(?:\[\d+])?$/;
+// The module half of a guard id is untrusted: the line it is parsed from may
+// be a runner-decoded continuation of a migration PATH (git carries LF, `:`
+// and `\` in names, and a directory component puts the forged text after a
+// real `/`). The timestamp gate in `extractFailingTests` rejects those
+// continuations outright; this shape is the second layer for every other
+// channel. The genuine value always comes from the invocation's repo-relative
+// paths — the producer job and the analyze job both run on ubuntu-latest, and
+// this suite's fixtures normalize their argument the same way — so it is
+// slash-bearing with no whitespace or backslashes, and anything else,
+// including a forged Windows drive prefix, is a payload. Backticks are
+// rejected outright because the id is rendered inside a code span in the
+// issue body.
+const GUARD_MODULE_UNSAFE = /[\s`\\]/;
+
+function guardModule(raw) {
+  return !GUARD_MODULE_UNSAFE.test(raw) && raw.includes('/') ? raw : undefined;
+}
 
 function cleanLine(line) {
   return line
@@ -53,17 +101,79 @@ function cleanLine(line) {
 }
 
 /**
+ * The Surefire id is the dedupe identity — the `seen` key, the
+ * `qwen-main-ci-failure-test:` marker, the bullet the body lists — so it is
+ * kept whole: two modules can carry the same simple `Class.method` (sdk-java
+ * already has three such simple-name pairs), and reducing to `Class.method`
+ * would merge them into one issue. The JAVA_ID_PATTERN shape is this lane's
+ * own guard against the phrase appearing in a test's captured stdout.
+ * Cosmetic shortening for the title lives in `shortenForTitle`.
+ */
+function javaTestId(raw) {
+  return JAVA_ID_PATTERN.test(raw) ? raw : undefined;
+}
+
+/**
  * Collect the failing test identifiers a runner reported, first-seen order.
- * Both runners print their failures more than once (inline plus summary), and a
+ * Every runner prints its failures more than once (inline plus summary), and a
  * matrix leg repeats them per job, so identifiers are deduped.
  */
 export function extractFailingTests(logText) {
   const seen = new Set();
   for (const rawLine of String(logText ?? '').split('\n')) {
+    // A flyway id is built from untrusted path text, so it is accepted only
+    // from a line the runner itself emitted — one carrying its timestamp.
+    // The guard prints file PATHS, so a LF inside a directory component
+    // leaves the forged text after a real `/` and past the module shape
+    // below; but a decoded annotation continuation is written without the
+    // runner's timestamp, which closes that door for both flyway arms.
+    const runnerLine = LOG_TIMESTAMP_PATTERN.test(
+      rawLine.replace(ANSI_PATTERN, ''),
+    );
     const line = cleanLine(rawLine);
     const vitest = VITEST_FAIL_PATTERN.exec(line);
     const pytest = PYTEST_FAIL_PATTERN.exec(line);
-    if (!vitest && !pytest) continue;
+    const maven = MAVEN_FAIL_PATTERN.exec(line);
+    const flyway = FLYWAY_FAIL_PATTERN.exec(line);
+    const flywayConfig = FLYWAY_CONFIG_PATTERN.exec(line);
+    if (!vitest && !pytest && !maven && !flyway && !flywayConfig) continue;
+
+    // The flyway id doubles as the issue title and body bullet, so it is
+    // written to be read, not only to be hashed — and both captures are
+    // validated before they become a dedupe identity, the way the Surefire
+    // id is validated below.
+    if (flyway) {
+      if (!runnerLine) continue;
+      const module = guardModule(flyway[1]);
+      if (module) {
+        seen.add(`flyway duplicate version ${flyway[2]} in ${module}`);
+        continue;
+      }
+      // A rejected capture must not discard a genuine config-mode identity
+      // on the same line — fall through to the flywayConfig arm below
+      // instead of returning. The suppression payload needs no newline at
+      // all: spaces on the timestamped line run the lazy module capture all
+      // the way to the payload, and an unconditional continue here would
+      // drop the line's real diagnosis with it.
+    }
+
+    if (flywayConfig) {
+      if (!runnerLine) continue;
+      const module = guardModule(flywayConfig[1]);
+      if (module) seen.add(`flyway ${flywayConfig[2]} in ${module}`);
+      continue;
+    }
+
+    // A line either flyway pattern matched is fully handled above, whether
+    // it yielded an identity or was dropped — the shared tail below reads
+    // vitest/pytest captures unconditionally and is only safe past it.
+    if (flyway || flywayConfig) continue;
+
+    if (maven) {
+      const id = javaTestId(maven[1]);
+      if (id) seen.add(id);
+      continue;
+    }
 
     // pytest -q appends ` - <error message>`; the message varies run to run and
     // would defeat deduping, so keep only the `file::test` node id.
@@ -122,7 +232,15 @@ export function failureSignature(workflowName, testIds) {
  * them (`file > Suite > nested > case` is routinely over 140 characters).
  */
 export function shortenForTitle(testId, limit = 110) {
-  const segments = testId.replace(/\s+/g, ' ').trim().split(' > ');
+  const text = testId.replace(/\s+/g, ' ').trim();
+  // A Surefire id's package prefix adds no signal next to the class name and
+  // pushes the method out of the title budget, and package segments are
+  // lowercase by convention. Only a Java-shaped id is stripped — a vitest
+  // `file > case` id opens with a path that must survive intact.
+  const display = JAVA_ID_PATTERN.test(text)
+    ? text.replace(/^(?:[a-z_$][\w$]*\.)+/, '')
+    : text;
+  const segments = display.split(' > ');
   const collapsed =
     segments.length > 2
       ? [segments[0], '…', segments.at(-1)].join(' > ')
@@ -140,6 +258,18 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
         tests.push({ id, key: testKey(id) });
     }
   }
+
+  // Guard-derived ids are the only run-level diagnoses in the set: the
+  // collision they name is stable across every merge stacked on a standing
+  // red, so they title the issue and are searched first. First-seen order
+  // would let a mass failure in another lane crowd them past the search and
+  // body caps — nothing guarantees the guard's log is globbed first. The
+  // sort is stable, so each group keeps its first-seen order and the cap
+  // counts are unchanged.
+  tests.sort(
+    (a, b) =>
+      Number(b.id.startsWith('flyway ')) - Number(a.id.startsWith('flyway ')),
+  );
 
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {
@@ -175,6 +305,12 @@ const ALSO_FAILING_HEADING = '## Also failing';
 // is the heading plus its contiguous bullet list — nothing else is ever written
 // under it.
 const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
+// The "- Failed jobs:" block is machine-owned the same way: on merge it is
+// stripped and re-emitted from the CURRENT run's failed jobs, so the lane the
+// body points at never freezes at filing time. The bullets it owns are the
+// two-space ones failedJobLines emits — the strip stops at the first line
+// that is not one, never consuming a human bullet that starts with `- `.
+const FAILED_JOBS_BLOCK = /\n*- Failed jobs:\n(?: {2}- [^\n]*\n?)+/;
 
 // The same split/merge contract — head / recorded occurrences / tail around
 // the marker, human text kept verbatim, occurrences newest-first and capped —
@@ -284,6 +420,12 @@ export function renderIssueBody({
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
       `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+      // The failing tests name what broke; the failed jobs name which lane
+      // broke — a guard's diagnosis (the colliding files) lives only in its
+      // job log.
+      ...(analysis.failedJobs.length
+        ? ['', '- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+        : []),
       '',
       '## Failing tests',
       '',
@@ -312,8 +454,13 @@ export function renderIssueBody({
 
   // The "## Also failing" list is rebuilt from the current failure set below,
   // so strip the previous one first: a test that has since been fixed must
-  // disappear instead of being listed forever.
-  const strippedProse = prose.replace(ALSO_FAILING_BLOCK, '').trimEnd();
+  // disappear instead of being listed forever. The "- Failed jobs:" block is
+  // rebuilt from the current run the same way; the '\n' replacement keeps the
+  // blank line that separated a mid-prose block from what followed it.
+  const strippedProse = prose
+    .replace(ALSO_FAILING_BLOCK, '')
+    .replace(FAILED_JOBS_BLOCK, '\n')
+    .trimEnd();
 
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
@@ -326,9 +473,14 @@ export function renderIssueBody({
   const withMarkers = missingMarkers.length
     ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
     : strippedProse;
-  const withTests = missingTests.length
-    ? `${withMarkers}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+  // A run whose failed-job list came back empty drops the block entirely
+  // rather than freezing the lanes an earlier run happened to report.
+  const withJobs = analysis.failedJobs.length
+    ? `${withMarkers}\n\n- Failed jobs:\n${failedJobLines(analysis.failedJobs).join('\n')}`
     : withMarkers;
+  const withTests = missingTests.length
+    ? `${withJobs}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+    : withJobs;
 
   // A re-run of the same run must not add a second line for it. Match the
   // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,

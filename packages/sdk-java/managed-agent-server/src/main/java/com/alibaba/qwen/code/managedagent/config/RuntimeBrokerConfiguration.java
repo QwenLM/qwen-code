@@ -58,8 +58,9 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public ToolExecutionRepository toolExecutionRepository(
-            DataSource dataSource) {
-        return new JdbcToolExecutionRepository(dataSource);
+            DataSource dataSource, RuntimeBindingRepository bindings) {
+        return new JdbcToolExecutionRepository(dataSource,
+                bindings instanceof JdbcRuntimeBindingRepository original ? original : null);
     }
 
     @Bean(destroyMethod = "close")
@@ -77,6 +78,18 @@ public class RuntimeBrokerConfiguration {
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
                 publicationData.getIfAvailable());
+    }
+
+    // The child result relay and the close cascade probe bindings across
+    // this Broker: it must be a bean, but its lifecycle stays with the
+    // owning EmbeddedRuntimeBroker — destroyMethod "" keeps Spring from
+    // closing the same service a second time.
+    @Bean(destroyMethod = "")
+    @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
+            name = "enabled", havingValue = "true")
+    public com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService runtimeBrokerService(
+            EmbeddedRuntimeBroker broker) {
+        return broker.service();
     }
 
     @Bean
