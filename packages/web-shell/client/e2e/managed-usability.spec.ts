@@ -127,7 +127,7 @@ for (const width of [1280, 390]) {
     await expect(
       page.locator('[data-managed-workspace-binding]'),
     ).toContainText('ws-b');
-    await expect(page.locator('[data-managed-model]')).toContainText('Model B');
+    await expect(page.locator('[data-managed-model]')).toContainText('agent-b');
     expect(requests).toHaveLength(width === 390 ? 2 : 1);
     expect(requests[0]).toMatchObject({
       agentId: 'agent-b',
