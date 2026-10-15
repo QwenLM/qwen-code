@@ -1,0 +1,302 @@
+name: 'Managed Agent Reference Distribution'
+
+run-name: "Managed Agent reference ${{ inputs.version || format('PR #{0} dry run', github.event.pull_request.number) }}"
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-managed-agent-reference.yml'
+      - 'scripts/package-managed-agent-reference.mjs'
+      - 'scripts/contract-version-utils.js'
+      - 'scripts/flyway-migration-utils.js'
+      - 'scripts/tests/package-managed-agent-reference.test.mjs'
+      - 'packages/sdk-java/qwencode/**'
+      - 'packages/sdk-java/runtime-broker/**'
+      - 'packages/sdk-java/managed-agent-server/**'
+      - 'packages/core/src/managed-runtime/contracts/**'
+      - 'packages/cli/src/serve/capabilities.ts'
+      - 'packages/cli/src/serve/broker-managed-runtime-provider.ts'
+      - 'packages/cli/src/serve/hosted-harness-contract.ts'
+      - 'docs/users/managed-agent-reference-deployment.md'
+      - 'docs/users/managed-agent-reference-deployment.zh-CN.md'
+      - 'docs/users/hosted-workspace-recovery.md'
+      - 'docs/users/hosted-workspace-recovery.zh-CN.md'
+      - 'package.json'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Experimental distribution version, for example 0.1.0-alpha.1.'
+        required: true
+        type: 'string'
+      dry_run:
+        description: 'Build and verify without creating a tag or GitHub prerelease.'
+        required: true
+        default: true
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'managed-agent-reference-${{ github.event.pull_request.number || github.run_id }}'
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: 'Prepare reference distribution'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    outputs:
+      tag: '${{ steps.version.outputs.tag }}'
+      version: '${{ steps.version.outputs.version }}'
+    steps:
+      - name: 'Resolve experimental version'
+        id: 'version'
+        shell: 'bash'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          DRY_RUN: '${{ inputs.dry_run }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == 'pull_request' ]]; then
+            version="0.0.0-pr.${PR_NUMBER}"
+          else
+            version="${INPUT_VERSION#v}"
+          fi
+          invalid_version() {
+            echo '::error::The reference distribution requires an experimental SemVer with a prerelease.'
+            exit 1
+          }
+          if [[ ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]]; then
+            invalid_version
+          fi
+          prerelease="${version#*-}"
+          IFS='.' read -r -a identifiers <<< "${prerelease}"
+          for identifier in "${identifiers[@]}"; do
+            if [[ "${identifier}" =~ ^[0-9]+$ && "${#identifier}" -gt 1 && "${identifier:0:1}" == '0' ]]; then
+              invalid_version
+            fi
+          done
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' && "${DRY_RUN}" == 'false' && "${GITHUB_REF}" != 'refs/heads/main' ]]; then
+            echo '::error::Published reference distributions must run from main.'
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=managed-agent-reference-v${version}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: 'Build and verify reference distribution'
+    needs: 'prepare'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 45
+    services:
+      mysql:
+        image: 'mysql:8.4'
+        env:
+          MYSQL_DATABASE: 'qwen_managed_agent'
+          MYSQL_PASSWORD: 'qwen'
+          MYSQL_ROOT_PASSWORD: 'root'
+          MYSQL_USER: 'qwen'
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    steps:
+      - name: 'Checkout source revision'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'Set up Java 21'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
+            packages/sdk-java/managed-agent-server/pom.xml
+
+      - name: 'Set up Node.js 22'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: 'Grant Flyway probe access'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          docker exec "${{ job.services.mysql.id }}" \
+            mysql -uroot -proot \
+            --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
+
+      - name: 'Test the packager'
+        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
+
+      - name: 'Build Java components'
+        run: |-
+          set -euo pipefail
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests clean install
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml -DskipTests clean package
+
+      - name: 'Assemble reference distribution'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        run: |-
+          node scripts/package-managed-agent-reference.mjs \
+            --version "${RELEASE_VERSION}" \
+            --source-revision "${GITHUB_SHA}" \
+            --output "${RUNNER_TEMP}/managed-agent-reference"
+
+      - name: 'Verify and boot the exact archive'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          release="${RUNNER_TEMP}/managed-agent-reference"
+          cd "${release}"
+          sha256sum --check SHA256SUMS.txt
+          mkdir extracted
+          tar -xzf "qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz" -C extracted
+          bundle="${release}/extracted/qwen-managed-agent-reference-${RELEASE_VERSION}"
+          cd "${bundle}"
+          sha256sum --check SHA256SUMS
+          SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent?allowPublicKeyRetrieval=true&useSSL=false' \
+          SPRING_DATASOURCE_USERNAME='qwen' \
+          SPRING_DATASOURCE_PASSWORD='qwen' \
+            bin/qwen-managed-agent-server > "${RUNNER_TEMP}/managed-agent-reference-boot.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true' EXIT
+          for attempt in {1..120}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/actuator/health > "${RUNNER_TEMP}/managed-agent-reference-health.json"; then
+              break
+            fi
+            if ! kill -0 "${server_pid}" 2>/dev/null; then
+              cat "${RUNNER_TEMP}/managed-agent-reference-boot.log"
+              exit 1
+            fi
+            if [[ "${attempt}" == '120' ]]; then
+              cat "${RUNNER_TEMP}/managed-agent-reference-boot.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          grep -q '"status":"UP"' "${RUNNER_TEMP}/managed-agent-reference-health.json"
+
+      - name: 'Upload verified release assets'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'managed-agent-reference-${{ needs.prepare.outputs.version }}'
+          path: |-
+            ${{ runner.temp }}/managed-agent-reference/*.tar.gz
+            ${{ runner.temp }}/managed-agent-reference/*.manifest.json
+            ${{ runner.temp }}/managed-agent-reference/SHA256SUMS.txt
+          if-no-files-found: 'error'
+          retention-days: 14
+
+  publish:
+    name: 'Publish experimental reference distribution'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    environment: 'production-release'
+    permissions:
+      contents: 'write'
+    steps:
+      - name: 'Download verified assets'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'managed-agent-reference-${{ needs.prepare.outputs.version }}'
+          path: 'release-assets'
+
+      - name: 'Create immutable GitHub prerelease'
+        env:
+          GH_REPO: '${{ github.repository }}'
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          archive="release-assets/qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz"
+          manifest="release-assets/qwen-managed-agent-reference-${RELEASE_VERSION}.manifest.json"
+          checksums='release-assets/SHA256SUMS.txt'
+          assets=("${archive}" "${manifest}" "${checksums}")
+          for asset in "${assets[@]}"; do
+            test -f "${asset}"
+          done
+
+          release_payload="$(jq -n \
+            --arg tag "${RELEASE_TAG}" \
+            --arg target "${GITHUB_SHA}" \
+            --arg name "Managed Agent reference ${RELEASE_VERSION}" \
+            '{tag_name:$tag,target_commitish:$target,name:$name,draft:true,prerelease:true,generate_release_notes:true}')"
+          release_json="$(gh api --method POST "repos/${GH_REPO}/releases" --input - <<< "${release_payload}")"
+          release_id="$(jq -er '.id' <<< "${release_json}")"
+
+          gh release upload "${RELEASE_TAG}" "${assets[@]}"
+          release_json="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
+          expected_names="$(printf '%s\n' \
+            'SHA256SUMS.txt' \
+            "qwen-managed-agent-reference-${RELEASE_VERSION}.manifest.json" \
+            "qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz" | sort)"
+          actual_names="$(jq -r '.assets[].name' <<< "${release_json}" | sort)"
+          if [[ "${actual_names}" != "${expected_names}" ]]; then
+            echo '::error::Draft release assets do not match the verified asset set.'
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            name="$(basename "${asset}")"
+            local_size="$(stat --format='%s' "${asset}")"
+            remote_size="$(jq -er --arg name "${name}" '.assets[] | select(.name == $name) | .size' <<< "${release_json}")"
+            if [[ "${remote_size}" != "${local_size}" ]]; then
+              echo "::error::Uploaded size mismatch for ${name}."
+              exit 1
+            fi
+            local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+            remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest // empty' <<< "${release_json}")"
+            if [[ -z "${remote_digest}" ]]; then
+              asset_id="$(jq -er --arg name "${name}" '.assets[] | select(.name == $name) | .id' <<< "${release_json}")"
+              downloaded_asset="$(mktemp)"
+              trap 'rm -f "${downloaded_asset}"' EXIT
+              gh api \
+                -H 'Accept: application/octet-stream' \
+                "repos/${GH_REPO}/releases/assets/${asset_id}" \
+                > "${downloaded_asset}"
+              remote_digest="sha256:$(sha256sum "${downloaded_asset}" | awk '{print $1}')"
+              rm -f "${downloaded_asset}"
+              trap - EXIT
+            fi
+            if [[ "${remote_digest}" != "${local_digest}" ]]; then
+              echo "::error::Uploaded digest mismatch for ${name}."
+              exit 1
+            fi
+          done
+
+          tag_json="$(gh api --method POST "repos/${GH_REPO}/git/refs" \
+            -f ref="refs/tags/${RELEASE_TAG}" \
+            -f sha="${GITHUB_SHA}")"
+          if [[ "$(jq -er '.object.sha' <<< "${tag_json}")" != "${GITHUB_SHA}" ]]; then
+            echo '::error::The created release tag does not point to the verified source revision.'
+            exit 1
+          fi
+
+          published="$(gh api --method PATCH "repos/${GH_REPO}/releases/${release_id}" \
+            -F draft=false \
+            -F prerelease=true)"
+          jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            '.draft == false and .prerelease == true and .tag_name == $tag' \
+            <<< "${published}" >/dev/null

@@ -73,6 +73,31 @@ describe('Hosted tool approval settings', () => {
     ).toBe(false);
   });
 
+  it('asks before every team write and never before reading the board', () => {
+    for (const mode of ['default', 'auto-edit'] as const) {
+      expect(
+        [
+          'team_create',
+          'team_delete',
+          'task_create',
+          'task_update',
+          'task_list',
+          'agent',
+          'exit_plan_mode',
+          'team_plan_approval',
+        ].filter((tool) =>
+          hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool),
+        ),
+      ).toEqual([
+        'team_create',
+        'team_delete',
+        'task_create',
+        'task_update',
+        'agent',
+      ]);
+    }
+  });
+
   it('pins only a mode that asks in the Session definition', () => {
     expect(
       hostedApprovalDefinition({ mode: 'yolo', timeoutMs: 5_000 }),

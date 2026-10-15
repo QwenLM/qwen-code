@@ -7,11 +7,21 @@ import {
   useState,
 } from 'react';
 import { useI18n } from '../../i18n';
+import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
+import { ChatEditor } from '../ChatEditor';
+import { WelcomeHeader } from '../WelcomeHeader';
+import type {
+  EditorHandle,
+  ComposerSubmitCommit,
+} from '../../hooks/useComposerCore';
+import {
+  clearComposerDraftIfMatches,
+  getComposerDraftStorageKey,
+} from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
-import { Textarea } from '../ui/textarea';
 import { managedEventsToMessages } from './managed-session-messages';
 import {
   getManagedClientId,
@@ -19,11 +29,16 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
+import { useManagedCwdChange } from './use-managed-cwd-change';
+import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
+import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
+import { useManagedTasks } from './use-managed-tasks';
+import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -32,6 +47,7 @@ import type {
 interface PendingPrompt {
   idempotencyKey: string;
   text: string;
+  draftText?: string;
   sessionId?: string;
   cwd?: string;
 }
@@ -52,6 +68,11 @@ function readPending(key: string): PendingPrompt | undefined {
     )
       return undefined;
     if (pending['cwd'] !== undefined && typeof pending['cwd'] !== 'string')
+      return undefined;
+    if (
+      pending['draftText'] !== undefined &&
+      typeof pending['draftText'] !== 'string'
+    )
       return undefined;
     return value as PendingPrompt;
   } catch {
@@ -114,6 +135,42 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const taskTriggerRef = useRef<HTMLButtonElement>(null);
+  const [wideTasks, setWideTasks] = useState(false);
+  const [taskPanelSession, setTaskPanelSession] = useState<string>();
+  const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
+  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
+  const taskSnapshots = useMemo(
+    () => (tasks.task ? [...tasks.page.data, tasks.task] : tasks.page.data),
+    [tasks.page.data, tasks.task],
+  );
+  const taskCancel = useManagedTaskCancel(
+    provider,
+    clientId,
+    sessionId,
+    taskSnapshots,
+    tasks.refresh,
+    tasks.apply,
+  );
+  useEffect(() => {
+    const element = pageRef.current;
+    if (!element) return;
+    const resize = () =>
+      setWideTasks(element.getBoundingClientRect().width >= 1100);
+    resize();
+    const observer =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(resize)
+        : undefined;
+    observer?.observe(element);
+    window.addEventListener('resize', resize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
+  }, []);
+  useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
@@ -145,7 +202,9 @@ function ManagedSessionsContent({
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
   );
-  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const composerRef = useRef<EditorHandle | null>(null);
+  const composerContainerRef = useRef<HTMLDivElement | null>(null);
+  const composerCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
   const sessionsNavRef = useRef<HTMLElement | null>(null);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const listLifetime = useRef<AbortController | undefined>(undefined);
@@ -175,6 +234,13 @@ function ManagedSessionsContent({
         ? toManagedPermissionRequest(approvals.action, messages)
         : null,
     [approvals.action, messages],
+  );
+  const cwd = useManagedCwdChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
   );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
@@ -211,15 +277,14 @@ function ManagedSessionsContent({
       focusComposer.current = undefined;
       return;
     }
-    const composer =
-      composerFormRef.current?.querySelector<HTMLTextAreaElement>(
-        'textarea:not([disabled])',
-      );
+    const composer = composerContainerRef.current?.querySelector(
+      '[contenteditable="true"], textarea:not([disabled])',
+    );
     const parked = document.activeElement;
     const ours = parked === document.body || parked === sessionsNavRef.current;
     if (composer) {
       focusComposer.current = undefined;
-      if (ours) composer.focus();
+      if (ours) composerRef.current?.focus();
       return;
     }
     if (!ours) {
@@ -304,23 +369,28 @@ function ManagedSessionsContent({
     }
   }
 
-  async function submit() {
+  async function submit(submittedText = text, commit?: ComposerSubmitCommit) {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy) return;
+    if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
     setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
-      if (!text.trim() || (sessionId && !detail.summary?.capabilities.canSend))
+      if (
+        !submittedText.trim() ||
+        (sessionId && !detail.summary?.capabilities.canSend)
+      )
         return;
       attempt = {
         idempotencyKey: managedRequestId(),
-        text,
+        text: submittedText,
+        draftText: composerRef.current?.getText(),
         sessionId,
         cwd: workspaceCwd,
       };
       pendingRef.current = attempt;
       setPending(attempt);
       persistPending(pendingKey, attempt);
+      composerCommit.current = commit;
     }
     setBusy(true);
     setError(undefined);
@@ -351,8 +421,25 @@ function ManagedSessionsContent({
       setPending(undefined);
       persistPending(pendingKey, undefined);
       setListRevision((current) => current + 1);
-      if (selection.current === selectedAtSubmit) {
+      composerCommit.current?.();
+      composerCommit.current = undefined;
+      const draftKey = getComposerDraftStorageKey(
+        undefined,
+        `managed:${provider.storageKey}:${attempt.sessionId ?? 'new'}`,
+      );
+      for (const draft of [attempt.draftText, attempt.text]) {
+        if (draft !== undefined) clearComposerDraftIfMatches(draftKey, draft);
+      }
+      const editor = composerRef.current;
+      if (
+        selection.current === attempt.sessionId &&
+        editor &&
+        [attempt.draftText, attempt.text].includes(editor.getText())
+      ) {
+        editor.clearText();
         setText('');
+      }
+      if (selection.current === selectedAtSubmit) {
         onSelectSession(admission.sessionId);
         detail.reload();
       }
@@ -422,7 +509,7 @@ function ManagedSessionsContent({
       </Button>
     ) : null;
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
+    <div ref={pageRef} className="flex h-full min-h-0 flex-col gap-3">
       {/* The uncertain-request row unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
@@ -444,12 +531,28 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {(error || detail.error) && (
-        <p role="alert" className="text-sm text-destructive">
-          {error || detail.error}
+      {/* One server condition can surface through both channels; announce
+          each distinct message once, keyed by the message so a standing
+          alert keeps its node when a duplicate of it stops rendering. */}
+      {[
+        ...new Set(
+          [detail.stoppedReason, detail.error, error].filter(
+            (message): message is string => Boolean(message),
+          ),
+        ),
+      ].map((message) => (
+        <p key={message} role="alert" className="text-sm text-destructive">
+          {message}
         </p>
-      )}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
+      ))}
+      <div
+        className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]"
+        style={
+          taskPanelOpen && wideTasks
+            ? { gridTemplateColumns: 'minmax(180px,240px) minmax(0,1fr) 360px' }
+            : undefined
+        }
+      >
         <nav
           ref={sessionsNavRef}
           tabIndex={-1}
@@ -507,12 +610,36 @@ function ManagedSessionsContent({
           )}
         </nav>
         <section
-          className="flex min-h-0 min-w-0 flex-col gap-3"
+          className={`${shellStyles.chatPane} gap-3`}
           aria-label={t('managed.conversation')}
         >
           {summary && (
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">{summary.title}</span>
+              {provider.tasks &&
+                (summary.capabilities.tasks === true ||
+                  taskCancel.pendingTaskIds.length > 0) && (
+                  <Button
+                    ref={taskTriggerRef}
+                    variant="outline"
+                    size="sm"
+                    aria-expanded={taskPanelOpen}
+                    onClick={() =>
+                      setTaskPanelSession(taskPanelOpen ? undefined : sessionId)
+                    }
+                  >
+                    {t(
+                      summary.capabilities.tasks === true
+                        ? 'managed.tasks.title'
+                        : 'managed.tasks.recovery',
+                    )}
+                  </Button>
+                )}
+              {Object.entries(taskCancel.states).map(([taskId, state]) => (
+                <span key={taskId} role="status">
+                  {t(taskCancelMessage(state))}
+                </span>
+              ))}
               <Badge variant="secondary">
                 {t(`managed.phase.${summary.phase}`)}
               </Badge>
@@ -520,6 +647,14 @@ function ManagedSessionsContent({
                 <span className="text-muted-foreground">
                   {t('managed.runtime')}:{' '}
                   {t(`managed.runtime.${summary.runtimeState}`)}
+                </span>
+              )}
+              {summary.agentId && (
+                <span className="text-muted-foreground" data-managed-model>
+                  {t('managed.modelPreset')}:{' '}
+                  {provider.workspaceBinding?.modelPresets?.find(
+                    (item) => item.agentId === summary.agentId,
+                  )?.label ?? summary.agentId}
                 </span>
               )}
               {summary.capabilities.artifacts && provider.toolResults && (
@@ -547,6 +682,30 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
+              <ManagedSessionCwdControl
+                key={`${provider.storageKey}:${summary.sessionId}`}
+                summary={summary}
+                supported={Boolean(provider.cwdChange)}
+                cwd={cwd}
+                disabledReason={
+                  active ||
+                  pendingApproval ||
+                  busy ||
+                  pending?.sessionId === sessionId
+                    ? t('managed.cwd.busy')
+                    : undefined
+                }
+                onSubmit={(path, revision) => {
+                  if (
+                    pendingRef.current?.sessionId === sessionId ||
+                    busy ||
+                    active ||
+                    pendingApproval
+                  )
+                    return Promise.resolve();
+                  return cwd.submit(path, revision);
+                }}
+              />
               {!summary.capabilities.workspaceTurns && (
                 <p className="text-muted-foreground">
                   {t('managed.workspaceExecutionUnavailable')}
@@ -567,9 +726,10 @@ function ManagedSessionsContent({
                 setListRevision((current) => current + 1);
                 onSelectSession(createdId);
               }}
+              onAbandoned={() => setListRevision((current) => current + 1)}
             />
           ) : (
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
               <MessageList
                 messages={messages}
                 onToolResultOpen={
@@ -587,11 +747,14 @@ function ManagedSessionsContent({
                 workspaceCwd={summary?.workspaceCwd}
                 hideSessionTimeline
                 welcomeHeader={
-                  summary?.workspace ? null : (
-                    <p className="p-4 text-muted-foreground">
-                      {t('managed.prompt')}
-                    </p>
-                  )
+                  messages.length === 0 && !detail.loading ? (
+                    <WelcomeHeader
+                      version=""
+                      cwd={summary?.workspaceCwd ?? ''}
+                      currentModel={summary?.agentId ?? ''}
+                      currentMode=""
+                    />
+                  ) : undefined
                 }
               />
             </div>
@@ -601,6 +764,13 @@ function ManagedSessionsContent({
               <p className="text-sm text-muted-foreground">
                 {t('managed.uncertain')}
               </p>
+              <Button
+                size="sm"
+                disabled={busy || cwd.blocked}
+                onClick={() => void submit()}
+              >
+                {t('managed.retry')}
+              </Button>
               {/* Offered only where the handler can restore the draft:
                   destroying the only copy from a foreign session would lose
                   it for good. */}
@@ -617,7 +787,11 @@ function ManagedSessionsContent({
                     // The pending record is client-scoped but the draft
                     // belongs to the session it was written for: restore it
                     // only there.
-                    if (pending.sessionId === sessionId) setText(pending.text);
+                    if (pending.sessionId === sessionId) {
+                      setText(pending.text);
+                      composerRef.current?.setText(pending.text);
+                    }
+                    composerCommit.current = undefined;
                     setError(undefined);
                     // A create that committed server-side before an
                     // unconfirmed failure is otherwise invisible until the
@@ -639,9 +813,11 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
-                // Only the Session creator may answer; once the service says
-                // so, that is true of every approval this Session raises, so
-                // the latch is scoped to the Session rather than the Action.
+                // Answering needs the Session's owner or a Workspace
+                // operator; once the service refuses this viewer, that
+                // holds for every approval this Session raises — until an
+                // explicit retry re-probes, so the latch is scoped to the
+                // Session rather than the Action.
                 disabled={approvals.respondForbidden}
                 extraDescriptionId={
                   [
@@ -696,20 +872,30 @@ function ManagedSessionsContent({
               guard only bounds the latch: the reason describes a card, and
               once the Session has none there is nothing left to explain. */}
           {pendingApproval !== null && answerNoticeShown && (
-            <p
-              id={answerNoticeId}
-              // The first refusal is news; the latch that keeps every later
-              // approval of this Session disabled only restates it, so it is
-              // a status line rather than a second alert.
-              role={approvals.answerError !== undefined ? 'alert' : 'status'}
-              className="text-sm text-destructive"
-            >
-              {t(
-                approvals.respondForbidden
-                  ? 'managed.approval.forbidden'
-                  : 'managed.approval.failed',
+            <div className="flex items-center gap-2">
+              <p
+                id={answerNoticeId}
+                // The first refusal is news; the latch that keeps every
+                // later approval of this Session disabled only restates it,
+                // so it is a status line rather than a second alert.
+                role={approvals.answerError !== undefined ? 'alert' : 'status'}
+                className="text-sm text-destructive"
+              >
+                {t(
+                  approvals.respondForbidden
+                    ? 'managed.approval.forbidden'
+                    : 'managed.approval.failed',
+                )}
+              </p>
+              {approvals.respondForbidden && (
+                // The refusal came from the viewer's role row, which an
+                // operator can raise while the page stays open — unlike the
+                // load-error retry this renders without a `loadError`.
+                <Button variant="outline" size="sm" onClick={approvals.retry}>
+                  {t('managed.approval.retry')}
+                </Button>
               )}
-            </p>
+            </div>
           )}
           <ManagedSessionProgress
             summary={summary}
@@ -720,24 +906,39 @@ function ManagedSessionsContent({
           />
           {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
-            <form
-              ref={composerFormRef}
-              className="flex shrink-0 flex-col gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submit();
-              }}
+            <div
+              ref={composerContainerRef}
+              className={`${shellStyles.footer} flex flex-col gap-2`}
             >
-              <Textarea
-                aria-label={t('managed.prompt')}
-                value={pending?.text ?? text}
-                onChange={(event) => setText(event.target.value)}
+              <ChatEditor
+                key={`${provider.storageKey}:${sessionId ?? 'new'}`}
+                ref={composerRef}
+                composerScopeKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
+                disableLegacyHistoryFallback
+                shellModeEnabled={false}
+                composerInput={
+                  pending && pending.sessionId === sessionId
+                    ? { text: pending.text }
+                    : undefined
+                }
+                composerInputVersion={0}
+                onInputTextChange={setText}
+                onSubmit={(value, _images, _files, commit) => {
+                  void submit(value, commit);
+                  return false;
+                }}
+                commands={[]}
+                workspaceFeaturesEnabled={false}
+                attachmentsEnabled={false}
+                visibleToolbarActions={[]}
+                showChatWidthToggle={false}
+                isPreparing={busy || cwd.blocked}
                 disabled={
                   busy ||
                   Boolean(pending) ||
                   Boolean(sessionId && !summary?.capabilities.canSend)
                 }
-                placeholder={t('managed.prompt')}
+                placeholderText={t('managed.prompt')}
               />
               <div className="flex items-center justify-end gap-2">
                 {sessionId &&
@@ -749,23 +950,8 @@ function ManagedSessionsContent({
                     </span>
                   )}
                 {cancelButton}
-                <Button
-                  type="submit"
-                  disabled={
-                    busy ||
-                    (!pending &&
-                      (!text.trim() ||
-                        Boolean(sessionId && !summary?.capabilities.canSend)))
-                  }
-                >
-                  {busy
-                    ? t('managed.sending')
-                    : pending
-                      ? t('managed.retry')
-                      : t('managed.send')}
-                </Button>
               </div>
-            </form>
+            </div>
           ) : (
             cancelButton && (
               <div className="flex shrink-0 justify-end">{cancelButton}</div>
@@ -786,6 +972,30 @@ function ManagedSessionsContent({
               />
             )}
         </section>
+        {taskPanelOpen && sessionId && provider.tasks && (
+          <ManagedTaskPanel
+            key={`${provider.storageKey}:${sessionId}`}
+            wide={wideTasks}
+            tasks={tasks}
+            cancel={taskCancel}
+            canCancel={
+              summary?.capabilities.tasks === true && !!provider.tasks.cancel
+            }
+            reader={
+              summary?.capabilities.artifacts === true
+                ? provider.toolResults
+                : undefined
+            }
+            clientId={clientId}
+            sessionId={sessionId}
+            onClose={() => setTaskPanelSession(undefined)}
+            restoreFocus={() => {
+              if (taskTriggerRef.current?.isConnected)
+                taskTriggerRef.current.focus();
+              else sessionsNavRef.current?.focus();
+            }}
+          />
+        )}
       </div>
     </div>
   );

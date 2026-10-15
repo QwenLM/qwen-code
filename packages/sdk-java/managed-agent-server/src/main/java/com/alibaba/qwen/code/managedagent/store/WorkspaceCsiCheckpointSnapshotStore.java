@@ -4,12 +4,18 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -25,8 +31,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import javax.sql.DataSource;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** A private component snapshot; it cannot authorize settlement or release. */
 public final class WorkspaceCsiCheckpointSnapshotStore {
@@ -34,12 +38,12 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
     private static final long MAX_BYTES = 32L * 1024 * 1024;
     private static final int MAX_ROWS = 4096;
     private static final int MAX_JSON_BYTES = 48 * 1024 * 1024;
-    private static final Set<String> TABLES = Set.of("managed_workspace_csi_retirement",
-            "managed_workspace_csi_registration", "managed_workspace_execution_lease",
-            "qwen_runtime_binding", "qwen_runtime_binding_slot", "qwen_runtime_session",
-            "qwen_tool_execution", "qwen_tool_publication", "qwen_tool_publication_object",
-            "qwen_managed_session_journal_head", "qwen_managed_session_journal_tx",
-            "qwen_managed_session_resource", "qwen_managed_session_resource_ref");
+    private static final Set<String> TABLES = Set.of("ma_operation",
+            "ma_storage", "ma_storage_owner",
+            "ma_runtime_binding", "ma_runtime_slot", "ma_runtime_session",
+            "ma_tool_execution", "ma_output_capture", "ma_resource",
+            "ma_session_head", "ma_session_journal_tx",
+            "ma_resource_ref");
     private final DataSource source;
     private final JdbcRuntimeBindingRepository bindings;
     private final ObjectMapper json;
@@ -85,8 +89,14 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
 
     private ObjectNode export(Connection connection, String retirementId,
             ObjectNode key, String publicationId) throws SQLException {
-        Map<String, Object> intentRow = one(connection,
-                "SELECT * FROM managed_workspace_csi_retirement WHERE retirement_id = ?", retirementId);
+        Map<String, Object> operationRow = one(connection,
+                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT'",
+                WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, key.path("tenantId").asText(), retirementId));
+        JsonNode payload = parse(text(operationRow, "result_json"));
+        require(payload.path("schemaVersion").asInt() == 1 && payload.path("data").isObject());
+        Map<String, Object> intentRow = json.convertValue(payload.path("data"), new com.fasterxml.jackson.core.type.TypeReference<LinkedHashMap<String, Object>>() { });
+        intentRow.put("retirement_id", text(operationRow, "operation_id"));
+        intentRow.put("phase", text(operationRow, "phase"));
         WorkspaceCsiReservationStore.Retirement intent;
         try {
             String encoded = text(intentRow, "identity_json");
@@ -105,7 +115,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         ObjectNode csi = originalCsi(connection, retirementId, intentRow, intent, runtime);
         String publicationScope = ToolPublicationDataStore.scope(key);
         Map<String, Object> publication = one(connection,
-                "SELECT * FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
+                "SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?",
                 publicationScope, publicationId);
         scope(publication, key);
         require("REFERENCED".equals(publication.get("producer_phase")) && !flag(publication, "quarantined"));
@@ -125,10 +135,11 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 && "pending".equals(terminal.path("capture").path("deliveryStatus").asText()));
         originalExecution(connection, runtime, intent, binding, terminal);
         Map<String, Object> head = one(connection,
-                "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
-                key.path("tenantId").asText(), key.path("sessionId").asText());
+                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
+                JdbcRuntimeBindingRepository.harnessDrainKey(key.path("tenantId").asText()),
+                JdbcRuntimeBindingRepository.harnessDrainKey(key.path("sessionId").asText()));
         scope(head, key);
-        require(number(head, "storage_version") == 1 && "READY".equals(head.get("recovery_status"))
+        require((number(head, "storage_version") == 1 || number(head, "storage_version") == 2) && "READY".equals(head.get("recovery_status"))
                 && Set.of("ACTIVE", "SEALED").contains(text(head, "state"))
                 && number(head, "compacted_through_revision") == 0
                 && number(head, "activation_epoch") == binding.path("activationEpoch").longValue());
@@ -205,7 +216,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             WorkspaceCsiReservationStore.Retirement intent, RuntimeBindingRecord runtime) throws SQLException {
         RuntimeProvisionRequest request = runtime.getRequest();
         Map<String, Object> registrationRow = one(connection,
-                "SELECT * FROM managed_workspace_csi_registration WHERE alias_key = ?",
+                "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ? AND registration_state = 'REGISTERED' AND storage_kind = 'CSI'",
                 WorkspaceCsiRegistration.aliasKey(request.getScope().getTenantId(), request.getStorageId()));
         WorkspaceCsiRegistration registration;
         try {
@@ -230,7 +241,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 && Objects.equals(runtime.getGeneration(), original.runtimeGeneration())
                 && runtime.getProvisionSeed().getProvisionRequestId().equals(original.provisionRequestId()));
         Map<String, Object> holder = one(connection,
-                "SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", registration.physicalKey());
+                "SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", registration.physicalKey());
         require("CSI".equals(holder.get("storage_kind")) && "DRAINING".equals(holder.get("csi_phase"))
                 && number(holder, "csi_revision") == 2 && holder.get("holder_key") == null
                 && holder.get("runtime_session_id") == null
@@ -259,14 +270,14 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 && runtime.getGeneration() == rawNumber(row, "runtime_generation")
                 && intent.sealedBindingVersion() > 0 && runtime.getVersion() >= intent.sealedBindingVersion());
         Map<String, Object> slot = one(connection,
-                "SELECT s.* FROM qwen_runtime_binding_slot s JOIN qwen_runtime_binding b ON b.request_key = s.request_key"
+                "SELECT " + ManagedSchemaProjection.RUNTIME_SLOT.columns("s") + " FROM ma_runtime_slot s JOIN ma_runtime_binding b ON b.request_key = s.request_key"
                         + " WHERE b.binding_id = ?", runtime.getBindingId());
         require(runtime.getBindingId().equals(slot.get("active_binding_id"))
                 && runtime.getGeneration() == rawNumber(slot, "last_generation")
                 && request.equals(new RuntimeProvisionRequest(scope(slot), nullable(slot, "isolation_key"),
                         text(slot, "provisioner_kind"), nullable(slot, "storage_id"))));
         require(scopeHash(request.getScope()).equals(one(connection,
-                "SELECT scope_key FROM qwen_runtime_binding WHERE binding_id = ?", runtime.getBindingId()).get("scope_key")));
+                "SELECT scope_key FROM ma_runtime_binding WHERE binding_id = ?", runtime.getBindingId()).get("scope_key")));
         require(runtime.getVersion() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER
                 && intent.sealedBindingVersion() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER
                 && runtime.getAttestationGeneration() > 0 && runtime.getAttestationGeneration() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER
@@ -292,7 +303,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             WorkspaceCsiReservationStore.Retirement intent, JsonNode binding, JsonNode terminal) throws SQLException {
         String executionId = binding.path("executionCallId").asText();
         Map<String, Object> execution = one(connection,
-                "SELECT * FROM qwen_tool_execution WHERE execution_call_id_hash = ?", valueHash(executionId));
+                "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE execution_call_id_hash = ?", valueHash(executionId));
         JsonNode ref = binding.path("reference");
         JsonNode actualRef = parse(text(execution, "reference_json"));
         require(executionId.equals(execution.get("execution_call_id"))
@@ -322,7 +333,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 ? left.decimalValue().compareTo(right.decimalValue()) : left.equals(right) ? 0 : 1, saved)
                 && terminal.path("executionStatus").asText().equals(execution.get("execution_status")));
         Map<String, Object> session = one(connection,
-                "SELECT * FROM qwen_runtime_session WHERE scope_key = ? AND runtime_session_id = ?",
+                "SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE scope_key = ? AND runtime_session_id = ?",
                 scopeHash(runtime.getRequest().getScope()), ref.path("sessionId").asText());
         require(runtime.getRequest().getScope().equals(scope(session))
                 && runtime.getBindingId().equals(session.get("binding_id"))
@@ -331,7 +342,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
     }
 
     private ArrayNode transactions(Connection connection, JsonNode key, Map<String, Object> head) throws SQLException {
-        var rows = rows(connection, "SELECT * FROM qwen_managed_session_journal_tx"
+        var rows = rows(connection, "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision LIMIT 4097",
                 key.path("tenantId").asText(), key.path("sessionId").asText());
         require(rows.size() == number(head, "journal_revision"));
@@ -367,10 +378,11 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         return result;
     }
 
-    private ArrayNode resources(Connection connection, JsonNode key, String scope, long headRevision) throws SQLException {
+    ArrayNode resources(Connection connection, JsonNode key, String scope, long headRevision) throws SQLException {
         Map<String, ArrayNode> references = new HashMap<>();
-        for (var row : rows(connection, "SELECT * FROM qwen_managed_session_resource_ref"
-                + " WHERE session_scope_key = ? ORDER BY journal_revision, resource_id LIMIT 4097", scope)) {
+        for (var row : rows(connection, "SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref"
+                + " WHERE session_scope_key = ? AND owner_kind IN ('JOURNAL', 'SESSION_RECORD')"
+                + " AND journal_revision IS NOT NULL ORDER BY journal_revision, resource_id LIMIT 4097", scope)) {
             scope(row, key);
             long revision = number(row, "journal_revision");
             require(revision > 0 && revision <= headRevision);
@@ -378,8 +390,11 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         }
         ArrayNode result = json.createArrayNode();
         long total = 0;
-        for (var row : rows(connection, "SELECT * FROM qwen_managed_session_resource"
-                + " WHERE session_scope_key = ? AND state = 'REFERENCED' ORDER BY resource_id LIMIT 4097", scope)) {
+        for (var row : rows(connection, "SELECT " + ManagedSchemaProjection.RESOURCE.columns("r") + " FROM ma_resource r JOIN (SELECT DISTINCT f.resource_key FROM ma_resource_ref f"
+                + " WHERE f.session_scope_key = ? AND f.owner_kind IN ('JOURNAL', 'SESSION_RECORD')"
+                + " AND f.journal_revision IS NOT NULL) refs ON refs.resource_key = r.resource_key"
+                + " WHERE r.session_scope_key = ? AND r.state = 'REFERENCED' AND r.deletion_operation_key IS NULL"
+                + " ORDER BY r.resource_id LIMIT 4097", scope, scope)) {
             scope(row, key);
             require("MYSQL_INLINE".equals(row.get("storage_kind")) && number(row, "schema_version") == 1
                     && row.get("object_key") == null && row.get("object_version_id") == null && row.get("encryption_key_id") == null);
@@ -400,10 +415,10 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
 
     private byte[] publicationBytes(Connection connection, String scope, String publicationId,
             String resourceId, String slot, String kind) throws SQLException {
-        var row = one(connection, "SELECT * FROM qwen_tool_publication_object"
+        var row = one(connection, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"
                 + " WHERE scope_key = ? AND publication_id = ? AND resource_id = ?", scope, publicationId, resourceId);
-        require("VERIFIED".equals(row.get("state")) && kind.equals(row.get("resource_kind"))
-                && (slot == null || slot.equals(row.get("slot_key"))) && row.get("object_key") == null);
+        require("VERIFIED".equals(row.get("capture_state")) && kind.equals(row.get("kind"))
+                && (slot == null || slot.equals(row.get("slot_key"))) && row.get("deletion_operation_key") == null);
         byte[] bytes = bytes(row, "inline_bytes", ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
         require(bytes.length == number(row, "byte_length") && hash(bytes).equals(row.get("sha256")));
         return bytes;
@@ -428,11 +443,8 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
 
     private void requireEngines(Connection connection) throws SQLException {
         var found = rows(connection, "SELECT table_name, engine FROM information_schema.tables"
-                + " WHERE table_schema = DATABASE() AND table_name IN ('managed_workspace_csi_retirement',"
-                + " 'managed_workspace_csi_registration', 'managed_workspace_execution_lease', 'qwen_runtime_binding',"
-                + " 'qwen_runtime_binding_slot', 'qwen_runtime_session', 'qwen_tool_execution', 'qwen_tool_publication',"
-                + " 'qwen_tool_publication_object', 'qwen_managed_session_journal_head', 'qwen_managed_session_journal_tx',"
-                + " 'qwen_managed_session_resource', 'qwen_managed_session_resource_ref')");
+                + " WHERE table_schema = DATABASE() AND table_name IN ('"
+                + String.join("', '", TABLES) + "')");
         require(found.size() == TABLES.size());
         for (var row : found) {
             require(TABLES.contains(text(row, "table_name")) && "InnoDB".equals(row.get("engine")));
@@ -449,8 +461,15 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         try (var statement = connection.prepareStatement(sql)) {
             statement.setQueryTimeout(10);
             statement.setMaxRows(MAX_ROWS + 1);
+            boolean h2 = connection.getMetaData().getDriverName().toLowerCase(Locale.ROOT).contains("h2");
             for (int index = 0; index < parameters.length; index++) {
-                statement.setObject(index + 1, parameters[index]);
+                int type = h2 ? statement.getParameterMetaData().getParameterType(index + 1) : Types.OTHER;
+                if (parameters[index] instanceof String value
+                        && Set.of(Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY).contains(type)) {
+                    statement.setBytes(index + 1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(value));
+                } else {
+                    statement.setObject(index + 1, parameters[index]);
+                }
             }
             try (var result = statement.executeQuery()) {
                 var metadata = result.getMetaData();
@@ -462,7 +481,14 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                     for (int index = 1; index <= metadata.getColumnCount(); index++) {
                         int type = metadata.getColumnType(index);
                         Object value = switch (type) {
-                            case Types.BLOB, Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY -> boundedBytes(result, index);
+                            case Types.BIGINT -> {
+                                long number = result.getLong(index);
+                                yield result.wasNull() ? null : number;
+                            }
+                            case Types.BLOB -> boundedBytes(result, index);
+                            case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY ->
+                                    Set.of("inline_bytes", "record_bytes").contains(metadata.getColumnName(index))
+                                            ? boundedBytes(result, index) : boundedIdentity(result, index);
                             case Types.CLOB, Types.LONGVARCHAR -> boundedText(result, index);
                             default -> result.getObject(index);
                         };
@@ -488,6 +514,21 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             require(bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES);
             return bytes;
         } catch (java.io.IOException error) {
+            throw unavailable();
+        }
+    }
+
+    private static String boundedIdentity(java.sql.ResultSet result, int index) throws SQLException {
+        byte[] bytes = boundedBytes(result, index);
+        if (bytes == null) {
+            return null;
+        }
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+        } catch (java.nio.charset.CharacterCodingException invalid) {
             throw unavailable();
         }
     }
@@ -598,7 +639,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
     }
 
     private static boolean id(String value, int limit) {
-        return value != null && !value.isBlank() && value.length() <= limit && value.indexOf('\0') < 0;
+        return StringUtils.isNotBlank(value) && value.length() <= limit && value.indexOf('\0') < 0;
     }
 
     private static boolean uuid(String value) {

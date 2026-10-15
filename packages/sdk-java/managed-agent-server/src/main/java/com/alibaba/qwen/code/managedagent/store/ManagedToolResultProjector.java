@@ -6,9 +6,17 @@ import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Claim;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Projection;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Source;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -17,12 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 
 @Component
 public class ManagedToolResultProjector {
@@ -73,9 +75,12 @@ public class ManagedToolResultProjector {
     }
 
     public void project(Claim claim) {
+        if (!store.admitsLegacyProjection(claim)) {
+            return;
+        }
         var data = publications.getIfAvailable();
         try (var lease = data == null ? null : data.readLease(claim.source().sessionKey())) {
-            var statuses = jdbc.query("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+            var statuses = jdbc.query("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     (row, index) -> row.getString(1), claim.source().tenantId(), claim.source().sessionId());
             if (statuses.stream().anyMatch(status -> List.of("DELETING", "DELETED").contains(status))) {
                 store.fail(claim, "SUPPRESSED", "session_unavailable");
@@ -110,8 +115,9 @@ public class ManagedToolResultProjector {
     private Projection resolve(Source source, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) throws IOException {
         guard.run();
         store.verifySource(source);
-        var candidates = jdbc.queryForList("SELECT p.*, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication p WHERE scope_key = ? AND tenant_id = ?"
+        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_key = ? AND tenant_id = ?"
                         + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
+                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 ToolPublicationDataStore.scope(source.sessionKey()),
                 source.tenantId(), source.workspaceId(), source.sessionId(),
                 ToolPublicationContract.sha256(source.executionCallId().getBytes(StandardCharsets.UTF_8)));
@@ -129,9 +135,10 @@ public class ManagedToolResultProjector {
                         && binding.path("sessionKey").equals(source.sessionKey())
                         && source.executionCallId().equals(binding.path("executionCallId").asText())
                         && publicationId.equals(binding.path("publicationId").asText()), "Publication binding changed");
-        var turns = jdbc.queryForList("SELECT t.tenant_id, t.session_id, t.prompt_id, t.turn_id, s.workspace_id FROM managed_agent_turn t"
-                        + " JOIN managed_agent_session s ON s.tenant_id = t.tenant_id AND s.session_id = t.session_id"
+        var turns = jdbc.query("SELECT t.tenant_id, t.session_id, t.prompt_id, t.turn_id, s.workspace_id FROM ma_turn t"
+                        + " JOIN ma_session s ON s.tenant_id = t.tenant_id AND s.session_id = t.session_id"
                         + " WHERE t.tenant_id = ? AND t.session_id = ? AND t.prompt_id = ?",
+                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
                 source.tenantId(), source.sessionId(), binding.path("turnId").asText());
         if (turns.isEmpty()) {
             throw new NoSuchElementException("Public Turn mapping is missing");
@@ -284,10 +291,12 @@ public class ManagedToolResultProjector {
     }
 
     private JsonNode inlineOutcome(Source source) {
-        var rows = jdbc.queryForList("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                        + " FROM qwen_managed_session_resource WHERE tenant_id = ? AND workspace_id = ?"
-                        + " AND session_id = ? AND resource_id = ?", source.tenantId(), source.workspaceId(),
-                source.sessionId(), source.outcomeRef().path("resourceId").asText());
+        var rows = jdbc.query("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
+                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
+                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND deletion_operation_key IS NULL",
+                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
+                ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
+                source.tenantId(), source.workspaceId(), source.sessionId());
         require(rows.size() == 1, "Not-started outcome is missing");
         var row = rows.getFirst();
         require("MYSQL_INLINE".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))

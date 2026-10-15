@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -35,7 +34,10 @@ public class ManagedActionService {
             LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
     private static final Set<String> PREVIEW_TOOLS =
-            Set.of("read_file", "write_file", "edit", "run_shell_command");
+            Set.of("read_file", "write_file", "edit", "run_shell_command",
+                    "agent", "send_message", "team_create", "task_create",
+                    "task_update", "workflow", "request_shutdown", "exit_plan_mode",
+                    "team_plan_approval");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
     private final ManagedExtensionRecordStore resources;
@@ -265,7 +267,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || options.path("v").asLong() != 2
+                || !List.of(2L, 3L).contains(options.path("v").asLong())
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

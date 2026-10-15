@@ -13,16 +13,18 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -47,11 +49,69 @@ public interface AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
+    /**
+     * H4b: creates a child Session under its parent's exact binding,
+     * stamping the lineage in the same transaction. The idempotency key
+     * derives from the parent's committed launch, so a replay returns the
+     * original admission and never mints a second Session. The caller is
+     * the control plane (the relay), so this path deliberately skips the
+     * public actor/workspace checks — the parent's row carries them.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /**
+     * The isolation slice (#13753 I1): the same creation, bound to the
+     * child run's ready child Workspace. The child's row takes the
+     * Workspace's directory instead of the parent's; the creating
+     * transaction locks the Workspace row and refuses unless it is ready,
+     * unfinished, prepared from the parent's current Workspace and storage,
+     * and names {@code childCwdRelative}.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage,
+            String childCwdRelative) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /**
+     * The child directory a child run's Workspace recorded, or null before
+     * its layout was recorded. Readiness is the creating transaction's to
+     * check, so a replay still answers once the Workspace moved on.
+     */
+    default String findChildWorkspaceCwd(String tenantId,
+            String parentSessionId, String childRunId) {
+        return null;
+    }
+
+    /** The replay of {@link #insertChildSessionCommand}: same key and
+     * digest answers the original admission; either mismatch conflicts. */
+    default StoreModels.Admission replayChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /** A child Session's persisted lineage, or null for a root Session. */
+    default StoreModels.SessionLineage findChildLineage(String tenantId,
+            String sessionId) {
+        return null;
+    }
+
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection);
+
+    Optional<Admission> findWorkspaceCreateReplay(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest);
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
@@ -60,13 +120,71 @@ public interface AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest);
 
+    /**
+     * The actor-carrying variant records the caller on the command receipt,
+     * so the receipt's replay answers the actor who recorded it — an
+     * OPERATOR's own retry of his own key — and not only the creator. The
+     * default drops the actor for implementations that cannot record it.
+     */
+    default Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            String actorId) {
+        return insertTurnCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, input, payloadDigest);
+    }
+
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId);
 
+    /** The actor-carrying twin of {@link #insertTurnCommand}. */
+    default Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, String actorId) {
+        return insertCancelCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, turnId);
+    }
+
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
+
+    /** The actor-carrying twin of {@link #insertTurnCommand}. */
+    default SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId) {
+        return beginSessionMutation(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, kind);
+    }
+
+    SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
+            String requestDigest, String sessionId, String title);
+
+    /** The actor-carrying twin: the recorded rename answers its recorder. */
+    default SessionMutationCommand beginSessionRename(String tenantId,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String title, String actorId) {
+        return beginSessionRename(tenantId, idempotencyKey, requestDigest,
+                sessionId, title);
+    }
+
+    SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, String title, String harnessBootId, long revision);
+
+    SessionRecord completeSessionRename(StoreModels.RenameDelivery delivery, String owner, String bootId);
+
+    void abandonSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, long revision, String owner);
+
+    List<StoreModels.RenameDelivery> deliverableRenames(long now);
+
+    Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
+            String owner, Duration lease);
+
+    void markRenameSubmitted(StoreModels.RenameDelivery delivery, String owner);
+
+    void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
 
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
@@ -95,6 +213,10 @@ public interface AgentStateStore {
         return false;
     }
 
+    default boolean workspaceShellEnabled() {
+        return false;
+    }
+
     default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest, boolean supported) {
         throw new UnsupportedOperationException("Workspace close is unavailable");
@@ -103,6 +225,12 @@ public interface AgentStateStore {
     OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
+
+    default OperationAdmission beginChildClose(String tenantId, String parentSessionId,
+            String childSessionId, String childRunId, String actorDigest, String key,
+            String digest, boolean supported) {
+        throw new UnsupportedOperationException("Internal child close is unavailable");
+    }
 
     default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
@@ -117,6 +245,20 @@ public interface AgentStateStore {
     /** The given Sessions with a completed workspace close, in one read. */
     Set<String> completedWorkspaceCloses(String tenantId,
             List<String> sessionIds);
+
+    /**
+     * Whether the Session's creator-keyed execution facts hold — the
+     * Registry still backs the binding exactly, its state is ACTIVE, and
+     * the create-command actor keeps OPERATOR or above. This is the
+     * passive-attachment subset the execution authority re-verifies, so
+     * any admission certifying a run under the creator's grants checks it
+     * first.
+     */
+    boolean hasExecutionRegistryFacts(String tenantId, String sessionId);
+
+    /** The given Sessions whose execution facts hold, in one read. */
+    Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
+            java.util.Collection<String> sessionIds);
 
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
@@ -135,9 +277,10 @@ public interface AgentStateStore {
      * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
      * or returns the operation the same actor already admitted under the
      * key. The target directory is already normalized and the request digest
-     * already covers it; admission checks the creation actor, the current
-     * grant, the Registry facts, the expected context revision and the busy
-     * barriers in the pinned order of the W2 design.
+     * already covers it; admission checks the read grant, replays under the
+     * key, then the caller's Workspace role, the deployment gate, the
+     * Session state, the creator-keyed Registry facts, the expected context
+     * revision and the busy barriers in the pinned order.
      */
     OperationAdmission beginCwdChangeOperation(String tenantId,
             String sessionId, String actorId, String actorDigest,
@@ -172,6 +315,61 @@ public interface AgentStateStore {
             Long resultContextRevision) {
     }
 
+    /**
+     * H4f: admits a public task cancel, or returns the operation the same
+     * actor already admitted under the key. The caller has validated the
+     * key and checked current access; under the Session lock this replays
+     * a retained key first, then — only for a new request — requires an
+     * active Session ({@code 409 session_not_active}), the task's
+     * {@code cancel} action ({@code 409 task_action_unavailable}) and no
+     * other open operation ({@code 409 session_operation_active}).
+     */
+    default OperationAdmission beginTaskCancelOperation(String tenantId,
+            String sessionId, String taskId, String actorDigest,
+            String idempotencyKey, String requestDigest) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** Task cancels due for delivery: pending, or leased past their lease. */
+    default List<OperationTarget> findDeliverableTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /** Parked (recovery_blocked) task cancels due for reconciliation. */
+    default List<OperationTarget> findParkedTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /**
+     * Records a task cancel's outcome: {@code completed} with a receipt,
+     * {@code failed} or {@code recovery_blocked} with its code (the latter
+     * parked until {@code retryAt}). A leased claim ({@code owner} set)
+     * settles only while it is still current; a parked operation
+     * ({@code owner} null) only while it is still parked.
+     *
+     * @return false when the claim or the parking is no longer current
+     */
+    default boolean settleTaskCancel(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            TaskCancelOutcome outcome, long retryAt) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** A task cancel's recorded outcome: its public status and code. */
+    record TaskCancelOutcome(String status, String failureCode) {
+        public static TaskCancelOutcome completed() {
+            return new TaskCancelOutcome("completed", null);
+        }
+
+        public static TaskCancelOutcome failed(String failureCode) {
+            return new TaskCancelOutcome("failed", failureCode);
+        }
+
+        public static TaskCancelOutcome recoveryBlocked(String failureCode) {
+            return new TaskCancelOutcome("recovery_blocked", failureCode);
+        }
+    }
+
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);
 
@@ -203,7 +401,7 @@ public interface AgentStateStore {
     Optional<SessionRecord> findSessionById(String sessionId);
 
     SessionPage listSessions(String tenantId, String actorId,
-            Long beforeUpdatedAt,
+            Long beforeCreatedAt,
             String beforeSessionId, int limit);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
@@ -244,6 +442,8 @@ public interface AgentStateStore {
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
+    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
+
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
@@ -253,10 +453,27 @@ public interface AgentStateStore {
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
+    /** The Sessions whose Snapshot covers more than their replay floor. */
+    List<ReplayFloorTarget> findReplayFloorTargets(int limit);
+
+    /**
+     * Raises the Session's replay floor, never above the Snapshot's covered
+     * sequence, so a client told to resync can resume from the Snapshot.
+     */
+    ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
+            long floorSequence);
+
     List<MaterializationTarget> findMaterializationTargets(int limit);
 
     MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit);
+
+    /**
+     * Rotates a stale materialization target behind the fresher ones by
+     * touching only {@code gmt_modified} on its progress row — never
+     * {@code covered_sequence}, which the gap guard must freeze on failure.
+     */
+    void deferMaterializationTarget(String tenantId, String sessionId);
 
     List<DispatchTarget> findDispatchable(long now, int limit);
 
@@ -268,6 +485,9 @@ public interface AgentStateStore {
 
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
+
+    void deferTurnRetry(String tenantId, String sessionId, String turnId,
+            String owner, long retryAfter);
 
     void scheduleTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
@@ -312,6 +532,11 @@ public interface AgentStateStore {
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId);
 
+    void retractHarnessTurnOutput(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long fromSourceId, long retractionSourceId, String sourceBootId,
+            String sourceEventEpoch, Long throughSourceId);
+
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events);
@@ -336,4 +561,7 @@ public interface AgentStateStore {
             String type, Map<String, Object> data, String sourceKey);
 
     SessionRecord requireSession(String tenantId, String sessionId);
+
+    Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
+            String sessionId);
 }

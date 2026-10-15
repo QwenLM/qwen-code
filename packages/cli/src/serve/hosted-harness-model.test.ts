@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { LlmEventType, Turn } from '@qwen-code/qwen-code-core/core/turn.js';
+import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Content, Part } from '@google/genai';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
@@ -19,6 +20,9 @@ import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import { HostedModelUnavailableError } from './hosted-agent-definition.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type { HostedModelRequest } from './hosted-model-recovery.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -59,6 +63,8 @@ function config(
   const shutdown = vi.fn(async () => undefined);
   const setHistory = vi.fn();
   const setUserMemory = vi.fn();
+  const setPromptToolSnapshot = vi.fn();
+  const setPromptAgentReachable = vi.fn();
   const refreshSystemInstruction = vi.fn(async () => undefined);
   const initialize = vi
     .fn<(options?: ConfigInitializeOptions) => Promise<void>>()
@@ -99,6 +105,8 @@ function config(
     }),
     getModel: () => 'test-model',
     setUserMemory,
+    setPromptToolSnapshot,
+    setPromptAgentReachable,
     getTurnBudget: () => budget,
     shutdown,
   };
@@ -108,6 +116,8 @@ function config(
     shutdown,
     setHistory,
     setUserMemory,
+    setPromptToolSnapshot,
+    setPromptAgentReachable,
     refreshSystemInstruction,
     initialize,
     refreshAuth,
@@ -151,8 +161,12 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Content, value: 'hello back' },
       { type: LlmEventType.Finished },
     ]);
+    hooks.getHistory.mockReturnValue([
+      { role: 'model', parts: [{ text: 'hello back' }] },
+    ]);
     await expect(runHostedHarnessTextTurn(input)).resolves.toEqual({
       text: 'hello back',
+      parts: [{ text: 'hello back' }],
       model: 'test-model',
     });
     expect(hooks.unregisterTool).toHaveBeenCalledWith('run_shell_command');
@@ -166,6 +180,81 @@ describe('Hosted Harness model boundary', () => {
     });
   });
 
+  it('returns complete no-tool model Parts without aliasing provider history', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    const parts: Part[] = [
+      { text: 'reasoning', thought: true, thoughtSignature: 'signature' },
+      { text: 'answer' },
+      { inlineData: { mimeType: 'image/png', data: 'aGk=' } },
+    ];
+    model.getHistory.mockReturnValue([{ role: 'model', parts }]);
+    const result = await runHostedHarnessTextTurn(input);
+    expect(result).toEqual({ text: 'answer', parts, model: 'test-model' });
+    result.parts![0]!.text = 'changed';
+    result.parts![2]!.inlineData!.data = 'changed';
+    result.parts!.push({ text: 'extra' });
+    expect(parts).toEqual([
+      { text: 'reasoning', thought: true, thoughtSignature: 'signature' },
+      { text: 'answer' },
+      { inlineData: { mimeType: 'image/png', data: 'aGk=' } },
+    ]);
+  });
+
+  it('omits a thought-only answer and its prompt while retaining a visible answered pair', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const unanswered = [{ text: 'unanswered' }];
+    const thoughtOnly = [{ text: 'private thought', thought: true }];
+    const answered = [{ text: 'answered' }];
+    const visible = [
+      { text: 'retained thought', thought: true },
+      { text: 'visible answer', thought: false },
+    ];
+    const pairs: Array<['user' | 'assistant', Part[]]> = [
+      ['user', unanswered],
+      ['assistant', thoughtOnly],
+      ['user', answered],
+      ['assistant', visible],
+    ];
+    const history = pairs.map(
+      ([type, parts], index): ChatRecord => ({
+        uuid: `history-${index}`,
+        parentUuid: index === 0 ? null : `history-${index - 1}`,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-09T00:00:00.000Z',
+        type,
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts,
+        },
+      }),
+    );
+    await runHostedHarnessTextTurn({ ...input, history });
+    expect(model.setHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: answered },
+      { role: 'model', parts: visible },
+    ]);
+    expect(history[1]!.message!.parts).toEqual(thoughtOnly);
+    expect(history[3]!.message!.parts).toEqual(visible);
+  });
+
+  it.each([
+    { history: [] },
+    { history: [{ role: 'user', parts: [{ text: input.prompt }] }] },
+    { history: [{ role: 'model' }] },
+  ])('refuses unavailable no-tool model history: %j', async ({ history }) => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    model.getHistory.mockReturnValue(history);
+    await expect(runHostedHarnessTextTurn(input)).rejects.toThrow(
+      'Hosted model output is unavailable.',
+    );
+    expect(model.shutdown).toHaveBeenCalledOnce();
+  });
+
   it('rejects a model tool request without executing it', async () => {
     const hooks = config([{ type: LlmEventType.ToolCallRequest }]);
     await expect(runHostedHarnessTextTurn(input)).rejects.toThrow(
@@ -175,7 +264,7 @@ describe('Hosted Harness model boundary', () => {
   });
 
   it('discards abandoned output after a fresh retry or model fallback', async () => {
-    config([
+    const model = config([
       { type: LlmEventType.Content, value: 'first attempt' },
       { type: LlmEventType.Retry, isContinuation: false },
       { type: LlmEventType.Content, value: 'second attempt' },
@@ -183,8 +272,15 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Content, value: 'final answer' },
       { type: LlmEventType.Finished },
     ]);
-    await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
+    const parts: Part[] = [
+      { text: 'final reasoning', thought: true },
+      { text: 'final answer' },
+    ];
+    model.getHistory.mockReturnValue([{ role: 'model', parts }]);
+    await expect(runHostedHarnessTextTurn(input)).resolves.toEqual({
       text: 'final answer',
+      parts,
+      model: 'test-model',
     });
   });
 
@@ -335,7 +431,115 @@ describe('Hosted Harness model boundary', () => {
     ).resolves.toMatchObject({ text: 'done', model: 'test-model' });
     expect(toolTurn.execute).toHaveBeenCalledOnce();
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
-    expect(order).toEqual(['request', 'inject', 'refresh', 'request']);
+    expect(order).toEqual([
+      'refresh',
+      'request',
+      'inject',
+      'refresh',
+      'request',
+    ]);
+  });
+
+  it('refreshes changed tool names and context together without refreshing for reordered names', async () => {
+    const model = config([]);
+    const names = [
+      ['read_file', 'monitor'],
+      ['monitor', 'read_file'],
+      ['read_file', 'glob', 'agent'],
+      [],
+    ];
+    const refreshes: number[] = [];
+    const chatTools = vi.fn();
+    let round = 0;
+    let context = 'project rules';
+    let output: Content = { role: 'model', parts: [] };
+    const client = state.config.getLlmClient();
+    state.config.getLlmClient = () => ({
+      ...client,
+      getChat: () => ({ setHistory: vi.fn(), setTools: chatTools }),
+      getHistory: () => [output],
+      async *sendMessageStream() {
+        refreshes.push(model.refreshSystemInstruction.mock.calls.length);
+        round++;
+        if (round < names.length) {
+          output = {
+            role: 'model',
+            parts: [{ functionCall: { name: 'read_file' } }],
+          };
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: `call-${round}`,
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: input.promptId,
+            },
+          };
+        } else {
+          output = { role: 'model', parts: [{ text: 'done' }] };
+          yield { type: LlmEventType.Content, value: 'done' };
+        }
+        yield { type: LlmEventType.Finished };
+      },
+    });
+    await runHostedHarnessTextTurn({
+      ...input,
+      workspaceContext: { read: () => context },
+      toolTurn: {
+        declarations: async () => names[round]!.map((name) => ({ name })),
+        consumeResults: async () => undefined,
+        setPromptHookRunner: () => undefined,
+        execute: async () => {
+          if (round === 2) context = 'revised rules';
+          if (round === 3) context = '';
+          return [
+            {
+              functionResponse: {
+                id: `call-${round}`,
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ];
+        },
+      },
+    });
+    expect(refreshes).toEqual([1, 1, 2, 3]);
+    expect(model.setPromptToolSnapshot.mock.calls).toEqual([
+      [new Set(names[0])],
+      [new Set(names[2])],
+      [new Set()],
+    ]);
+    expect(model.setPromptAgentReachable.mock.calls).toEqual([
+      [false],
+      [true],
+      [false],
+    ]);
+    expect(model.setUserMemory.mock.calls).toEqual([
+      ['project rules'],
+      ['revised rules'],
+      [''],
+    ]);
+    expect(chatTools.mock.calls).toEqual(
+      names.map((tools) => [
+        tools.length
+          ? [{ functionDeclarations: tools.map((name) => ({ name })) }]
+          : [],
+      ]),
+    );
+  });
+
+  it('does not send a fresh model request if prompt synchronization fails', async () => {
+    const model = config([]);
+    model.refreshSystemInstruction.mockRejectedValue(
+      new Error('prompt refresh failed'),
+    );
+    await expect(runHostedHarnessTextTurn(input)).rejects.toThrow(
+      'prompt refresh failed',
+    );
+    expect(model.sendMessageStream).not.toHaveBeenCalled();
+    expect(model.shutdown).toHaveBeenCalledOnce();
   });
 
   it('does not reapply a completed SessionStart on later turns', async () => {
@@ -529,6 +733,37 @@ describe('Hosted Harness model boundary', () => {
     expect(model.requests[0]).toEqual([{ text: 'rewritten +10k' }]);
   });
 
+  it('carries the provider request id into the rejection and StopFailure error_details', async () => {
+    const requestId = 'a30a1854-1925-4da8-8803-73fee2865116';
+    config([
+      {
+        type: LlmEventType.Error,
+        value: {
+          error: {
+            message: '400 status code (no body)',
+            status: 400,
+            requestId,
+          },
+        },
+      },
+    ]);
+    const hooks = hostedHooks();
+    await expect(
+      runHostedHarnessTextTurn({ ...input, hooks: hooks.session }),
+    ).rejects.toThrow(
+      `[API Error: 400 status code (no body) (request_id: ${requestId})]`,
+    );
+    expect(hooks.fire).toHaveBeenCalledWith(
+      HookEventName.StopFailure,
+      `${input.promptId}:0:model-failure`,
+      expect.objectContaining({
+        error_details: `[API Error: 400 status code (no body) (request_id: ${requestId})]`,
+      }),
+      input.signal,
+      undefined,
+    );
+  });
+
   it('reports provider failure through StopFailure and leaves Hook recovery failures untouched', async () => {
     config([
       {
@@ -543,7 +778,9 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.fire).toHaveBeenCalledWith(
       HookEventName.StopFailure,
       `${input.promptId}:0:model-failure`,
-      expect.objectContaining({ error_details: 'provider failed' }),
+      expect.objectContaining({
+        error_details: '[API Error: provider failed]',
+      }),
       input.signal,
       undefined,
     );
@@ -564,64 +801,71 @@ describe('Hosted Harness model boundary', () => {
     ).toBe(false);
   });
 
-  it('suppresses both returned text and persisted parts when MessageDisplay hides the answer', async () => {
-    config([
-      { type: LlmEventType.Content, value: 'answer' },
-      { type: LlmEventType.Finished },
-    ]);
-    const hooks = hostedHooks([HookEventName.MessageDisplay]);
-    const getCatalog = hooks.session.getCatalog;
-    let ready = false;
-    vi.spyOn(hooks.session, 'getCatalog').mockImplementation(() =>
-      ready ? getCatalog() : undefined,
-    );
-    vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
-      ready = true;
-    });
-    const textDeltas = {
-      delta: vi.fn(),
-      retract: vi.fn(async () => undefined),
-    };
-    hooks.fire.mockImplementation(async (event) =>
-      event === HookEventName.MessageDisplay
-        ? { suppressOutput: true }
-        : undefined,
-    );
-    const toolTurn = {
-      execute: vi.fn(),
-      consumeResults: vi.fn(),
-      declarations: vi.fn().mockResolvedValue([]),
-      setPromptHookRunner: vi.fn(),
-    };
-    await expect(
-      runHostedHarnessTextTurn({
-        ...input,
-        hooks: hooks.session,
-        toolTurn,
-        textDeltas,
-      }),
-    ).resolves.toMatchObject({ text: '', parts: [] });
-    expect(textDeltas.delta).not.toHaveBeenCalled();
-    expect(
-      hooks.fire.mock.calls.find(
-        ([event]) => event === HookEventName.MessageDisplay,
-      )?.[2],
-    ).toMatchObject({
-      message_id: `${input.promptId}:0`,
-      displayed_text: 'answer',
-      is_final: true,
-    });
-  });
+  it.each([false, true])(
+    'suppresses text and Parts when MessageDisplay hides the answer (tools=%s)',
+    async (withTools) => {
+      config([
+        { type: LlmEventType.Content, value: 'answer' },
+        { type: LlmEventType.Finished },
+      ]);
+      const hooks = hostedHooks([HookEventName.MessageDisplay]);
+      const getCatalog = hooks.session.getCatalog;
+      let ready = false;
+      vi.spyOn(hooks.session, 'getCatalog').mockImplementation(() =>
+        ready ? getCatalog() : undefined,
+      );
+      vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
+        ready = true;
+      });
+      const textDeltas = {
+        delta: vi.fn(),
+        retract: vi.fn(async () => undefined),
+      };
+      hooks.fire.mockImplementation(async (event) =>
+        event === HookEventName.MessageDisplay
+          ? { suppressOutput: true }
+          : undefined,
+      );
+      const toolTurn = {
+        execute: vi.fn(),
+        consumeResults: vi.fn(),
+        declarations: vi.fn().mockResolvedValue([]),
+        setPromptHookRunner: vi.fn(),
+      };
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          hooks: hooks.session,
+          ...(withTools ? { toolTurn } : {}),
+          textDeltas,
+        }),
+      ).resolves.toMatchObject({ text: '', parts: [] });
+      expect(textDeltas.delta).not.toHaveBeenCalled();
+      expect(
+        hooks.fire.mock.calls.find(
+          ([event]) => event === HookEventName.MessageDisplay,
+        )?.[2],
+      ).toMatchObject({
+        message_id: `${input.promptId}:0`,
+        displayed_text: 'answer',
+        is_final: true,
+      });
+    },
+  );
 
   it('buffers discarded Stop drafts until the final answer is accepted', async () => {
     const model = config([]);
     const hooks = hostedHooks([HookEventName.Stop]);
     let attempts = 0;
     model.sendMessageStream.mockImplementation(async function* () {
-      yield {
-        type: LlmEventType.Content,
-        value: ++attempts === 1 ? 'discarded draft' : 'accepted answer',
-      };
+      const text = ++attempts === 1 ? 'discarded draft' : 'accepted answer';
+      model.getHistory.mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ text: `${text} reasoning`, thought: true }, { text }],
+        },
+      ]);
+      yield { type: LlmEventType.Content, value: text };
       yield { type: LlmEventType.Finished };
     });
     let stops = 0;
@@ -636,7 +880,14 @@ describe('Hosted Harness model boundary', () => {
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
-    ).resolves.toMatchObject({ text: 'accepted answer' });
+    ).resolves.toEqual({
+      text: 'accepted answer',
+      parts: [
+        { text: 'accepted answer reasoning', thought: true },
+        { text: 'accepted answer' },
+      ],
+      model: 'test-model',
+    });
     expect(textDeltas.delta).not.toHaveBeenCalled();
     expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
   });
@@ -1080,6 +1331,84 @@ it.each(['decision', 'continue'] as const)(
 describe('Hosted Harness resume and retraction', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('replays a saved request unchanged and synchronizes the next fresh model round', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    model.getHistory.mockReturnValueOnce([
+      { role: 'model', parts: [{ functionCall: { name: 'read_file' } }] },
+    ]);
+    const prepared = {
+      request: {
+        model: 'saved-model',
+        config: {
+          systemInstruction: 'SAVED_SYSTEM_INSTRUCTION',
+          tools: [{ functionDeclarations: [{ name: 'read_file' }] }],
+        },
+        contents: [],
+      },
+    } as unknown as LlmPreparedRequest;
+    const original = structuredClone(prepared);
+    const replay = vi
+      .spyOn(Turn.prototype, 'run')
+      .mockImplementation(async function* () {
+        expect(model.setPromptToolSnapshot).not.toHaveBeenCalled();
+        expect(model.refreshSystemInstruction).not.toHaveBeenCalled();
+        yield {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'saved-call',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: input.promptId,
+          },
+        };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: undefined },
+        };
+      });
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        resumeModel: { round: 0, prepared } as HostedModelRequest,
+        toolTurn: {
+          declarations: async () => [
+            { name: 'read_file' },
+            { name: 'monitor' },
+          ],
+          execute: async () => [
+            {
+              functionResponse: {
+                id: 'saved-call',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+          consumeResults: async () => undefined,
+          setPromptHookRunner: () => undefined,
+        },
+      });
+      expect(replay).toHaveBeenCalledWith(
+        'saved-model',
+        [],
+        input.signal,
+        prepared,
+      );
+      expect(prepared).toEqual(original);
+      expect(model.setPromptToolSnapshot).toHaveBeenCalledExactlyOnceWith(
+        new Set(['read_file', 'monitor']),
+      );
+      expect(model.refreshSystemInstruction).toHaveBeenCalledOnce();
+      expect(model.sendMessageStream).toHaveBeenCalledOnce();
+    } finally {
+      replay.mockRestore();
+    }
+  });
+
   function configWithTools(
     events: Array<{
       type: LlmEventType;
@@ -1103,6 +1432,7 @@ describe('Hosted Harness resume and retraction', () => {
       }),
       getLlmClient: () => ({
         setTools: vi.fn(async () => undefined),
+        refreshSystemInstruction: vi.fn(async () => undefined),
         getChat: () => ({
           setHistory: vi.fn(),
           setTools: vi.fn(async () => undefined),
@@ -1121,6 +1451,8 @@ describe('Hosted Harness resume and retraction', () => {
       }),
       getModel: () => 'test-model',
       setUserMemory: vi.fn(),
+      setPromptToolSnapshot: vi.fn(),
+      setPromptAgentReachable: vi.fn(),
       shutdown: vi.fn(async () => undefined),
     };
     return { requests, types };
@@ -1268,4 +1600,122 @@ describe('Hosted Harness resume and retraction', () => {
       ' and two',
     ]);
   });
+});
+
+it('uses the unique configured route for a definition model', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  const switchModel = vi.fn(async () => undefined);
+  state.config['getAllConfiguredModels'] = () => [
+    {
+      id: 'pinned',
+      authType: 'openai',
+      registryBaseUrl: 'https://model.example/v1',
+    },
+  ];
+  state.config['switchModel'] = switchModel;
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentDefinition: {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+      model: { id: 'pinned' },
+    },
+  });
+  expect(switchModel).toHaveBeenCalledWith('openai', 'pinned', {
+    baseUrl: 'https://model.example/v1',
+    requireCachedCredentials: true,
+  });
+  expect(mocks.refreshAuth).toHaveBeenCalled();
+});
+
+it.each([
+  { models: [] },
+  {
+    models: [
+      { id: 'pinned', authType: 'openai' },
+      { id: 'pinned', authType: 'anthropic' },
+    ],
+  },
+])(
+  'refuses an absent or ambiguous model before inference',
+  async ({ models }) => {
+    const mocks = config([]);
+    state.config['getAllConfiguredModels'] = () => models;
+    state.config['switchModel'] = vi.fn();
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          model: { id: 'pinned' },
+        },
+      }),
+    ).rejects.toThrow('model_unavailable');
+    expect(mocks.initialize).not.toHaveBeenCalled();
+    expect(mocks.requests).toHaveLength(0);
+  },
+);
+
+it('refuses an unauthenticated pinned model before inference', async () => {
+  // The matched model exists and is unambiguous, but switching to it fails
+  // (for example missing credentials): the Turn must fail with
+  // model_unavailable and zero inference requests, per design §5.6.
+  const mocks = config([]);
+  state.config['getAllConfiguredModels'] = () => [
+    { id: 'pinned', authType: 'openai' },
+  ];
+  state.config['switchModel'] = vi.fn(async () => {
+    throw new Error('no cached credentials');
+  });
+  await expect(
+    runHostedHarnessTextTurn({
+      ...input,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        model: { id: 'pinned' },
+      },
+    }),
+  ).rejects.toThrow('model_unavailable');
+  expect(mocks.initialize).not.toHaveBeenCalled();
+  expect(mocks.requests).toHaveLength(0);
+});
+
+it('preserves model_unavailable when early config cleanup fails', async () => {
+  const mocks = config([]);
+  state.config['getAllConfiguredModels'] = () => [];
+  mocks.shutdown.mockRejectedValueOnce(new Error('cleanup failed'));
+  await expect(
+    runHostedHarnessTextTurn({
+      ...input,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        model: { id: 'pinned' },
+      },
+    }),
+  ).rejects.toBeInstanceOf(HostedModelUnavailableError);
+  expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith({
+    shutdownTelemetry: false,
+    strictResourceCleanup: true,
+  });
+  expect(mocks.initialize).not.toHaveBeenCalled();
+  expect(mocks.requests).toHaveLength(0);
+});
+
+it('keeps agent instructions ahead of refreshed project context', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentInstructions: 'AGENT_SECTION',
+    workspaceContext: { read: () => 'PROJECT_SECTION' },
+  });
+  expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
+    '# Agent instructions\n\nAGENT_SECTION\n\nPROJECT_SECTION',
+  );
 });

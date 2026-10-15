@@ -7,6 +7,7 @@
 import fs, { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
 import {
   mkdir,
   mkdtemp,
@@ -43,6 +44,7 @@ import {
   ManagedRuntimeLedger,
   processGroupLiveness,
   queryProcessTable,
+  testInternals as ledgerTestInternals,
 } from './managed-runtime-ledger.js';
 import {
   ManagedMcpToolUnknownError,
@@ -206,8 +208,59 @@ describe.skipIf(process.platform === 'win32')(
       expect(ledger.outstandingGroups().map((group) => group.pgid)).toContain(
         pgid,
       );
+      // The memory view is only as good as its file: the on-disk document
+      // names the same group, proving the durable-first write carried it.
+      const onDisk = ledgerTestInternals.readLedgerDocument(ledgerFile);
+      expect(onDisk?.groups.map((group) => group.pgid)).toContain(pgid);
       await exec.close();
       strayGroups.delete(pgid);
+    });
+
+    it('kills in pid order when the ledger fails to record: never a settle-then-kill', async () => {
+      // The failure path has one admissible order: the ledger record is
+      // attempted and the kill is INITIATED before the caller hears the call
+      // failed. The kill is deliberately not awaited — post-SIGKILL reaping
+      // is scheduler-paced, so the group may still be running at the settle.
+      const events: string[] = [];
+      const realWait = ledger.waitForGroupExit.bind(ledger);
+      let killed: number | undefined;
+      const doubled = {
+        addGroup: () => {
+          events.push('record-fail');
+          throw new Error('ledger disk full');
+        },
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: (pgid: number, budgetMs: number) => {
+          events.push('kill-started');
+          // The doubled addGroup keeps this group out of every ledger view,
+          // so the afterEach net is the only reaper left if the test fails
+          // before close().
+          strayGroups.add(pgid);
+          killed = pgid;
+          return realWait(pgid, budgetMs);
+        },
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const result = await exec.execute(
+        reference('call-order', input),
+        'run_shell_command',
+        input,
+      );
+      expect(events.slice(0, 2)).toEqual(['record-fail', 'kill-started']);
+      expect(result.executionStatus).toBe('error');
+      await exec.close();
+      strayGroups.delete(killed!);
     });
 
     it('fails the call and kills the group when the ledger cannot record it', async () => {
@@ -245,8 +298,43 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.executionStatus).toBe('error');
       expect(result.error?.message).toContain('ledger disk full');
       expect(seen).toHaveLength(1);
-      // The callback killed the group it could not record.
-      expect(processGroupLiveness(seen[0]!)).toBe('gone');
+      // The kill must be INITIATED before the caller hears the failure. The
+      // ledger double never observes signalProcessGroup, so the oracle is
+      // the group leader's kernel state after a synchronous spin: long
+      // enough for a sent SIGKILL to land, and — a spin yields to the
+      // kernel but never to the event loop — proof that a kill deferred to
+      // a macrotask cannot have run. Linux-only: /proc is the readable
+      // kernel state.
+      if (process.platform === 'linux') {
+        const spinUntil = Date.now() + 40;
+        while (Date.now() < spinUntil) {
+          // Busy on purpose: yielding would let a deferred kill land here.
+        }
+        let state: string | undefined;
+        try {
+          const stat = readFileSync(`/proc/${seen[0]!}/stat`, 'utf8');
+          // `pid (comm) state …` — comm itself may hold spaces and parens,
+          // so the state is the first field after the LAST ')'.
+          state = stat
+            .slice(stat.lastIndexOf(')') + 1)
+            .trim()
+            .split(' ')[0];
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          state = undefined; // Reaped already: not running by any measure.
+        }
+        expect(state ?? 'gone').not.toMatch(/^[RS]$/);
+      }
+      // The callback killed the group it could not record. Post-SIGKILL
+      // reaping is scheduler-paced: assert the consequence it settles into,
+      // never the instant the kill lands.
+      const deathDeadline = Date.now() + 3_000;
+      while (processGroupLiveness(seen[0]!) !== 'gone') {
+        if (Date.now() > deathDeadline) {
+          throw new Error('the unrecorded group never died');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       await exec.close();
     });
 
@@ -843,6 +931,172 @@ describe('Managed Tool worker admission seal', () => {
     );
   });
 
+  it('uses the composer history for mutation, retains retry results and refuses external changes', async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), 'qwen-composer-history-'),
+    );
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(directory, 'global'),
+    );
+    const file = path.join(directory, 'note.txt');
+    await writeFile(file, 'before');
+    const history = new ManagedRuntimeFileHistory(
+      reference.sessionId,
+      directory,
+      null,
+    );
+    await history.ready();
+    await history.prepare(reference.promptId, ['note.txt']);
+    const invoke = vi.fn(async () => {
+      await writeFile(file, 'after');
+      return { llmContent: 'written', returnDisplay: 'written' };
+    });
+    const executor = new ManagedToolExecutor(async () => ({
+      sessionId: reference.sessionId,
+      directory,
+      fileHistory: history,
+      admitsDirectory: () => true,
+      tools: new Map([
+        [
+          'write_file',
+          {
+            build: () => ({ execute: invoke }),
+          } as unknown as AnyDeclarativeTool,
+        ],
+      ]),
+    }));
+    try {
+      const result = await executor.execute(reference, 'write_file', {
+        file_path: file,
+      });
+      expect(result.executionStatus).toBe('success');
+      expect(await readFile(file, 'utf8')).toBe('after');
+      expect(history.state().snapshots).toHaveLength(1);
+      expect(history.state().files['note.txt']?.digest).toBe(
+        `sha256:${createHash('sha256').update('after').digest('hex')}`,
+      );
+      expect(
+        await executor.execute(reference, 'write_file', { file_path: file }),
+      ).toEqual(result);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      await writeFile(file, 'outside change');
+      const refused = await executor.execute(
+        { ...reference, callId: 'later-call' },
+        'write_file',
+        { file_path: file },
+      );
+      expect(refused.executionStatus).toBe('error');
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(await readFile(file, 'utf8')).toBe('outside change');
+    } finally {
+      await executor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('confines retained file inputs without observing ambient pathnames', async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), 'qwen-retained-path-'),
+    );
+    const invoke = vi.fn(async () => ({
+      llmContent: 'owned read',
+      returnDisplay: 'owned read',
+    }));
+    const executor = new ManagedToolExecutor(async () => ({
+      sessionId: reference.sessionId,
+      directory,
+      workspaceRoot: path.dirname(directory),
+      retainedFileHistory: {} as NonNullable<
+        ManagedToolSet['retainedFileHistory']
+      >,
+      admitsDirectory: () => true,
+      tools: new Map([
+        [
+          'read_file',
+          {
+            build: () => ({ execute: invoke }),
+          } as unknown as AnyDeclarativeTool,
+        ],
+      ]),
+    }));
+    const metadata = [
+      vi.spyOn(fs.promises, 'realpath'),
+      vi.spyOn(fs.promises, 'lstat'),
+      vi.spyOn(fs.promises, 'readlink'),
+    ];
+    syncBuiltinESMExports();
+    try {
+      expect(
+        (
+          await executor.execute(reference, 'read_file', {
+            file_path: 'note.txt',
+          })
+        ).executionStatus,
+      ).toBe('success');
+      expect(
+        (
+          await executor.execute(
+            { ...reference, callId: 'escaped-read' },
+            'read_file',
+            { file_path: '../escaped.txt' },
+          )
+        ).executionStatus,
+      ).toBe('error');
+      expect(invoke).toHaveBeenCalledTimes(1);
+      for (const observation of metadata)
+        expect(observation).not.toHaveBeenCalled();
+    } finally {
+      await executor.close();
+      for (const observation of metadata) observation.mockRestore();
+      syncBuiltinESMExports();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['missing', 'foreign'] as const)(
+    'refuses a %s retained composer history before mutation',
+    async (fault) => {
+      const directory = await mkdtemp(
+        path.join(os.tmpdir(), 'qwen-composer-history-refusal-'),
+      );
+      const invoke = vi.fn();
+      const executor = new ManagedToolExecutor(async () => ({
+        sessionId: reference.sessionId,
+        directory,
+        retainedFileHistory: {} as NonNullable<
+          ManagedToolSet['retainedFileHistory']
+        >,
+        fileHistory:
+          fault === 'foreign'
+            ? new ManagedRuntimeFileHistory('foreign-owner', directory, null)
+            : undefined,
+        admitsDirectory: () => true,
+        tools: new Map([
+          [
+            'write_file',
+            {
+              build: () => ({ execute: invoke }),
+            } as unknown as AnyDeclarativeTool,
+          ],
+        ]),
+      }));
+      try {
+        expect(
+          (
+            await executor.execute(reference, 'write_file', {
+              file_path: path.join(directory, 'note.txt'),
+            })
+          ).executionStatus,
+        ).toBe('error');
+        expect(invoke).not.toHaveBeenCalled();
+        expect(existsSync(path.join(directory, 'note.txt'))).toBe(false);
+      } finally {
+        await executor.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('keeps original history snapshots without resolving a new Workspace', async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), 'qwen-worker-history-seal-'),
@@ -899,6 +1153,33 @@ describe('Managed Tool worker admission seal', () => {
     } finally {
       await executor.close();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses retained history binding without the original composed history', async () => {
+    const createBackup = vi.fn();
+    const executor = new ManagedToolExecutor(async () => ({
+      sessionId: reference.sessionId,
+      directory: '/unadmitted-retained-workspace',
+      admitsDirectory: () => true,
+      tools: new Map(),
+      retainedFileHistory: {
+        withWorkingFile: vi.fn(),
+        withBackupFile: vi.fn(),
+        createBackup,
+      },
+    }));
+    try {
+      await expect(
+        executor.controlFileHistory(reference.sessionId, reference.sessionId, {
+          kind: 'raw-file-history',
+          action: 'bind',
+          state: null,
+        }),
+      ).rejects.toBeInstanceOf(ManagedToolConflictError);
+      expect(createBackup).not.toHaveBeenCalled();
+    } finally {
+      await executor.close();
     }
   });
 

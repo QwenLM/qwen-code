@@ -5,6 +5,10 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -13,20 +17,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.HexFormat;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.function.Function;
-import java.util.regex.Pattern;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,22 +27,51 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
+
 /**
- * The Stage H records of each Managed Session, kept by the Session store in
- * the transaction that commits them: the latest revision of every record,
- * its SessionTaskView projection and its delivery line, which is the outbox.
- * A revision the shared contract refuses fails the whole commit, so the
- * control plane never holds a record that the Session authority could not
- * have committed.
+ * The Stage H records of each Managed Session, kept by the Session store in the transaction that
+ * commits them: the latest revision of every record, its SessionTaskView projection and its
+ * delivery line, which is the outbox. A revision the shared contract refuses fails the whole
+ * commit, so the control plane never holds a record that the Session authority could not have
+ * committed.
  */
 @Repository
 public class ManagedExtensionRecordStore {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedExtensionRecordStore.class);
+
+    /**
+     * A session message its Session's lineage refuses (H4d): only this store holds a child's
+     * lineage, so it is a rollbackable non-commit.
+     */
+    public static final String ERROR_MESSAGE_LINEAGE =
+            "session_message_lineage_refused";
+
+    /**
+     * A session command its Session's lineage refuses (H4e-b3): the same carve-out as the message
+     * channel's, under its own code.
+     */
+    public static final String ERROR_COMMAND_LINEAGE =
+            "session_command_lineage_refused";
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
     public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
-            + " qwen_managed_session_extension_record WHERE"
+            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
             + " session_scope_key = ? AND operation_hash = ?";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
     private static final String HEADER_SUBTYPE = "managed_session_header_v1";
@@ -111,15 +132,24 @@ public class ManagedExtensionRecordStore {
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
     }
 
+    /**
+     * H4f: the record a task id names and its latest committed body, which a task cancel reconciles
+     * against — the authority's own durable statement, mirrored in the transaction that committed
+     * it.
+     */
+    public record TaskTarget(String domain, String recordId, String kind,
+            String state, long revision, JsonNode body) {
+    }
+
     public List<JsonNode> listRecords(String tenantId, String sessionId,
             String domain) {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
         require(body != null, "Unknown extension record domain.");
         List<String> ids = jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND domain = ?"
-                        + " ORDER BY created_at, record_key",
+                        + " ORDER BY gmt_create, record_key",
                 (result, row) -> result.getString("record_resource_id"),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 tenantId, sessionId, domain);
@@ -131,10 +161,11 @@ public class ManagedExtensionRecordStore {
     }
 
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId) {
-        return jdbc.query("SELECT record_resource_id FROM qwen_managed_session_extension_record"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                        + " AND domain = 'hook_registration' AND settled_at IS NOT NULL"
-                        + " ORDER BY first_sequence DESC",
+        return jdbc.query(
+                        "SELECT record_resource_id FROM ma_session_record WHERE record_kind ="
+                            + " 'DOMAIN' AND session_scope_key = ? AND tenant_id = ? AND session_id"
+                            + " = ? AND domain = 'hook_registration' AND settled_at IS NOT NULL"
+                            + " ORDER BY first_sequence DESC",
                 (result, row) -> result.getString("record_resource_id"),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)
                 .stream().map(id -> {
@@ -143,6 +174,38 @@ public class ManagedExtensionRecordStore {
                     return record;
                 }).filter(record -> "settled".equals(record.path("run").path("state").textValue()))
                 .findFirst();
+    }
+
+    /**
+     * H4f: the task's record identity and latest committed body, or empty when the id names no task
+     * of the Session.
+     */
+    public Optional<TaskTarget> findTaskTarget(String tenantId,
+            String sessionId, String taskId) {
+        String recordKey = recordKey(taskId);
+        if (recordKey == null) {
+            return Optional.empty();
+        }
+        return jdbc.query(
+                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+                (result, row) -> {
+                    taskRow(result, tenantId, sessionId);
+                    return new String[] {result.getString("domain"),
+                            result.getString("record_id"),
+                            result.getString("task_kind"),
+                            result.getString("task_state"),
+                            Long.toString(result.getLong("revision")),
+                            result.getString("record_resource_id")};
+                },
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                recordKey).stream().findFirst().map(row -> {
+                    JsonNode body = readBody(readResource(tenantId, sessionId,
+                            row[5]));
+                    ManagedExtensionProjection.RECORD_BODIES.get(row[0])
+                            .require().accept(body);
+                    return new TaskTarget(row[0], row[1], row[2], row[3],
+                            Long.parseLong(row[4]), body);
+                });
     }
 
     /** Reads only a committed resource in this Session's scope. */
@@ -162,13 +225,8 @@ public class ManagedExtensionRecordStore {
 
     private StoredResource readResource(String tenantId, String sessionId,
             String resourceId) {
-        StoredResource resource = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_resource WHERE"
-                        + " session_scope_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND resource_id = ?"
-                        + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE'"
-                        + " AND object_key IS NULL AND object_version_id IS NULL"
-                        + " AND encryption_key_id IS NULL",
+        StoredResource resource = jdbc.query(
+                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL",
                 (result, row) -> new StoredResource(
                         result.getString("resource_id"),
                         result.getString("kind"), result.getInt("schema_version"),
@@ -185,44 +243,85 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * What one journal transaction carries: the tool receipts, and the
-     * payload of its last activation.changed event (null when it has none),
-     * collected during the same pass so the commit does not parse twice.
+     * Collects the parsed records in the same pass; the legacy cache still uses the last activation
+     * payload.
      */
-    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
-    }
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation, List<JsonNode> records) {}
 
     /**
-     * Applies the Stage H revisions that one journal transaction carries.
-     * It runs inside the Session store's commit, after the transaction's
-     * resources are stored, so {@code resources} reads each body verified.
-     * Every record line must be one the authority's reader can parse, and
-     * every event line one its reader can read back: a line the authority
-     * would refuse at the next open is refused here, so no commit can
-     * brick the Session it writes. A Stage H event must hold its declared
-     * place among the transaction's {@code eventCount} events, and its
-     * transaction must hold only those events and then its commit marker,
-     * as the authority writes it.
+     * Applies the Stage H revisions that one journal transaction carries. It runs inside the
+     * Session store's commit, after the transaction's resources are stored, so {@code resources}
+     * reads each body verified. Every record line must be one the authority's reader can parse, and
+     * every event line one its reader can read back: a line the authority would refuse at the next
+     * open is refused here, so no commit can brick the Session it writes. A Stage H event must hold
+     * its declared place among the transaction's {@code eventCount} events, and its transaction
+     * must hold only those events and then its commit marker, as the authority writes it.
      */
     ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
-            Function<String, StoredResource> resources) {
+            Function<String, StoredResource> resources, long committedAt) {
+        return apply(
+                tenantId,
+                workspaceId,
+                sessionId,
+                firstSequence,
+                eventCount,
+                recordBytes,
+                resources,
+                committedAt,
+                null);
+    }
+
+    ApplyResult applyNative(
+            String tenantId,
+            String workspaceId,
+            String sessionId,
+            long firstSequence,
+            int eventCount,
+            byte[] recordBytes,
+            Function<String, StoredResource> resources,
+            long committedAt) {
+        return apply(
+                tenantId,
+                workspaceId,
+                sessionId,
+                firstSequence,
+                eventCount,
+                recordBytes,
+                resources,
+                committedAt,
+                CsiNativeActivationProof.records(recordBytes));
+    }
+
+    private ApplyResult apply(
+            String tenantId,
+            String workspaceId,
+            String sessionId,
+            long firstSequence,
+            int eventCount,
+            byte[] recordBytes,
+            Function<String, StoredResource> resources,
+            long committedAt,
+            List<JsonNode> nativeRecords) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
+        List<JsonNode> records = new ArrayList<>();
         int applied = 0;
         JsonNode lastActivation = null;
         boolean shaped = true;
         boolean managed = false;
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
-            JsonNode record = parse(lines[index]);
+            JsonNode record =
+                    nativeRecords == null ? parse(lines[index]) : nativeRecords.get(index);
             if (record == null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
                         "Record line " + (index + 1) + " is not a JSON object"
                                 + " the Session authority can read.");
             }
+            records.add(record);
             String subtype = record.path("subtype").textValue();
             lastSubtype = subtype;
             if (!EVENT_SUBTYPE.equals(subtype)) {
@@ -297,18 +396,74 @@ public class ManagedExtensionRecordStore {
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
-                        firstSequence + index, occurredAt, resources);
+                        firstSequence + index, occurredAt, resources,
+                        () -> transactionInputIds(lines, eventCount), committedAt);
                 applied++;
             }
         }
         require(applied == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return new ApplyResult(receipts, lastActivation);
+        return new ApplyResult(List.copyOf(receipts), lastActivation, List.copyOf(records));
+    }
+
+    /**
+     * A never-started verdict and the creation mint share one seam: this lock is the same row the
+     * creation fence reads FOR UPDATE, so the mint's lineage write and the verdict's name serialize
+     * against each other. The verdict must name exactly the Session the lineage proves minted —
+     * unnamed orphans the mint, mismatched forges one — and null exactly when no lineage exists.
+     * Package-visible for its H2 decision-table pin; the row lock it rides only binds inside the
+     * commit transaction that calls it.
+     */
+    void reconcileNeverStartedVerdict(String tenantId, String sessionId,
+            String domain, String recordId, JsonNode record) {
+        jdbc.query("SELECT record_key FROM"
+                        + " ma_session_record"
+                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
+                        + " AND record_key = ? FOR UPDATE",
+                (result, rowNum) -> result.getString(1),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, domain,
+                        recordId));
+        // The lineage read must be a locking read on purpose: under
+        // REPEATABLE READ the transaction's snapshot was established by
+        // the ordinary reads ahead of this gate, so a plain SELECT would
+        // miss a mint committed after that snapshot even while the row
+        // lock above serializes against the mint's own fence. A locking
+        // read always sees the latest committed data on both InnoDB
+        // isolation defaults — and takes the same extension-then-session
+        // lock order the mint uses, so the seam never cycles.
+        List<String> lineage = jdbc.query(
+                        "SELECT session_id FROM ma_session WHERE session_kind = 'PUBLIC' AND"
+                            + " tenant_id = ? AND parent_session_id = ? AND parent_child_run_id = ?"
+                            + " FOR UPDATE",
+                (result, rowNum) -> result.getString(1), tenantId,
+                sessionId, recordId);
+        JsonNode named = record.get("childSessionId");
+        String namedId = named == null || named.isNull() ? null
+                : named.textValue();
+        boolean lawfullyNamed = lineage.isEmpty() ? namedId == null
+                : lineage.size() == 1 && lineage.getFirst().equals(namedId);
+        if (!lawfullyNamed) {
+            // Its own refusal code, not the generic record rejection:
+            // the Hosted writer must classify this as a rollbackable
+            // non-commit (an authority kept alive for the corrected
+            // retry), never as a write failure that latches the parent's
+            // Session log shut behind it.
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_run_lineage_minted",
+                    "Child run " + recordId + "'s never-started verdict does"
+                            + " not name the Session its creation minted.");
+        }
     }
 
     boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
+        return hasNewLifecycleDispatch(tenantId, sessionId, bytes, resources, false, false);
+    }
+
+    boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources, boolean v2, boolean resourcePhase) {
         boolean dispatch = false;
         var revisions = new java.util.HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
@@ -326,19 +481,48 @@ public class ManagedExtensionRecordStore {
             }
             if ("model.attempt".equals(event.path("kind").asText())
                     && "started".equals(payload.path("state").asText())) {
+                if (v2) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                }
                 dispatch = true;
             }
             if (!"domain.committed".equals(event.path("kind").asText())) {
                 continue;
             }
             String domain = payload.path("domain").asText();
-            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+            // A lifecycle-claimed owner also owes its own child-cleanup
+            // records (dispatch, attach, cancel, close_scope): they are
+            // lifecycle work, never new ordinary work — but they never
+            // enter the hook dispatch analysis or its network re-verify.
+            boolean hookDomain = "hook_execution".equals(domain)
+                    || "hook_registration".equals(domain);
+            if (v2 && (resourcePhase || List.of("monitor_run", "mcp_configuration", "mcp_operation",
+                    "schedule", "automation_run", "session_message", "channel_delivery").contains(domain))) {
+                if (!List.of("monitor_run", "child_run", "child_acceptance", "mcp_configuration", "mcp_operation",
+                        "hook_execution", "hook_registration", "schedule", "automation_run", "session_message", "channel_delivery").contains(domain)) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                }
+                JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+                JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+                if (previous == null || requiresLifecycleDispatch(previous, next)
+                        || !ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(previous, next)) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                }
+                continue;
+            }
+            if (!hookDomain
+                    && !"child_run".equals(domain)
+                    && !"child_acceptance".equals(domain)) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
-            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
-            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
-            if (requiresLifecycleDispatch(previous, next)) {
-                dispatch = true;
+            if (hookDomain) {
+                JsonNode next = readBody(resources.apply(
+                        payload.path("recordRef").path("resourceId").asText()));
+                JsonNode previous = previousLifecycleRecord(tenantId,
+                        sessionId, domain, next, revisions);
+                if (requiresLifecycleDispatch(previous, next)) {
+                    dispatch = true;
+                }
             }
         }
         return dispatch;
@@ -378,12 +562,15 @@ public class ManagedExtensionRecordStore {
 
     private JsonNode previousLifecycleRecord(String tenantId, String sessionId, String domain, JsonNode next,
             java.util.Map<String, JsonNode> revisions) {
-        String id = next.path("hook_execution".equals(domain) ? "hookExecutionId" : "registrationId").asText();
+        String id = ManagedExtensionProjection.RECORD_BODIES.get(domain).recordId().apply(next);
         String key = domain + ":" + id;
         JsonNode previous = revisions.get(key);
         if (previous == null) {
-            previous = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
-                + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+            previous = jdbc.queryForList(
+                                    "SELECT record_resource_id FROM ma_session_record WHERE"
+                                        + " record_kind = 'DOMAIN' AND session_scope_key = ? AND"
+                                        + " record_key = ? AND tenant_id = ? AND session_id = ? AND"
+                                        + " domain = ? AND record_id = ?",
                 String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, domain, id), tenantId, sessionId, domain, id).stream().map(resource -> {
                     JsonNode record = readBody(readResource(tenantId, sessionId, resource));
@@ -415,16 +602,16 @@ public class ManagedExtensionRecordStore {
                 sessionId));
         String cursor = "";
         if (beforeCreatedAt != null) {
-            cursor = " AND (created_at < ? OR created_at = ?"
+            cursor = " AND (gmt_create < ? OR gmt_create = ?"
                     + " AND record_key < ?)";
             arguments.add(beforeCreatedAt);
             arguments.add(beforeCreatedAt);
             arguments.add(recordKey(beforeTaskId));
         }
         arguments.add(limit + 1);
-        List<TaskRow> rows = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND task_kind IS NOT NULL" + cursor + " ORDER BY created_at DESC,"
+        List<TaskRow> rows = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
+                        + " session_scope_key = ? AND task_kind IS NOT NULL" + cursor + " ORDER BY gmt_create DESC,"
                         + " record_key DESC LIMIT ?",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 arguments.toArray());
@@ -438,21 +625,19 @@ public class ManagedExtensionRecordStore {
         if (recordKey == null) {
             return Optional.empty();
         }
-        return jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+        return jdbc.query(
+                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 recordKey).stream().findFirst();
     }
 
     /**
-     * The event-level checks the Session authority's reader runs on every
-     * event line: a closed envelope with an optional subject, version 1,
-     * the sequence of the line's place among the transaction's events, a
-     * well-formed id, this Session's closed key, and a valid time and
-     * kind. The authority never gives a Stage H record event a subject, so
-     * only the other event lines may carry one. Returns the event's time.
+     * The event-level checks the Session authority's reader runs on every event line: a closed
+     * envelope with an optional subject, version 1, the sequence of the line's place among the
+     * transaction's events, a well-formed id, this Session's closed key, and a valid time and kind.
+     * The authority never gives a Stage H record event a subject, so only the other event lines may
+     * carry one. Returns the event's time.
      */
     private static long requireEvent(JsonNode event, String tenantId,
             String workspaceId, String sessionId, long sequence,
@@ -507,11 +692,10 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * The payload checks the Session authority's reader runs on every
-     * domain.committed event: a closed payload whose domain is in the v1
-     * index, of version 1, whose operation is an id and whose reference
-     * names a version 1 record of the domain, whether or not the domain
-     * has a record body here.
+     * The payload checks the Session authority's reader runs on every domain.committed event: a
+     * closed payload whose domain is in the v1 index, of version 1, whose operation is an id and
+     * whose reference names a version 1 record of the domain, whether or not the domain has a
+     * record body here.
      */
     private static void requireDomainCommitted(JsonNode payload,
             String domain, boolean stageH) {
@@ -547,23 +731,44 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * The resource of one committed record that an indexed Hook projection
-     * matches, if any. Admission keeps the records under one key in
-     * agreement, so comparing with one of them decides as all would.
+     * The resource of one committed record that an indexed Hook projection matches, if any.
+     * Admission keeps the records under one key in agreement, so comparing with one of them decides
+     * as all would.
      */
     private Optional<String> hookRecordResource(String where,
             Object... arguments) {
         return jdbc.query("SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record WHERE "
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND "
                         + where + " LIMIT 1",
                 (result, row) -> result.getString("record_resource_id"),
                 arguments).stream().findFirst();
     }
 
+    /**
+     * The ids of the inputs a transaction accepts, one per input event (a repeated id stays
+     * repeated), read only when a record must bind to them.
+     */
+    private static List<String> transactionInputIds(String[] lines,
+            int eventCount) {
+        List<String> inputs = new ArrayList<>();
+        for (int index = 0; index < Math.min(eventCount, lines.length);
+                index++) {
+            JsonNode event = parse(lines[index]);
+            if (event != null && EVENT_SUBTYPE.equals(event.path("subtype")
+                    .textValue()) && "input.accepted".equals(event
+                            .path("managedSession").path("kind").textValue())) {
+                inputs.add(event.path("managedSession").path("payload")
+                        .path("inputId").textValue());
+            }
+        }
+        return inputs;
+    }
+
     private void applyRevision(String tenantId, String workspaceId,
             String sessionId, String domain, Body body, String operationId,
             JsonNode recordRef, long sequence, long occurredAt,
-            Function<String, StoredResource> resources) {
+            Function<String, StoredResource> resources,
+            Supplier<List<String>> inputIds, long committedAt) {
         String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
         require(resource.kind().equals(recordRef.get("kind").textValue())
@@ -595,12 +800,20 @@ public class ManagedExtensionRecordStore {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
             }
-            require(!"child_agent".equals(record.get("kind").textValue())
+            require(!ManagedExtensionRecords.isChildSessionRun(record)
                     || record.get("depth").longValue() != 1
                     || record.get("rootSessionId").textValue()
                             .equals(sessionId),
                     "Child run rootSessionId must be this Session for a"
                             + " first-level child.");
+            JsonNode stopReasonNode = record.get("stopReason");
+            JsonNode executionNode = record.get("run").get("execution");
+            if (stopReasonNode != null && !stopReasonNode.isNull()
+                    && executionNode != null && "not_started_proven"
+                            .equals(executionNode.textValue())) {
+                reconcileNeverStartedVerdict(tenantId, sessionId, domain,
+                        body.recordId().apply(record), record);
+            }
         }
         if (domain.equals("child_acceptance")) {
             for (String field : List.of("contentRef", "terminalReceiptRef")) {
@@ -609,6 +822,36 @@ public class ManagedExtensionRecordStore {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
             }
+        }
+        if (domain.equals("session_message")) {
+            JsonNode ref = record.get("contentRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+        }
+        if (domain.equals("session_command")) {
+            JsonNode argsRef = record.get("argsRef");
+            requireReference(resources.apply(argsRef.get("resourceId").textValue()), argsRef);
+            JsonNode replyRef = record.get("replyRef");
+            if (replyRef != null && !replyRef.isNull()) {
+                requireReference(resources.apply(replyRef.get("resourceId").textValue()), replyRef);
+            }
+        }
+        if (List.of("team_task", "team_message", "team_plan").contains(domain)) {
+            for (String field : List.of("descriptionRef", "metadataRef", "contentRef",
+                    "planRef", "feedbackRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("schedule")) {
+            JsonNode ref = record.get("promptRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+            // H6b: a persistent definition lives in its target Session.
+            require(!"persistent".equals(record.get("sessionMode").textValue())
+                    || sessionId.equals(record.get("targetSessionId").textValue()),
+                    "Schedule targetSessionId must be this Session for a"
+                            + " persistent definition.");
         }
         if (domain.equals("monitor_run")) {
             for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
@@ -624,6 +867,8 @@ public class ManagedExtensionRecordStore {
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
         }
         if (domain.equals("channel_delivery")) {
+            ChannelInstanceStore.requireReconciliationFence(jdbc, tenantId, sessionId,
+                    record.get("deliveryId").textValue(), operationId);
             JsonNode ref = record.get("contentRef");
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
             for (JsonNode segment : record.get("segments")) {
@@ -647,7 +892,8 @@ public class ManagedExtensionRecordStore {
                         StoredResource messages = resources.apply(messagesRef.get("resourceId").textValue());
                         requireReference(messages, messagesRef);
                         require(List.of("managed-hook-messages", "managed-hook-message-chunks").contains(messages.kind()),
-                                "The Hook plan must reference a messages snapshot or chunk manifest.");
+                                "The Hook plan must reference a messages snapshot or chunk"
+                                        + " manifest.");
                         if (messages.kind().equals("managed-hook-message-chunks")) {
                             JsonNode parts = readBody(messages).get("parts");
                             require(parts != null && parts.isArray(), "The Hook messages manifest must contain parts.");
@@ -677,11 +923,12 @@ public class ManagedExtensionRecordStore {
                     require(ManagedExtensionRecords.isDefinitionPinConsistent(
                             readBody(resources.apply(registration)).get("run").get("definition"),
                             record.get("run").get("definition")),
-                            "A Hook catalog revision cannot name two definition digests."));
+                                            "A Hook catalog revision cannot name two definition"
+                                                    + " digests."));
         }
         if (domain.equals("mcp_configuration")) {
             List<String> configurations = jdbc.query("SELECT record_resource_id FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND domain = 'mcp_configuration'",
                     (result, row) -> result.getString("record_resource_id"), scopeKey);
             for (String configuration : configurations) {
@@ -695,15 +942,15 @@ public class ManagedExtensionRecordStore {
             String childRunKey = ManagedExtensionProjection.recordKey(sessionId,
                     "child_run", record.get("childRunId").textValue());
             String childRunResource = jdbc.query("SELECT record_resource_id FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND record_key = ?",
                     (result, row) -> result.getString("record_resource_id"),
                     scopeKey, childRunKey).stream().findFirst().orElse(null);
             require(childRunResource != null,
-                    "Child acceptance must name a child agent run of this Session.");
+                    "Child acceptance must name a child Session run of this Session.");
             JsonNode child = readBody(resources.apply(childRunResource));
-            require("child_agent".equals(child.get("kind").textValue()),
-                    "Child acceptance must name a child agent run of this Session.");
+            require(ManagedExtensionRecords.isChildSessionRun(child),
+                    "Child acceptance must name a child Session run of this Session.");
             require("settled".equals(child.get("run").get("state").textValue())
                     && "completed".equals(child.get("stopReason").textValue()),
                     "Child acceptance must name a run that ended with its"
@@ -732,19 +979,69 @@ public class ManagedExtensionRecordStore {
                     "Child acceptance must bind the result and receipt its"
                             + " child run committed.");
         }
-        StoredRow previous = jdbc.query("SELECT * FROM"
-                        + " qwen_managed_session_extension_record WHERE"
+        if (domain.equals("child_run")
+                && ManagedExtensionRecords.isChildSessionRun(record)) {
+            // H4b decision 7 (the reverse of the acceptance's check): the
+            // acceptance record is authoritative — the run's delivery may
+            // reach accepted/consumed only after its acceptance chain
+            // exists, and may never retract to unknown/rejected once it
+            // does.
+            String delivery = record.get("run").get("delivery").get("state")
+                    .textValue();
+            String acceptanceKey = ManagedExtensionProjection.recordKey(
+                    sessionId, "child_acceptance",
+                    record.get("childRunId").textValue());
+            boolean acceptanceExists = !jdbc
+                    .query(
+                                    "SELECT record_resource_id FROM ma_session_record WHERE"
+                                        + " record_kind = 'DOMAIN' AND session_scope_key = ? AND"
+                                        + " record_key = ?",
+                            (result, row) -> result.getString(
+                                    "record_resource_id"),
+                            scopeKey, acceptanceKey)
+                    .isEmpty();
+            require(
+                    !(delivery.equals("accepted") || delivery.equals("consumed"))
+                            || acceptanceExists,
+                    "Child run delivery reaches accepted or consumed only with"
+                            + " its acceptance record.");
+            require(
+                    !(delivery.equals("unknown") || delivery.equals("rejected"))
+                            || !acceptanceExists,
+                    "Child run delivery cannot go unknown or rejected after its"
+                            + " acceptance record.");
+        }
+        StoredRow previous = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ?",
                 ManagedExtensionRecordStore::storedRow, scopeKey, recordKey)
                 .stream().findFirst().orElse(null);
         String operationHash = sha256(operationId);
+        if (domain.equals("session_message")) {
+            requireSessionMessage(tenantId, sessionId, scopeKey, record,
+                    previous == null, resources);
+        }
+        if (domain.equals("session_command")) {
+            requireSessionCommand(tenantId, sessionId, scopeKey, record,
+                    previous == null, resources);
+        }
+        if (domain.startsWith("team_")) {
+            requireTeamRecord(sessionId, scopeKey, domain, record,
+                    previous == null ? null
+                            : readBody(resources.apply(previous.resourceId())),
+                    resources);
+        }
         if (previous == null) {
+            if (domain.equals("child_run")) {
+                requireContinuation(sessionId, scopeKey, record, resources);
+            }
             if (domain.equals("hook_execution")) {
                 String registrationKey = ManagedExtensionProjection.recordKey(sessionId,
                         "hook_registration", record.get("registrationId").textValue());
-                String registrationResource = jdbc.query("SELECT record_resource_id FROM"
-                                + " qwen_managed_session_extension_record WHERE"
-                                + " session_scope_key = ? AND record_key = ?",
+                String registrationResource = jdbc.query(
+                                        "SELECT record_resource_id FROM ma_session_record WHERE"
+                                            + " record_kind = 'DOMAIN' AND session_scope_key = ?"
+                                            + " AND record_key = ?",
                         (result, row) -> result.getString("record_resource_id"),
                         scopeKey, registrationKey).stream().findFirst().orElse(null);
                 require(registrationResource != null,
@@ -761,8 +1058,9 @@ public class ManagedExtensionRecordStore {
                         "Hook onceKey is already consumed in this Session.");
                 String occurrence = "Hook occurrence must keep its registration,"
                         + " event and plan, with unique ordinals.";
-                require(hookRecordResource("session_scope_key = ?"
-                                + " AND hook_occurrence_hash = ? AND hook_ordinal = ?",
+                require(hookRecordResource(
+                                        "session_scope_key = ? AND hook_occurrence_hash = ? AND"
+                                                + " hook_ordinal = ?",
                                 scopeKey, keys.occurrenceHash(), keys.ordinal()).isEmpty(),
                         occurrence);
                 hookRecordResource("session_scope_key = ? AND hook_occurrence_hash = ?",
@@ -776,9 +1074,10 @@ public class ManagedExtensionRecordStore {
             if (domain.equals("mcp_operation")) {
                 String configKey = ManagedExtensionProjection.recordKey(sessionId,
                         "mcp_configuration", record.get("configurationId").textValue());
-                String configResource = jdbc.query("SELECT record_resource_id FROM"
-                                + " qwen_managed_session_extension_record WHERE"
-                                + " session_scope_key = ? AND record_key = ?",
+                String configResource = jdbc.query(
+                                        "SELECT record_resource_id FROM ma_session_record WHERE"
+                                            + " record_kind = 'DOMAIN' AND session_scope_key = ?"
+                                            + " AND record_key = ?",
                         (result, row) -> result.getString("record_resource_id"),
                         scopeKey, configKey).stream().findFirst().orElse(null);
                 require(configResource != null,
@@ -792,12 +1091,68 @@ public class ManagedExtensionRecordStore {
                         && ManagedMcpRecords.same(config.get("run").get("definition"), record.get("run").get("definition")),
                         "MCP operation must bind to its active committed configuration.");
             }
+            if (domain.equals("automation_run")) {
+                // H6b: a run binds to its live definition at the current
+                // revision, and its id is the derivation of its occurrence
+                // (design decisions 2 and 3).
+                String scheduleKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "schedule", record.get("scheduleId").textValue());
+                String scheduleResource = jdbc.query(
+                                        "SELECT record_resource_id FROM ma_session_record WHERE"
+                                            + " record_kind = 'DOMAIN' AND session_scope_key = ?"
+                                            + " AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, scheduleKey).stream().findFirst().orElse(null);
+                String binding = "Automation run must bind to its live definition"
+                        + " at the current revision.";
+                require(scheduleResource != null, binding);
+                JsonNode schedule = readBody(resources.apply(scheduleResource));
+                require(!ManagedExtensionRecords
+                                .isTerminalRunState(
+                                schedule.get("run").get("state").textValue())
+                        && schedule.get("definitionRevision").decimalValue().compareTo(
+                                record.get("definitionRevision").decimalValue()) == 0
+                        && ManagedMcpRecords.same(schedule.get("sessionMode"),
+                                record.get("sessionMode"))
+                        && ManagedMcpRecords.same(schedule.get("targetSessionId"),
+                                record.get("targetSessionId")),
+                        binding);
+                require(record.get("automationRunId").textValue().equals(
+                                AutomationLedgerStore.automationRunId(
+                                        record.get("scheduleId").textValue(),
+                                        record.get("occurrenceKey").textValue())),
+                        "Automation run id must be derived from its definition"
+                                + " and occurrence.");
+            }
+            if (domain.equals("channel_delivery")) {
+                // H5c: a delivery goes out through a committed, live route
+                // at the revision it was planned against.
+                String routeKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "channel_route", record.get("routeId").textValue());
+                String routeResource = jdbc.query(
+                                        "SELECT record_resource_id FROM ma_session_record WHERE"
+                                            + " record_kind = 'DOMAIN' AND session_scope_key = ?"
+                                            + " AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, routeKey).stream().findFirst().orElse(null);
+                require(routeResource != null,
+                        "Channel delivery must bind to its committed route at the"
+                                + " pinned revision.");
+                JsonNode route = readBody(resources.apply(routeResource));
+                String routeState = route.get("run").get("state").textValue();
+                require(ManagedMcpRecords.same(route.get("routeRevision"),
+                        record.get("routeRevision"))
+                        && !List.of("settled", "failed", "cancelled")
+                                .contains(routeState),
+                        "Channel delivery must bind to its committed route at the"
+                                + " pinned revision.");
+            }
             require(body.isStart().test(record), "The first revision of "
                     + domain + " record " + recordId + " must open its run.");
             // The command that opens a record becomes the operation of its
             // grants, so it opens no other record.
             Integer opened = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                            + " qwen_managed_session_extension_record WHERE"
+                            + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND operation_hash = ?",
                     Integer.class, scopeKey, operationHash);
             require(opened != null && opened == 0, "Command " + operationId
@@ -810,6 +1165,26 @@ public class ManagedExtensionRecordStore {
                     domain + " record " + recordId
                             + " cannot follow its revision "
                             + previous.revision() + ".");
+        }
+        if (domain.equals("session_message")) {
+            // After the chain rules, so a different message under a taken
+            // id answers as the conflict it is, as the authority does. A
+            // transaction carries at most one Stage H record (apply), so
+            // every input it accepts is this record's: an opening receipt
+            // carries exactly one, under its own id, and no other revision
+            // carries any.
+            boolean opening = previous == null && "inbound".equals(
+                    record.get("direction").textValue());
+            List<String> inputs = inputIds.get();
+            require(opening
+                    ? inputs.equals(List.of(record.get("inputId").textValue()))
+                    : inputs.isEmpty(),
+                    "An inbound session message opens together with its"
+                            + " input, and no other revision carries one.");
+        }
+        if (domain.equals("session_command")) {
+            require(inputIds.get().isEmpty(),
+                    "A session command never carries an input.");
         }
         JsonNode run = record.get("run");
         TaskProjection projection = ManagedExtensionProjection.project(
@@ -824,16 +1199,16 @@ public class ManagedExtensionRecordStore {
         long revision = previous == null ? 1 : previous.revision() + 1;
         if (previous == null) {
             try {
-                jdbc.update("INSERT INTO qwen_managed_session_extension_record"
-                                + " (session_scope_key, record_key, tenant_id,"
+                jdbc.update("INSERT INTO ma_session_record"
+                                + " (record_kind, session_scope_key, record_key, tenant_id,"
                                 + " workspace_id, session_id, domain, record_id,"
                                 + " operation_hash, revision, record_resource_id,"
                                 + " task_kind, task_state, runtime_state,"
                                 + " definition_revision, delivery_target,"
-                                + " delivery_state, created_at, started_at,"
+                                + " delivery_state, gmt_create, started_at,"
                                 + " settled_at, first_sequence, hook_once_key_hash,"
                                 + " hook_occurrence_hash, hook_ordinal,"
-                                + " hook_definition_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+                                + " hook_definition_hash) VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?,"
                                 + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         scopeKey, recordKey, tenantId, workspaceId, sessionId,
                         domain, recordId, operationHash, revision, resourceId,
@@ -856,19 +1231,26 @@ public class ManagedExtensionRecordStore {
                         + " already committed in this Session.");
             }
         } else {
-            jdbc.update("UPDATE qwen_managed_session_extension_record SET"
-                            + " revision = ?, record_resource_id = ?,"
-                            + " task_state = ?, runtime_state = ?,"
-                            + " definition_revision = ?, delivery_target = ?,"
-                            + " delivery_state = ?, started_at = ?,"
-                            + " settled_at = ? WHERE session_scope_key = ?"
-                            + " AND record_key = ?",
+            jdbc.update(
+                    "UPDATE ma_session_record SET revision = ?, record_resource_id = ?, task_state"
+                        + " = ?, runtime_state = ?, definition_revision = ?, delivery_target = ?,"
+                        + " delivery_state = ?, started_at = ?, settled_at = ? WHERE record_kind ="
+                        + " 'DOMAIN' AND session_scope_key = ? AND record_key = ?",
                     revision, resourceId, body.taskKindOf().apply(record) == null ? null : projection.state(),
                     projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
                     projection.settledAt(), scopeKey, recordKey);
         }
+        if (domain.equals("schedule")) {
+            new AutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
+                    sessionId, revision, record, committedAt);
+        }
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
+                        + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scopeKey, recordKey);
+        jdbc.update(
+                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
         if (body.taskKindOf().apply(record) != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
@@ -919,7 +1301,7 @@ public class ManagedExtensionRecordStore {
         return new TaskProjection(result.getString("task_state"),
                 result.getString("runtime_state"),
                 result.getObject("definition_revision", Long.class),
-                result.getLong("created_at"),
+                result.getLong("gmt_create"),
                 result.getObject("started_at", Long.class),
                 result.getObject("settled_at", Long.class));
     }
@@ -966,12 +1348,380 @@ public class ManagedExtensionRecordStore {
     }
 
     private static String sha256(byte[] value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance(
-                    "SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
+        return DigestUtils.sha256Hex(value);
+    }
+
+    /**
+     * H4d: each Session proves what it holds. A record in the parent's journal binds to its child
+     * run; a record in a child's journal binds to the lineage creation stamped on its Session row,
+     * which only this store holds, so that refusal carries its own code: the authority could not
+     * refuse it first, and the writer keeps its log writable.
+     */
+    private void requireSessionMessage(String tenantId, String sessionId,
+            String scopeKey, JsonNode message, boolean opening,
+            Function<String, StoredResource> resources) {
+        boolean outbound = "outbound".equals(message.get("direction")
+                .textValue());
+        String target = message.get("targetSessionId").isNull() ? null
+                : message.get("targetSessionId").textValue();
+        String sender = message.get("senderSessionId").textValue();
+        String childRunId = message.get("childRunId").textValue();
+        require(!outbound || sender.equals(sessionId),
+                "Outbound session message must be sent by this Session.");
+        require(outbound || sessionId.equals(target),
+                "Inbound session message must be addressed to this Session.");
+        if (outbound == "to_child".equals(message.get("route").textValue())) {
+            JsonNode child = recordBody(scopeKey, sessionId, "child_run",
+                    childRunId, resources);
+            require(child != null
+                    && ManagedExtensionRecords.isChildSessionRun(child),
+                    "Session message must name a child Session run of this"
+                            + " Session.");
+            String attached = child.get("childSessionId").isNull() ? null
+                    : child.get("childSessionId").textValue();
+            if (outbound) {
+                require(!opening || !ManagedExtensionRecords.TERMINAL.contains(
+                        child.get("run").get("state").textValue()),
+                        "Session message to a child must name a run that has"
+                                + " not ended.");
+                require(target == null || target.equals(attached),
+                        "Session message to a child must target the Session"
+                                + " its run attached.");
+            } else {
+                // Before the attach the parent cannot tell its child's
+                // Session yet: the delivery waits, it is not a forgery.
+                require(attached != null,
+                        "Session message from a child arrives only once its"
+                                + " run attached.");
+                require(sender.equals(attached),
+                        "Session message from a child must come from the"
+                                + " Session its run attached.");
+            }
+            return;
         }
+        // The lineage is stamped at creation and never changes, so a plain
+        // read decides; read directly, since a store built beside no
+        // public Session table holds no AgentStateStore.
+        List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
+                        + " parent_child_run_id FROM ma_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> new String[] {
+                        result.getString("parent_session_id"),
+                        result.getString("parent_child_run_id") },
+                tenantId, sessionId);
+        String parent = lineage.isEmpty() ? null : lineage.get(0)[0];
+        String edge = lineage.isEmpty() ? null : lineage.get(0)[1];
+        boolean follows = parent != null && childRunId.equals(edge)
+                && (outbound ? target == null || target.equals(parent)
+                        : sender.equals(parent));
+        if (!follows) {
+            throw new ApiException(HttpStatus.CONFLICT, ERROR_MESSAGE_LINEAGE,
+                    outbound
+                            ? "Session message to a parent must follow this"
+                                    + " Session's lineage."
+                            : "Session message from a parent must follow this"
+                                    + " Session's lineage.");
+        }
+    }
+
+    /**
+     * H4e-b3's session command rules, exactly the message channel's two arms under the command's
+     * own evidence: the member journal's outbound entry must follow its stamped lineage to the
+     * parent, and the lead journal's inbound receipt must name one of its own child Session runs,
+     * attached to the claimed sender.
+     */
+    private void requireSessionCommand(String tenantId, String sessionId,
+            String scopeKey, JsonNode command, boolean opening,
+            Function<String, StoredResource> resources) {
+        boolean outbound = "outbound".equals(command.get("direction")
+                .textValue());
+        String target = command.get("targetSessionId").isNull() ? null
+                : command.get("targetSessionId").textValue();
+        String sender = command.get("senderSessionId").textValue();
+        String childRunId = command.get("childRunId").textValue();
+        require(!outbound || sender.equals(sessionId),
+                "Outbound session command must be sent by this Session.");
+        require(outbound || sessionId.equals(target),
+                "Inbound session command must be addressed to this"
+                        + " Session.");
+        if (outbound) {
+            // to_parent on the member's own journal: the lineage is
+            // stamped at creation and never changes, so a plain read
+            // decides, exactly like the message channel's.
+            List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
+                            + " parent_child_run_id FROM ma_session"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    (result, row) -> new String[] {
+                            result.getString("parent_session_id"),
+                            result.getString("parent_child_run_id") },
+                    tenantId, sessionId);
+            String parent = lineage.isEmpty() ? null : lineage.get(0)[0];
+            String edge = lineage.isEmpty() ? null : lineage.get(0)[1];
+            boolean follows = parent != null && childRunId.equals(edge)
+                    && (target == null || target.equals(parent));
+            if (!follows) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        ERROR_COMMAND_LINEAGE,
+                        "Session command to a parent must follow this"
+                                + " Session's lineage.");
+            }
+            return;
+        }
+        // to_parent's receipt on the lead's journal: exactly H4d-b's
+        // inbound child branch — the run belongs to this Session, and it
+        // attached the claimed sender.
+        JsonNode child = recordBody(scopeKey, sessionId, "child_run",
+                childRunId, resources);
+        require(child != null
+                && ManagedExtensionRecords.isChildSessionRun(child),
+                "Session command must name a child Session run of this"
+                        + " Session.");
+        JsonNode attachedNode = child.get("childSessionId");
+        require(!attachedNode.isNull(),
+                "Session command from a child arrives only once its run"
+                        + " attached.");
+        require(sender.equals(attachedNode.textValue()),
+                "Session command from a child must come from the Session"
+                        + " its run attached.");
+    }
+
+    /**
+     * H4d's continueChildRun: a continuation opens a new run after a completed one of this Session,
+     * in its scope, tree, workspace and definition, and a predecessor is continued at most once, so
+     * the chain stays linear.
+     */
+    private void requireContinuation(String sessionId, String scopeKey,
+            JsonNode child, Function<String, StoredResource> resources) {
+        JsonNode named = child.get("predecessorChildRunId");
+        if (!ManagedExtensionRecords.isChildSessionRun(child)
+                || named.isNull()) {
+            return;
+        }
+        String predecessorId = named.textValue();
+        JsonNode predecessor = recordBody(scopeKey, sessionId, "child_run",
+                predecessorId, resources);
+        require(predecessor != null && predecessor.get("kind").textValue()
+                .equals(child.get("kind").textValue()),
+                "Child continuation must name a child run of this Session of"
+                        + " its own kind.");
+        require("completed".equals(predecessor.get("stopReason")
+                .textValue()),
+                "Child continuation must follow a run that completed with its"
+                        + " result.");
+        require(!predecessor.get("stopRequested").booleanValue(),
+                "Child continuation cannot revive a run whose stop was"
+                        + " requested.");
+        require(List.of("ownerScopeId", "rootSessionId", "depth",
+                "workspaceMode", "workingDirectory").stream()
+                .allMatch(key -> ManagedExtensionRecords.same(
+                        predecessor.get(key), child.get(key)))
+                && ManagedExtensionRecords.same(predecessor.get("run")
+                        .get("definition"), child.get("run").get("definition")),
+                "Child continuation must keep its predecessor's scope, tree,"
+                        + " workspace and definition.");
+        // Continuations are rare and checked only when one opens, so the runs
+        // are read rather than indexed: a sibling proven never to have
+        // started releases the predecessor, which no unique index could
+        // express. Only a run of the predecessor's kind can continue it, so
+        // only those are read. Each opened once every earlier one proved it
+        // never started, so at most one still holds the predecessor; the
+        // authority keeps just that latest one, relying on the same
+        // invariant, so a second release condition must change both.
+        List<String> siblings = jdbc.query("SELECT record_resource_id FROM"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
+                        + " session_scope_key = ? AND domain = 'child_run'"
+                        + " AND task_kind = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                scopeKey, ManagedExtensionRecords.childRunTaskKind(child));
+        for (String sibling : siblings) {
+            JsonNode body = readBody(resources.apply(sibling));
+            require(!predecessorId.equals(body.get("predecessorChildRunId")
+                    .textValue()) || "not_started_proven".equals(
+                            body.at("/run/execution").textValue()),
+                    "Child continuation must name a predecessor no other run"
+                            + " continues.");
+        }
+    }
+
+    /**
+     * H4e: a team lives in its lead's journal. Each member joins as a live child Session run of the
+     * lead that no other team lists; every other team record opens only in an active team of this
+     * Session, so a closing team drains, and its parties, owner, dependencies and plan member come
+     * from that team. The authority checks the same rules.
+     */
+    private void requireTeamRecord(String sessionId, String scopeKey,
+            String domain, JsonNode record, JsonNode previous,
+            Function<String, StoredResource> resources) {
+        if (domain.equals("team_state")) {
+            require(sessionId.equals(record.get("leadSessionId").textValue()),
+                    "Team must be led by this Session.");
+            Set<String> joined = new HashSet<>();
+            if (previous != null) {
+                previous.get("members").forEach(member -> joined.add(
+                        member.get("childRunId").textValue()));
+            }
+            String teamId = record.get("teamId").textValue();
+            for (JsonNode member : record.get("members")) {
+                String run = member.get("childRunId").textValue();
+                if (joined.contains(run)) {
+                    continue;
+                }
+                JsonNode child = recordBody(scopeKey, sessionId, "child_run",
+                        run, resources);
+                require(child != null
+                        && ManagedExtensionRecords.isChildSessionRun(child)
+                        && !ManagedExtensionRecords.isTerminalRunState(
+                                child.at("/run/state").textValue()),
+                        "Team member must join as a child Session run of this"
+                                + " Session that has not ended.");
+                // Joins are rare, so the teams are read rather than indexed.
+                for (JsonNode other : domainBodies(scopeKey, "team_state",
+                        resources)) {
+                    require(other.get("teamId").textValue().equals(teamId)
+                            || memberWith(other, "childRunId", run) == null,
+                            "Team member's child run must belong to no other"
+                                    + " team.");
+                }
+            }
+            return;
+        }
+        String teamId = record.get("teamId").textValue();
+        JsonNode team = recordBody(scopeKey, sessionId, "team_state", teamId,
+                resources);
+        require(team != null && (previous != null
+                || "active".equals(team.get("lifecycle").textValue())),
+                "Team record must open in an active team of this Session.");
+        if (domain.equals("team_task")) {
+            String taskId = record.get("taskId").textValue();
+            if (previous == null) {
+                // Read only when a task opens; its number never changes.
+                for (JsonNode other : domainBodies(scopeKey, "team_task",
+                        resources)) {
+                    require(!teamId.equals(other.get("teamId").textValue())
+                            || other.get("number").longValue()
+                                    != record.get("number").longValue(),
+                            "Team task number must be unique in its team.");
+                }
+            }
+            JsonNode owner = record.get("owner");
+            require(owner.isNull() || (previous != null
+                    && ManagedExtensionRecords.same(owner, previous.get("owner")))
+                    || takesPart(team, owner.textValue()),
+                    "Team task owner must be the leader or a member of its"
+                            + " team.");
+            Set<String> earlier = new HashSet<>();
+            if (previous != null) {
+                previous.get("blockedBy").forEach(each -> earlier.add(
+                        each.textValue()));
+            }
+            Deque<String> pending = new ArrayDeque<>();
+            for (JsonNode each : record.get("blockedBy")) {
+                String blocker = each.textValue();
+                if (earlier.contains(blocker)) {
+                    continue;
+                }
+                JsonNode other = recordBody(scopeKey, sessionId, "team_task",
+                        blocker, resources);
+                require(other != null
+                        && teamId.equals(other.get("teamId").textValue()),
+                        "Team task must be blocked only by tasks of its team.");
+                pending.push(blocker);
+            }
+            // Only the new edges can close a cycle: one does exactly when
+            // this task is reachable from a new blocker.
+            Set<String> seen = new HashSet<>();
+            while (!pending.isEmpty()) {
+                String next = pending.pop();
+                require(!next.equals(taskId),
+                        "Team task dependencies must not form a cycle.");
+                if (seen.add(next)) {
+                    recordBody(scopeKey, sessionId, "team_task", next,
+                            resources).get("blockedBy").forEach(each ->
+                                    pending.push(each.textValue()));
+                }
+            }
+        }
+        if (domain.equals("team_message")) {
+            String to = record.get("to").textValue();
+            // Every revision, not only the opening: the roster only grows,
+            // so a lawful successor always passes, while one that
+            // readdresses the message is refused before its recipient is
+            // looked up below.
+            require(takesPart(team, record.get("from").textValue())
+                    && takesPart(team, to),
+                    "Team message must travel between the leader and members"
+                            + " of its team.");
+            JsonNode target = record.get("targetSessionId");
+            if (!target.isNull()) {
+                // The leader is this Session; a member is the Session its
+                // run attached, so a message to one not attached yet stays
+                // planned.
+                String expected = sessionId;
+                if (!ManagedTeamRecords.LEADER.equals(to)) {
+                    JsonNode child = recordBody(scopeKey, sessionId,
+                            "child_run", memberWith(team, "name", to)
+                                    .get("childRunId").textValue(),
+                            resources);
+                    expected = ManagedExtensionRecords.isChildSessionRun(child)
+                            && !child.get("childSessionId").isNull()
+                                    ? child.get("childSessionId").textValue()
+                                    : null;
+                }
+                require(target.textValue().equals(expected),
+                        "Team message must target the Session of its"
+                                + " recipient.");
+            }
+        }
+        if (domain.equals("team_plan") && previous == null) {
+            JsonNode member = memberWith(team, "name",
+                    record.get("member").textValue());
+            require(member != null
+                    && member.get("planModeRequired").booleanValue(),
+                    "Team plan must come from a member of its team that"
+                            + " requires plan mode.");
+        }
+    }
+
+    private static boolean takesPart(JsonNode team, String name) {
+        return ManagedTeamRecords.LEADER.equals(name)
+                || memberWith(team, "name", name) != null;
+    }
+
+    private static JsonNode memberWith(JsonNode team, String key,
+            String value) {
+        for (JsonNode member : team.get("members")) {
+            if (value.equals(member.get(key).textValue())) {
+                return member;
+            }
+        }
+        return null;
+    }
+
+    /** The latest committed body of every record of one domain of this Session. */
+    private List<JsonNode> domainBodies(String scopeKey, String domain,
+            Function<String, StoredResource> resources) {
+        return jdbc.query("SELECT record_resource_id FROM"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
+                        + " session_scope_key = ? AND domain = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                scopeKey, domain)
+                .stream().map(resource -> readBody(resources.apply(resource)))
+                .toList();
+    }
+
+    /** The latest committed body of one record of this Session, or null. */
+    private JsonNode recordBody(String scopeKey, String sessionId,
+            String domain, String recordId,
+            Function<String, StoredResource> resources) {
+        return jdbc.query("SELECT record_resource_id FROM"
+                        + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
+                        + " session_scope_key = ? AND record_key = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                scopeKey, ManagedExtensionProjection.recordKey(sessionId,
+                        domain, recordId))
+                .stream().findFirst()
+                .map(resource -> readBody(resources.apply(resource)))
+                .orElse(null);
     }
 
     private static void requireReference(StoredResource resource, JsonNode ref) {
@@ -996,30 +1746,22 @@ public class ManagedExtensionRecordStore {
             String resourceId, TaskProjection projection) {
     }
 
-    /** Whether the event id sits in the domain's own reserved
-     * {@code <domain>:<n>} namespace. */
+    /** Whether the event id sits in the domain's own reserved {@code <domain>:<n>} namespace. */
     private static boolean ownReservedId(String eventId, String domain) {
-        if (eventId == null || !eventId.startsWith(domain + ":")) {
-            return false;
-        }
-        for (int index = domain.length() + 1; index < eventId.length();
-                index++) {
-            if (!Character.isDigit(eventId.charAt(index))) {
-                return false;
-            }
-        }
-        return eventId.length() > domain.length() + 1;
+        return eventId != null && eventId.startsWith(domain + ":")
+                && StringUtils.isNumeric(eventId.substring(domain.length() + 1));
     }
-    /** Whether the Session is being deleted or deleted. The read runs
-     * inside the record commit's own transaction, so a plain SELECT would
-     * read that transaction's own snapshot and silently miss a deletion that
-     * committed later (REPEATABLE READ) — the journal must stay empty once a
-     * deletion began. Up to this point the commit holds the tenant row and
-     * the journal head, not the Session row, so FOR UPDATE takes the Session
-     * row's lock here for the first time and may wait across connections —
-     * the same shape main's announce() already has. */
+
+    /**
+     * Whether the Session is being deleted or deleted. The read runs inside the record commit's own
+     * transaction, so a plain SELECT would read that transaction's own snapshot and silently miss a
+     * deletion that committed later (REPEATABLE READ) — the journal must stay empty once a deletion
+     * began. Up to this point the commit holds the tenant row and the journal head, not the Session
+     * row, so FOR UPDATE takes the Session row's lock here for the first time and may wait across
+     * connections — the same shape main's announce() already has.
+     */
     private boolean isBeingDeleted(String tenantId, String sessionId) {
-        String status = jdbc.query("SELECT status FROM managed_agent_session"
+        String status = jdbc.query("SELECT status FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 (result, row) -> result.getString("status"),
                 tenantId, sessionId).stream().findFirst().orElse(null);

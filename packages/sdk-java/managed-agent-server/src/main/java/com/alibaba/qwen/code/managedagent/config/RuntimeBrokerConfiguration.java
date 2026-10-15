@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -14,12 +14,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.SecretProtector;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import java.util.concurrent.CompletableFuture;
-import javax.sql.DataSource;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import javax.sql.DataSource;
+
+import java.util.concurrent.CompletableFuture;
 
 @Configuration
 public class RuntimeBrokerConfiguration {
@@ -58,8 +61,9 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public ToolExecutionRepository toolExecutionRepository(
-            DataSource dataSource) {
-        return new JdbcToolExecutionRepository(dataSource);
+            DataSource dataSource, RuntimeBindingRepository bindings) {
+        return new JdbcToolExecutionRepository(dataSource,
+                bindings instanceof JdbcRuntimeBindingRepository original ? original : null);
     }
 
     @Bean(destroyMethod = "close")
@@ -77,6 +81,18 @@ public class RuntimeBrokerConfiguration {
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
                 publicationData.getIfAvailable());
+    }
+
+    // The child result relay and the close cascade probe bindings across
+    // this Broker: it must be a bean, but its lifecycle stays with the
+    // owning EmbeddedRuntimeBroker — destroyMethod "" keeps Spring from
+    // closing the same service a second time.
+    @Bean(destroyMethod = "")
+    @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
+            name = "enabled", havingValue = "true")
+    public com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService runtimeBrokerService(
+            EmbeddedRuntimeBroker broker) {
+        return broker.service();
     }
 
     @Bean
@@ -101,7 +117,7 @@ public class RuntimeBrokerConfiguration {
     }
 
     private static void require(String value, String name) {
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             throw new IllegalStateException(name + " is required");
         }
     }

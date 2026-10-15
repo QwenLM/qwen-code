@@ -13,20 +13,16 @@ import {
 import { ToolNames } from '../../tools/tool-names.js';
 import { matchesToolPattern } from '../../permissions/rule-parser.js';
 
-export type AgentToolClassification = 'allow' | 'deny' | 'thread';
-
-export const THREAD_TOOL_NAMES = [
-  ToolNames.THREAD_POST,
-  ToolNames.THREAD_WAIT,
-  ToolNames.THREAD_BLOCK,
-  ToolNames.THREAD_REVIEW,
-  ToolNames.THREAD_CREATE,
-  ToolNames.THREAD_READ,
-] as const;
+export type AgentToolClassification = 'allow' | 'deny';
 
 type CoreToolName = (typeof ToolNames)[keyof typeof ToolNames];
-type AgentThreadToolName = (typeof THREAD_TOOL_NAMES)[number];
 
+/**
+ * The read-only ceiling. Only the persisted Agent Host session
+ * (`sourceType: 'agent-host'`) and an `agent` session that no session-agents
+ * binding claims still run under it; session-agents sessions do not (plan
+ * §8-1). Exhaustive over core tool names so a new tool must be classified.
+ */
 export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.EDIT]: 'deny',
   [ToolNames.WRITE_FILE]: 'deny',
@@ -109,61 +105,13 @@ export const AGENT_TOOL_CLASSIFICATION = {
   // The deferred-tool bridge can invoke any registered tool, so it is denied
   // for the same reason as exec.
   [ToolNames.TOOL_CALL]: 'deny',
-  [ToolNames.THREAD_POST]: 'thread',
-  [ToolNames.THREAD_WAIT]: 'thread',
-  [ToolNames.THREAD_BLOCK]: 'thread',
-  [ToolNames.THREAD_REVIEW]: 'thread',
-  [ToolNames.THREAD_CREATE]: 'thread',
-  [ToolNames.THREAD_READ]: 'thread',
-} as const satisfies Record<
-  CoreToolName | AgentThreadToolName,
-  AgentToolClassification
->;
+} as const satisfies Record<CoreToolName, AgentToolClassification>;
 
 export function classifyAgentTool(name: string): AgentToolClassification {
   if (!Object.hasOwn(AGENT_TOOL_CLASSIFICATION, name)) return 'deny';
   return AGENT_TOOL_CLASSIFICATION[
     name as keyof typeof AGENT_TOOL_CLASSIFICATION
   ];
-}
-
-export function buildAgentToolConfig(definition?: ToolConfig): ToolConfig {
-  const allowAll = definition === undefined || definition.tools.includes('*');
-  let allowed = allowAll
-    ? Object.entries(AGENT_TOOL_CLASSIFICATION)
-        .filter(([, classification]) => classification === 'allow')
-        .map(([name]) => name)
-    : definition.tools
-        .map((tool) => (typeof tool === 'string' ? tool : tool.name))
-        .filter(
-          (name): name is string =>
-            typeof name === 'string' && classifyAgentTool(name) === 'allow',
-        );
-  if (definition?.executionAllowedTools !== undefined) {
-    const executable = new Set(definition.executionAllowedTools);
-    allowed = allowed.filter((name) => executable.has(name));
-  }
-  if (definition?.disallowedTools?.length) {
-    const disallowed = new Set(definition.disallowedTools);
-    allowed = allowed.filter((name) => !disallowed.has(name));
-  }
-  const tools = Array.from(new Set([...allowed, ...THREAD_TOOL_NAMES]));
-  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
-
-  return {
-    tools,
-    executionAllowedTools: [...tools],
-    disallowedTools: Array.from(
-      new Set([
-        ...Object.entries(AGENT_TOOL_CLASSIFICATION)
-          .filter(([, classification]) => classification === 'deny')
-          .map(([name]) => name),
-        ...(definition?.disallowedTools ?? []).filter(
-          (name) => !threadTools.has(name),
-        ),
-      ]),
-    ),
-  };
 }
 
 export function createAgentToolInvocationGuard(
@@ -203,41 +151,38 @@ export function createAgentToolInvocationGuard(
  * through the session's ordinary approval flow, which the orchestrator relays
  * to the chat session. So there is no read-only ceiling here. A linked
  * definition may still narrow the surface; that narrowing is kept.
- * Thread tools are never offered: there is no thread behind such a session.
  */
 export function buildSessionAgentToolConfig(
   definition?: ToolConfig,
 ): ToolConfig {
-  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
   const definitionNames = definition?.tools.map((tool) =>
     typeof tool === 'string' ? tool : tool.name,
   );
   let executionAllowedTools: string[] | undefined;
   if (definitionNames !== undefined && !definitionNames.includes('*')) {
     executionAllowedTools = definitionNames.filter(
-      (name): name is string =>
-        typeof name === 'string' && !threadTools.has(name),
+      (name): name is string => typeof name === 'string',
     );
   }
   if (definition?.executionAllowedTools !== undefined) {
     const executable = new Set(definition.executionAllowedTools);
     executionAllowedTools = (
       executionAllowedTools ?? definition.executionAllowedTools
-    ).filter((name) => executable.has(name) && !threadTools.has(name));
+    ).filter((name) => executable.has(name));
   }
   return {
     tools: definition?.tools ?? ['*'],
     ...(executionAllowedTools !== undefined ? { executionAllowedTools } : {}),
-    disallowedTools: Array.from(
-      new Set([...(definition?.disallowedTools ?? []), ...THREAD_TOOL_NAMES]),
-    ),
+    ...(definition?.disallowedTools?.length
+      ? { disallowedTools: [...new Set(definition.disallowedTools)] }
+      : {}),
   };
 }
 
 /**
  * The guard for a session-agents agent session: the upstream guard, the
- * definition's execution allowlist when it has one, its `disallowedTools`,
- * and no thread tools.
+ * definition's execution allowlist when it has one, and its
+ * `disallowedTools`.
  * Unlike {@link createAgentToolInvocationGuard} there is no read-only
  * classification; writes go through the session's approval flow, which
  * always asks: `Config.markSessionAgentSession` pins such a session to
@@ -253,7 +198,6 @@ export function createSessionAgentToolInvocationGuard(
   executionAllowedTools?: ReadonlySet<string>,
   disallowedTools?: readonly string[],
 ): ToolInvocationGuard {
-  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
   return async (context) => {
     if (upstream) {
       const upstreamDecision = await evaluateToolInvocationGuard(
@@ -263,7 +207,6 @@ export function createSessionAgentToolInvocationGuard(
       if (!upstreamDecision.allowed) return upstreamDecision;
     }
     if (
-      threadTools.has(context.toolName) ||
       (executionAllowedTools !== undefined &&
         !executionAllowedTools.has(context.toolName)) ||
       (disallowedTools?.some((pattern) =>

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+
 import java.util.concurrent.CompletionStage;
 
 public interface RuntimeWarmer {
@@ -24,6 +25,18 @@ public interface RuntimeWarmer {
                 new UnsupportedOperationException("Workspace close is unavailable"));
     }
 
+    default CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Workspace resource drain is unavailable"));
+    }
+
+    default CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Stopped Workspace recovery is unavailable"));
+    }
+
     /**
      * The W2 settlement probe: verifies the target directory of a cwd
      * change against the administrator mount mapping, its continuity and
@@ -35,5 +48,14 @@ public interface RuntimeWarmer {
     default void verifyWorkspaceCwdTarget(ContextBinding binding,
             String targetCwdRelative) {
         throw WorkspaceExecutionStore.unavailable();
+    }
+
+    /**
+     * The child Workspace capability of the isolation slice (#13753 I1),
+     * or null when this host cannot create a child Workspace: it is off
+     * by default and needs a control plane that mounts the storage.
+     */
+    default ChildWorkspaceProvider childWorkspaces() {
+        return null;
     }
 }

@@ -16,7 +16,7 @@ public record RuntimeDrainReceipt(String bindingId, long generation,
         }
     }
 
-    boolean matches(RuntimeBindingRecord binding) {
+    public boolean matches(RuntimeBindingRecord binding) {
         return bindingId.equals(binding.getBindingId()) && generation == binding.getGeneration()
                 && binding.getProvisionSeed() != null
                 && provisionRequestId.equals(binding.getProvisionSeed().getProvisionRequestId())
