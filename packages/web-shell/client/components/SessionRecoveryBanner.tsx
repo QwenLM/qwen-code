@@ -55,14 +55,13 @@ export function SessionRecoveryBanner({
 
   const continueSession = async () => {
     if (pendingRef.current) return;
-    const confirmationOwner = ownerGuard.capture({ includeRecovery: true });
     const confirmCancellation = recovery?.cancellationConfirmationId;
-    if (
-      confirmCancellation &&
-      !window.confirm(t('session.recovery.confirmCancellation'))
-    )
-      return;
-    if (!confirmationOwner.isCurrent()) return;
+    if (confirmCancellation) {
+      // Re-check identity after the blocking dialog; only when one was shown.
+      const confirmationOwner = ownerGuard.capture({ includeRecovery: true });
+      if (!window.confirm(t('session.recovery.confirmCancellation'))) return;
+      if (!confirmationOwner.isCurrent()) return;
+    }
     const owner = ownerGuard.capture();
     pendingRef.current = owner;
     setPending(true);
