@@ -684,9 +684,18 @@ describe('hosted background launch recovery (#13847)', () => {
       // planDecisionEvidence rides the teams funnel alone — without it
       // the takeover cannot prove what the call committed, so the typed
       // decline stands, never a minted answer.
+      const before = (await replacement.sink.project()).filter(
+        (entry) => entry.daemonPromptId === PROMPT_ID,
+      ).length;
       const outcome = await takeoverRaw(replacement, {});
       expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
       expect(await unsettledTurnIds(replacement)).toContain(PROMPT_ID);
+      // The decline writes nothing: the funnel guard runs before the
+      // answer pass, so no minted tool_result fold lands in the journal.
+      const after = (await replacement.sink.project()).filter(
+        (entry) => entry.daemonPromptId === PROMPT_ID,
+      ).length;
+      expect(after).toBe(before);
     } finally {
       await replacement.close();
     }
