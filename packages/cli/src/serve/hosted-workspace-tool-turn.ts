@@ -4456,9 +4456,15 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      await Promise.allSettled(
-        [...reserved.values()].map((id) => this.broker.cancel(id)),
+      const cancellationBarriers = new Set<string>();
+      const reservedIds = [...reserved.values()];
+      const cancellationResults = await Promise.allSettled(
+        reservedIds.map((id) => this.broker.cancel(id)),
       );
+      cancellationResults.forEach((result, index) => {
+        if (result.status === 'fulfilled')
+          cancellationBarriers.add(reservedIds[index]!);
+      });
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
@@ -4491,7 +4497,12 @@ export class HostedWorkspaceToolTurn {
               String(closeCause),
           );
         }
-        if (!proven && grantOwnerState === undefined && request?.background) {
+        if (
+          !proven &&
+          grantOwnerState === undefined &&
+          request?.background &&
+          cancellationBarriers.has(executionCallId)
+        ) {
           try {
             proven =
               (await this.broker.backgroundProcessStatus(executionCallId)) ===

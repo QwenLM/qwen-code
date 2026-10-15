@@ -34,8 +34,9 @@ R3 —— 不放宽：含糊的结果必须保持阻塞，绝不被报为「从�
 
 ## 关键证据链（全部在当前 HEAD 核实）
 
-1. **对一次 `is_background` 派发，缺失 `:process` 行是「从未启动」
-   的完整证明** —— 该行只为那一次执行入账，并按派发所属的 hold 家族
+1. **对一次 `is_background` 派发，只有先经过排除迟到准入的生命周期边界，
+   再缺失 `:process` 行，才是「从未启动」的完整证明** —— reload 为对账路径提供
+   该边界，存活回合则通过成功的取消屏障取得它。该行只为那一次执行入账，并按派发所属的 hold 家族
    入账（`is_background` 为 `ManagedHoldFamily.SHELL`，`is_monitor` 为
    `ManagedHoldFamily.MONITOR`；两者都经
    `RuntimeBrokerService.admitBackgroundProcess`，共用同一个键）。
@@ -138,9 +139,11 @@ started: false })` → 经 `commitExtensionRecord` 提交
 
 tool-turn 的 catch 处理 publication 行尚未创建时失败的后台 Shell 预留。
 保留 grant owner 的 `NOT_STARTED` 证明。close 请求失败或没有返回状态时，
-才通过 `backgroundProcessStatus(executionCallId)` 查询同一原 Broker。任何
-非 `NOT_STARTED` 的明确状态都是反证，不得被后备查询覆盖。因此 publication
-缺失时，也必须由独立进程账本返回确定性的 404，才允许结算。只有带类型的
+后备路径先要求原 Broker 确认取消。Broker 在 Session 锁下持久化取消，并在
+等待中的 publication 安装结束后重新检查，因此成功应答会阻止迟到的进程
+入账与派发。随后才通过 `backgroundProcessStatus(executionCallId)` 查询同一原
+Broker。任何明确状态都是反证，不得被后备查询覆盖。因此 publication 缺失时，
+也必须先跨过取消屏障，再由独立进程账本返回确定性的 404，才允许结算。只有带类型的
 `runtime_execution_not_found` 应答解析为行缺失，才允许在存活回合内执行
 `settleFailed(..., { stopReason: 'start_failed', started: false })`。
 行存在、unknown、身份不匹配或查询被拒绝时，记录继续未结算；publication
@@ -153,8 +156,9 @@ grant 与远程证据路径负责。不增加 acquire、release、派发或协�
 调用已完成。
 
 回归用例先拒绝 reserve，再因 publication 缺失拒绝 `close_not_started`。
-只有原进程明确不存在时才要求立即结算 child；进程行存在或 Broker 不可达时，
-保留拒绝结算行为。
+只有取消屏障成功且原进程明确不存在时才要求立即结算 child；取消失败、进程行
+存在或 Broker 不可达时，保留拒绝结算行为。Broker 侧另有回归钉住：publication
+安装延迟期间一旦持久化取消，安装随后完成也不得迟到派发。
 
 ### 挂点：hosted 会话 open
 

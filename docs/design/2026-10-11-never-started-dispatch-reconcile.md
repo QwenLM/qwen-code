@@ -37,8 +37,11 @@ reported as never-started.
 
 ## Key evidence chain (all verified at HEAD)
 
-1. **A missing `:process` row is a complete proof of never-started for an
-   `is_background` dispatch** — the row is admitted for that execution alone,
+1. **A missing `:process` row after a lifecycle boundary rules out late
+   admission is a complete proof of never-started for an `is_background`
+   dispatch** — reload supplies that boundary for reconciliation; the live
+   Turn obtains it through a successful cancellation barrier. The row is
+   admitted for that execution alone,
    under whichever hold family the dispatch belongs to
    (`ManagedHoldFamily.SHELL` for `is_background`, `ManagedHoldFamily.MONITOR`
    for `is_monitor`; both go through
@@ -151,11 +154,15 @@ started: false })` → commits `state: failed`,
 
 The tool-turn catch handles a failed background Shell reservation before a
 publication row exists. It retains the grant owner's `NOT_STARTED` proof. If
-the close request fails or returns no state, it probes the same original Broker
-through `backgroundProcessStatus(executionCallId)`. A returned state other than
-`NOT_STARTED` is affirmative counter-evidence and is never overridden by the
-fallback. A missing publication can therefore settle only when the independent
-process ledger also returns its definitive 404. Only the typed
+the close request fails or returns no state, the fallback first requires the
+original Broker to acknowledge cancellation. The Broker persists cancellation
+under the Session lock and rechecks it after a pending publication installation,
+so a successful response prevents a late process admission or dispatch. Only
+then does the Turn probe the same Broker through
+`backgroundProcessStatus(executionCallId)`. A returned state is affirmative
+counter-evidence and is never overridden by the fallback. A missing publication
+can therefore settle only after the cancellation barrier and when the
+independent process ledger also returns its definitive 404. Only the typed
 `runtime_execution_not_found` response resolves to absence and permits
 `settleFailed(..., { stopReason: 'start_failed', started: false })` in the live
 Turn. A present row, unknown result, wrong identity or rejected probe leaves
@@ -168,10 +175,12 @@ paths. It adds no acquire, release, dispatch or protocol field. The original
 Turn still reports recovery required after recording the proven child terminal;
 the fix does not claim the rest of an uncertain batch completed.
 
-The regression refuses reservation, then refuses `close_not_started` for the
-absent publication. It requires immediate child settlement only for a
-definitively absent original process and retains refusal when a process row
-exists or the Broker is unavailable.
+The regressions refuse reservation, then refuse `close_not_started` for the
+absent publication. They require immediate child settlement only after a
+successful cancellation barrier and a definitively absent original process,
+retain refusal when cancellation fails, a process row exists or the Broker is
+unavailable, and pin the Broker against dispatch after a delayed publication
+installation observes a persisted cancellation.
 
 ### Hook point: hosted session open
 
