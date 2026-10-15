@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -160,12 +162,7 @@ public final class SessionResourceCollectionCollector {
                                         .put("sessionId", session)
                                         .toString();
                         jdbc.update(
-                                "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key,"
-                                    + " scope_key, operation_id, operation_kind, tenant_id,"
-                                    + " session_id, target_kind, target_key, request_digest,"
-                                    + " request_json, phase, state, created_at, updated_at) VALUES"
-                                    + " (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?,"
-                                    + " ?, 'COLLECTING', 'PENDING', ?, ?)",
+                                "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
                                 operationKey(scope),
                                 scope,
                                 scope,
@@ -184,14 +181,7 @@ public final class SessionResourceCollectionCollector {
     Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates = jdbc.query(
-                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE"
-                            + " operation_kind = 'SESSION_RESOURCE_GC' AND NOT EXISTS (SELECT 1"
-                            + " FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND"
-                            + " s.session_id = ma_operation.session_id AND s.csi_guard = TRUE) AND"
-                            + " state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ?"
-                            + " AND (claim_owner = ? OR claim_until IS NULL OR claim_until <="
-                            + " FROM_UNIXTIME(? / 1000.0)) ORDER BY available_at, operation_key"
-                            + " LIMIT 32",
+                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
             Claim claim =
@@ -209,12 +199,7 @@ public final class SessionResourceCollectionCollector {
                                                 jdbc, tenant, session);
                                 var row =
                                         jdbc.query(
-                                                        "SELECT *, CAST(UNIX_TIMESTAMP(claim_until)"
-                                                            + " AS DECIMAL(20, 3)) * 1000 AS"
-                                                            + " claim_until_epoch FROM ma_operation"
-                                                            + " WHERE operation_key = ? AND"
-                                                            + " operation_kind ="
-                                                            + " 'SESSION_RESOURCE_GC' FOR UPDATE",
+                                                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",
                                                         (result, index) ->
                                                                 ManagedSchemaRows.read(result),
                                                         operationKey(scope))
@@ -262,8 +247,7 @@ public final class SessionResourceCollectionCollector {
                                                 blocker);
                                     }
                                     jdbc.update(
-                                            "UPDATE ma_operation SET failure_code = ?, available_at"
-                                                + " = ?, updated_at = ? WHERE operation_key = ?",
+                                            "UPDATE ma_operation SET failure_code = ?, available_at = ?, gmt_modified = ? WHERE operation_key = ?",
                                             blocker,
                                             next,
                                             now,
@@ -275,10 +259,7 @@ public final class SessionResourceCollectionCollector {
                                                         row, "claim_generation")
                                                 + 1;
                                 jdbc.update(
-                                        "UPDATE ma_operation SET claim_generation = ?, claim_owner"
-                                            + " = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
-                                            + " failure_code = NULL, state = 'LEASED', updated_at ="
-                                            + " ? WHERE operation_key = ?",
+                                        "UPDATE ma_operation SET claim_generation = ?, claim_owner = ?, claim_until = ?, failure_code = NULL, state = 'LEASED', gmt_modified = ? WHERE operation_key = ?",
                                         generation,
                                         owner,
                                         now + CLAIM_MILLIS,
@@ -368,10 +349,7 @@ public final class SessionResourceCollectionCollector {
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
         var row =
                 jdbc.query(
-                                "SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) *"
-                                        + " 1000 AS claim_until_epoch FROM ma_operation WHERE"
-                                        + " operation_key = ? AND operation_kind ="
-                                        + " 'SESSION_RESOURCE_GC' FOR UPDATE",
+                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",
                                 (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                                 operationKey(claim.scope()))
                         .getFirst();
@@ -395,9 +373,7 @@ public final class SessionResourceCollectionCollector {
         if (ManagedSessionRetirementStore.deleteOwnerBatch(jdbc, claim.tenant(), claim.session(), PAGE_ROWS)
                 || deleteArtifactBatch(claim.scope())) {
             jdbc.update(
-                    "UPDATE ma_operation SET phase = 'RELEASING_OWNERS', claim_until ="
-                        + " FROM_UNIXTIME(? / 1000.0), updated_at = ? WHERE operation_key = ? AND"
-                        + " claim_generation = ?",
+                    "UPDATE ma_operation SET phase = 'RELEASING_OWNERS', claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
             return true;
         }
@@ -449,16 +425,13 @@ public final class SessionResourceCollectionCollector {
                 .put("collectedBytes", total).toString();
         if (more) {
             jdbc.update(
-                    "UPDATE ma_operation SET result_json = ?, claim_until = FROM_UNIXTIME(? /"
-                        + " 1000.0), updated_at = ? WHERE operation_key = ? AND claim_generation ="
-                        + " ?",
+                    "UPDATE ma_operation SET result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     result, now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
         } else {
             jdbc.update(
-                    "UPDATE ma_operation SET result_json = ?, state = 'SUCCEEDED', completed_at ="
-                            + " ?, claim_owner = NULL, claim_until = NULL, available_at = -1,"
-                            + " failure_code = NULL, updated_at = ? WHERE operation_key = ? AND"
-                            + " claim_generation = ?",
+                    "UPDATE ma_operation SET result_json = ?, state = 'SUCCEEDED', completed_at = ?, claim_owner = NULL, claim_until = NULL, available_at = "
+                            + ManagedSchemaTime.NEVER_DUE_MILLIS
+                            + ", failure_code = NULL, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     result, now, now, operationKey(claim.scope()), claim.generation());
             ManagedSessionRetirementStore.markCollectionCompleted(jdbc, claim.tenant(), claim.session(), operationKey(claim.scope()));
             jdbc.update(
@@ -494,7 +467,7 @@ public final class SessionResourceCollectionCollector {
                     ToolPublicationRetentionStore.lockGenericSession(
                             jdbc, claim.tenant(), claim.session());
                     jdbc.update(
-                            "UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL,"
+                            "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL,"
                                 + " available_at = ?, failure_code = 'collection_retry', state ="
                                 + " 'PENDING' WHERE operation_key = ? AND operation_kind ="
                                 + " 'SESSION_RESOURCE_GC' AND claim_owner = ? AND claim_generation"

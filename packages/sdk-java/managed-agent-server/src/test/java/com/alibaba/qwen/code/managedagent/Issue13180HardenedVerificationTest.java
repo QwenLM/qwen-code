@@ -217,7 +217,7 @@ class Issue13180HardenedVerificationTest {
         long nowMillis = System.currentTimeMillis();
         jdbc.update(
                 "INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, session_id,"
-                        + " action_id, record_id, action_version, domain, revision, state, options_json, created_at)"
+                        + " action_id, record_id, action_version, domain, revision, state, options_json, gmt_create)"
                         + " VALUES ('ACTION', ?, ?, ?, ?, ?, ?, 1, 'approval', 1, 'requested', ?, ?)",
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(tenant, session),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant, session, actionId), tenant, session, actionId, actionId,

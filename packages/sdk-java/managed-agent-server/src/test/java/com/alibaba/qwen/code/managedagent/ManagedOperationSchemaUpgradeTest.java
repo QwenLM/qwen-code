@@ -39,7 +39,7 @@ class ManagedOperationSchemaUpgradeTest {
         jdbc.update(
                 "INSERT INTO ma_operation"
                     + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,session_id,"
-                    + "target_kind,target_key,request_digest,request_json,state,phase,admission_stage,delivery_state,session_status_before,created_at,updated_at)"
+                    + "target_kind,target_key,request_digest,request_json,state,phase,admission_stage,delivery_state,session_status_before,gmt_create,gmt_modified)"
                     + " VALUES (?,?,?,'CLOSE',?,?,'SESSION',?,'digest','{}',"
                     + "'PENDING','PENDING','JAVA_DURABLE','PENDING','ACTIVE',0,0)",
                 ManagedSchemaKeys.key("operation"),

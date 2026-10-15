@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -144,7 +145,7 @@ public class ManagedTaskEventStore {
 
     public EventPage read(String tenantId, String sessionId, String taskId, long after, int limit) {
         List<TaskEvent> events = jdbc.query("SELECT sequence_id AS event_sequence, event_type,"
-                        + " created_at AS occurred_at, schema_version, projection_version, state, runtime_state,"
+                        + " gmt_create AS occurred_at, schema_version, projection_version, state, runtime_state,"
                         + " text, truncated, artifact_id, capture_id, output_stream_id AS stream_id,"
                         + " first_ordinal, end_ordinal, archived FROM ma_public_event WHERE tenant_id = ?"
                         + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?"
@@ -159,7 +160,7 @@ public class ManagedTaskEventStore {
             lockStream(tenantId, sessionId, taskId, occurredAt);
             long sequence = advance(tenantId, sessionId, taskId);
             jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
-                            + "event_id,event_type,created_at,schema_version,projection_version,state,runtime_state)"
+                            + "event_id,event_type,gmt_create,schema_version,projection_version,state,runtime_state)"
                             + " VALUES (?,?,'TASK',?,?,?,'state_changed',?,?,?,?,?)",
                     tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
                     occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, state, runtimeState);
@@ -195,12 +196,12 @@ public class ManagedTaskEventStore {
                 ends.put(streamKey, endOrdinal);
                 ObjectNode ranges = JSON.createObjectNode();
                 ends.forEach(ranges::put);
-                jdbc.update("UPDATE ma_event_stream SET output_ranges_json = ?, updated_at = ? WHERE tenant_id = ?"
+                jdbc.update("UPDATE ma_event_stream SET output_ranges_json = ?, gmt_modified = ? WHERE tenant_id = ?"
                                 + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?",
                         ranges.toString(), occurredAt, tenantId, sessionId, taskId);
             }
             jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
-                            + "event_id,event_type,created_at,schema_version,projection_version,text,truncated,capture_id,"
+                            + "event_id,event_type,gmt_create,schema_version,projection_version,text,truncated,capture_id,"
                             + "output_stream_id,first_ordinal,end_ordinal) VALUES (?,?,'TASK',?,?,?,'output',?,?,?,?,?,?,?,?,?)",
                     tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
                     occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, text, truncated,
@@ -227,7 +228,7 @@ public class ManagedTaskEventStore {
             publishCursorState(tenantId, sessionId, taskId, sequence,
                     new CursorState(refs, cursor.outputEnds()), occurredAt);
             jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
-                            + "event_id,event_type,created_at,schema_version,projection_version,artifact_id)"
+                            + "event_id,event_type,gmt_create,schema_version,projection_version,artifact_id)"
                             + " VALUES (?,?,'TASK',?,?,?,'artifact',?,?,?,?)",
                     tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
                     occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, artifactId);
@@ -270,7 +271,7 @@ public class ManagedTaskEventStore {
     }
 
     private void lockStream(String tenantId, String sessionId, String taskId, long occurredAt) {
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,updated_at)"
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,gmt_modified)"
                         + " VALUES (?,?,'TASK',?,?) ON DUPLICATE KEY UPDATE stream_id = stream_id",
                 tenantId, sessionId, taskId, occurredAt);
         jdbc.queryForObject("SELECT last_sequence FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
@@ -386,10 +387,7 @@ public class ManagedTaskEventStore {
         String ownerKey = ManagedSchemaKeys.key(scope, "TASK", taskId);
         String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenantId, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
-                        + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
-                        + " VALUES (?,?,?,?,?,?,'task-artifact-refs/1',1,?,?,'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6))"
-                        + " ON DUPLICATE KEY UPDATE resource_key = resource_key",
+        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES (?,?,?,?,?,?,'task-artifact-refs/1',1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
                 resourceKey, scope, tenantId, workspace, sessionId, resourceId, bytes.length, digest, bytes);
         Boolean same = jdbc.queryForObject("SELECT inline_bytes,sha256,byte_length,kind,schema_version,state FROM ma_resource"
                         + " WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ? AND session_id = ?",
@@ -403,10 +401,9 @@ public class ManagedTaskEventStore {
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'EVENT_STREAM' AND owner_key = ?",
                 scope, ownerKey);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,"
-                        + "tenant_id,workspace_id,session_id,created_at) VALUES (?,'EVENT_STREAM',?,?,?,?,?,?,CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,workspace_id,session_id,gmt_create) VALUES (?,'EVENT_STREAM',?,?,?,?,?,?," + ManagedSchemaTime.SQL_NOW + ")",
                 scope, ownerKey, revision, resourceKey, tenantId, workspace, sessionId);
-        jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key = ?, updated_at = ? WHERE tenant_id = ?"
+        jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key = ?, gmt_modified = ? WHERE tenant_id = ?"
                         + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?",
                 resourceKey, occurredAt, tenantId, sessionId, taskId);
     }
