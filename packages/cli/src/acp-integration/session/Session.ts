@@ -11433,6 +11433,15 @@ export class Session implements SessionContext {
       // early-returns on the `permissionScope: 'session'` these params carry.
       requestPermission: (params, signal) =>
         requestPermissionWithAbort(this.client, params, signal),
+      retireTeamBinding: (bindingId) =>
+        this.client.extNotification(
+          'qwen/notify/session/teammate-binding-ended',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            bindingId,
+          },
+        ),
     });
   }
 
@@ -11560,7 +11569,9 @@ export class Session implements SessionContext {
           kind: recipient === LEADER_NAME ? 'root' : 'teammate',
         },
         structured: {
-          ...(activity.kind === 'message' && activity.from
+          ...(activity.kind === 'message' &&
+          activity.from &&
+          activity.from !== 'unknown'
             ? {
                 author: {
                   agentName: agentName(activity.from),

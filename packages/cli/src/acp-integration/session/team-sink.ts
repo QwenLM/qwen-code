@@ -19,6 +19,7 @@ import {
   type TeammateJoinedEvent,
 } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
 import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
+import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
 import {
   ToolConfirmationOutcome,
   type ToolCallConfirmationDetails,
@@ -34,6 +35,7 @@ import {
 } from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('ACP_TEAM_SINK');
+let nextBindingId = 0;
 
 export interface TeamSinkDeps {
   readonly config: Config;
@@ -80,6 +82,7 @@ export interface TeamSinkDeps {
     to?: string;
     message?: string;
   }) => void;
+  readonly retireTeamBinding: (bindingId: number) => Promise<void>;
   /** Asks the ACP client to decide a teammate's tool approval. */
   readonly requestPermission: (
     params: RequestPermissionRequest,
@@ -103,6 +106,7 @@ export interface TeamSinkDeps {
  */
 export function attachTeamSink(deps: TeamSinkDeps): () => void {
   let boundManager: TeamManager | null = null;
+  let bindingId = 0;
   let bindingController: AbortController | null = null;
   let approvalListener: ((event: TeammateApprovalRequestEvent) => void) | null =
     null;
@@ -115,6 +119,9 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
   const detachFromManager = (manager: TeamManager): void => {
     bindingController?.abort();
     bindingController = null;
+    void deps.retireTeamBinding(bindingId).catch((error) => {
+      debugLogger.warn('Failed to retract teammate approvals:', error);
+    });
     manager.setLeaderMessageCallback(null);
     const emitter = manager.getEventEmitter();
     if (approvalListener) {
@@ -162,6 +169,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
   const handleApproval = (
     event: TeammateApprovalRequestEvent,
     signal: AbortSignal,
+    requestBindingId: number,
   ): void => {
     const who = `tool ${event.toolName} requested by teammate "${event.teammateName}"`;
     const details = event.confirmationDetails;
@@ -206,7 +214,10 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     const offered = options.map((option) => ({ ...option }));
     const params: RequestPermissionRequest = {
       sessionId: deps.sessionId,
-      _meta: { permissionScope: 'session' },
+      _meta: {
+        permissionScope: 'session',
+        teammateBindingId: requestBindingId,
+      },
       options,
       toolCall: {
         toolCallId: `teammate-${randomUUID()}`,
@@ -293,6 +304,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
   };
 
   const handleMessageSent = (event: MessageSentEvent): void => {
+    if (event.to === LEADER_NAME) return;
     deps.reportTeammateActivity({
       kind: 'message',
       name: event.from,
@@ -321,8 +333,11 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     });
     const emitter = manager.getEventEmitter();
     bindingController = new AbortController();
+    bindingId = ++nextBindingId;
+    const requestBindingId = bindingId;
     const signal = AbortSignal.any([deps.signal, bindingController.signal]);
-    approvalListener = (event) => handleApproval(event, signal);
+    approvalListener = (event) =>
+      handleApproval(event, signal, requestBindingId);
     emitter.on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
     joinedListener = handleJoined;
     emitter.on(TeamEventType.TEAMMATE_JOINED, joinedListener);

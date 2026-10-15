@@ -597,6 +597,20 @@ export function transcriptBlocksToDaemonMessages(
     const blockTeammate = teammateOfAgent(
       (block as DaemonTextTranscriptBlock).agent,
     );
+    if (block.kind === 'status' && block.source === 'teammate_activity') {
+      messages.push({
+        id: block.id,
+        role: 'system',
+        content: block.text,
+        variant: 'info',
+        source: block.source,
+        data: getRecord(block.data),
+        ...(blockTeammate ? { teammate: blockTeammate } : {}),
+        timestamp: blockTime,
+        sourceBlockIds: [block.id],
+      });
+      continue;
+    }
     const blockTaskId = getString(
       getRecord(
         block.kind === 'status' ? block.data : blockMeta?.['backgroundTask'],

@@ -118,20 +118,15 @@ export const ROOT_AGENT_IDENTITY: AgentIdentity = {
 export interface SubagentMeta {
   /** ID of the parent AgentTool call that created this subagent */
   parentToolCallId?: string;
-  /** Type of subagent (from AgentParams.subagent_type) */
+  /** Resolved definition name once the subagent starts. */
   subagentType?: string;
   /** The agent that produced this frame. Absent means the root agent. */
   agent?: AgentIdentity;
 }
 
 /**
- * Derives a subagent's identity from the agent that spawned it.
- *
- * The segment is the requested `subagent_type` as given: core resolves it to a
- * definition name case-insensitively and asynchronously, which this synchronous
- * mint cannot follow. Only the empty request is reproduced exactly, by
- * degrading to the same default core uses — so the documented default path
- * agrees with the name replay rebuilds from the persisted `subagentName`.
+ * Preserve definition casing: live tracking replaces the request with START's
+ * resolved name before emitting frames.
  */
 export function deriveSubagentIdentity(
   subagentType: string,

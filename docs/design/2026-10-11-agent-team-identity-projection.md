@@ -27,7 +27,7 @@ The shape mirrors OpenAI's Responses multi-agent contract (per-item `agent: { ag
 
 ### Subagent column
 
-- **Live**: the ACP bridge stamps `_meta.agent` on every subagent-projected frame (thought, message, tool call, tool call update).
+- **Live**: the ACP session stamps `_meta.agent` on every subagent-projected frame (thought, message, tool call, tool call update), using the resolved definition name from the runtime's `start` event.
 - **Reload**: `transcript-replay.ts` rebuilds identity from the persisted `task_execution` display (`subagentName` → `/root/<type>`, `kind: 'subagent'`). Root-parented only — the persisted record carries no lineage beyond its type name.
 
 ### Teammate column
@@ -35,9 +35,9 @@ The shape mirrors OpenAI's Responses multi-agent contract (per-item `agent: { ag
 - **Reports & roster changes** enqueue as `kind: 'peer'` background notifications with `agent` (producer) and `label` (sender name, rendered on the turn marker). Persistence keeps them inside `backgroundTask.agent`; replay hoists that to frame-level `_meta.agent`, so live and reloaded frames share one shape and the SDK reducer's `block.agent` path works identically.
 - **Activity & inter-agent messages** are a separate, display-only projection (new in this PR):
   - The `TeamManager` event bridge already observed every teammate tool call/result — and discarded them as activity heartbeats. A new `TEAMMATE_ACTIVITY` event forwards `{name, toolName, phase, description, success}`.
-  - The team sink also subscribes to `MESSAGE_SENT` (`{from, to, message}`) — both directions, including teammate→teammate.
+  - The team sink subscribes to `MESSAGE_SENT` (`{from, to, message}`) for messages addressed to teammates, using resolved roster names. Leader-directed reports use the mailbox projection only.
   - The session publishes both as `agent_message_chunk` frames with `_meta.source = 'teammate_activity'`, **without entering the notification queue and without persistence**. Rationale: activity is observational — every queued peer item wakes the leader into an automatic turn (one model round per event), and 20+ tool events per teammate turn would drown the queue. The report a teammate eventually sends is what the transcript must keep; per-tool activity is ephemeral by the same logic the PR already applied to status/idle events.
-  - Direction follows OpenAI's `agent_message`: the frame's `agent` names the **recipient** (`/root` when addressed to the leader), and the structured `backgroundTask.author` carries the sender (`/root`, depth 0, `kind: 'root'` for the leader). `toolName`/`phase`/`success` ride the same structured payload.
+  - Direction follows OpenAI's `agent_message`: the frame's `agent` names the **recipient**, and the structured `backgroundTask.author` carries the sender (`/root`, depth 0, `kind: 'root'` for the leader). `toolName`/`phase`/`success` ride the same structured payload. The SDK projects activity as a status block that leaves leader text and token usage untouched.
 
 ### Web Shell
 
@@ -51,12 +51,13 @@ The shape mirrors OpenAI's Responses multi-agent contract (per-item `agent: { ag
 3. **Ephemerality is documented, not hidden** — reload keeps reports/roster rows attributed; activity rows vanish. The follow-up list records a persisted per-teammate summary as a candidate refinement.
 4. **Same-instance manager re-notification is a no-op** in the sink: `Config.setTeamManager` fires change callbacks even for the identical object, and re-registering the five listeners would double approvals and leak on detach (review finding, fixed with a regression test).
 
-Teammate approvals inherit the session's permission persistence policy: standalone sessions cannot offer project-wide persistence, and responses selecting an unoffered option are cancelled. Each request has its own UUID. Messages addressed to the leader carry `/root`, depth 0, and `kind: 'root'`, matching the sender identity rules. Teammate permission requests carry private `_meta.permissionScope: 'session'`: neither the ACP session nor the bridge attributes them to a foreground or background leader turn. Ending that turn leaves them pending; session cancellation/teardown still cancels them. Switching or detaching the bound TeamManager also cancels its pending approvals immediately; a late host response cannot permit an old team tool. Re-notifying the same manager preserves pending approvals.
+Teammate approvals inherit the session's permission persistence policy: standalone sessions cannot offer project-wide persistence, and responses selecting an unoffered option are cancelled. Each request has its own UUID. Teammate permission requests carry private `_meta.permissionScope: 'session'`: neither the ACP session nor the bridge attributes them to a foreground or background leader turn. Ending that turn leaves them pending; session cancellation/teardown still cancels them. Switching or detaching the bound TeamManager also cancels its pending approvals immediately; a late host response cannot permit an old team tool. Each binding has a child-process-monotonic private `teammateBindingId`; `qwen/notify/session/teammate-binding-ended` retires its bridge/mediator requests and emits `permission_resolved`. A session-entry-scoped high-water mark rejects late requests from retired bindings without cancelling leader or newer-team approvals. Re-notifying the same manager preserves pending approvals.
 
 ## Known gaps (follow-ups, not this PR)
 
 - CJK teammate names collapse in `sanitizeName` (pre-existing main behavior): `研究员` sanitizes to empty and the model retries with ASCII. Identity projection itself handles non-ASCII paths fine (verified with pinyin names + Chinese message content).
 - Per-teammate persisted activity summary; teammate color usage; collapsed activity grouping (industry survey: Claude Code folds idle rows, LangGraph density slider, ChatGPT Active/Done panels — nobody streams flat tool rows into the main view).
+- Foreground nested-frame projection and persisted lineage remain separate work; this slice does not produce nested trees. Inbox consumption and transcript recording are not transactional, so crash-safe redelivery is not guaranteed.
 
 ## Acceptance
 

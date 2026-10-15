@@ -1490,6 +1490,12 @@ describe('Session', () => {
         message: 'checked',
         timestamp: 3,
       });
+      manager.emit('message_sent', {
+        from: 'unknown',
+        to: 'checker',
+        message: 'unattributed message',
+        timestamp: 4,
+      });
 
       // Events become client-visible frames with the acting or receiving agent.
       await vi.waitFor(() =>
@@ -1555,12 +1561,12 @@ describe('Session', () => {
 
       expect(activityFrames[2]).toMatchObject({
         _meta: {
-          agent: { agentName: '/root', depth: 0, kind: 'root' },
-          backgroundTask: {
-            author: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
-          },
+          agent: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
         },
       });
+      expect(activityFrames[2]?._meta?.['backgroundTask']).not.toHaveProperty(
+        'author',
+      );
 
       // …but the leader is never prompted: activity is observational and
       // must not queue a turn the way a report does.
@@ -1588,6 +1594,7 @@ describe('Session', () => {
 
       let offeredId: string | undefined;
       let promptedTitle: string | undefined;
+      let bindingId: unknown;
       vi.mocked(mockClient.requestPermission).mockImplementationOnce(
         async (params) => {
           const request = params as unknown as {
@@ -1596,6 +1603,7 @@ describe('Session', () => {
           };
           offeredId = request.options[0]!.optionId;
           promptedTitle = request.toolCall.title;
+          bindingId = params._meta?.['teammateBindingId'];
           return {
             outcome: { outcome: 'selected', optionId: offeredId },
           } as never;
@@ -1624,6 +1632,10 @@ describe('Session', () => {
       expect(promptedTitle).toContain('security');
       expect(respond.mock.calls[0]![0]).toBe(offeredId);
       session.dispose();
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/teammate-binding-ended',
+        { v: 1, sessionId: 'test-session-id', bindingId },
+      );
     });
 
     it('does not let an unanswered teammate approval wedge the next one', async () => {
@@ -52473,7 +52485,7 @@ describe('Session', () => {
       const client = new BridgeClient(
         () => entry as BridgeClientSessionEntry,
         () => undefined,
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
         0,
         Infinity,
       );

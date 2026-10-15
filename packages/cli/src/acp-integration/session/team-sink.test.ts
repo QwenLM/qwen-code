@@ -128,6 +128,7 @@ describe('attachTeamSink', () => {
   let requestPermission: ReturnType<typeof vi.fn>;
   let reportRosterChange: ReturnType<typeof vi.fn>;
   let reportTeammateActivity: ReturnType<typeof vi.fn>;
+  let retireTeamBinding: ReturnType<typeof vi.fn>;
   let deps: TeamSinkDeps;
 
   // Re-fires the team-manager change callback with the already-bound manager,
@@ -143,6 +144,7 @@ describe('attachTeamSink', () => {
     requestPermission = vi.fn();
     reportRosterChange = vi.fn();
     reportTeammateActivity = vi.fn();
+    retireTeamBinding = vi.fn(async () => {});
     deps = {
       config: config as unknown as Config,
       sessionId: 's1',
@@ -150,6 +152,7 @@ describe('attachTeamSink', () => {
       injectLeaderMessage,
       reportRosterChange,
       reportTeammateActivity,
+      retireTeamBinding,
       requestPermission,
     };
   });
@@ -209,7 +212,10 @@ describe('attachTeamSink', () => {
 
     await vi.waitFor(() => expect(respond).toHaveBeenCalled());
     expect(requestPermission).toHaveBeenCalledTimes(1);
-    expect(offered?._meta).toEqual({ permissionScope: 'session' });
+    expect(offered?._meta).toEqual({
+      permissionScope: 'session',
+      teammateBindingId: expect.any(Number),
+    });
     expect(offered?.toolCall.title).toContain('security');
     expect(offered?.toolCall._meta).toMatchObject({
       toolName: 'write_file',
@@ -290,12 +296,16 @@ describe('attachTeamSink', () => {
       config.fireChange(manager);
       expect(old.respond).not.toHaveBeenCalled();
       expect(pending[0]!.signal.aborted).toBe(false);
+      expect(retireTeamBinding).not.toHaveBeenCalled();
+      const oldBindingId =
+        requestPermission.mock.calls[0]![0]._meta.teammateBindingId;
 
       const next = makeManager();
       if (boundary === 'manager swap') config.fireChange(next);
       else detach();
 
       expect(pending[0]!.signal.aborted).toBe(true);
+      expect(retireTeamBinding).toHaveBeenCalledExactlyOnceWith(oldBindingId);
       expect(old.respond).toHaveBeenCalledTimes(1);
       expect(old.respond.mock.calls[0]![0]).toBe(
         ToolConfirmationOutcome.Cancel,
@@ -318,6 +328,9 @@ describe('attachTeamSink', () => {
           current.event,
         );
         expect(pending[1]!.signal.aborted).toBe(false);
+        expect(
+          requestPermission.mock.calls[1]![0]._meta.teammateBindingId,
+        ).toBeGreaterThan(oldBindingId);
         pending[1]!.resolve({
           outcome: {
             outcome: 'selected',
@@ -512,6 +525,13 @@ describe('attachTeamSink', () => {
       description: 'file not found',
       timestamp: 2,
     });
+    manager.emitter.emit(TeamEventType.MESSAGE_SENT, {
+      from: 'writer',
+      to: 'leader',
+      message: 'leader mailbox report',
+      timestamp: 3,
+    });
+    expect(reportTeammateActivity).toHaveBeenCalledTimes(2);
     manager.emitter.emit(TeamEventType.MESSAGE_SENT, {
       from: 'writer',
       to: 'checker',

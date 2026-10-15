@@ -6,6 +6,7 @@
 
 import type {
   AgentEventEmitter,
+  AgentStartEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentToolOutputUpdateEvent,
@@ -84,7 +85,7 @@ export class SubAgentTracker {
       signal,
     ) => requestPermissionWithAbort(this.client, params, signal),
     private readonly permissionPersistencePolicy?: PermissionPersistencePolicy,
-    parentAgent: AgentIdentity = ROOT_AGENT_IDENTITY,
+    private readonly parentAgent: AgentIdentity = ROOT_AGENT_IDENTITY,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -111,6 +112,15 @@ export class SubAgentTracker {
     eventEmitter: AgentEventEmitter,
     abortSignal: AbortSignal,
   ): Array<() => void> {
+    const onStart = (...args: unknown[]) => {
+      const event = args[0] as AgentStartEvent;
+      if (abortSignal.aborted) return;
+      this.subagentMeta.subagentType = event.name;
+      this.subagentMeta.agent = deriveSubagentIdentity(
+        event.name,
+        this.parentAgent,
+      );
+    };
     const onToolCall = this.createToolCallHandler(abortSignal);
     const onToolResult = this.createToolResultHandler(abortSignal);
     const pending = new Set<string>();
@@ -153,6 +163,7 @@ export class SubAgentTracker {
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
     const onStreamText = this.createStreamTextHandler(abortSignal);
 
+    eventEmitter.on(AgentEventType.START, onStart);
     eventEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
     eventEmitter.on(AgentEventType.TOOL_RESULT, onLifecycle);
     eventEmitter.on(AgentEventType.TOOL_RESULT, onToolResult);
@@ -163,6 +174,7 @@ export class SubAgentTracker {
 
     return [
       () => {
+        eventEmitter.off(AgentEventType.START, onStart);
         eventEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
         eventEmitter.off(AgentEventType.TOOL_RESULT, onToolResult);
         if (closing) return;

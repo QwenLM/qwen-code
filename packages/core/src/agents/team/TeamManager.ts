@@ -788,14 +788,18 @@ export class TeamManager {
     summary?: string,
     automatic = false,
   ): Promise<void> {
+    const sender = from
+      ? findMemberByName(this.teamFile.members, from)
+      : undefined;
+    const fromName =
+      this.getSenderPriority(from) === MessagePriority.LEADER
+        ? LEADER_NAME
+        : (sender?.name ?? 'unknown');
     // Messages addressed to the leader go to leader's mailbox.
     if (
       toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
-      const sender = from
-        ? findMemberByName(this.teamFile.members, from)
-        : undefined;
       const responseCandidate =
         sender && !automatic ? classifyShutdownResponse(message) : undefined;
       const shutdownReservation =
@@ -809,7 +813,7 @@ export class TeamManager {
 
       try {
         await writeMessage(this.teamFile.name, LEADER_NAME, {
-          from: from ?? 'unknown',
+          from: fromName,
           text: message,
           summary,
           timestamp: new Date().toISOString(),
@@ -834,7 +838,7 @@ export class TeamManager {
       }
       try {
         this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-          from: from ?? 'unknown',
+          from: fromName,
           to: LEADER_NAME,
           message,
           timestamp: Date.now(),
@@ -880,11 +884,11 @@ export class TeamManager {
           `through its backlog before sending more.`,
       );
     }
-    queue.push({ text: message, from: from ?? '', priority });
+    queue.push({ text: message, from: fromName, priority });
 
     this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-      from: from ?? 'unknown',
-      to: toName,
+      from: fromName,
+      to: member.name,
       message,
       timestamp: Date.now(),
     });
@@ -1242,12 +1246,22 @@ export class TeamManager {
       return;
     }
 
+    const senders = newMessages.map(({ from }) =>
+      !from ||
+      from === 'unknown' ||
+      from.toLowerCase() === LEADER_NAME ||
+      from === this.teamFile.leadAgentId
+        ? undefined
+        : findMemberByName(this.teamFile.members, from)?.name,
+    );
     callback(
       this.formatLeaderEnvelope(newMessages).join('\n\n'),
       this.formatLeaderDisplay(newMessages),
       // Senders travel with the batch so a host can attribute the report
       // structurally instead of parsing it out of the formatted envelope.
-      [...new Set(newMessages.map((message) => message.from).filter(Boolean))],
+      senders.every((sender) => sender !== undefined)
+        ? [...new Set(senders)]
+        : undefined,
     );
   }
 

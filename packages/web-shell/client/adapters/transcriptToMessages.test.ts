@@ -598,59 +598,110 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('renders teammate activity frames as attributed notices, not leader text', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      textBlock(
-        'activity-1',
-        'assistant',
-        'researcher started read_file: Read notes.md',
-        1,
-        false,
-        {
-          meta: {
-            source: 'teammate_activity',
-            qwenDiscreteMessage: true,
-            backgroundTask: {
-              taskId: 'teammate-activity-1',
-              status: 'call',
-              kind: 'peer',
-            },
+  it('renders teammate activity as attributed notices without splitting leader text or taking its usage', () => {
+    const author = {
+      agentName: '/root/writer',
+      depth: 1,
+      kind: 'teammate',
+    };
+    const updates = [
+      {
+        text: 'Leader ',
+        meta: {
+          promptId: 'leader-1',
+          qwenTranscript: { sourceRecordIds: ['leader-record-1'] },
+        },
+      },
+      {
+        text: 'researcher started read_file: Read notes.md',
+        meta: {
+          source: 'teammate_activity',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'teammate-activity-1',
+            status: 'call',
+            kind: 'peer',
           },
           agent: {
             agentName: '/root/researcher',
             depth: 1,
             kind: 'teammate',
           },
+          backgroundTurn: {
+            turnId: 'automatic-1',
+            taskId: 'teammate-message-1',
+            kind: 'peer',
+            startedAt: 2,
+          },
         },
-      ),
-      textBlock(
-        'activity-2',
-        'assistant',
-        'writer → checker: sky sentence',
-        2,
-        false,
-        {
-          meta: {
-            source: 'teammate_activity',
-            qwenDiscreteMessage: true,
-            backgroundTask: {
-              taskId: 'teammate-activity-2',
-              status: 'message',
-              kind: 'peer',
-            },
+      },
+      {
+        text: 'answer',
+        meta: {
+          promptId: 'leader-1',
+          qwenTranscript: { sourceRecordIds: ['leader-record-2'] },
+        },
+      },
+      {
+        text: 'writer → checker: sky sentence',
+        meta: {
+          source: 'teammate_activity',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'teammate-activity-2',
+            status: 'message',
+            kind: 'peer',
+            author,
           },
           agent: {
-            agentName: '/root/writer',
+            agentName: '/root/checker',
             depth: 1,
             kind: 'teammate',
           },
         },
-      ),
-    ]);
-
-    expect(messages).toEqual([
+      },
       {
-        id: 'activity-1',
+        text: '',
+        meta: {
+          promptId: 'leader-1',
+          usage: { inputTokens: 7, outputTokens: 3 },
+        },
+      },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      updates.flatMap(({ text, meta }, index) =>
+        normalizeDaemonEvent({
+          id: index + 1,
+          v: 1,
+          type: 'session_update',
+          _meta: { serverTimestamp: index + 1 },
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              _meta: meta,
+            },
+          },
+        }),
+      ),
+    );
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'assistant',
+      'status',
+      'assistant',
+      'status',
+    ]);
+    const messages = transcriptBlocksToDaemonMessages(state.blocks);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'Leader answer',
+        promptId: 'leader-1',
+        usage: { inputTokens: 7, outputTokens: 3 },
+      },
+      {
         role: 'system',
         content: 'researcher started read_file: Read notes.md',
         variant: 'info',
@@ -661,10 +712,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
           kind: 'peer',
         },
         teammate: { name: 'researcher' },
-        timestamp: 1,
+        timestamp: 2,
       },
       {
-        id: 'activity-2',
         role: 'system',
         content: 'writer → checker: sky sentence',
         variant: 'info',
@@ -673,44 +723,60 @@ describe('transcriptBlocksToDaemonMessages', () => {
           taskId: 'teammate-activity-2',
           status: 'message',
           kind: 'peer',
+          author,
         },
-        teammate: { name: 'writer' },
-        timestamp: 2,
+        teammate: { name: 'checker' },
+        timestamp: 4,
       },
     ]);
+    for (const message of messages.filter(
+      (message) => message.role === 'system',
+    )) {
+      expect(message).not.toHaveProperty('usage');
+    }
   });
 
   it('attributes a teammate roster change delivered as background_task_completed', () => {
     // Real peer frames carry `_meta.source: 'background_task_completed'`, so
     // the attribution must live on that push site too, not only on the
     // 'background_notification' one.
-    const messages = transcriptBlocksToDaemonMessages([
-      textBlock(
-        'peer-2',
-        'assistant',
-        'teammate correctness joined the team',
-        1,
-        false,
-        {
-          meta: {
-            source: 'background_task_completed',
-            qwenDiscreteMessage: true,
-            backgroundTask: {
-              taskId: 'teammate-roster-1',
-              status: 'joined',
-              kind: 'peer',
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'teammate correctness joined the team',
+            },
+            _meta: {
+              source: 'background_task_completed',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                taskId: 'teammate-roster-1',
+                status: 'joined',
+                kind: 'peer',
+              },
+              agent: {
+                agentName: '/root/correctness',
+                depth: 1,
+                kind: 'teammate',
+              },
             },
           },
-          agent: {
-            agentName: '/root/correctness',
-            depth: 1,
-            kind: 'teammate',
-          },
         },
-      ),
-    ]);
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({ kind: 'status' });
+    const messages = transcriptBlocksToDaemonMessages(state.blocks);
 
     expect(messages[0]).toMatchObject({
+      role: 'system',
+      content: 'teammate correctness joined the team',
       source: 'background_task_completed',
       teammate: { name: 'correctness' },
     });
@@ -721,8 +787,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
     // frame that precedes it does, keyed by the same background task id. In a
     // live session the consumed display row is suppressed, so this marker is
     // the row the user actually sees.
-    const messages = transcriptBlocksToDaemonMessages([
-      textBlock('peer-3', 'user', 'report text', 1, false, {
+    const updates = [
+      {
+        text: 'report text',
         meta: {
           source: 'background_task_completed',
           qwenDiscreteMessage: true,
@@ -731,14 +798,15 @@ describe('transcriptBlocksToDaemonMessages', () => {
             status: 'message',
             kind: 'peer',
           },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
         },
-        agent: {
-          agentName: '/root/correctness',
-          depth: 1,
-          kind: 'teammate',
-        },
-      }),
-      textBlock('turn-1', 'assistant', '', 2, false, {
+      },
+      {
+        text: '',
         meta: {
           source: 'background_notification_turn_started',
           backgroundTurn: {
@@ -748,15 +816,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
             startedAt: 2,
           },
         },
-      }),
-    ]);
-
-    const turnStarted = messages.find(
-      (message) =>
-        message.role === 'system' &&
-        message.source === 'background_notification_turn_started',
+      },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      updates.flatMap(({ text, meta }, index) =>
+        normalizeDaemonEvent({
+          id: index + 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              _meta: meta,
+            },
+          },
+        }),
+      ),
     );
-    expect(turnStarted).toMatchObject({ teammate: { name: 'correctness' } });
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'status',
+    ]);
+    const messages = transcriptBlocksToDaemonMessages(state.blocks);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'system',
+      source: 'background_notification_turn_started',
+      teammate: { name: 'correctness' },
+    });
   });
 
   it('keeps vision bridge notices separate from assistant output', () => {
