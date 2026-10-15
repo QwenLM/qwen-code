@@ -242,7 +242,7 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare.outputs.already_published).toBe(
       '${{ steps.published.outputs.already_published }}',
     );
-    expect(releaseYaml.jobs.build.needs).toBe('prepare');
+    expect(releaseYaml.jobs.build.needs).toEqual(['prepare', 'desktop_shell']);
     expect(releaseYaml.jobs.build.if).toBe(
       "${{ needs.prepare.outputs.already_published != 'true' }}",
     );
