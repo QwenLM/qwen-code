@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
@@ -18,6 +16,11 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.Principal;
@@ -27,10 +30,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 // FG8 (issue #14054): the gate-side half of the monitor_run and background
 // shell fault gates. The probe relays the Harness session's real event

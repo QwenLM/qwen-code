@@ -9102,6 +9102,286 @@ describe('Hosted Harness no-tool session', () => {
     expect(release.mock.calls[1]).toEqual([{ drain: true }]);
   });
 
+  it('restores the held-Runtime drain obligation on a replacement load (#13930 R1-2)', async () => {
+    // A restart empties the in-memory held set; the close's drain
+    // obligation survives only when the load restores it from the Broker's
+    // durable hold rows. The prewritten Session below belongs to a process
+    // that died before any close could drain; the Broker still lists the
+    // held Runtime Session, so the load must restore the obligation and
+    // this process's close must hand the Runtime back through the drain
+    // arm. Without the load-time restore the final assertions are red:
+    // the fresh process's set is empty and its close drains nothing. The
+    // second id is digest-shaped: alongside the cardinality pin (every
+    // restored entry drains, not just the first) it carries the close's
+    // hostedRuntimeSessionId mapping end-to-end — an already path-safe
+    // answer must come back verbatim (#13986 R1-1).
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const restored = [PROMPT_ID, `wake-${'a'.repeat(64)}`];
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockResolvedValue(restored);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    // The load is additive: it restores the obligation and never discharges
+    // it — only the close drains (#13986 R1-2).
+    expect(release).not.toHaveBeenCalled();
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls).toEqual([[{ drain: true }], [{ drain: true }]]);
+    expect(
+      (release.mock.contexts as HostedWorkspaceBroker[])
+        .map((broker) => broker.runtimeSessionId)
+        .sort(),
+    ).toEqual([...restored].sort());
+  });
+
+  it('closes a Session whose restored hold the restarted Broker cannot drain (#13986 R2-1)', async () => {
+    // A worker restart takes the Harness and the Broker down together. The
+    // replacement Broker no longer holds the Runtime Session in memory and
+    // cannot prove its release, so the drain of a restored hold answers the
+    // declared-retryable 503 runtime_reconciliation_required — the
+    // Workspace-level cascade owns the Runtime from there. The close must
+    // tolerate that answer and retire the Session: before the tolerance the
+    // same DELETE rethrew ahead of sessions.delete, answered 503 on every
+    // retry, and the reload re-seeded the id — the Session could never
+    // leave the registry. The unproven drain still parks the monitor-loop
+    // settle on runtime_lost rather than stop_requested.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        503,
+        'runtime_reconciliation_required',
+      ),
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    ).mockResolvedValue([PROMPT_ID]);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .expect(204);
+    // The Session left the registry: a second close finds nothing to close.
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .expect(404);
+  });
+
+  it('loads without the drain obligation when the restore query fails (#13930 R1-2)', async () => {
+    // The declared degrade: a failed active-holds query logs and loads
+    // without the obligation — never a failed load in the restart window
+    // this slice serves. The close then drains nothing.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockRejectedValue(new Error('broker unreachable'));
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+    // No obligation was restored, so the close drains nothing.
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory on a fresh create (#13930 R1-2)', async () => {
+    // A created Session has no hold rows: the restore read is load-only.
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory on a lifecycle-v2 load (#13986 R1-3)', async () => {
+    // The set's only reader is the close's drain loop, which sits in the
+    // v1-only close block: a v2 Session would restore an obligation its
+    // close never drains — a dead Broker round trip on every load plus
+    // in-memory state that reads as an armed drain and is not.
+    await prewriteShellProfileSession();
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        lifecycleProtocolVersion: 2,
+        lifecycleAuthority: { operationId: 'v2-load', claimGeneration: 1 },
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory for an MCP-profile load (#13986 R3-1)', async () => {
+    // The 409 gate admits hosted-workspace-mcp/1 beside the workspace
+    // profiles whenever brokerOptions is present, but an MCP-profile
+    // Session has no tool turn and can never hold a background Runtime:
+    // the restore read would be a dead Broker round trip on every load,
+    // and a misleading could-not-restore line whenever the Broker is down.
+    await prewriteShellProfileSession('hosted-workspace-mcp/1');
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers: [
+          {
+            serverId: 'demo',
+            serverRevision: 1,
+            definitionDigest: 'a'.repeat(64),
+          },
+        ],
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  /** A Session whose process died before any close could drain: the
+   * durable definition exists and the writer is free again. */
+  async function prewriteShellProfileSession(
+    toolProfile = 'hosted-workspace-shell/1',
+  ): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile,
+              ...(toolProfile === 'hosted-workspace-mcp/1'
+                ? {
+                    mcpServers: [
+                      {
+                        serverId: 'demo',
+                        serverRevision: 1,
+                        definitionDigest: 'a'.repeat(64),
+                      },
+                    ],
+                  }
+                : {}),
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    // The open above only mints the durable definition; closing here frees
+    // the writer so the replacement process may open the Session — the
+    // death itself is that no close ever drained.
+    await managed.close();
+  }
+
   type DetachedFamily = 'child_run' | 'monitor_run';
 
   async function prewriteDetachedOutput(

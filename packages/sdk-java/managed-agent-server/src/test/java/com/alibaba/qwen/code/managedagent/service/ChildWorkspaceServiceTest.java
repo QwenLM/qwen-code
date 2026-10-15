@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -114,8 +115,7 @@ class ChildWorkspaceServiceTest {
     void parkLeftovers() {
         for (String tenant : tenants) {
             jdbc.update("UPDATE ma_workspace SET finish_request = NULL WHERE tenant_id = ? AND workspace_kind = 'CHILD_GIT'", tenant);
-            jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(? / 1000.0), available_at = ?"
-                    + " WHERE tenant_id = ? AND operation_kind = 'CHILD_WORKSPACE'", System.currentTimeMillis() + 86_400_000, Long.MAX_VALUE, tenant);
+            jdbc.update("UPDATE ma_operation SET claim_until = ?, available_at = ? WHERE tenant_id = ? AND operation_kind = 'CHILD_WORKSPACE'", System.currentTimeMillis() + 86_400_000, Long.MAX_VALUE, tenant);
         }
     }
 
@@ -597,9 +597,8 @@ class ChildWorkspaceServiceTest {
         assertBroker(() -> leases.holdForMaintenance(storage, rival.childWorkspaceId(), rival.claimGeneration()),
                 "workspace_busy");
         clock.addAndGet(1_001);
-        jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE operation_kind = 'CHILD_WORKSPACE'");
-        assertThat(jdbc.queryForObject("SELECT claim_until < CURRENT_TIMESTAMP(6) FROM ma_operation WHERE tenant_id = ?"
-                + " AND operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", Boolean.class,
+        jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_kind = 'CHILD_WORKSPACE'");
+        assertThat(jdbc.queryForObject("SELECT claim_until < " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE tenant_id = ? AND operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", Boolean.class,
                 parent.tenantId(), rival.childWorkspaceId())).isTrue();
         assertThat(store.claim(row, "b", clock.get(), 1_000)).isNull();
         assertThat(holder(storage)).isEqualTo(maintenanceHolder(first));
@@ -863,8 +862,7 @@ class ChildWorkspaceServiceTest {
                 for (int wait = 0; wait < 200 && renewedUntil.get() < started + ChildWorkspaceService.LEASE_MS - 500;
                         wait++) {
                     sleep(10);
-                    renewedUntil.set(jdbc.queryForObject("SELECT FLOOR(UNIX_TIMESTAMP(claim_until) * 1000.0) FROM ma_operation"
-                            + " WHERE operation_kind = 'CHILD_WORKSPACE' AND session_id = ?", Long.class, parent.sessionId()));
+                    renewedUntil.set(jdbc.queryForObject("SELECT FLOOR(claim_until) FROM ma_operation WHERE operation_kind = 'CHILD_WORKSPACE' AND session_id = ?", Long.class, parent.sessionId()));
                 }
                 return slow.storageRoot(binding);
             }
@@ -982,6 +980,7 @@ class ChildWorkspaceServiceTest {
     void aStrandedHoldStaysProtectedWithTheCapabilityOff() throws Exception {
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
+        clock.set(System.currentTimeMillis());
         Row dead = store.claim(row, "dead-worker", clock.get(), 1_000);
         leases.holdForMaintenance(parent.workspace(), dead.childWorkspaceId(), dead.claimGeneration());
         warmer.provider = null;

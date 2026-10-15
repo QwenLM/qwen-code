@@ -149,7 +149,7 @@ class ManagedSessionOperationStoreTest {
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
                         + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_until,"
-                        + " created_at, updated_at) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
                         + " 'digest', '{}', 'RUNNING', 'CAPTURING', 'LEASED', ?, 0, 0)",
                 ManagedSchemaKeys.key("background"), scope, TENANT, sessionId, target, new java.sql.Timestamp(0));
         assertThat(targets(store)).isEmpty();

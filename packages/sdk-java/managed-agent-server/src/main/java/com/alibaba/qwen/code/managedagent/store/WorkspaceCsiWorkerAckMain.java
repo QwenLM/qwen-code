@@ -12,7 +12,6 @@ import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.comm.SignVersion;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -42,7 +41,7 @@ public final class WorkspaceCsiWorkerAckMain {
         var selector = new WorkspaceCsiWorkerAckStore.Selector(args[1], args[2], args[3], args[4], args[5]);
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
                 required("K2_JDBC_PASSWORD"));
-        var jdbc = new JdbcTemplate(source);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
