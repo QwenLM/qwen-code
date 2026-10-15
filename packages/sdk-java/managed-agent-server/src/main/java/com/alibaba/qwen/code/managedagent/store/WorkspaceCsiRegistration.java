@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 public record WorkspaceCsiRegistration(String tenantId, String storageId,
@@ -60,14 +62,14 @@ public record WorkspaceCsiRegistration(String tenantId, String storageId,
 
     private static String key(String... fields) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            MessageDigest digest = DigestUtils.getSha256Digest();
             for (String field : fields) {
                 byte[] bytes = field.getBytes(StandardCharsets.UTF_8);
                 digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
                 digest.update(bytes);
             }
             return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException impossible) {
+        } catch (IllegalArgumentException impossible) {
             throw new IllegalStateException("SHA-256 unavailable", impossible);
         }
     }
@@ -82,7 +84,7 @@ public record WorkspaceCsiRegistration(String tenantId, String storageId,
     }
 
     private static void text(String value, int maximum) {
-        if (value == null || value.isBlank() || value.length() > maximum) {
+        if (StringUtils.isBlank(value) || value.length() > maximum) {
             throw invalid();
         }
         value.codePoints().forEach(point -> {
