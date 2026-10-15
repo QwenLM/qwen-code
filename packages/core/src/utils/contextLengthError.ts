@@ -133,18 +133,22 @@ function parseTokenCounts(text: string): {
 
   // vLLM names the prompt length and its limit. For a decoder prompt that
   // limit is `max_model_len`, the server's real window and often smaller than
-  // the one inferred from the id. For an encoder prompt it is the encoder
-  // cache budget, which bounds the input rather than the window. The gap is
-  // bounded so a huge error body cannot make the lazy scan quadratic.
+  // the one inferred from the id. For an encoder prompt both numbers count
+  // encoder input (such as image or audio tokens) against the encoder cache
+  // budget, so neither says how big the chat history is and no counts are
+  // returned. The gap is bounded so a huge error body cannot make the lazy
+  // scan quadratic.
   const vllmPromptMatch = text.match(
     /\b(\w+) prompt \(length[^\S\n]*(\d[\d,]*)\)[^\n]{0,120}?longer than the maximum model length of[^\S\n]*(\d[\d,]*)/i,
   );
   if (vllmPromptMatch) {
+    if (vllmPromptMatch[1]!.toLowerCase() === 'encoder') {
+      return {};
+    }
     return {
       actualTokens: parseInteger(vllmPromptMatch[2]!),
       limitTokens: parseInteger(vllmPromptMatch[3]!),
-      limitKind:
-        vllmPromptMatch[1]!.toLowerCase() === 'encoder' ? 'input' : 'total',
+      limitKind: 'total',
     };
   }
   const vllmResponsesMatch = text.match(

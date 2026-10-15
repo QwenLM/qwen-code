@@ -146,9 +146,9 @@ describe('contextLengthError', () => {
       expect(info.limitTokens).toBe(32768);
     });
 
-    // An encoder prompt is bounded by the encoder cache budget, not by the
-    // window, so its number must not be offered as the server's window.
-    it('marks the encoder prompt limit as an input bound', () => {
+    // An encoder prompt counts encoder input against the encoder cache
+    // budget, so neither number may anchor compaction or the window.
+    it('detects an encoder prompt overflow without reporting its counts', () => {
       const info = getContextLengthExceededInfo(
         new Error(
           '400 The encoder prompt (length 9000) is longer than the maximum model length of 8192.',
@@ -156,9 +156,9 @@ describe('contextLengthError', () => {
       );
 
       expect(info.isExceeded).toBe(true);
-      expect(info.actualTokens).toBe(9000);
-      expect(info.limitTokens).toBe(8192);
-      expect(info.limitKind).toBe('input');
+      expect(info.actualTokens).toBeUndefined();
+      expect(info.limitTokens).toBeUndefined();
+      expect(info.limitKind).toBeUndefined();
     });
 
     it('stays fast on a huge error body with repeated prompt fragments', () => {
