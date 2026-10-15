@@ -1,19 +1,20 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
+
+import java.time.Duration;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 class ToolPublicationConfigurationTest {
     @Test
@@ -88,7 +89,9 @@ class ToolPublicationConfigurationTest {
             response.setStatusCode(503);
             assertThat(client.getClientConfiguration().getRetryStrategy().shouldRetry(
                     new com.aliyun.oss.OSSException("write failure"), request, response, 0)).isFalse();
-        } finally { client.shutdown(); }
+        } finally {
+            client.shutdown();
+        }
         settings.setOssEndpoint("http://oss-cn-hangzhou.aliyuncs.com");
         assertThatThrownBy(() -> ToolPublicationConfiguration.buildOss(properties, credentials))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("regional HTTPS");

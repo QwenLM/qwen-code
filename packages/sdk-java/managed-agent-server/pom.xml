@@ -190,7 +190,8 @@
                 <artifactId>maven-checkstyle-plugin</artifactId>
                 <version>${checkstyle-maven-plugin.version}</version>
                 <configuration>
-                    <configLocation>${project.basedir}/../qwencode/checkstyle.xml</configLocation>
+                    <configLocation>${project.basedir}/../qwencode/qwen-code-checks.xml</configLocation>
+                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
                 </configuration>
                 <executions>
                     <execution>

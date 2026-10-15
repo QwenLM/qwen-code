@@ -2,10 +2,11 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 /** Explicit storage model for offline SQL tests; native mount tests use the real guard. */
 public final class WorkspaceTestStorage {

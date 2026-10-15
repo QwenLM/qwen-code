@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
+
+import javax.sql.DataSource;
 
 /** The same business contracts against a separate real MySQL database per test. */
 public class ManagedSchemaBusinessMySqlIT extends ManagedSchemaBusinessStoreTest {
