@@ -2,10 +2,11 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Bounded maintenance of saved local bindings, independent of product Session authorization. */
 final class RuntimeRecoveryCoordinator implements AutoCloseable {
