@@ -410,22 +410,6 @@ public final class ApiModels {
         public WebShellSession(String sessionId, String title, String agentId,
                 String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
                 Object environment, long lastSequence, WebShellWorkspace workspace,
-                WebShellSessionCapabilities capabilities, String approvalMode,
-                WebShellModelContext modelContext) {
-            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
-                    environment, lastSequence, workspace, capabilities, approvalMode, modelContext, null);
-        }
-        public WebShellSession(String sessionId, String title, String agentId,
-                String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
-                Object environment, long lastSequence, WebShellWorkspace workspace,
-                WebShellSessionCapabilities capabilities, String approvalMode) {
-            this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
-                    environment, lastSequence, workspace, capabilities, approvalMode, null, null);
-        }
-
-        public WebShellSession(String sessionId, String title, String agentId,
-                String status, long createdAt, long updatedAt, WebShellTurn activeTurn,
-                Object environment, long lastSequence, WebShellWorkspace workspace,
                 WebShellSessionCapabilities capabilities) {
             this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn,
                     environment, lastSequence, workspace, capabilities, null, null, null);
