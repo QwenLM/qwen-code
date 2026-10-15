@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.store.ManagedRuntimeRetentionGuard;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
@@ -24,6 +21,16 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
+
+import javax.sql.DataSource;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
@@ -39,14 +46,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.sql.DataSource;
-import org.flywaydb.core.Flyway;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedRuntimeRetentionRaceTest {
     private static final Instant OLD = Instant.parse("2000-01-01T00:00:00Z");
@@ -162,12 +164,13 @@ class ManagedRuntimeRetentionRaceTest {
                 release.countDown();
             }
             assertThat(sweep.get(5, TimeUnit.SECONDS).bindingsDeleted()).isEqualTo(1);
-            assertThat(writer.get(5, TimeUnit.SECONDS)).hasMessage(switch (reference) {
+            String expectedMessage = switch (reference) {
                 case PUBLICATION -> "Original Runtime binding is missing";
                 case HOLDER -> "Workspace execution authority is unavailable.";
                 case OPERATOR -> "Exact Hosted Shell operator recovery is unavailable.";
                 case CSI_RETIREMENT -> "Workspace CSI admission is unavailable.";
-            });
+            };
+            assertThat(writer.get(5, TimeUnit.SECONDS)).hasMessage(expectedMessage);
             assertThat(fixture.bindings.findById(fixture.binding.getBindingId())).isNull();
             assertThat(fixture.count(reference.table)).isZero();
         } finally {

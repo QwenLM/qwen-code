@@ -1,14 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.hash;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.parse;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.positive;
-import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -16,7 +11,13 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.JSON;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.check;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.hash;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.parse;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.positive;
+import static com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryStore.text;
 
 /** Original authority reads without acquiring, renewing or quarantining anything. */
 final class WorkspaceRecoveryReader {

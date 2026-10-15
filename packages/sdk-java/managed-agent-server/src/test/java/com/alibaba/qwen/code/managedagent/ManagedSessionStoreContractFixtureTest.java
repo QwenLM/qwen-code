@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,8 +19,9 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
-import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSessionStoreContractFixtureTest {
     private static final ObjectMapper JSON = new ObjectMapper();
