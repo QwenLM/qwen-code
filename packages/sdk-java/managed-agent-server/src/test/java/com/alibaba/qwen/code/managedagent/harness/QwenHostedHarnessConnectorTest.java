@@ -56,6 +56,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -246,9 +247,13 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2",
-            "hosted-workspace-shell/1", "hosted-workspace-shell/2", "hosted-workspace-team-lead/1"})
-    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile) {
+    @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
+            "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
+            "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
+            "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
+            "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
+            "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
+    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -268,6 +273,8 @@ class QwenHostedHarnessConnectorTest {
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getToolPublication().setEnabled(publication);
+        properties.getToolPublication().setExecutionBytes(1048576L);
         var actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         when(attached.getApprovalMode()).thenReturn(null, "yolo", "default");
@@ -290,6 +297,12 @@ class QwenHostedHarnessConnectorTest {
                     .doesNotContain("workspaceId=workspace-a");
         }
         Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
+        if (publication && (profile.startsWith("hosted-workspace-shell/")
+                || profile.equals("hosted-workspace-team-lead/1"))) {
+            assertThat(created).containsEntry("captureBytes", 1048576L);
+        } else {
+            assertThat(created).doesNotContainKey("captureBytes");
+        }
         assertThat(created)
                 .containsEntry("approvalMode", "default")
                 .containsEntry("approvalTimeoutMs", properties.getHarness().getApprovalTimeout().toMillis())
@@ -301,13 +314,15 @@ class QwenHostedHarnessConnectorTest {
             assertThat(created).doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
-                .doesNotContainKey("childWorkspaces");
+                .doesNotContainKeys("childWorkspaces", "captureBytes");
+        properties.getToolPublication().setExecutionBytes(2097152L);
         QwenHostedHarnessConnector restarted = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(restarted, "client", client);
         restarted.recoverManagedRuntime("tenant-a", SESSION_ID, false);
         verify(client, times(4)).loadSession(load.capture());
         Map<String, Object> recovered = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
-        assertThat(recovered).containsEntry("toolProfile", profile);
+        assertThat(recovered).containsEntry("toolProfile", profile)
+                .doesNotContainKey("captureBytes");
         if (profile.startsWith("hosted-workspace-shell/")) {
             assertThat(recovered).containsEntry("suppressChildAgents", true);
         } else {
@@ -321,7 +336,7 @@ class QwenHostedHarnessConnectorTest {
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
                 .containsEntry("toolProfile", profile)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
-                .doesNotContainKey("driveRuntimeRecovery");
+                .doesNotContainKeys("driveRuntimeRecovery", "captureBytes");
         clearInvocations(execution);
         RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         doThrow(refusal).when(execution).authorize(session);

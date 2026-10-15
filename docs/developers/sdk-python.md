@@ -28,6 +28,14 @@ pip install --pre qwen-code-sdk
 ```
 
 If `qwen` is not on `PATH`, pass `path_to_qwen_executable` explicitly.
+On Windows, the SDK discovers npm's `qwen.cmd` shim only through the effective
+child `PATH`, ignoring extensionless shell shims and non-launchable `PATHEXT`
+associations. A command in the current directory is considered only when that
+directory is explicitly included in `PATH`.
+You can override the lookup path through the `env` option; Windows environment
+variable names are case-insensitive, so `PATH`, `Path`, and `path` are equivalent.
+Closing a running Windows shim stops its CLI process tree through the system
+`taskkill` utility; process exit and stderr cleanup waits have bounded timeouts.
 
 Before writing SDK code, make sure the CLI works in the same shell:
 
