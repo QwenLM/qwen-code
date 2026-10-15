@@ -5,13 +5,14 @@
 ## 状态与范围
 
 用户于 2026-10-14 批准这一首版范围。常驻分支已实现，本地检查和独立 worker
-协议、Java 数据及 Spring 配置验证均通过；普通公开 Hosted 切换已在 H2 和明示
-测试放置下通过本地验证。最新 ACK 实验使用 `53f24ba09`，两个公开 Session
-及正常关闭均已完成。独立检查确认关闭重放、旧输入拒绝，以及 Pod/container/
-PV/PVC 身份不变、零重启（25/25 项通过）。文件操作及保留内容由固定模型的
-结果守卫间接支持；公开投影没有逐条工具结果，ACK 归属行也未直接检查，
-完整 ACK 切换验收因此仍未完成。所有实验资源均已正常清理，没有丢弃失败
-Session 状态。本设计替代此前 K2
+协议、Java 数据及 Spring 配置验证均通过。2026-10-16 的 ACK 验收采用 runtime
+`53f24ba09` 和单独封存的实验辅助代码（含 `a4a51655c` 的归属 reader），补齐全部
+四项直接证据：六条实际文件工具调用与回复、六份原应用同 DataSource 归属快照、并发准入，以及正常
+应用 JVM 重启后第二个 Session 实际成功。独立检查 52/52 通过，另有 26/26 项
+数据复核通过。两个 Session 均正常关闭，切换期间原 worker、绑定身份及物理
+reservation 保留。所有新增实验资源均正常清理并查询确认不存在。另一次安装尝试
+的首轮 Turn 失败，其关闭阻塞和获批丢弃合成状态的记录单独保留，不能作为恢复证据。
+Shipping review 仍未给出 verdict，PR 保持 Draft。本设计替代此前 K2
 完成计划中本版的自动退役和卷复用要求。原设计及证据保留为后续工作，不能作为
 本版验收证据。
 
@@ -119,16 +120,30 @@ Linux CSI 挂载或 ACK 部署。此前拒绝的 native 验收操作不借架构
 完成声明前需要构建、类型检查、聚焦测试、独立验证和两轮干净完整 diff 自审。
 部署及云上验收与本地实现验证分开记录。
 
-本轮 ACK 保留了 46 条连续的公开响应。两个 Session 均到达 `closed`；同键
-关闭重放返回原操作和回执，向已关闭的第一个 Session 输入实际返回
-`409 workspace_unavailable`。固定模型仅在收到三条工具消息后输出完成标记，
-并校验第二个 Session 首次读取中包含第一个 Session 的唯一内容。这些守卫
-提供间接证据，不等于捕获了六条工具实际结果或逐字节比对了保留文件。剩余
-云上验收需要采集这些结果，以及原 binding/generation 和物理 reservation 行。
-普通清理不资格化物理退役或卷复用；MySQL 并发、重启恢复和 shipping review
-仍分别验证。
+成功的 ACK 尝试保留了 62 条连续响应。A 实际执行 Write/Edit/Read，应用 JVM
+重启后 B 实际执行 Read/Edit/Read。六对真实调用与回复全部采集，包含明确的
+Write/Edit 成功回复；B 首次读取的字节与 A 最后读取完全相同。两个 Session
+均到达 `closed`，同键关闭重放返回原操作；重启前后旧 A 输入均返回
+`409 workspace_unavailable`。两个不同幂等键并发创建，实际为一个 202 和一个
+`409 workspace_busy`；再并发重放两次赢家键，均返回同一 Session。这只证明
+本次两批请求的实际结果，不扩大为任意并发场景的证明。
 
-剩余验收的采集仅放在实验夹具中。模型夹具只保存选中 run 的实际工具调用
+六份原应用同 DataSource 的只读快照各采集固定八表。原 binding 身份、runtime
+generation、seed、lease 和 handle 的导出投影保持相等；slot、storage 和 owner
+的完整导出行始终相等，CSI 为 `RESERVED`、revision 为 1。两个原 Runtime Session
+在各自 Turn 完成后已 `RELEASED`，关闭后继续保持。binding 保持 `READY`；B
+使用时 attestation/operation generation、record version 和健康时间正常推进，
+不能声称整个 binding 行没有变化。
+
+正常重启在新的子 JVM 中重新打开同一文件 H2 数据库，PID 从 20 变为 277，
+incarnation ID 不同。app 容器和原 worker 的 UID、容器及镜像身份保留，Kubernetes
+重启数为零；原 PV/PVC 和盘 handle 始终不变，B 在这个保留的 worker 上实际执行。
+确定性测试模型与文件 H2 不资格化外部模型、MySQL 并发、崩溃恢复或生产数据库
+高可用。节点始终不可调度；安装器仅通过正常 Binding API 放置本实验的精确 app
+和原 provisioner 创建的 worker。普通维护清理不资格化物理退役或跨 Workspace
+卷复用。
+
+证据采集仍仅放在实验夹具中。模型夹具只保存选中 run 的实际工具调用
 和回复，限制文本结果大小，并精确比对读取字节。测试专用 reader 从原应用的
 DataSource 导出限定范围、一致的归属快照，不开放公开 SQL 路由，也不写生命周期
 状态。准入测试采用独立 DataSource 和 store。应用重建测试必须保留原放置、
@@ -142,8 +157,8 @@ DataSource 导出限定范围、一致的归属快照，不开放公开 SQL 路�
 完整 binding；重建前后八张被采集表完全相同，同时 Spring、Broker、DataSource
 和 repository 实例均重新创建。原 placement 和 worker 保持存活，只启动一次，
 没有物理释放。Runtime Session 在每个 Turn 完成后已释放，公开关闭保留该状态。
-这只验证同 JVM、内存 H2 和普通 boot-2 放置下的应用重建；文件数据库重开、
-新应用 JVM 以及在 ACK 上补采这些证据，仍需单独验收。
+这只验证同 JVM、内存 H2 和普通 boot-2 放置下的应用重建；上文单独的 ACK
+验收补齐文件数据库重开、新应用 JVM 和 CSI 证据，不扩大本地夹具的资格。
 
 Session 锁顺序 canary 的精确源码边界包含常驻 store 的 Session 锁和 CSI inventory
 的 Turn 读取。只有方法体顶层的 final 局部变量直接构造调用者类内直接声明的

@@ -6,16 +6,19 @@
 
 The user approved this first-release scope on 2026-10-14. The resident branches
 are implemented. Local checks and independent worker protocol, Java data and
-Spring configuration validation have passed. The ordinary public Hosted handoff
-has passed locally with H2 and declared placement. The latest ACK trial on
-`53f24ba09` completed two public Sessions and normal closes. Independent checks
-confirmed close replay, old-input refusal and unchanged Pod/container/PV/PVC
-identities with zero restarts (25/25 checks). File operations and retained content
-have indirect support from the fixed model's result guards; the public projection
-does not expose individual tool results, and ACK ownership rows were not directly
-inspected. Complete ACK handoff acceptance therefore remains open. All trial
-resources were normally cleaned without abandoning failed Session state. This
-document supersedes the automatic retirement
+Spring configuration validation have passed. The 2026-10-16 ACK acceptance on
+runtime `53f24ba09` and separately frozen experiment helpers, including the
+ownership reader from `a4a51655c`, completed the four direct evidence requirements:
+six actual file tool calls and replies,
+six ownership snapshots from the original application DataSource, concurrent
+admission, and a normal application JVM restart followed by a successful second
+Session. Independent checks passed 52/52, with 26/26 additional data checks.
+Both Sessions closed normally while the original worker, binding identity and
+physical reservation remained throughout handoff. All new trial resources were
+normally cleaned and checked absent. A separate installation attempt failed its initial Turn;
+its blocked close and approved synthetic-state abandonment remain recorded and
+are not recovery evidence. Shipping review still has no verdict; the PR remains
+Draft. This document supersedes the automatic retirement
 and volume reuse requirements of the earlier K2 completion plan for this release.
 Those designs and their evidence remain future work, not acceptance evidence for
 this release.
@@ -147,24 +150,44 @@ Build, typecheck, focused tests, independent validation and two clean full-diff
 audits precede a completion claim. Deployment and cloud acceptance remain separate
 from local implementation validation.
 
-The ACK run retained 46 contiguous public response records. Both Sessions reached
-`closed`; the same-key close replay returned the original operation and receipt,
-and input to the closed first Session returned `409 workspace_unavailable`.
-The fixed model emits its completion marker only after three tool messages and
-checks the first Session's unique content in the second Session's initial read.
-These guards are indirect evidence, not six captured tool results or a direct
-comparison of retained file bytes. The remaining cloud acceptance must capture
-those results and the original binding/generation and physical reservation rows.
-Ordinary cleanup does not qualify physical retirement or volume reuse; MySQL
-concurrency, restart recovery and shipping review remain separate checks.
+The successful ACK attempt retained 62 contiguous response records. A performed
+Write/Edit/Read; B performed Read/Edit/Read after the application JVM restarted.
+All six actual call/reply pairs were captured, including explicit Write/Edit
+acknowledgments. B's initial read exactly matched A's final read bytes. Both
+Sessions reached `closed`; the same-key close replay returned the original
+operation, and old A input returned `409 workspace_unavailable` both before and
+after restart. Two concurrent distinct-key creates yielded one 202 and one
+`409 workspace_busy`; two concurrent replays of the winner key returned the
+same Session. This is the observed two-batch result, not a general concurrency
+proof.
 
-The remaining acceptance work keeps evidence collection inside the experiment.
+Six same-DataSource, read-only snapshots each captured eight fixed tables.
+The original binding identity, runtime generation, seed, lease and handle
+projections stayed equal. The complete exported slot, storage and owner rows
+stayed equal, with CSI `RESERVED` at revision 1. Both original Runtime Sessions
+were already `RELEASED` after their completed Turns and remained released after
+close. The binding stayed `READY`; its attestation and operation generations,
+record version and health timestamps legitimately advanced when B used it.
+This does not claim the entire binding row remained unchanged.
+
+The normal restart reopened the same file-backed H2 database in a new child
+JVM (PID 20 to 277, with different incarnation IDs). The app container and
+original worker retained their UID, container and image identities with zero
+Kubernetes restarts. The same PV/PVC and disk handle remained throughout, and
+B actually executed against that retained worker. The deterministic test model
+and file-backed H2 do not qualify an external model, MySQL concurrency, crash
+recovery or production database high availability. The node remained cordoned;
+the installer used normal Binding API calls for only the exact experiment app
+and the worker created by the original provisioner. Ordinary maintenance cleanup
+does not qualify physical retirement or cross-Workspace volume reuse.
+
+Evidence collection remains inside the experiment.
 The model fixture saves only the selected run's actual tool calls and replies,
 with bounded text results and exact read-byte comparisons. A test-only reader of
 the original application DataSource exports scoped, consistent ownership
-snapshots; it will expose no public SQL route or write lifecycle state. Admission
+snapshots; it exposes no public SQL route and writes no lifecycle state. Admission
 tests use independent DataSources and stores. Application reconstruction
-tests must preserve the original placement while creating fresh application and
+tests preserve the original placement while creating fresh application and
 Broker instances; retaining an old Broker object does not prove recovery.
 The model fixture's three unit tests cover bounded capture, exact read bytes,
 identity refusal and immutable retries; these tests use synthetic replies.
@@ -180,8 +203,9 @@ creating fresh Spring, Broker, DataSource and repository instances. The original
 placement and worker stayed alive, with one start and no physical release.
 Runtime Sessions were already released after each completed Turn; public close
 retained that state. This is same-JVM reconstruction with in-memory H2 and an
-ordinary boot-2 placement. File-backed database reopening, a new application JVM
-and these additional evidence captures on ACK remain separate acceptance work.
+ordinary boot-2 placement. The separate ACK acceptance above supplies the
+file-backed database reopening, new application JVM and CSI evidence; it does
+not extend this local fixture's qualification.
 
 The Session lock-order canary includes the resident store's Session locks and
 the CSI inventory's Turn reads in its exact source boundary. It resolves calls
