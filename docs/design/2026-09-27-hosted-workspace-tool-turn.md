@@ -4,6 +4,10 @@
 
 Status: implemented behind the private gates, based on main `daaac2223`. Part of proposal #12380, following the Hosted no-tool path and W0c-3. This is a private integration slice, not public capability enablement.
 
+> Approval update (2026-09-30): the Hosted Workspace tool turn can now ask for approval before calls that the Session's approval mode does not pre-approve, so the "does not implement interactive approvals" clause below describes the earlier slice. See [Actions](2026-09-30-managed-agent-actions.md).
+
+> File history update (2026-09-30): Write/Edit backup settlement and private file-only undo are implemented in [Hosted Workspace file history](2026-09-30-hosted-file-history.md), including persistence, reload, conflict detection and failure boundaries. The file-backup exclusions below describe the earlier slice.
+
 ## Problem and current state
 
 The Hosted Harness has a durable no-tool text turn. W0c-3 independently runs tools through a persisted Workspace binding and holds a SQL storage owner. Nothing connects the model's function calls to that path. Before this change, the generic TypeScript Broker provider depended on control, prepare and start operations absent from the production Broker. This slice supplies prepare/start but deliberately does not implement that provider's generic control contract.
@@ -49,7 +53,7 @@ Tool-enabled history preserves complete function-call/function-response groups. 
 
 ## Failure and cancellation
 
-A definite HTTP 409 `workspace_busy` or `workspace_unavailable` acquisition refusal before claiming storage ends the turn with an ordinary error; the Session may retry or reload. After storage is claimed, acquisition failures use `runtime_session_acquire_failed`, including a failed authority recheck, and remain recovery-blocked. A lost acquisition reply also remains blocked.
+A definite HTTP 409 `workspace_busy` acquisition refusal during a turn's tool execution means another Session's tool turn holds the mount: the turn waits for that holder to release — retrying the acquisition on a short poll bounded only by the turn's cancellation and deadline — then acquires and continues, so a second Session on the same Workspace queues instead of losing its turn. The `workspace_unavailable` refusal, and any definite refusal on a recovery acquisition, still ends the turn with an ordinary error; the Session may retry or reload. After storage is claimed, acquisition failures use `runtime_session_acquire_failed`, including a failed authority recheck, and remain recovery-blocked. A lost acquisition reply also remains blocked.
 
 Admission or argument-resource failure before dispatch causes no tool effect. After a lost start reply, query only the original execution. An unobservable outcome, lease loss, failed result commit or unverified cancellation blocks the Session at its durable wait. The caller can observe recovery-required status. The Harness neither emits a normal completed/cancelled safety boundary nor permits a fresh prompt to forget that work.
 

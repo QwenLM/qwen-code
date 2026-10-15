@@ -226,4 +226,264 @@ describe('parseAndFormatApiError', () => {
       expect(parseAndFormatApiError(raw)).toBe(`[API Error: ${raw}]`);
     });
   });
+
+  // Strict OpenAI-compatible backends (vLLM/SGLang) reject requests with a 400
+  // whose body openai-node fails to capture, so the CLI shows only
+  // "[API Error: 400 status code (no body)]" and the user has no traceable id
+  // to quote to their provider. The SDK does stamp `x-request-id` onto
+  // APIError.headers, so surface it on the user-facing line.
+  // See https://github.com/QwenLM/qwen-code/issues/14115
+  describe('request id surfacing', () => {
+    const REQUEST_ID = 'a30a1854-1925-4da8-8803-73fee2865116';
+    const BODYLESS = '400 status code (no body)';
+
+    it('appends an already-resolved StructuredError.requestId', () => {
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: REQUEST_ID,
+      };
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('reads x-request-id off a live error carrying a real Headers instance', () => {
+      // openai-node 5.x assigns a genuine `Headers` to APIError.headers, where
+      // bracket access (`headers['x-request-id']`) reads undefined.
+      const headers = new Headers();
+      headers.set('x-request-id', REQUEST_ID);
+      const error = Object.assign(new Error(BODYLESS), {
+        status: 400,
+        headers,
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it.each(['x-request-id', 'X-Request-Id'])(
+      'reads %s off a live error carrying a plain header record',
+      (headerName) => {
+        const error = Object.assign(new Error(BODYLESS), {
+          status: 400,
+          headers: { [headerName]: REQUEST_ID },
+        });
+
+        expect(parseAndFormatApiError(error)).toBe(
+          `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+        );
+      },
+    );
+
+    it('reads x-request-id off a nested response.headers record', () => {
+      // Gaxios-shaped Gemini/Vertex failures nest the header record under
+      // `error.response.headers` instead of stamping it on the error itself.
+      const error = Object.assign(new Error(BODYLESS), {
+        status: 400,
+        response: { headers: { 'x-request-id': REQUEST_ID } },
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it.each(['requestID', 'request_id', 'response_id'])(
+      'reads the provider id off the %s spelling',
+      (key) => {
+        const error = Object.assign(new Error(BODYLESS), {
+          status: 400,
+          [key]: REQUEST_ID,
+        });
+
+        expect(parseAndFormatApiError(error)).toBe(
+          `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+        );
+      },
+    );
+
+    it('prefers an explicit .requestId over the other spellings', () => {
+      const error = Object.assign(new Error(BODYLESS), {
+        status: 400,
+        requestId: REQUEST_ID,
+        request_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('walks error.cause to recover an id from a wrapped gateway error', () => {
+      const error = new Error(BODYLESS, {
+        cause: Object.assign(new Error('inner'), {
+          headers: { 'x-request-id': REQUEST_ID },
+        }),
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (cause: inner) (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('recovers a request id from a JSON payload embedded in the message', () => {
+      // The rate-limit diagnostics already parse a provider id out of a JSON
+      // body in the message; the user-facing line should see the same id.
+      const error = Object.assign(
+        new Error(
+          `stream failed: {"error":{"message":"bad"},"requestId":"${REQUEST_ID}"}`,
+        ),
+        { status: 400 },
+      );
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: stream failed: {"error":{"message":"bad"},"requestId":"${REQUEST_ID}"} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('omits the suffix when no request id is available', () => {
+      const error: StructuredError = { message: BODYLESS, status: 400 };
+
+      expect(parseAndFormatApiError(error)).toBe(`[API Error: ${BODYLESS}]`);
+      expect(parseAndFormatApiError(new Error(BODYLESS))).toBe(
+        `[API Error: ${BODYLESS}]`,
+      );
+    });
+
+    it.each(['', '   '])(
+      'treats a blank request id as absent (%j)',
+      (requestId) => {
+        // The openai SDK stamps requestID from headers.get('x-request-id'),
+        // which is '' for a present-but-empty header; that must not render
+        // an empty "(request_id: )" suffix.
+        const error: StructuredError = {
+          message: BODYLESS,
+          status: 400,
+          requestId,
+        };
+
+        expect(parseAndFormatApiError(error)).toBe(`[API Error: ${BODYLESS}]`);
+      },
+    );
+
+    it('drops a request id carrying control or escape characters', () => {
+      // A hostile gateway could answer a bodyless 400 with a request_id full
+      // of ANSI/OSC sequences; the id goes verbatim onto a terminal-bound
+      // line, so anything outside the token allowlist is dropped, not
+      // sanitized.
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: '\u001b[2J\u001b[H\u001b]0;pwned\u0007x',
+      };
+
+      const result = parseAndFormatApiError(error);
+
+      expect(result).toBe(`[API Error: ${BODYLESS}]`);
+      expect(result).not.toContain('\u001b');
+      expect(result).not.toContain('\u0007');
+    });
+
+    it('drops an escape-laden id even when the message embeds its JSON-escaped form', () => {
+      // ResponsesHttpError shape: JSON.parse turned `\u001b` into a real ESC
+      // in .requestId, while JSON.stringify re-escaped it inside the message,
+      // so the dedup guard can never match — the allowlist is what keeps the
+      // raw bytes off the line.
+      const error = Object.assign(
+        new Error(
+          `Responses API error 400: ${JSON.stringify({ request_id: '\u001b[2J' })}`,
+        ),
+        { status: 400, requestId: '\u001b[2J' },
+      );
+
+      const result = parseAndFormatApiError(error);
+
+      expect(result).not.toContain('\u001b');
+    });
+
+    it('keeps the 429 quota guidance after the request id', () => {
+      const error: StructuredError = {
+        message: 'Rate limit exceeded',
+        status: 429,
+        requestId: REQUEST_ID,
+      };
+
+      const result = parseAndFormatApiError(error, AuthType.USE_VERTEX_AI);
+
+      expect(result).toContain(
+        `[API Error: Rate limit exceeded (request_id: ${REQUEST_ID})]`,
+      );
+      expect(result).toContain(vertexMessage);
+    });
+
+    it('does not re-wrap a line that already carries a request id', () => {
+      const formatted = `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`;
+
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+      expect(parseAndFormatApiError({ message: formatted, status: 400 })).toBe(
+        formatted,
+      );
+    });
+
+    it('does not append the suffix when the message already embeds the id (ResponsesHttpError opaque body)', () => {
+      // ResponsesHttpError appends " (request_id: …)" to its own message on
+      // the opaque-body path and also exposes `.requestId`; the formatter
+      // must not print the same id twice.
+      const message = `Responses API error 404: <body excerpt> (request_id: ${REQUEST_ID})`;
+      const error = Object.assign(new Error(message), {
+        status: 404,
+        requestId: REQUEST_ID,
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(`[API Error: ${message}]`);
+    });
+
+    it('does not append the suffix when the JSON diagnostic excerpt already contains the id', () => {
+      // When the Responses body parses, the excerpt is a JSON diagnostic that
+      // already carries "request_id":"X"; appending the suffix repeats it.
+      const message = `Responses API error 400: {"error":{"message":"bad request"},"request_id":"${REQUEST_ID}"}`;
+      const error = Object.assign(new Error(message), {
+        status: 400,
+        requestId: REQUEST_ID,
+      });
+
+      // The id is embedded in a JSON body inside the message, not as the
+      // "(request_id: X)" suffix, so the suffix would duplicate it.
+      const result = parseAndFormatApiError(error);
+      expect(result).toBe(`[API Error: ${message}]`);
+    });
+
+    it('still appends the suffix when the message merely contains the id as a substring', () => {
+      // "400" is a substring of the bodyless-400 message itself; a bare
+      // includes() dedup guard would read that as "already embedded" and
+      // silently drop the one thing this formatter exists to add.
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: '400',
+      };
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: 400)]`,
+      );
+    });
+
+    it('bounds an over-long provider-supplied request id', () => {
+      // Positionally distinct input so the assertion pins HOW the id is
+      // bounded (first 128 chars), not merely THAT something bounded it.
+      const long = 'ABCDEFGHIJ'.repeat(50); // 500 chars
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: long,
+      };
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${long.substring(0, 128)})]`,
+      );
+    });
+  });
 });

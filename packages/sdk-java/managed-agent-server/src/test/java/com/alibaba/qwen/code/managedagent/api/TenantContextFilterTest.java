@@ -1,15 +1,16 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.ServletException;
-import java.io.IOException;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+
+import java.io.IOException;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TenantContextFilterTest {
     private final TenantContextFilter filter = new TenantContextFilter(
@@ -77,6 +78,27 @@ class TenantContextFilterTest {
                     .contains("actor_scope_mismatch");
             assertThat(chain.getRequest()).isNull();
         }
+    }
+
+    @Test
+    void scopesTheBareAgentCollectionRoute() throws Exception {
+        for (String path : new String[] {"/v1/agents",
+                "/v1/agents;jsessionid=abc", "/v1;route=public/agents",
+                "/v1/%61gents"}) {
+            MockHttpServletRequest bare = new MockHttpServletRequest("POST", path);
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            MockFilterChain chain = new MockFilterChain();
+            filter.doFilter(bare, response, chain);
+            assertThat(response.getStatus()).isEqualTo(400);
+            assertThat(response.getContentAsString()).contains("invalid_tenant");
+            assertThat(chain.getRequest()).isNull();
+        }
+
+        MockHttpServletRequest unrelated = new MockHttpServletRequest("POST",
+                "/v1/agentsx");
+        MockFilterChain passed = new MockFilterChain();
+        filter.doFilter(unrelated, new MockHttpServletResponse(), passed);
+        assertThat(passed.getRequest()).isSameAs(unrelated);
     }
 
     private static MockHttpServletRequest request(String tenant) {

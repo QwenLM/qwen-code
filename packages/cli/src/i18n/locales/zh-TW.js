@@ -23,6 +23,8 @@ export default {
   'Project level': '專案層級',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪貼簿圖片貼上功能無法使用，因為原生剪貼簿模組載入失敗。請重新安裝 Qwen Code，或改用 npm 安裝方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪貼簿圖片貼上功能無法使用：未找到支援的剪貼簿工具。在 Linux 上請安裝 `wl-clipboard`（Wayland）或 `xclip`（X11），若為無頭環境請設定 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)

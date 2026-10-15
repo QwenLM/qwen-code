@@ -43,9 +43,8 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
 });
 
 // Mock AgentCore to avoid real model calls while keeping the real
-// InProcessBackend + AgentInteractive wiring. The factory and helpers
-// are shared with InProcessBackend.test.ts so both suites assert
-// against the same mocked AgentCore surface.
+// InProcessBackend + AgentInteractive wiring; the factory is shared with
+// InProcessBackend.test.ts so both suites assert against the same surface.
 vi.mock('../runtime/agent-core.js', async () =>
   (await import('../runtime/agent-core-test-mock.js')).agentCoreMockModule(),
 );
@@ -86,11 +85,8 @@ function setMockGlobalDir(dir: string): void {
 const LEADER_MODEL = 'leader-model';
 const LEADER_AUTH_TYPE = 'openai';
 
-/**
- * Leader-session Config mock: provider route is
- * openai/leader-model @ https://leader.example.com. Anything a spawned
- * teammate resolves to differently is observable against these values.
- */
+// Leader route: openai/leader-model @ https://leader.example.com. Anything a
+// spawned teammate resolves to differently is observable against these.
 function createLeaderConfig(projectRoot: string): Config {
   const leaderGenerator = { generateContentStream: vi.fn() };
   return {
@@ -131,25 +127,6 @@ function createLeaderConfig(projectRoot: string): Config {
   } as never;
 }
 
-// ─── Fixtures ────────────────────────────────────────────────
-
-async function writeAgentDefinition(
-  projectRoot: string,
-  fileName: string,
-  frontmatter: Record<string, string>,
-): Promise<void> {
-  const dir = path.join(projectRoot, '.qwen', 'agents');
-  await fs.mkdir(dir, { recursive: true });
-  const fm = Object.entries(frontmatter)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join('\n');
-  await fs.writeFile(
-    path.join(dir, fileName),
-    `---\n${fm}\n---\n\nYou are a worker agent.\n`,
-    'utf-8',
-  );
-}
-
 describe('TeamManager teammate model routing (#10071)', () => {
   let tmpDir: string;
   let projectDir: string;
@@ -159,14 +136,50 @@ describe('TeamManager teammate model routing (#10071)', () => {
   let teamManager: TeamManager;
   const TEAM_NAME = 'route-team';
 
-  async function writeTeamFileFixture(): Promise<TeamFile> {
-    const teamFile: TeamFile = {
-      name: TEAM_NAME,
-      createdAt: Date.now(),
-      leadAgentId: formatAgentId('leader', TEAM_NAME),
-      members: [],
-    };
-    return teamFile;
+  const teamFileFixture = (): TeamFile => ({
+    name: TEAM_NAME,
+    createdAt: Date.now(),
+    leadAgentId: formatAgentId('leader', TEAM_NAME),
+    members: [],
+  });
+  const agentId = (name: string) => formatAgentId(name, TEAM_NAME);
+  const members = () => teamManager.getTeamFile().members;
+
+  /** Writes `.qwen/agents/<name>.md`; omitting `model` leaves no selector. */
+  async function define(name: string, description: string, model?: string) {
+    const dir = path.join(projectDir, '.qwen', 'agents');
+    await fs.mkdir(dir, { recursive: true });
+    const fm = [`name: ${name}`, `description: ${description}`]
+      .concat(model ? [`model: ${model}`] : [])
+      .join('\n');
+    await fs.writeFile(
+      path.join(dir, `${name}.md`),
+      `---\n${fm}\n---\n\nYou are a worker agent.\n`,
+      'utf-8',
+    );
+  }
+
+  const spawn = (
+    opts: { name: string; agentType: string; model?: string },
+    manager = teamManager,
+  ) => manager.spawnTeammate({ ...opts, cwd: projectDir });
+
+  const lastCoreCall = () =>
+    destructureAgentCoreCall(
+      (AgentCore as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)!,
+    );
+
+  const expectRouteCreated = (model: string) =>
+    expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({ authType: 'anthropic', model }),
+      expect.anything(),
+    );
+
+  function expectLeaderRoute(name: string) {
+    expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    expect(backend.getAgentContentGenerator(agentId(name))).toBe(
+      leaderConfig.getContentGenerator(),
+    );
   }
 
   beforeEach(async () => {
@@ -193,11 +206,7 @@ describe('TeamManager teammate model routing (#10071)', () => {
     backend = new InProcessBackend(leaderConfig);
     await backend.init();
     const subagentManager = new SubagentManager(leaderConfig);
-    teamManager = new TeamManager(
-      backend,
-      await writeTeamFileFixture(),
-      subagentManager,
-    );
+    teamManager = new TeamManager(backend, teamFileFixture(), subagentManager);
   });
 
   afterEach(async () => {
@@ -207,321 +216,192 @@ describe('TeamManager teammate model routing (#10071)', () => {
   });
 
   it('routes a teammate through the custom provider selected in its agent definition', async () => {
-    // Leader runs on openai/leader-model; the definition selects a
-    // different provider route (anthropic:claude-worker). An ordinary
-    // subagent with this definition gets a dedicated ContentGenerator
-    // for the anthropic route — a named teammate must get the same.
-    await writeAgentDefinition(projectDir, 'worker.md', {
-      name: 'worker',
-      description: 'A worker with a custom model route',
-      model: 'anthropic:claude-worker',
-    });
-
-    await teamManager.spawnTeammate({
-      name: 'w1',
-      agentType: 'worker',
-      cwd: projectDir,
-    });
-
-    const agentId = formatAgentId('w1', TEAM_NAME);
-
-    // A dedicated ContentGenerator must have been created for the
-    // teammate's own route, not inherited from the leader.
-    expect(mockCreateContentGenerator).toHaveBeenCalledWith(
-      expect.objectContaining({
-        authType: 'anthropic',
-        model: 'claude-worker',
-      }),
-      expect.anything(),
+    // Leader runs on openai/leader-model; the definition selects
+    // anthropic:claude-worker. An ordinary subagent gets a dedicated
+    // ContentGenerator for that route — a named teammate must too.
+    await define(
+      'worker',
+      'A worker with a custom model route',
+      'anthropic:claude-worker',
     );
+    await spawn({ name: 'w1', agentType: 'worker' });
 
-    const teammateGenerator = backend.getAgentContentGenerator(agentId);
+    // A dedicated generator for the teammate's own route, not the leader's.
+    expectRouteCreated('claude-worker');
+    const teammateGenerator = backend.getAgentContentGenerator(agentId('w1'));
     expect(teammateGenerator).toBeDefined();
     expect(teammateGenerator).not.toBe(leaderConfig.getContentGenerator());
 
-    // The agent runtime must receive the view so Config getters resolve
-    // the teammate's route during the run.
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { modelConfig, runtimeView } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
-    );
+    // The runtime receives the view so Config getters resolve the
+    // teammate's route during the run.
+    const { modelConfig, runtimeView } = lastCoreCall();
     expect(modelConfig.model).toBe('claude-worker');
     expect(runtimeView).toBeDefined();
     expect(runtimeView!.contentGeneratorConfig.authType).toBe('anthropic');
     expect(runtimeView!.contentGenerator).toBe(teammateGenerator);
-
     // The team file reflects the model the teammate actually runs on.
-    const member = teamManager.getTeamFile().members[0]!;
-    expect(member.model).toBe('claude-worker');
+    expect(members()[0]!.model).toBe('claude-worker');
   });
 
   it('resolves a fast selector in the definition against the runtime context', async () => {
-    // convertToRuntimeConfig alone receives no runtime context, so a
-    // `fast` selector could not resolve and the teammate silently
-    // inherited the leader's model. The spawn path must resolve it.
+    // convertToRuntimeConfig alone gets no runtime context, so `fast`
+    // could not resolve and the teammate silently inherited the leader's
+    // model. The spawn path must resolve it.
     (
       leaderConfig as unknown as { getFastModel: ReturnType<typeof vi.fn> }
     ).getFastModel.mockReturnValue('anthropic:claude-fast');
+    await define('fast-worker', 'A worker selecting the fast model', 'fast');
+    await spawn({ name: 'w2', agentType: 'fast-worker' });
 
-    await writeAgentDefinition(projectDir, 'fast-worker.md', {
-      name: 'fast-worker',
-      description: 'A worker selecting the fast model',
-      model: 'fast',
-    });
-
-    await teamManager.spawnTeammate({
-      name: 'w2',
-      agentType: 'fast-worker',
-      cwd: projectDir,
-    });
-
-    expect(mockCreateContentGenerator).toHaveBeenCalledWith(
-      expect.objectContaining({
-        authType: 'anthropic',
-        model: 'claude-fast',
-      }),
-      expect.anything(),
-    );
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { modelConfig } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
-    );
-    expect(modelConfig.model).toBe('claude-fast');
+    expectRouteCreated('claude-fast');
+    expect(lastCoreCall().modelConfig.model).toBe('claude-fast');
   });
 
   it('keeps the leader route for definitions that do not select a model', async () => {
-    // Regression guard: no selector means inherit — the teammate must
-    // keep running on the leader's ContentGenerator exactly as before.
-    await writeAgentDefinition(projectDir, 'plain-worker.md', {
-      name: 'plain-worker',
-      description: 'A worker without a model selector',
-    });
+    // Regression guard: no selector means inherit — the teammate keeps
+    // running on the leader's ContentGenerator exactly as before.
+    await define('plain-worker', 'A worker without a model selector');
+    await spawn({ name: 'w3', agentType: 'plain-worker' });
 
-    await teamManager.spawnTeammate({
-      name: 'w3',
-      agentType: 'plain-worker',
-      cwd: projectDir,
-    });
-
-    const agentId = formatAgentId('w3', TEAM_NAME);
-
-    expect(mockCreateContentGenerator).not.toHaveBeenCalled();
-    expect(backend.getAgentContentGenerator(agentId)).toBe(
-      leaderConfig.getContentGenerator(),
-    );
-
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { modelConfig, runtimeView } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
-    );
+    expectLeaderRoute('w3');
+    const { modelConfig, runtimeView } = lastCoreCall();
     expect(modelConfig.model).toBeUndefined();
     expect(runtimeView).toBeUndefined();
   });
 
   it('keeps the leader route for inherit selectors', async () => {
-    await writeAgentDefinition(projectDir, 'inherit-worker.md', {
-      name: 'inherit-worker',
-      description: 'A worker inheriting the leader model',
-      model: 'inherit',
-    });
-
-    await teamManager.spawnTeammate({
-      name: 'w4',
-      agentType: 'inherit-worker',
-      cwd: projectDir,
-    });
-
-    expect(mockCreateContentGenerator).not.toHaveBeenCalled();
-    const agentId = formatAgentId('w4', TEAM_NAME);
-    expect(backend.getAgentContentGenerator(agentId)).toBe(
-      leaderConfig.getContentGenerator(),
+    await define(
+      'inherit-worker',
+      'A worker inheriting the leader model',
+      'inherit',
     );
+    await spawn({ name: 'w4', agentType: 'inherit-worker' });
+    expectLeaderRoute('w4');
   });
 
   it('keeps the leader route when the leader overrides the model at spawn time', async () => {
-    // The definition selects a custom route, but the leader picks the
-    // model explicitly at spawn time: the definition does not vouch
-    // for the route of a model it did not select, so the `!config.model`
-    // guard must skip authOverrides entirely.
-    await writeAgentDefinition(projectDir, 'overridden-worker.md', {
-      name: 'overridden-worker',
-      description: 'A worker whose route must yield to a spawn override',
-      model: 'anthropic:claude-worker',
-    });
-
-    await teamManager.spawnTeammate({
+    // The definition selects a route, but the leader picks the model at
+    // spawn time: the definition does not vouch for the route of a model
+    // it did not select, so the `!config.model` guard must skip
+    // authOverrides entirely.
+    await define(
+      'overridden-worker',
+      'A worker whose route must yield to a spawn override',
+      'anthropic:claude-worker',
+    );
+    await spawn({
       name: 'w5',
       agentType: 'overridden-worker',
       model: 'leader-picked-model',
-      cwd: projectDir,
     });
 
-    const agentId = formatAgentId('w5', TEAM_NAME);
-
-    // No dedicated generator may be built on the definition's route...
-    expect(mockCreateContentGenerator).not.toHaveBeenCalled();
-    // ...the teammate runs on the leader's generator...
-    expect(backend.getAgentContentGenerator(agentId)).toBe(
-      leaderConfig.getContentGenerator(),
-    );
-
-    // ...and every surface agrees on the spawn-time model.
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { modelConfig, runtimeView } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
-    );
+    // No generator on the definition's route, the teammate runs on the
+    // leader's generator, and every surface agrees on the spawn-time model.
+    expectLeaderRoute('w5');
+    const { modelConfig, runtimeView } = lastCoreCall();
     expect(modelConfig.model).toBe('leader-picked-model');
     expect(runtimeView).toBeUndefined();
-    const member = teamManager.getTeamFile().members[0]!;
-    expect(member.model).toBe('leader-picked-model');
+    expect(members()[0]!.model).toBe('leader-picked-model');
   });
 
   it('fails loudly when the dedicated route generator cannot be created', async () => {
-    // The definition selects a route but the generator for it cannot be
-    // created (e.g. missing API key). InProcessBackend swallows that
-    // failure and falls back to the leader's generator; the spawn path
-    // must detect the missing dedicated generator and fail into the
-    // rollback instead of letting the teammate join misrouted (#10071).
-    await writeAgentDefinition(projectDir, 'unroutable-worker.md', {
-      name: 'unroutable-worker',
-      description: 'A worker whose route cannot be created',
-      model: 'anthropic:claude-worker',
-    });
-
+    // The route's generator cannot be created (e.g. missing API key).
+    // InProcessBackend swallows that and falls back to the leader's
+    // generator; the spawn path must detect the missing dedicated generator
+    // and fail into the rollback instead of joining misrouted (#10071).
+    await define(
+      'unroutable-worker',
+      'A worker whose route cannot be created',
+      'anthropic:claude-worker',
+    );
     mockCreateContentGenerator.mockRejectedValueOnce(
       new Error('The API key for Anthropic is not set'),
     );
 
-    // The swallowed creation failure must surface in the spawn error:
-    // the ordinary-subagent path reports the provider's message, and
-    // the debug log that used to be the only trace is a no-op without
+    // The swallowed failure must surface in the spawn error: the
+    // ordinary-subagent path reports the provider's message, and the debug
+    // log that used to be the only trace is a no-op without
     // QWEN_DEBUG_LOG_FILE.
     await expect(
-      teamManager.spawnTeammate({
-        name: 'w6',
-        agentType: 'unroutable-worker',
-        cwd: projectDir,
-      }),
+      spawn({ name: 'w6', agentType: 'unroutable-worker' }),
     ).rejects.toThrow(
       /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\): The API key for Anthropic is not set/,
     );
 
-    // Rollback must run: no member persisted, and the rolled-back id
-    // must stay respawnable — otherwise every retry dies with 'Agent
-    // "X" already exists.' masking this route failure. The stopped
-    // handle itself stays readable for post-stop inspection (Arena
-    // reads transcripts through it on the timeout path); the backend
-    // tracks the stop separately so the respawn gate still clears, as
-    // pinned by the retry test below.
-    expect(teamManager.getTeamFile().members).toHaveLength(0);
-    const agentId = formatAgentId('w6', TEAM_NAME);
-    expect(backend.getAgent(agentId)?.getStatus()).toBe(AgentStatus.CANCELLED);
+    // Rollback must run: no member persisted, and the id must stay
+    // respawnable — otherwise every retry dies with 'Agent "X" already
+    // exists.' masking this route failure. The stopped handle stays readable
+    // for post-stop inspection (Arena reads transcripts through it on the
+    // timeout path); the backend tracks the stop separately so the respawn
+    // gate still clears, as pinned by the retry test below.
+    expect(members()).toHaveLength(0);
+    expect(backend.getAgent(agentId('w6'))?.getStatus()).toBe(
+      AgentStatus.CANCELLED,
+    );
   });
 
   it('releases a rolled-back teammate name so the same spawn can retry', async () => {
-    // Route-verification failure rolls the teammate back via
-    // backend.stopAgent. The backend used to keep the agent id in its
-    // `agents` map after stopAgent, so the retry — which reuses the
-    // same name/agentId (generateUniqueTeammateName only dedupes
-    // against current members) — was permanently rejected with
-    // 'Agent "X" already exists.', masking the real route failure.
-    await writeAgentDefinition(projectDir, 'retry-worker.md', {
-      name: 'retry-worker',
-      description: 'A worker whose route fails then succeeds',
-      model: 'anthropic:claude-worker',
-    });
-
+    // Route-verification failure rolls back via backend.stopAgent, which
+    // used to keep the id in its `agents` map, so the retry — same
+    // name/agentId, since generateUniqueTeammateName only dedupes against
+    // current members — was permanently rejected with 'Agent "X" already
+    // exists.', masking the real route failure.
+    await define(
+      'retry-worker',
+      'A worker whose route fails then succeeds',
+      'anthropic:claude-worker',
+    );
     mockCreateContentGenerator.mockRejectedValueOnce(
       new Error('The API key for Anthropic is not set'),
     );
+    const retry = () => spawn({ name: 'w8', agentType: 'retry-worker' });
 
     // First attempt: route creation fails, spawn fails, rollback runs.
-    await expect(
-      teamManager.spawnTeammate({
-        name: 'w8',
-        agentType: 'retry-worker',
-        cwd: projectDir,
-      }),
-    ).rejects.toThrow(
+    await expect(retry()).rejects.toThrow(
       /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\)/,
     );
-    expect(teamManager.getTeamFile().members).toHaveLength(0);
+    expect(members()).toHaveLength(0);
 
     // Same-name respawn must succeed once the route is creatable.
-    await teamManager.spawnTeammate({
-      name: 'w8',
-      agentType: 'retry-worker',
-      cwd: projectDir,
-    });
+    await retry();
+    expect(members()).toHaveLength(1);
+    expect(backend.getAgent(agentId('w8'))).toBeDefined();
+    expect(backend.getAgentContentGenerator(agentId('w8'))).toBeDefined();
 
-    const agentId = formatAgentId('w8', TEAM_NAME);
-    expect(teamManager.getTeamFile().members).toHaveLength(1);
-    expect(backend.getAgent(agentId)).toBeDefined();
-    expect(backend.getAgentContentGenerator(agentId)).toBeDefined();
-
-    // A third spawn with the same name now fails with the genuine
-    // team-level name collision — not the stale backend gate.
-    await expect(
-      teamManager.spawnTeammate({
-        name: 'w8',
-        agentType: 'retry-worker',
-        cwd: projectDir,
-      }),
-    ).rejects.toThrow(/already exists in this team/);
-    expect(teamManager.getTeamFile().members).toHaveLength(1);
+    // A third spawn now fails with the genuine team-level name collision —
+    // not the stale backend gate.
+    await expect(retry()).rejects.toThrow(/already exists in this team/);
+    expect(members()).toHaveLength(1);
   });
 
   it('treats an empty spawn-time model override the same as none', async () => {
-    // `model: ''` must fall back to the definition's route/model exactly
-    // like `undefined`. The guards used to mix nullish (`??`) and falsy
-    // (`!`) checks, so '' kept the empty override as the model while the
-    // route guard saw no override — the teammate was pinned to '' over
-    // the leader's generator instead of its definition's route.
-    await writeAgentDefinition(projectDir, 'empty-override-worker.md', {
-      name: 'empty-override-worker',
-      description: 'A worker with a custom model route',
-      model: 'anthropic:claude-worker',
-    });
-
-    await teamManager.spawnTeammate({
-      name: 'w9',
-      agentType: 'empty-override-worker',
-      model: '',
-      cwd: projectDir,
-    });
-
-    const agentId = formatAgentId('w9', TEAM_NAME);
-
-    expect(mockCreateContentGenerator).toHaveBeenCalledWith(
-      expect.objectContaining({
-        authType: 'anthropic',
-        model: 'claude-worker',
-      }),
-      expect.anything(),
+    // `model: ''` must fall back to the definition's route/model like
+    // `undefined`. The guards used to mix nullish (`??`) and falsy (`!`)
+    // checks, so '' was kept as the model while the route guard saw no
+    // override — pinning the teammate to '' over the leader's generator.
+    await define(
+      'empty-override-worker',
+      'A worker with a custom model route',
+      'anthropic:claude-worker',
     );
-    expect(backend.getAgentContentGenerator(agentId)).toBeDefined();
+    await spawn({ name: 'w9', agentType: 'empty-override-worker', model: '' });
 
-    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
-    const { modelConfig } = destructureAgentCoreCall(
-      MockAgentCore.mock.calls.at(-1)!,
-    );
-    expect(modelConfig.model).toBe('claude-worker');
-    const member = teamManager.getTeamFile().members[0]!;
-    expect(member.model).toBe('claude-worker');
+    expectRouteCreated('claude-worker');
+    expect(backend.getAgentContentGenerator(agentId('w9'))).toBeDefined();
+    expect(lastCoreCall().modelConfig.model).toBe('claude-worker');
+    expect(members()[0]!.model).toBe('claude-worker');
   });
 
   it('fails loudly on a backend that omits getAgentContentGenerator', async () => {
-    // PTY-style backends may omit getAgentContentGenerator (types.ts
-    // allows it). A model-selecting definition on such a backend must
-    // fail with the real cause — not with a missing-generator error
-    // that looks like a missing API key, and not by silently joining
-    // on the leader's generator (#10071).
-    await writeAgentDefinition(projectDir, 'routed-worker.md', {
-      name: 'routed-worker',
-      description: 'A worker with a custom model route',
-      model: 'anthropic:claude-worker',
-    });
+    // PTY-style backends may omit getAgentContentGenerator (types.ts allows
+    // it). A model-selecting definition there must fail with the real cause
+    // — not a missing-generator error that looks like a missing API key,
+    // and not by silently joining on the leader's generator (#10071).
+    await define(
+      'routed-worker',
+      'A worker with a custom model route',
+      'anthropic:claude-worker',
+    );
 
     const ptyStyleBackend = {
       type: 'tmux',
@@ -537,23 +417,17 @@ describe('TeamManager teammate model routing (#10071)', () => {
       setOnAgentExit: vi.fn(),
       // getAgentContentGenerator intentionally omitted.
     } as unknown as Backend;
-
     const localTeamManager = new TeamManager(
       ptyStyleBackend,
-      await writeTeamFileFixture(),
+      teamFileFixture(),
       new SubagentManager(leaderConfig),
     );
 
     await expect(
-      localTeamManager.spawnTeammate({
-        name: 'w7',
-        agentType: 'routed-worker',
-        cwd: projectDir,
-      }),
+      spawn({ name: 'w7', agentType: 'routed-worker' }, localTeamManager),
     ).rejects.toThrow(
       /does not support dedicated per-agent ContentGenerators required by model "claude-worker" \(anthropic\)/,
     );
-
     // Rollback must run: no member persisted.
     expect(localTeamManager.getTeamFile().members).toHaveLength(0);
     await localTeamManager.cleanup();

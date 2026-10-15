@@ -39,8 +39,11 @@ import {
   FILE_HISTORY_DIR,
   serializeSnapshot,
 } from './fileHistoryService.js';
-import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  readFileHistorySnapshotPayload,
+  SessionFileHistoryAccumulator,
+} from './session-file-history-state.js';
+import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
@@ -312,6 +315,8 @@ export interface ListSessionsOptions {
   archiveState?: SessionArchiveState;
   /** Aborts an in-progress catalog scan. */
   signal?: AbortSignal;
+  /** Omits records carrying any of these immutable creator attributions. */
+  excludeSourceTypes?: readonly string[];
 }
 
 /**
@@ -2609,7 +2614,13 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20, archiveState = 'active', signal } = options;
+    const {
+      cursor,
+      size = 20,
+      archiveState = 'active',
+      signal,
+      excludeSourceTypes,
+    } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
     signal?.throwIfAborted();
@@ -2714,9 +2725,22 @@ export class SessionService {
         continue;
       }
 
+      const knownManaged = isManagedFirstRecord(firstRecord);
+      const source = this.extractCreationMetadataFromFile(
+        filePath,
+        records,
+        tailBuffer,
+        knownManaged,
+      );
+      if (
+        excludeSourceTypes !== undefined &&
+        source.sourceType !== undefined &&
+        excludeSourceTypes.includes(source.sourceType)
+      ) {
+        continue;
+      }
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
-      const knownManaged = isManagedFirstRecord(firstRecord);
       const titleInfo = this.readSessionTitleInfoFromFile(
         filePath,
         tailBuffer,
@@ -2730,12 +2754,6 @@ export class SessionService {
         records,
         readResult.complete,
         tailBuffer,
-      );
-      const source = this.extractCreationMetadataFromFile(
-        filePath,
-        records,
-        tailBuffer,
-        knownManaged,
       );
       items.push({
         sessionId: firstRecord.sessionId,
@@ -2847,16 +2865,19 @@ export class SessionService {
    *
    * Same disk-walk shape as {@link findSessionTitlesByPrefix} /
    * {@link findSessionsByTitle}: `readdir` the chats dir, cap at the
-   * file-processing safety limit, then read only the first JSONL record for
-   * project membership. Title/prompt/message hydration is skipped entirely.
+   * file-processing safety limit, then read the first JSONL record for project
+   * membership. A requested source exclusion adds one bounded tail read;
+   * title/prompt/message hydration is still skipped.
    *
    * Still an O(n) disk walk — callers (and HTTP clients of
    * `GET .../session-info`) must not poll this in a tight loop.
    */
-  async getSessionInfoCounts(): Promise<SessionInfoCounts> {
+  async getSessionInfoCounts(
+    options: { excludeSourceTypes?: readonly string[] } = {},
+  ): Promise<SessionInfoCounts> {
     const [active, archived] = await Promise.all([
-      this.countSessionsInState('active'),
-      this.countSessionsInState('archived'),
+      this.countSessionsInState('active', options.excludeSourceTypes),
+      this.countSessionsInState('archived', options.excludeSourceTypes),
     ]);
     return {
       active: active.count,
@@ -2868,6 +2889,7 @@ export class SessionService {
 
   private async countSessionsInState(
     archiveState: SessionArchiveState,
+    excludeSourceTypes?: readonly string[],
   ): Promise<{ count: number; truncated: boolean }> {
     const chatsDir = this.getChatsDirForState(archiveState);
     let fileNames: string[];
@@ -2883,6 +2905,10 @@ export class SessionService {
     let count = 0;
     let filesProcessed = 0;
     let truncated = false;
+    const tailBuffer =
+      excludeSourceTypes === undefined
+        ? undefined
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const name of fileNames) {
       if (!SESSION_FILE_PATTERN.test(name)) continue;
@@ -2908,6 +2934,15 @@ export class SessionService {
             firstRecord.sessionId,
             firstRecord.cwd,
           ))
+        ) {
+          continue;
+        }
+        if (
+          excludeSourceTypes !== undefined &&
+          excludeSourceTypes.includes(
+            this.extractCreationMetadataFromFile(filePath, records, tailBuffer)
+              .sourceType ?? '',
+          )
         ) {
           continue;
         }
@@ -4602,8 +4637,10 @@ export class SessionService {
    *
    * @returns Session data for resumption, or undefined if no sessions exist
    */
-  async loadLastSession(): Promise<ResumedSessionData | undefined> {
-    const result = await this.listSessions({ size: 1 });
+  async loadLastSession(
+    options: Pick<ListSessionsOptions, 'excludeSourceTypes'> = {},
+  ): Promise<ResumedSessionData | undefined> {
+    const result = await this.listSessions({ size: 1, ...options });
     if (result.items.length === 0) {
       return;
     }
@@ -4740,6 +4777,28 @@ function remapSystemPayloadForFork(
     const payload = record.systemPayload as
       | { uiEvent?: Record<string, unknown> }
       | undefined;
+    if (
+      payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
+      payload?.uiEvent?.['event.name'] === 'tool_lifecycle'
+    ) {
+      const event = payload.uiEvent;
+      return {
+        ...payload,
+        uiEvent: {
+          ...event,
+          sessionId: newSessionId,
+          ...(event['event.name'] === 'request_lifecycle'
+            ? {
+                promptId:
+                  typeof event['promptId'] === 'string' &&
+                  event['promptId'].startsWith(`${sourceSessionId}#`)
+                    ? `${newSessionId}${event['promptId'].slice(sourceSessionId.length)}`
+                    : event['promptId'],
+              }
+            : {}),
+        },
+      } as unknown as ChatRecord['systemPayload'];
+    }
     const promptId = payload?.uiEvent?.['prompt_id'];
     const sourcePrefix = `${sourceSessionId}#`;
     if (typeof promptId === 'string' && promptId.startsWith(sourcePrefix)) {
@@ -4749,7 +4808,7 @@ function remapSystemPayloadForFork(
           ...payload?.uiEvent,
           prompt_id: `${newSessionId}${promptId.slice(sourceSessionId.length)}`,
         },
-      } as ChatRecord['systemPayload'];
+      } as unknown as ChatRecord['systemPayload'];
     }
   }
   if (
@@ -4797,15 +4856,8 @@ function collectFileHistorySnapshotPromptIds(
 ): Set<string> {
   const ids = new Set<string>();
   for (const record of records) {
-    if (
-      record.type !== 'system' ||
-      record.subtype !== 'file_history_snapshot' ||
-      !record.systemPayload
-    ) {
-      continue;
-    }
-    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
-    if (!Array.isArray(payload.snapshots)) continue;
+    const payload = readFileHistorySnapshotPayload(record);
+    if (!payload) continue;
     try {
       for (const snapshot of deserializeSnapshots(payload.snapshots)) {
         ids.add(snapshot.promptId);
@@ -4822,15 +4874,10 @@ function collectReferencedFileHistoryBackupNames(
 ): Set<string> {
   const names = new Set<string>();
   for (const record of records) {
-    if (
-      record.type !== 'system' ||
-      record.subtype !== 'file_history_snapshot' ||
-      !record.systemPayload
-    ) {
-      continue;
-    }
-    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
-    if (!Array.isArray(payload.snapshots)) continue;
+    const payload = readFileHistorySnapshotPayload(
+      record as Pick<ChatRecord, 'type' | 'subtype' | 'systemPayload'>,
+    );
+    if (!payload) continue;
     for (const snapshot of payload.snapshots) {
       if (
         !snapshot ||
@@ -4880,8 +4927,12 @@ export function replayUiTelemetryFromConversation(
       | UiTelemetryRecordPayload
       | undefined;
     const uiEvent = payload?.uiEvent;
-    if (uiEvent) {
-      uiTelemetryService.addEvent(uiEvent, sessionId);
+    if (
+      uiEvent &&
+      uiEvent['event.name'] !== 'request_lifecycle' &&
+      uiEvent['event.name'] !== 'tool_lifecycle'
+    ) {
+      uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
     }
   }
 

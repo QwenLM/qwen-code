@@ -116,6 +116,37 @@ If the QQ server rejects a Markdown message for any reason, the channel automati
 
 This is the opposite of the WeChat channel, which strips all Markdown. You can let the agent use full Markdown with the QQ channel.
 
+## Images and Videos
+
+Users can send images and videos to the bot. An image is passed to the agent as vision input, so the agent sees the picture itself — screenshots, error messages, and diagrams all work — and the same file is also saved to a temporary local path for the case where the model cannot take images. A video is saved to a temporary local path and the agent is told that path.
+
+A media message does not need any text — an image-only or video-only message starts a turn, and the channel uses `(image)` or `(video)` as the placeholder. When the message does carry text, that text is kept as the caption.
+
+- Images are limited to 8 MB and videos to 20 MB, and at most five attachments per message are handled. Anything larger is skipped and logged to the channel's stderr.
+- Downloaded files are not deleted. They stay under the system temporary directory, which the system clears on its own schedule.
+
+Image input requires a model that accepts images. Declare the capability when the model is multimodal but not recognised by name. The field belongs on the provider entry that serves the model, because a top-level `model.generationConfig` value is ignored for provider-backed models:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "your-model-id",
+        "baseUrl": "https://example.invalid/v1",
+        "generationConfig": {
+          "modalities": { "image": true }
+        }
+      }
+    ]
+  }
+}
+```
+
+With a text-only model the agent receives an "unsupported image" note plus the saved path instead of the picture.
+
+Sending images or videos back to QQ is not supported.
+
 ## Token Management
 
 Access tokens expire after approximately 2 hours. The channel automatically refreshes them at 80% of their TTL (typically ~1.6 hours). If a refresh fails, it retries after 60 seconds.

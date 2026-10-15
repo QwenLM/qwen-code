@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.math.BigDecimal;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -222,12 +221,11 @@ final class ManagedContextProtocol {
     }
 
     private static long integer(Object value) {
-        require(value instanceof Number);
-        try {
-            return new BigDecimal(value.toString()).longValueExact();
-        } catch (ArithmeticException | NumberFormatException failure) {
+        Long exact = BrokerValues.exactLong(value);
+        if (exact == null) {
             throw new IllegalArgumentException("Managed context number is invalid.");
         }
+        return exact;
     }
 
     private static boolean exactNumber(Object value, long expected) {

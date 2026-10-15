@@ -1,20 +1,23 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class QwenHostedHarnessNewSessionRegressionTest {
     @Test
@@ -41,8 +44,13 @@ class QwenHostedHarnessNewSessionRegressionTest {
         properties.getSessionStore().setEnabled(true);
         properties.getSessionStore().setBaseUrl("https://store.example");
         properties.getSessionStore().setWorkspaceId("workspace-a");
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", sessionId)).thenReturn(
+                new SessionRecord("tenant-a", sessionId, "qwen-code", null,
+                        "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
         QwenHostedHarnessConnector connector =
-                new QwenHostedHarnessConnector(properties);
+                new QwenHostedHarnessConnector(properties, sessions,
+                        mock(WorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
 
         HarnessConnector.Attachment attachment = connector.createOrLoad(

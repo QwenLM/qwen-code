@@ -13,32 +13,19 @@ class JdbcRepositoryTest {
     }
 
     @Test
-    void standaloneInitializerUpgradesOldRowsWithoutChangingTheirOutcome() throws Exception {
+    void freshInitializerRefusesLegacyTablesWithoutChangingExistingRows() throws Exception {
         DataSource source = dataSource();
-        String schema;
-        try (var stream = getClass().getResourceAsStream("/com/alibaba/qwen/code/runtimebroker/schema.sql")) {
-            schema = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
-                    .replace("    loss_evidence_json LONGTEXT,\n", "")
-                    .replace("    stop_evidence_json LONGTEXT,\n", "")
-                    .replace("    abandoned_at DATETIME(6),\n", "")
-                    .replace("    loss_evidence_id VARCHAR(512),\n", "");
-        }
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            for (String command : schema.split(";")) {
-                if (!command.isBlank()) {
-                    statement.execute(command);
-                }
-            }
+            statement.execute("CREATE TABLE qwen_runtime_binding (binding_id VARCHAR(128) PRIMARY KEY)");
+            statement.execute("INSERT INTO qwen_runtime_binding VALUES ('original')");
         }
-        JdbcRepositoryContract.writeLegacyRows(source, "standalone-upgrade");
-        JdbcRuntimeBrokerSchema.initialize(source);
-        JdbcRuntimeBrokerSchema.initialize(source);
-        var executions = new JdbcToolExecutionRepository(source);
-        for (String state : java.util.List.of("PREPARED", "UNKNOWN", "SETTLED")) {
-            var stored = executions.findByIdempotencyKey("standalone-upgrade-" + state + "-key");
-            org.junit.jupiter.api.Assertions.assertEquals(state, stored.getState().name());
-            org.junit.jupiter.api.Assertions.assertEquals(5, stored.getVersion());
-            org.junit.jupiter.api.Assertions.assertNull(stored.getLossEvidenceId());
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var rows = statement.executeQuery("SELECT binding_id FROM qwen_runtime_binding")) {
+            org.junit.jupiter.api.Assertions.assertTrue(rows.next());
+            org.junit.jupiter.api.Assertions.assertEquals("original", rows.getString(1));
+            org.junit.jupiter.api.Assertions.assertFalse(rows.next());
         }
     }
 

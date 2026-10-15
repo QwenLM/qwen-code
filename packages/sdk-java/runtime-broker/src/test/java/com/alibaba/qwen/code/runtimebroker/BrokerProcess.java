@@ -100,10 +100,18 @@ final class BrokerProcess implements AutoCloseable {
     }
 
     Reply create(String harness, String runtimeSession, String key,
-            Map<String, Object> reference) {
+            FaultGateRig.ToolCall toolCall) {
         return call("create", Map.of("harness", harness,
                 "runtimeSession", runtimeSession, "key", key,
-                "reference", reference));
+                "reference", toolCall.reference(), "payloadJson", toolCall.payloadJson()));
+    }
+
+    /** Creates and dispatches in one step, never reserving first. */
+    Reply createImmediate(String harness, String runtimeSession, String key,
+            FaultGateRig.ToolCall toolCall) {
+        return call("createImmediate", Map.of("harness", harness,
+                "runtimeSession", runtimeSession, "key", key,
+                "reference", toolCall.immediateReference()));
     }
 
     Reply get(String harness, String runtimeSession, String execution) {

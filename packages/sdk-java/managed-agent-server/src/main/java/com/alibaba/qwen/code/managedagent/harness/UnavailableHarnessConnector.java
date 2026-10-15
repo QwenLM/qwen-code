@@ -16,6 +16,12 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public Attachment recoverManagedRuntime(String tenantId, String sessionId,
+            boolean cancellation) {
+        throw unavailable();
+    }
+
+    @Override
     public Admission submit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
@@ -35,6 +41,11 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void rename(String tenantId, String sessionId, String title, long revision) {
+        rename(tenantId, sessionId, title);
+    }
+
+    @Override
     public void rename(String tenantId, String sessionId, String title) {
         throw unavailable();
     }
@@ -44,7 +55,7 @@ public class UnavailableHarnessConnector implements HarnessConnector {
         throw unavailable();
     }
 
-    private static IllegalStateException unavailable() {
-        return new IllegalStateException("Hosted Harness is disabled");
+    private static HarnessDisabledException unavailable() {
+        return new HarnessDisabledException("Hosted Harness is disabled");
     }
 }

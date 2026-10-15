@@ -15,7 +15,7 @@ tools, remote storage, or external jobs that recreate writers after reboot.
 
 ## Persistent identity and launch ordering
 
-An opt-in `runtime-broker.durable-local-process` mode uses the configured state
+`runtime-broker.durable-local-process` (on by default) uses the configured state
 directory, outside Workspace roots. Linux `/etc/machine-id` and
 `/proc/sys/kernel/random/boot_id` supply host and boot identity. The saved PID
 namespace from `/proc/self/ns/pid` and time namespace from `/proc/self/ns/time`
@@ -103,10 +103,14 @@ general force-unlock or PID-kill recovery is introduced.
 durable modes. A package-private local store owns locking and durable records.
 `RuntimeProvisioner` and the Workspace wrapper expose narrowly scoped startup
 recovery support. `RuntimeBrokerService` permits observation of supported saved
-startup records. Embedded configuration explicitly enables the mode and rejects
+startup records. Embedded configuration enables the mode by default (opt out
+with `runtime-broker.durable-local-process=false` together with
+`runtime-broker.trusted-local-reboot-recovery=false`; the packaged server maps
+these to `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS` and
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY`) and rejects
 a recovery directory under any configured Workspace root. No database migration
-or public API changes are needed. Existing constructors and the default
-configuration stay ephemeral.
+or public API changes are needed. Existing constructors stay ephemeral; the
+default configuration uses the durable mode.
 
 ## Verification and acceptance
 

@@ -21,6 +21,10 @@ import {
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
+import {
+  isSkipSelectorOnUniqueStrongHitEnabled,
+  RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
+} from './recall-experiment.js';
 import { AUTO_MEMORY_SCOPES } from './types.js';
 import {
   createAutoMemoryTreeSnapshot,
@@ -114,6 +118,7 @@ const RECALL_TOKEN_RUN = new RegExp(
 
 /** Whether a matched run is CJK, and therefore bigram-tokenized. */
 const CJK_RUN_START = new RegExp(`^${CJK_CLASS}`, 'u');
+const CJK_RUN_END = new RegExp(`${CJK_CLASS}$`, 'u');
 const CJK_BIGRAM = new RegExp(`^${CJK_CLASS}{2}$`, 'u');
 
 function normalizeRecallText(text: string): string {
@@ -303,31 +308,56 @@ function scoreDocument(
   return lexicalScore + typeBoost;
 }
 
-function isStrongFastMatch(
+function matchesTitleOrKeyword(
   query: string,
   doc: ScannedAutoMemoryDocument,
+  /**
+   * Require a token boundary for every non-CJK title and keyword instead of
+   * only the short Latin ones. Only the #13003 skip gate sets this: there the
+   * match is the final authority on whether the selector runs at all, so a
+   * coincidental inner substring (`ai` inside `explain`, `log` inside
+   * `catalog`) would cancel the model call that is the only thing correcting
+   * it. Ranking callers keep the loose arm, so default recall behavior is
+   * unchanged.
+   */
+  requireTokenBoundary = false,
 ): boolean {
   const normalizedQuery = normalizeRecallText(query);
   const title = normalizeRecallText(doc.title).trim();
   const keywords = doc.keywords
     .map((keyword) => normalizeRecallText(keyword).trim())
     .filter(Boolean);
-  const includesKeyword = (keyword: string) => {
-    if (!/^[a-z0-9]{1,2}$/.test(keyword)) {
-      return normalizedQuery.includes(keyword);
-    }
-    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(
-      `(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`,
-      'u',
-    ).test(normalizedQuery);
+  // CJK edges and neighbors split non-CJK tokens without a separator; other
+  // edges still need boundaries so Git文档 cannot match inside Legit文档.
+  const includesValue = (value: string) => {
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const boundary = requireTokenBoundary
+      ? `(?:${CJK_CLASS}|[^\\p{L}\\p{N}])`
+      : '[^\\p{L}\\p{N}]';
+    const leftBoundary = CJK_RUN_START.test(value) ? '' : `(?:^|${boundary})`;
+    const rightBoundary = CJK_RUN_END.test(value) ? '' : `(?:$|${boundary})`;
+    return new RegExp(`${leftBoundary}${escaped}${rightBoundary}`, 'u').test(
+      normalizedQuery,
+    );
   };
-  if (
-    (title.length > 0 && normalizedQuery.includes(title)) ||
+  const includesKeyword = (keyword: string) =>
+    requireTokenBoundary || /^[a-z0-9]{1,2}$/.test(keyword)
+      ? includesValue(keyword)
+      : normalizedQuery.includes(keyword);
+  return (
+    (title.length > 0 &&
+      (requireTokenBoundary
+        ? includesValue(title)
+        : normalizedQuery.includes(title))) ||
     keywords.some(includesKeyword)
-  ) {
-    return true;
-  }
+  );
+}
+
+function isStrongFastMatch(
+  query: string,
+  doc: ScannedAutoMemoryDocument,
+): boolean {
+  if (matchesTitleOrKeyword(query, doc)) return true;
 
   const queryTokens = tokenize(query);
   const metadata = normalizeRecallText(
@@ -480,7 +510,19 @@ export interface RelevantAutoMemoryPromptResult {
   prompt: string;
   selectedDocs: ScannedAutoMemoryDocument[];
   strategy: 'none' | 'heuristic' | 'model';
+  /**
+   * Set only when the model selector was skipped because the fast result was
+   * a unique title/keyword match with no body in history: this IS the fast result, so the
+   * consumer delivers it as the fast phase rather than as a refined one.
+   */
+  selectorSkipped?: true;
 }
+
+// The flag name and its predicate are defined in './recall-experiment.js', a
+// module with no imports, so `telemetry/loggers.ts` can read the same
+// definition without joining the memory → telemetry → memory cycle. The name
+// stays exported here because this module owns the experiment.
+export { RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV };
 
 function createRecallResult(
   treeSnapshot: AutoMemoryTreeSnapshot | undefined,
@@ -526,7 +568,7 @@ async function rereadSelectedDocuments(
   const dropped = docs.filter((_, index) => reread[index] === null);
   if (dropped.length > 0) {
     debugLogger.warn(
-      `Selected memory dropped before injection (deleted, unreadable, or untrusted): ${dropped
+      `Selected memory dropped before injection (unavailable or changed during the read): ${dropped
         .map(toAutoMemoryRef)
         .join(', ')}`,
     );
@@ -546,8 +588,23 @@ function logRecallResult(
     fastDurationMs: number;
     selectorDurationMs: number;
   },
+  selectorDecided: boolean,
 ): void {
   if (!config || abortSignal?.aborted) return;
+  // The skip guard only exists in structured mode, so legacy recalls never
+  // have a selector-skip decision to report: stamping `false` there would
+  // mix a constant into the experiment's control series. Leave the field
+  // unset and let the logger drop the dimension.
+  //
+  // A structured recall that returned before the selector was ever reached —
+  // the empty-query / empty-corpus / non-positive-limit short circuit — is in
+  // the same position: it made no skip decision, and `false` there would read
+  // as "the selector ran and was not skipped". That would put trivially fast
+  // recalls into the ablation's control arm, which the treatment arm
+  // structurally cannot contain (a skip requires exactly one candidate), and
+  // `recordMemoryRecallMetrics` carries only `strategy` and `selector_skipped`
+  // on the counter and histogram, so the samples could not be sliced back out.
+  const legacy = (config.getMemoryRecallMode?.() ?? 'legacy') === 'legacy';
   logMemoryRecall(
     config,
     new MemoryRecallEvent({
@@ -559,6 +616,9 @@ function logRecallResult(
       scan_duration_ms: timings.scanDurationMs,
       fast_duration_ms: timings.fastDurationMs,
       selector_duration_ms: timings.selectorDurationMs,
+      ...(legacy || !selectorDecided
+        ? {}
+        : { selector_skipped: result.selectorSkipped === true }),
     }),
   );
 }
@@ -656,6 +716,9 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       result,
       t0,
       timings(),
+      // Short circuit: the selector was never reached, so this recall made no
+      // skip decision and must not enter the control series as `false`.
+      false,
     );
     return result;
   }
@@ -664,6 +727,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   if (options.config) {
     try {
       const fastStartedAt = Date.now();
+      const skipGateEnabled =
+        !legacy && isSkipSelectorOnUniqueStrongHitEnabled();
       const candidates = selectModelCandidateDocuments(
         query,
         docs,
@@ -675,6 +740,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       // Publish the deterministic candidates before blocking on the selector
       // round trip. `fallbackDocs` is already lexically ranked and already has
       // active-tool noise filtered out by selectModelCandidateDocuments.
+      let publishedFast: RelevantAutoMemoryPromptResult | undefined;
+      let fastCandidateCount = 0;
       if (options.onFastResult && !options.abortSignal?.aborted) {
         const fastDocs = legacy
           ? fallbackDocs.slice(0, MAX_FAST_RECALL_DOCS)
@@ -688,18 +755,61 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
                   isStrongFastMatch(query, doc),
               ),
             ].slice(0, MAX_FAST_RECALL_DOCS);
-        if (!legacy || fastDocs.length > 0)
-          options.onFastResult(
-            createRecallResult(
-              treeSnapshot,
-              fastDocs,
-              fastDocs.length > 0 ? 'heuristic' : 'none',
-              bodyPresentVersions,
-              legacy,
-            ),
+        fastCandidateCount = fastDocs.length;
+        if (!legacy || fastDocs.length > 0) {
+          publishedFast = createRecallResult(
+            treeSnapshot,
+            fastDocs,
+            fastDocs.length > 0 ? 'heuristic' : 'none',
+            bodyPresentVersions,
+            legacy,
           );
+          options.onFastResult(publishedFast);
+        }
       }
       fastDurationMs = Date.now() - fastStartedAt;
+      // Count before rendering: a second candidate trimmed by the prompt
+      // budget must not turn an ambiguous recall into a selector skip.
+      const uniqueStrongHit = publishedFast?.selectedDocs[0];
+      if (
+        skipGateEnabled &&
+        fastCandidateCount === 1 &&
+        publishedFast?.selectedDocs.length === 1 &&
+        uniqueStrongHit !== undefined &&
+        // Strict arm: this match decides whether the selector runs at all, so
+        // it may not rest on a coincidental inner substring.
+        matchesTitleOrKeyword(query, uniqueStrongHit, true) &&
+        !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
+        !options.abortSignal?.aborted &&
+        // Count ranking and strict matches across the full selector pool,
+        // including CJK-adjacent short keywords in the recent reserve.
+        candidates.modelCandidates.filter(
+          (doc) =>
+            matchesTitleOrKeyword(query, doc) ||
+            matchesTitleOrKeyword(query, doc, true),
+        ).length === 1 &&
+        (await rereadSelectedDocuments([uniqueStrongHit]))[0]?.mtimeMs ===
+          uniqueStrongHit.mtimeMs &&
+        !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
+        !options.abortSignal?.aborted
+      ) {
+        const result: RelevantAutoMemoryPromptResult = {
+          ...publishedFast,
+          selectorSkipped: true,
+        };
+        logRecallResult(
+          options.config,
+          options.abortSignal,
+          query.length,
+          docs.length,
+          result,
+          t0,
+          timings(),
+          // This is the deliberate skip the field exists to report.
+          true,
+        );
+        return result;
+      }
       selectorStartedAt = Date.now();
       const modelSelectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
         options.config,
@@ -730,6 +840,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         result,
         t0,
         timings(),
+        // The selector ran, so `false` is a genuine control sample.
+        true,
       );
       return result;
     } catch (error) {
@@ -795,6 +907,11 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     result,
     t0,
     timings(),
+    // Heuristic fallback. `selectorStartedAt` is set the instant the selector
+    // is entered, so it separates "the selector ran and then failed" — a real
+    // control sample, `false` is correct — from a throw before it was reached,
+    // which made no skip decision and must stay off the series.
+    selectorStartedAt !== undefined,
   );
   return result;
 }

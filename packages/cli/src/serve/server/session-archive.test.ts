@@ -20,11 +20,13 @@ import {
   type SessionWriterLease,
   Storage,
   getCronFilePath,
+  getSessionWriterLockPath,
   readSessionPrs,
   readCronTasks,
   updateCronTasks,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   danglingInFlightPromptIds,
   readPromptLedgerRecords,
@@ -493,6 +495,80 @@ describe('archiveDaemonSessions', () => {
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
+  });
+
+  it('archives a sealed Managed session through the sealed-writer fallback', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440202';
+    const transcriptPath = path.join(
+      new Storage(workspaceDir, runtimeDir).getProjectDir(),
+      'chats',
+      `${sessionId}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const session = await openManagedSession({
+      runtimeBaseDir: runtimeDir,
+      sessionId,
+      transcriptPath,
+      sessionKey: {
+        tenantId: 't1',
+        workspaceId: 'w1',
+        sessionId,
+      },
+      cwd: workspaceDir,
+      version: 'test',
+      workerId: 'archive-test',
+      activationLeaseDurationMs: 60_000,
+      create: {
+        definitionRef: {
+          resourceId: 'def-1',
+          kind: 'managed-definition',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest: 'a'.repeat(64),
+        },
+        rootSnapshotRef: {
+          resourceId: 'root-1',
+          kind: 'managed-root',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest: 'b'.repeat(64),
+        },
+        createdBy: 'test',
+      },
+    });
+    // Sealed schema-3 lock: a legacy maintenance lease cannot take it, so the
+    // route only works when the sealed-Managed fallback arm runs first.
+    await session.close();
+
+    const service = new SessionService(workspaceDir);
+    await expect(
+      service.getMaintainableSessionLocation(sessionId),
+    ).resolves.toBe('active');
+
+    const lockPath = getSessionWriterLockPath(runtimeDir, sessionId);
+    const lockBefore = fs.readFileSync(lockPath);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    // With the sealed-Managed arm removed the route reports mutationApplied:
+    // false for exactly the sessions the design requires to succeed.
+    expect(result.errors).toEqual([]);
+    expect(result).toEqual({
+      archived: [sessionId],
+      alreadyArchived: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [],
+    });
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+    expect(fs.readFileSync(lockPath)).toEqual(lockBefore);
   });
 
   it('collapses case-variant spellings in one batch to a single archive', async () => {
