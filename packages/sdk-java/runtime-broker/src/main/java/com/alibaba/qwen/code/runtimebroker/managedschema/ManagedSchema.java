@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Objects;
 
 import java.util.regex.Pattern;
@@ -17,7 +18,11 @@ public final class ManagedSchema {
     public static final String PRIVATE_AUTHORITY =
             "/db/managed-schema/V2__private_csi_authority.sql";
     public static final String K2_RETIREMENT =
-            "/db/managed-schema/V3__k2_retirement_evidence.sql";
+            "/db/managed-schema/V4__k2_retirement_evidence.sql";
+    public static final String SESSION_LIST =
+            "/db/managed-schema/V3__session_list_created_at.sql";
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, K2_RETIREMENT);
+    private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}
 
@@ -32,15 +37,14 @@ public final class ManagedSchema {
             var tables = ManagedSchemaCatalog.tables(connection);
             if (!tables.isEmpty()) {
                 int version = schemaVersion(connection);
-                if (version < 3) {
+                if (version < CURRENT) {
                     if (ManagedSchemaCatalog.hasHistory(connection)) {
                         throw new SQLException(
-                                "The canonical catalog requires the application's pending migrations");
+                                "The canonical V" + version + " catalog requires the application's V" + (version + 1) + " migration");
                     }
-                    if (version == 1) {
-                        execute(connection, read(PRIVATE_AUTHORITY));
+                    for (String extension : EXTENSIONS.subList(version - 1, EXTENSIONS.size())) {
+                        execute(connection, read(extension));
                     }
-                    execute(connection, read(K2_RETIREMENT));
                     ManagedSchemaCatalog.validate(connection, ddl);
                 }
                 return;
@@ -70,13 +74,31 @@ public final class ManagedSchema {
     }
 
     public static String ddl() {
-        return extend(extend(read(RESOURCE), read(PRIVATE_AUTHORITY)), read(K2_RETIREMENT));
+        return ddl(CURRENT);
+    }
+
+    private static String ddl(int version) {
+        String ddl = read(RESOURCE);
+        for (String extension : EXTENSIONS.subList(0, version - 1)) {
+            ddl = extend(ddl, read(extension));
+        }
+        return ddl;
     }
 
     private static String extend(String ddl, String extension) {
         for (String raw : extension.replaceAll("(?m)^--[^\\n]*", "").split(";")) {
             String command = raw.trim();
             if (command.isEmpty()) {
+                continue;
+            }
+            var drop = Pattern.compile("DROP INDEX ([a-z_]+) ON (ma_[a-z_]+)").matcher(command);
+            if (drop.matches()) {
+                var index = Pattern.compile("\\nCREATE INDEX " + drop.group(1) + " ON " + drop.group(2)
+                        + " \\([^)]+\\);").matcher(ddl);
+                if (!index.find()) {
+                    throw new IllegalStateException("Dropped index is absent from the canonical baseline");
+                }
+                ddl = index.replaceFirst("");
                 continue;
             }
             var addition = Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD (?:COLUMN )?(.+)",
@@ -120,25 +142,24 @@ public final class ManagedSchema {
     }
 
     private static int schemaVersion(Connection connection) throws SQLException {
-        try {
-            ManagedSchemaCatalog.validate(connection, ddl());
-            return 3;
-        } catch (SQLException current) {
+        SQLException current = null;
+        for (int version = CURRENT; version >= 1; version--) {
             try {
-                ManagedSchemaCatalog.validateBaseline(connection,
-                        extend(read(RESOURCE), read(PRIVATE_AUTHORITY)));
-                return 2;
-            } catch (SQLException authority) {
-                current.addSuppressed(authority);
-            }
-            try {
-                ManagedSchemaCatalog.validateBaseline(connection, read(RESOURCE));
-                return 1;
-            } catch (SQLException baseline) {
-                current.addSuppressed(baseline);
-                throw current;
+                if (version == CURRENT) {
+                    ManagedSchemaCatalog.validate(connection, ddl(version));
+                } else {
+                    ManagedSchemaCatalog.validateBaseline(connection, ddl(version));
+                }
+                return version;
+            } catch (SQLException mismatch) {
+                if (current == null) {
+                    current = mismatch;
+                } else {
+                    current.addSuppressed(mismatch);
+                }
             }
         }
+        throw current;
     }
 
     private static void execute(Connection connection, String ddl) throws SQLException {

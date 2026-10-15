@@ -3458,7 +3458,7 @@ export function createServeApp(
   const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
-  registerSessionRoutes(app, {
+  const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,
@@ -3938,6 +3938,7 @@ export function createServeApp(
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
     virtualSubagentSessions,
+    resolveSubagentSessionRuntime,
     conversationRuntimeActivity,
   });
 

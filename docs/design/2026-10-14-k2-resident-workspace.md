@@ -68,6 +68,13 @@ to RELEASED and never writes the physical owner. It retains
 reservation identity. No expiration, failed RPC or lost Pod permits another
 Workspace or tenant to take ownership.
 
+The canonical catalog preserves published V1/V2 and main's V3 Session-list
+index migration. The unpublished K2 retirement extension moves to V4 without
+changing its SQL. Both Broker initialization and Flyway recognize the exact
+V1/V2/V3 catalog shapes before applying pending extensions, preserve existing
+rows and migration-history entries, and validate the complete V4 catalog. A
+partially modified or unknown catalog remains unavailable.
+
 ## Session admission and tools
 
 Creation locks the real `ma_workspace` row and checks current unfinished
@@ -130,6 +137,14 @@ native acceptance operations are not retried through this architecture change.
 Build, typecheck, focused tests, independent validation and two clean full-diff
 audits precede a completion claim. Deployment and cloud acceptance remain separate
 from local implementation validation.
+
+The Session lock-order canary includes the resident store's Session locks and
+the CSI inventory's Turn reads in its exact source boundary. It resolves calls
+on a final method-body local only when that local directly constructs one unique
+private static final nested type declared directly in the caller and has no
+reassignment, shadowing or escape.
+These calls retain normal audit edges: reversed lock order still fails. Unknown
+receivers, aliases and ambiguous overloads remain unresolvable.
 
 The ordinary public lifecycle integration test uses real Spring HTTP, H2,
 Hosted Harness, journal writers and worker/provider processes on macOS. A

@@ -55,6 +55,11 @@ guard 约束。
 `csi_phase = RESERVED` 和原 reservation 身份。过期、RPC 失败或 Pod 丢失均
 不能让其他 Workspace 或租户接管占用。
 
+canonical catalog 保留已发布 V1/V2 和主干 V3 Session 列表索引迁移。尚未发布的
+K2 退役扩展顺延为 V4，SQL 内容不变。Broker 初始化和 Flyway 都在应用后续扩展
+前验证精确 V1/V2/V3 目录形状，保留原数据和迁移历史行，再验证完整 V4 目录。
+部分修改或未知目录仍不可用。
+
 ## Session 准入与工具
 
 创建时锁住真实 `ma_workspace` 行，在插入前检查当前未完成 Session 和未结算
@@ -106,6 +111,12 @@ Broker 重启恢复原持久化运行环境身份。worker 或 Pod 被替换、�
 Linux CSI 挂载或 ACK 部署。此前拒绝的 native 验收操作不借架构调整重新尝试。
 完成声明前需要构建、类型检查、聚焦测试、独立验证和两轮干净完整 diff 自审。
 部署及云上验收与本地实现验证分开记录。
+
+Session 锁顺序 canary 的精确源码边界包含常驻 store 的 Session 锁和 CSI inventory
+的 Turn 读取。只有方法体顶层的 final 局部变量直接构造调用者类内直接声明的
+private static final 嵌套类型，且没有重赋值、遮蔽或逃逸时，才解析它的成员调用。
+这些调用仍生成正常审计边，反向锁顺序仍失败；未知 receiver、别名和有歧义的
+重载保持无法解析。
 
 普通公开生命周期联调在 macOS 使用真实 Spring HTTP、H2、Hosted Harness、日志
 writer 和 worker/provider 进程。Broker 的包私有构造器接受明确的测试放置 provider；

@@ -593,7 +593,7 @@ final class WorkspaceCsiApplicationInventory {
         if (target == null || target.getAutoCommit() || original == null || intent == null) {
             throw new IllegalArgumentException("An original transaction and validated original intent are required");
         }
-        var inventory = new Inspection(target, original, intent);
+        final Inspection inventory = new Inspection(target, original, intent);
         try {
             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.validate(target);
         } catch (SQLException mismatch) {
@@ -620,7 +620,7 @@ final class WorkspaceCsiApplicationInventory {
         WorkspaceCsiApplicationImage.expected(baseline, com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.SETTLING,
                 null, null, null);
         // Only the saved-row validators run here; no discover, membership lookup or SQL is invoked.
-        var validation = new Inspection(null, actual, intent);
+        final Inspection validation = new Inspection(null, actual, intent);
         var references = originalReferences(actual, intent, baseline);
         for (Row receipt : baseline.table("ma_request_receipt").rows()) {
             if (receipt.membership() == Membership.ORIGINAL && validation.rawSession(receipt)

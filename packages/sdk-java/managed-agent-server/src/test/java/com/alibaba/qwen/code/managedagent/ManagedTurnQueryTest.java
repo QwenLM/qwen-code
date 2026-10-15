@@ -103,6 +103,34 @@ class ManagedTurnQueryTest {
     }
 
     @Test
+    void batchedEnvironmentEventsKeepEachSessionPairedWithItsRequestedTurn() throws Exception {
+        String tenant = tenant();
+        String first = emptySession(tenant);
+        String second = emptySession(tenant);
+        for (String session : List.of(first, second)) {
+            turn(tenant, session, "turn_a", "COMPLETED", 1_000, 3_000L, null);
+            turn(tenant, session, "turn_b", "RUNNING", 2_000, null, null);
+        }
+        store.appendPublicEventIfAbsent(tenant, first, "turn_a",
+                "environment.ready", Map.of(), false, "first:wanted");
+        store.appendPublicEventIfAbsent(tenant, second, "turn_b",
+                "environment.provisioning", Map.of(), false, "second:wanted");
+        store.appendPublicEventIfAbsent(tenant, first, "turn_b",
+                "environment.failed", Map.of(), false, "first:other-turn");
+        store.appendPublicEventIfAbsent(tenant, second, "turn_a",
+                "environment.failed", Map.of(), false, "second:other-turn");
+
+        var events = store.findLatestEnvironmentEvents(tenant, Map.of(
+                first, store.findTurnSummary(tenant, first, "turn_a").orElseThrow(),
+                second, store.findTurnSummary(tenant, second, "turn_b").orElseThrow()));
+        assertThat(events).containsOnlyKeys(first, second);
+        assertThat(events.get(first).turnId()).isEqualTo("turn_a");
+        assertThat(events.get(first).type()).isEqualTo("environment.ready");
+        assertThat(events.get(second).turnId()).isEqualTo("turn_b");
+        assertThat(events.get(second).type()).isEqualTo("environment.provisioning");
+    }
+
+    @Test
     void pagesNewestFirstAndBreaksTiesByTurnId() throws Exception {
         String tenant = tenant();
         String sessionId = emptySession(tenant);
