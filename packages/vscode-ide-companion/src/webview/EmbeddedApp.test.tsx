@@ -1718,8 +1718,12 @@ describe('EmbeddedApp message edit rewind', () => {
         }),
       );
     });
+    await deliverTranscript(props, [userBlock('u3', 'original text')]);
+    sdkMocks.rewindSession.mockImplementation(async () => {
+      await deliverTranscript(props, []);
+    });
     sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [snapshot(3)] });
-    const prepareSubmit = await startEditing(props, 3);
+    const prepareSubmit = await startEditing(props, 0);
 
     await act(async () => {
       await expect(
