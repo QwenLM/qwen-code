@@ -1082,7 +1082,27 @@ describe('ChatEditor context usage ring', () => {
     expect(getContextUsage).not.toHaveBeenCalled();
   });
 
-  it('opens the context breakdown when clicked', () => {
+  it('opens the details panel when clicked', () => {
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onOpenContextUsage).toHaveBeenCalledTimes(1);
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a transcript snapshot when the host has no details panel', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
       tokenCount: 100,
@@ -1097,6 +1117,24 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the conversation hint once the click opens the details panel', async () => {
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).not.toContain(
+      'Click to view the breakdown in the conversation.',
+    );
   });
 
   it('shows the used/total detail in the hover card on focus', async () => {

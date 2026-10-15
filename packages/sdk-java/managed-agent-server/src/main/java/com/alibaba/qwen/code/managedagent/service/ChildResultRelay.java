@@ -460,12 +460,12 @@ public class ChildResultRelay {
     }
 
     private void create(RelayRow row, PendingChild pending, long now) {
-        JsonNode body = readJson(relayStore.readResource(pending.tenantId(),
+        JsonNode body = readJson(relayStore.readResource(pending.tenantId(), pending.parentSessionId(),
                 pending.recordResourceId()), "child run body");
         String inputResource = body.required("inputRef")
                 .required("resourceId").asText();
         JsonNode envelope = readJson(
-                relayStore.readResource(pending.tenantId(), inputResource),
+                relayStore.readResource(pending.tenantId(), pending.parentSessionId(), inputResource),
                 "child launch envelope");
         // #13803 (K1): the record's kind selects the launch envelope —
         // never its shape: a child_agent launch is a prompt, a workflow
@@ -546,11 +546,11 @@ public class ChildResultRelay {
                         + " has no readable result yet");
             }
             String instruction = readJson(relayStore.readResource(
-                    pending.tenantId(), run.required("inputRef")
+                    pending.tenantId(), pending.parentSessionId(), run.required("inputRef")
                             .required("resourceId").asText()),
                     "continued run's launch envelope")
                     .required("prompt").asText();
-            String result = relayStore.readResource(pending.tenantId(),
+            String result = relayStore.readResource(pending.tenantId(), pending.parentSessionId(),
                     run.required("resultRef").required("resourceId")
                             .asText());
             if (result == null) {
@@ -1083,7 +1083,7 @@ public class ChildResultRelay {
                     "child result exceeds the copy bound", now);
             return;
         }
-        JsonNode body = readJson(relayStore.readResource(pending.tenantId(),
+        JsonNode body = readJson(relayStore.readResource(pending.tenantId(), pending.parentSessionId(),
                 pending.recordResourceId()), "child run body");
         ObjectNode receiptJson = mapper.createObjectNode()
                 .put("childSessionId", row.childSessionId())
@@ -1118,7 +1118,7 @@ public class ChildResultRelay {
         // child wakes the parent with a durable notification input; a
         // foreground child's acceptance commits alone and its answer
         // arrives through the original tool result, never a second wake.
-        JsonNode body = readJson(relayStore.readResource(pending.tenantId(),
+        JsonNode body = readJson(relayStore.readResource(pending.tenantId(), pending.parentSessionId(),
                 pending.recordResourceId()), "child run body");
         boolean background = "sent"
                 .equals(body.required("completion").asText());
@@ -1128,7 +1128,7 @@ public class ChildResultRelay {
         accept.put("childRunId", row.childRunId());
         if (background) {
             JsonNode envelope = readJson(
-                    relayStore.readResource(pending.tenantId(), body
+                    relayStore.readResource(pending.tenantId(), pending.parentSessionId(), body
                             .required("inputRef").required("resourceId")
                             .asText()),
                     "child launch envelope");

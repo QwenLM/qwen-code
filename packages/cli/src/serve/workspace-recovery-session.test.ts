@@ -1090,6 +1090,63 @@ describe('verifyRecoverySession', () => {
     expect(f.complete.size).toBe(f.refs.size);
   });
 
+  it('roundtrips fully collected retirement counters without replay or activation', async () => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+      },
+    };
+    const roundtrip = JSON.parse(
+      JSON.stringify(source),
+    ) as RecoverySessionSource;
+    const io = {
+      ...f.io,
+      async *transactions() {},
+      nextReference: vi.fn(async () => null),
+      enqueue: vi.fn(async () => {}),
+    };
+    await expect(
+      verifyRecoverySession(roundtrip, io, 'migration'),
+    ).resolves.toEqual({ fileHistory: 'not_captured' });
+    expect(roundtrip.retiredHead).toEqual(source.retiredHead);
+    expect(io.read).not.toHaveBeenCalled();
+    expect(io.enqueue).not.toHaveBeenCalled();
+    expect(roundtrip.publicSession.status).toBe('DELETED');
+  });
+
+  it.each([
+    { state: 'ACTIVE' },
+    { compactedThroughRevision: 0 },
+    { tenantId: 'other' },
+    { sessionId: 'other' },
+    { writerId: 'late-writer' },
+    { lastCommitDigest: 'bad' },
+    { writerGeneration: Number.MAX_SAFE_INTEGER + 1 },
+    { committedSequence: -1 },
+    { activationEpoch: 0.5 },
+  ])('rejects damaged collected retirement authority (%j)', async (damage) => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+        ...damage,
+      },
+    };
+    await expect(
+      verifyRecoverySession(source, {
+        ...f.io,
+        async *transactions() {},
+      }),
+    ).rejects.toThrow('invalid collected retirement head');
+  });
+
   it('requires retirement evidence before accepting a cleared checkpoint pointer', async () => {
     const f = retiredFixture();
     Object.assign(f.source, { retirement: null });
