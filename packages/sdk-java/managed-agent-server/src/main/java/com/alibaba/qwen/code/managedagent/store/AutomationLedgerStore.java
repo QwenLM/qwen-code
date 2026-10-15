@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -16,11 +18,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -232,12 +231,7 @@ public class AutomationLedgerStore {
     }
 
     public static String sha256(String value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
     }
 
     // --- definition mirror ---
@@ -460,7 +454,7 @@ public class AutomationLedgerStore {
                         + " SET blocked_reason = ?, gmt_modified = ?"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND lease_owner = ? AND fence = ?",
-                reason.substring(0, Math.min(reason.length(), 1024)), now,
+                StringUtils.truncate(Objects.requireNonNull(reason), 1024), now,
                 tenantId, scheduleId, owner, fence);
     }
 
@@ -539,8 +533,7 @@ public class AutomationLedgerStore {
     public boolean deferOccurrence(String tenantId, String scheduleId,
             String occurrenceKey, int attempts, long nextRetryAt,
             String lastError, String owner, long fence, long now) {
-        String error = lastError == null ? null
-                : lastError.substring(0, Math.min(lastError.length(), 1024));
+        String error = StringUtils.truncate(lastError, 1024);
         return jdbc.update("UPDATE ma_schedule_occurrence o"
                         + " SET o.attempts = ?, o.next_retry_at = ?,"
                         + " o.last_error = ?, o.gmt_modified = ?"

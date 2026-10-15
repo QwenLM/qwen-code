@@ -1934,7 +1934,7 @@ class ManagedAgentMySqlIT {
         var store =
                 new ManagedAgentDefinitionStore(
                         new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
-                                source));
+                                source), new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -1985,7 +1985,7 @@ class ManagedAgentMySqlIT {
         var store =
                 new ManagedAgentDefinitionStore(
                         new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
-                                source));
+                                source), new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -2016,7 +2016,7 @@ class ManagedAgentMySqlIT {
                 .load()
                 .migrate();
         var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
-        var store = new ManagedAgentDefinitionStore(jdbc);
+        var store = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -2048,7 +2048,7 @@ class ManagedAgentMySqlIT {
         var winnerSource = dataSource();
         var winnerService =
                 new ManagedAgentDefinitionService(
-                        new ManagedAgentDefinitionStore(new JdbcTemplate(winnerSource)),
+                        new ManagedAgentDefinitionStore(new JdbcTemplate(winnerSource), new RequestDigests()),
                         new RequestDigests(),
                         new ObjectMapper());
         var winnerTransactions =
@@ -2073,7 +2073,7 @@ class ManagedAgentMySqlIT {
                 };
         var racingService =
                 new ManagedAgentDefinitionService(
-                        new ManagedAgentDefinitionStore(racingJdbc),
+                        new ManagedAgentDefinitionStore(racingJdbc, new RequestDigests()),
                         new RequestDigests(),
                         new ObjectMapper());
 

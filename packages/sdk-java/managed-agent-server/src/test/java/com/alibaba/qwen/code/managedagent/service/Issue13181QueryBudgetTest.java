@@ -1183,7 +1183,8 @@ class Issue13181QueryBudgetTest {
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
         }
-        long renewals = fixture.ledger.count("update ma_operation set claim_until");
+        long renewals = fixture.ledger.count("update ma_operation set",
+                "claim_until = ?, verification_next_at = case when");
         assertThat(renewals).isGreaterThanOrEqualTo(2);
         assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
         assertThat(fixture.ledger.count("from ma_session_head", "for update"))
@@ -1231,7 +1232,8 @@ class Issue13181QueryBudgetTest {
         assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read")
                 .path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(reads).hasValueGreaterThan(1000);
-        assertThat(fixture.ledger.count("update ma_operation set claim_until")).isZero();
+        assertThat(fixture.ledger.count("update ma_operation set",
+                "claim_until = ?, verification_next_at = case when")).isZero();
         assertThat(fixture.ledger.count("select inline_bytes from ma_resource")).isZero();
         assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
     }
