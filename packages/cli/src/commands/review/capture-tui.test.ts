@@ -5480,7 +5480,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(stderr).not.toContain('may still be running');
   }, 15_000);
 
-  it.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a FAILED .ans write after capture — contract, not stack trace',
     async () => {
       // The capture window legally runs up to an hour; the disk can fill
@@ -6888,7 +6888,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses an unwritable existing --out dir BEFORE the capture runs',
     async () => {
       // mkdirSync({recursive}) does no permission check on an existing dir:
@@ -6907,7 +6907,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     },
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses a --cwd the process cannot ENTER, not just a missing one',
     async () => {
       // statSync alone passes a mode-644 directory; entering it needs +x —

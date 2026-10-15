@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -39,17 +40,14 @@ public final class ToolPublicationRetentionClockFixtureMain {
             }
             tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
                     new ManagedSessionStoreModels.AcquireWriterRequest("workspace-clock", "writer-clock", 60_000L)));
-            assertThat(jdbc.queryForObject("SELECT UNIX_TIMESTAMP(writer_lease_until) * 1000"
-                    + " - UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000 FROM ma_session_head"
-                    + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session))
+            assertThat(jdbc.queryForObject("SELECT CAST(writer_lease_until AS SIGNED) - (" + ManagedSchemaTime.SQL_NOW + ") FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session))
                     .isBetween(58_000L, 60_000L);
             assertThatThrownBy(() -> retire(jdbc, tx, tenant, session))
                     .isInstanceOfSatisfying(ApiException.class, error ->
                             assertThat(error.getCode()).isEqualTo("managed_session_writer_active"));
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL"
                     + " AND tenant_id = ?", Integer.class, tenant)).isZero();
-            jdbc.update("UPDATE ma_session_head SET writer_lease_until ="
-                    + " TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE tenant_id = ?", tenant);
+            jdbc.update("UPDATE ma_session_head SET writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE tenant_id = ?", tenant);
             retire(jdbc, tx, tenant, session);
             long retired = jdbc.queryForObject("SELECT retired_at FROM ma_session"
                     + " WHERE tenant_id = ?", Long.class, tenant);
@@ -73,7 +71,7 @@ public final class ToolPublicationRetentionClockFixtureMain {
     }
 
     private static long databaseEpoch(JdbcTemplate jdbc) {
-        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000", Long.class);
+        return jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", Long.class);
     }
 
     private static void assertEpoch(JdbcTemplate jdbc, long actual) {

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -90,7 +91,7 @@ public class ChildResultRelayStore {
     // every row whose classification is terminal (delivered, orphaned or
     // given up), because the bounded discovery set is for work still
     // owed — accumulated terminal rows would otherwise starve the
-    // fleet-wide scan behind an ORDER BY created_at LIMIT. The
+    // fleet-wide scan behind an ORDER BY gmt_create LIMIT. The
     // eligibility halves apply to both delivery arms: an unfiltered
     // accepted/consumed arm lets backed-off or foreign-leased rows squat
     // every slot of the bounded page, so a newer due launch is never
@@ -115,28 +116,12 @@ public class ChildResultRelayStore {
     // finished child where close is unavailable, and ahead of the page
     // they would keep a newer launch from ever being reached.
     private static final String PENDING_SQL =
-            "SELECT tenant_id, session_id, record_id, revision, delivery_state, record_resource_id FROM ("
+            "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
                     + " SELECT r.tenant_id, r.session_id, r.record_id, r.revision, r.delivery_state, r.record_resource_id,"
-                    + " 0 AS priority, r.created_at FROM ma_session_record r LEFT JOIN ma_operation l"
+                    + " 0 AS priority, r.gmt_create FROM ma_session_record r LEFT JOIN ma_operation l"
                     + " ON l.scope_key = r.session_scope_key AND l.operation_id = r.record_id"
                     + " AND l.operation_kind = 'CHILD_SESSION_START' WHERE r.domain = 'child_run'"
-                    + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL + " AND NOT EXISTS (SELECT 1 FROM ma_operation c"
-                    + " WHERE c.scope_key = r.session_scope_key AND c.operation_id = r.record_id"
-                    + " AND c.operation_kind = 'CHILD_SESSION_CLOSE')"
-                    + " AND ((r.delivery_state IN ('planned', 'accepting', 'unknown')"
-                    + " AND (l.state IS NULL OR l.state NOT IN ('done', 'orphaned', 'unknown')))"
-                    + " OR (r.delivery_state IN ('accepted', 'consumed', 'cancelled')"
-                    + " AND l.state NOT IN ('done', 'orphaned', 'unknown')))"
-                    + " AND (l.available_at IS NULL OR l.available_at <= ?)"
-                    + " AND (l.claim_until IS NULL OR l.claim_until <= FROM_UNIXTIME(? / 1000.0) OR l.claim_owner = ?)"
-                    + " UNION ALL SELECT o.tenant_id, o.session_id, o.operation_id AS record_id,"
-                    + " COALESCE(r.revision, 0) AS revision, COALESCE(r.delivery_state, 'accepted') AS delivery_state,"
-                    + " r.record_resource_id, 1 AS priority, o.created_at FROM ma_operation o"
-                    + " LEFT JOIN ma_session_record r ON r.session_scope_key = o.scope_key AND r.domain = 'child_run'"
-                    + " AND r.record_id = o.operation_id WHERE o.operation_kind = 'CHILD_SESSION_CLOSE'"
-                    + " AND o.state = 'close_debt' AND o.available_at <= ?"
-                    + " AND (o.claim_until IS NULL OR o.claim_until <= FROM_UNIXTIME(? / 1000.0) OR o.claim_owner = ?)"
-                    + " ) pending ORDER BY priority, created_at, session_id, record_id LIMIT ?";
+                    + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL + " AND NOT EXISTS (SELECT 1 FROM ma_operation c WHERE c.scope_key = r.session_scope_key AND c.operation_id = r.record_id AND c.operation_kind = 'CHILD_SESSION_CLOSE') AND ((r.delivery_state IN ('planned', 'accepting', 'unknown') AND (l.state IS NULL OR l.state NOT IN ('done', 'orphaned', 'unknown'))) OR (r.delivery_state IN ('accepted', 'consumed', 'cancelled') AND l.state NOT IN ('done', 'orphaned', 'unknown'))) AND (l.available_at IS NULL OR l.available_at <= ?) AND (l.claim_until IS NULL OR l.claim_until <= ? OR l.claim_owner = ?) UNION ALL SELECT o.tenant_id, o.session_id, o.operation_id AS record_id, COALESCE(r.revision, 0) AS revision, COALESCE(r.delivery_state, 'accepted') AS delivery_state, r.record_resource_id, 1 AS priority, o.gmt_create FROM ma_operation o LEFT JOIN ma_session_record r ON r.session_scope_key = o.scope_key AND r.domain = 'child_run' AND r.record_id = o.operation_id WHERE o.operation_kind = 'CHILD_SESSION_CLOSE' AND o.state = 'close_debt' AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ? OR o.claim_owner = ?) ) pending ORDER BY pending.priority, pending.gmt_create, pending.session_id, pending.record_id LIMIT ?";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -623,7 +608,7 @@ public class ChildResultRelayStore {
                         + " AND task_kind IN " + CHILD_SESSION_KINDS_SQL
                         + " AND task_state NOT IN ('completed', 'failed',"
                         + " 'cancelled')"
-                        + " ORDER BY created_at, record_id",
+                        + " ORDER BY gmt_create, record_id",
                 (result, row) -> new LiveScope(
                         result.getString("record_id"),
                         result.getString("record_resource_id")),
@@ -669,11 +654,11 @@ public class ChildResultRelayStore {
                         + " submission_attempted, harness_event_epoch"
                         + " FROM ma_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " ORDER BY created_at " + order + ", turn_id "
+                        + " ORDER BY gmt_create " + order + ", turn_id "
                         + order + " LIMIT 1",
                 (result, row) -> new TurnLine(result.getString("turn_id"),
                         result.getString("status"),
-                        (Long) result.getObject("completed_at"),
+                        result.getObject("completed_at", Long.class),
                         result.getString("error_code"),
                         result.getBoolean("submission_attempted"),
                         result.getString("harness_event_epoch")),
@@ -745,7 +730,7 @@ public class ChildResultRelayStore {
         String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", creationKey).toString();
         jdbc.update("INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
                         + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase,"
-                        + " created_at, updated_at) VALUES (?, ?, ?, 'CHILD_SESSION_START', ?, ?, ?, 'CHILD_RUN', ?, ?, ?,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHILD_SESSION_START', ?, ?, ?, 'CHILD_RUN', ?, ?, ?,"
                         + " 'creating', 'STARTING', ?, ?)",
                 operationKey("CHILD_SESSION_START", tenantId, parentSessionId, childRunId), scope(tenantId, parentSessionId), scope(tenantId, parentSessionId),
                 childRunId, tenantId, parentSessionId, ManagedSchemaKeys.key(childRunId), ManagedSchemaKeys.key(request), request, now, now);
@@ -753,19 +738,14 @@ public class ChildResultRelayStore {
         if (existing == null || !creationKey.equals(existing.creationKey())) {
             return null;
         }
-        int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
-                        + " claim_generation = claim_generation + 1, updated_at = ? WHERE operation_key = ?"
-                        + " AND state NOT IN ('done', 'orphaned', 'unknown')"
-                        + " AND (claim_owner = ? OR claim_until IS NULL OR claim_until < FROM_UNIXTIME(? / 1000.0))",
+        int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = ?, claim_generation = claim_generation + 1, gmt_modified = ? WHERE operation_key = ? AND state NOT IN ('done', 'orphaned', 'unknown') AND (claim_owner = ? OR claim_until IS NULL OR claim_until < ?)",
                 owner, leaseUntil, now,
                 operationKey(existing.operationKind(), tenantId, parentSessionId, childRunId), owner, now);
         return claimed == 1 ? find(tenantId, parentSessionId, childRunId) : null;
     }
 
     public RelayRow find(String tenantId, String parentSessionId, String childRunId) {
-        return jdbc.query("SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20, 3)) * 1000 AS claim_until_epoch FROM ma_operation WHERE scope_key = ? AND tenant_id = ? AND session_id = ?"
-                        + " AND operation_id = ? AND operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE')"
-                        + " ORDER BY CASE WHEN operation_kind = 'CHILD_SESSION_CLOSE' THEN 0 ELSE 1 END LIMIT 1",
+        return jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE scope_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') ORDER BY CASE WHEN operation_kind = 'CHILD_SESSION_CLOSE' THEN 0 ELSE 1 END LIMIT 1",
                 (row, index) -> {
                     JsonNode request = readBody(row.getString("request_json"));
                     JsonNode result = readBody(row.getString("result_json"));
@@ -775,7 +755,7 @@ public class ChildResultRelayStore {
                     return new RelayRow(row.getString("tenant_id"), row.getString("session_id"), row.getString("operation_id"),
                             request.path("creationKey").asText(), child, row.getString("state"), row.getString("claim_owner"),
                             until == null ? 0 : until, row.getInt("attempt_count"), row.getLong("available_at"),
-                            error, row.getLong("created_at"), row.getLong("updated_at"), row.getLong("claim_generation"),
+                            error, row.getLong("gmt_create"), row.getLong("gmt_modified"), row.getLong("claim_generation"),
                             row.getString("operation_kind"));
                 }, scope(tenantId, parentSessionId), tenantId, parentSessionId, childRunId).stream().findFirst().orElse(null);
     }
@@ -820,20 +800,14 @@ public class ChildResultRelayStore {
         }
         if ("close_debt".equals(state) && !"CHILD_SESSION_CLOSE".equals(row.operationKind())) {
             transactions.executeWithoutResult(status -> {
-                int changed = jdbc.update("UPDATE ma_operation SET state = 'done', claim_owner = NULL, claim_until = NULL,"
-                                + " result_json = ?, updated_at = ? WHERE operation_key = ? AND claim_owner = ?"
-                                + " AND claim_generation = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)",
+                int changed = jdbc.update("UPDATE ma_operation SET state = 'done', claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                         resultBody(childSessionId, lastError), now, operationKey(row.operationKind(), row.tenantId(),
                                 row.parentSessionId(), row.childRunId()), owner, row.claimGeneration(), now);
                 if (changed != 1) {
                     return;
                 }
                 String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", row.creationKey()).toString();
-                jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id,"
-                                + " session_id, target_kind, target_key, request_digest, request_json, result_json, state, phase,"
-                                + " claim_owner, claim_generation, claim_until, available_at, created_at, updated_at)"
-                                + " VALUES (?, ?, ?, 'CHILD_SESSION_CLOSE', ?, ?, ?, 'CHILD_RUN', ?, ?, ?, ?, 'close_debt',"
-                                + " 'CLOSING', ?, 1, FROM_UNIXTIME(? / 1000.0), ?, ?, ?)",
+                jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, request_digest, request_json, result_json, state, phase, claim_owner, claim_generation, claim_until, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHILD_SESSION_CLOSE', ?, ?, ?, 'CHILD_RUN', ?, ?, ?, ?, 'close_debt', 'CLOSING', ?, 1, ?, ?, ?, ?)",
                         operationKey("CHILD_SESSION_CLOSE", row.tenantId(), row.parentSessionId(), row.childRunId()),
                         scope(row.tenantId(), row.parentSessionId()), scope(row.tenantId(), row.parentSessionId()), row.childRunId(), row.tenantId(), row.parentSessionId(),
                         ManagedSchemaKeys.key(row.childRunId()), ManagedSchemaKeys.key(request), request,
@@ -842,23 +816,20 @@ public class ChildResultRelayStore {
             });
             return;
         }
-        jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, available_at = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
-                        + " updated_at = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)",
+        jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 state, resultBody(childSessionId, lastError), nextRetryAt, leaseUntil, now,
                 operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
                 owner, row.claimGeneration(), now);
     }
 
     public void scheduleRetry(RelayRow row, String owner, long nextRetryAt, long leaseUntil, long now) {
-        jdbc.update("UPDATE ma_operation SET available_at = ?, claim_until = FROM_UNIXTIME(? / 1000.0), updated_at = ?"
-                        + " WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)",
+        jdbc.update("UPDATE ma_operation SET available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 nextRetryAt, leaseUntil, now, operationKey(row.operationKind(), row.tenantId(),
                         row.parentSessionId(), row.childRunId()), owner, row.claimGeneration(), now);
     }
 
     public void defer(RelayRow row, String owner, long nextRetryAt, String lastError, long leaseUntil, long now) {
-        jdbc.update("UPDATE ma_operation SET attempt_count = ?, available_at = ?, result_json = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
-                        + " updated_at = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)",
+        jdbc.update("UPDATE ma_operation SET attempt_count = ?, available_at = ?, result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 row.attempts() + 1, nextRetryAt, resultBody(row.childSessionId(), lastError), leaseUntil, now,
                 operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
                 owner, row.claimGeneration(), now);
@@ -869,9 +840,7 @@ public class ChildResultRelayStore {
             throw new IllegalArgumentException("Unknown child result classification " + state);
         }
         transactions.executeWithoutResult(status -> {
-            int changed = jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, claim_owner = NULL,"
-                            + " claim_until = NULL, updated_at = ?, completed_at = ? WHERE operation_key = ?"
-                            + " AND claim_owner = ? AND claim_generation = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)",
+            int changed = jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                     state, resultBody(row.childSessionId(), lastError), now, now,
                     operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
                     owner, row.claimGeneration(), now);
@@ -889,10 +858,10 @@ public class ChildResultRelayStore {
         String key = ManagedSchemaKeys.key("delivery", "CHILD_RESULT", sourceScope, row.childRunId());
         jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, tenant_id, source_scope_key, source_session_id,"
                         + " target_session_id, delivery_id, creation_key, payload_json, transport_state, reception_state,"
-                        + " consumption_state, created_at, updated_at) VALUES (?, 'CHILD_RESULT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        + " consumption_state, gmt_create, gmt_modified) VALUES (?, 'CHILD_RESULT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                         + " ON DUPLICATE KEY UPDATE transport_state = VALUES(transport_state),"
                         + " reception_state = VALUES(reception_state), consumption_state = VALUES(consumption_state),"
-                        + " updated_at = VALUES(updated_at)",
+                        + " gmt_modified = VALUES(gmt_modified)",
                 key, row.tenantId(), sourceScope, child == null ? row.parentSessionId() : child, row.parentSessionId(),
                 row.childRunId(), row.creationKey(), resultBody(child, null), transport, reception, consumption, now, now);
     }

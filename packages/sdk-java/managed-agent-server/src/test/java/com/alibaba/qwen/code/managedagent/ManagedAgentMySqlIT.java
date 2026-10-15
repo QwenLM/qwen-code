@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -471,9 +472,9 @@ class ManagedAgentMySqlIT {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
         boolean precisionWindowReached = false;
         while (System.nanoTime() < deadline) {
-            Integer micros =
-                    jdbc.queryForObject("SELECT MICROSECOND(CURRENT_TIMESTAMP(6))", Integer.class);
-            if (micros != null && micros >= 600_000 && micros <= 700_000) {
+            Integer millis =
+                    jdbc.queryForObject("SELECT (" + ManagedSchemaTime.SQL_NOW + ") % 1000", Integer.class);
+            if (millis != null && millis >= 600 && millis <= 700) {
                 precisionWindowReached = true;
                 break;
             }
@@ -541,10 +542,7 @@ class ManagedAgentMySqlIT {
         assertLeaseDeadline(jdbc, tenant, session, renewed);
 
         jdbc.update(
-                "UPDATE ma_session_head SET"
-                        + " writer_lease_until = TIMESTAMPADD(SECOND, -1,"
-                        + " CURRENT_TIMESTAMP(6)) WHERE tenant_id = ?"
-                        + " AND session_id = ?",
+                "UPDATE ma_session_head SET writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE tenant_id = ? AND session_id = ?",
                 tenant,
                 session);
         WriterGrant takenOver =
@@ -591,9 +589,7 @@ class ManagedAgentMySqlIT {
             JdbcTemplate jdbc, String tenant, String session, WriterGrant grant) {
         Long persisted =
                 jdbc.queryForObject(
-                        "SELECT UNIX_TIMESTAMP(writer_lease_until) * 1000"
-                                + " FROM ma_session_head"
-                                + " WHERE tenant_id = ? AND session_id = ?",
+                        "SELECT writer_lease_until FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                         Long.class,
                         tenant,
                         session);
@@ -1025,7 +1021,7 @@ class ManagedAgentMySqlIT {
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, created_at) VALUES (?, ?,"
+                        + " task_kind, task_state, gmt_create) VALUES (?, ?,"
                         + " ?, ?, ?, 'monitor_run', ?, ?, 1, ?, 'monitor',"
                         + " 'pending', ?)",
                 IntStream.range(0, 500)
@@ -1633,8 +1629,8 @@ class ManagedAgentMySqlIT {
             jdbc.update(
                     "INSERT INTO ma_turn (tenant_id,"
                             + " session_id, turn_id, prompt_id, input_json,"
-                            + " payload_digest, status, created_at,"
-                            + " updated_at, completed_at) VALUES (?, ?, ?, ?,"
+                            + " payload_digest, status, gmt_create,"
+                            + " gmt_modified, completed_at) VALUES (?, ?, ?, ?,"
                             + " 'not json', 'digest', 'COMPLETED', ?, ?, ?)",
                     tenant,
                     sessionId,
@@ -2174,9 +2170,7 @@ class ManagedAgentMySqlIT {
         while (System.nanoTime() < deadline) {
             Boolean expired =
                     jdbc.queryForObject(
-                            "SELECT writer_lease_until < CURRENT_TIMESTAMP(6)"
-                                    + " FROM ma_session_head"
-                                    + " WHERE tenant_id = ? AND session_id = ?",
+                            "SELECT writer_lease_until < " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                             Boolean.class,
                             ManagedSessionStoreProcessFixtureMain.TENANT,
                             ManagedSessionStoreProcessFixtureMain.SESSION);

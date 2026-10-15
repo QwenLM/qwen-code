@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -100,8 +101,9 @@ class ManagedSchemaPublicationLoadMySqlIT {
                     }
                     jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id,"
                             + " operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json,"
-                            + " phase, state, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'CAPTURE_GC', ?, ?,"
-                            + " 'OUTPUT_CAPTURE', ?, ?, '{}', 'DELETING', 'SUCCEEDED', -1, 0, 0)", history);
+                            + " phase, state, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'CAPTURE_GC', ?, ?,"
+                            + " 'OUTPUT_CAPTURE', ?, ?, '{}', 'DELETING', 'SUCCEEDED', " + ManagedSchemaTime.NEVER_DUE_MILLIS
+                            + ", 0, 0)", history);
                     previous = count;
                     jdbc.update("UPDATE ma_output_capture SET retention_state = 'RETIRING' WHERE scope_key = ? AND publication_id = ?",
                             scope, publication);
@@ -169,12 +171,12 @@ class ManagedSchemaPublicationLoadMySqlIT {
 
                 String scope = ManagedSessionStore.sessionScopeKey(TENANT, HEALTHY);
                 String proofKey = ManagedSchemaKeys.operationKey(OperationKind.WORKSPACE_OPERATOR_RECOVERY, scope, scope, "proof");
-                insertOperation(jdbc, proofKey, scope, "proof", "WORKSPACE_OPERATOR_RECOVERY", HEALTHY, scope, "SUCCEEDED", -1);
+                insertOperation(jdbc, proofKey, scope, "proof", "WORKSPACE_OPERATOR_RECOVERY", HEALTHY, scope, "SUCCEEDED",
+                        ManagedSchemaTime.NEVER_DUE_MILLIS);
                 String protectedId = lowResourceId(scope, "protected");
                 byte[] body = "immutable-body".getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 insertResource(jdbc, scope, protectedId, "REFERENCED", body);
-                jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
-                                + " tenant_id, session_id, resource_id, created_at) VALUES (?, 'OPERATION', ?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'OPERATION', ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                         scope, proofKey, ManagedSchemaKeys.key(scope, protectedId), TENANT, HEALTHY, protectedId);
                 long smallClaim = 0;
                 long smallPage = 0;
@@ -249,15 +251,13 @@ class ManagedSchemaPublicationLoadMySqlIT {
     private static void insertOperation(ManagedSchemaJdbcTemplate jdbc, String key, String scope, String id, String kind,
             String session, String target, String state, long available) {
         jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id,"
-                        + " session_id, target_kind, target_key, request_digest, request_json, phase, state, available_at, created_at, updated_at)"
+                        + " session_id, target_kind, target_key, request_digest, request_json, phase, state, available_at, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', ?, ?, 0, 0)",
                 key, scope, scope, id, kind, TENANT, session, target, ManagedSchemaKeys.key(id), state, available);
     }
 
     private static void insertResource(ManagedSchemaJdbcTemplate jdbc, String scope, String id, String state, byte[] bytes) {
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes, state, created_at)"
-                        + " VALUES (?, ?, ?, ?, ?, 'managed-message-body', 1, ?, ?, 'MYSQL_INLINE', ?, ?, CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'managed-message-body', 1, ?, ?, 'MYSQL_INLINE', ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(scope, id), scope, TENANT, HEALTHY, id, bytes.length, ToolPublicationContract.sha256(bytes),
                 state.equals("COLLECTED") ? null : bytes, state);
     }
@@ -273,10 +273,9 @@ class ManagedSchemaPublicationLoadMySqlIT {
             resources.add(new Object[] {ManagedSchemaKeys.key(scope, id), scope, TENANT, HEALTHY, id, ToolPublicationContract.sha256(bytes)});
         }
         jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id,"
-                        + " session_id, target_kind, target_key, request_digest, request_json, phase, state, available_at, created_at, updated_at)"
-                        + " VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', 'SUCCEEDED', -1, 0, 0)", operations);
-        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, state, created_at) VALUES (?, ?, ?, ?, ?, 'managed-message-body', 1, 1, ?,"
-                        + " 'MYSQL_INLINE', 'COLLECTED', CURRENT_TIMESTAMP(6))", resources);
+                        + " session_id, target_kind, target_key, request_digest, request_json, phase, state, available_at, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', 'SUCCEEDED', "
+                        + ManagedSchemaTime.NEVER_DUE_MILLIS + ", 0, 0)", operations);
+        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'managed-message-body', 1, 1, ?, 'MYSQL_INLINE', 'COLLECTED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
     }
 }
