@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
@@ -51,7 +52,7 @@ public class BrokerSecurity {
         boolean publicLoopback = publicAddress != null
                 && publicAddress.isLoopbackAddress();
         String contextPath = server.getServlet().getContextPath();
-        if (contextPath != null && !contextPath.isBlank()
+        if (StringUtils.isNotBlank(contextPath)
                 && !"/".equals(contextPath)) {
             // The auth and routing filters match path prefixes, which a
             // context path would silently bypass.
@@ -61,7 +62,7 @@ public class BrokerSecurity {
                             + " the root.");
         }
         String servletPath = mvc.getServlet().getPath();
-        if (servletPath != null && !servletPath.isBlank()
+        if (StringUtils.isNotBlank(servletPath)
                 && !"/".equals(servletPath)) {
             // Same bypass as a context path: the filters must see the same
             // paths the dispatcher routes.
@@ -133,7 +134,7 @@ public class BrokerSecurity {
         ManagedAgentProperties.InternalServer internal =
                 properties.getInternalServer();
         String bindingKey = properties.getSessionStore().getBindingKey();
-        byte[] bindingKeyBytes = bindingKey == null || bindingKey.isBlank()
+        byte[] bindingKeyBytes = StringUtils.isBlank(bindingKey)
                 ? null : bindingKey.getBytes(StandardCharsets.UTF_8);
         // The routing filter classifies by local port; equal port numbers on
         // different addresses would let the public address serve /internal/**.
@@ -212,7 +213,7 @@ public class BrokerSecurity {
     // dedicated internal listener a loopback URL naming another port 404s
     // every store call.
     private void checkStoreBaseUrlPort(String baseUrl, int internalPort) {
-        if (baseUrl == null || baseUrl.isBlank()) {
+        if (StringUtils.isBlank(baseUrl)) {
             return;
         }
         java.net.URI uri;
@@ -246,7 +247,7 @@ public class BrokerSecurity {
             return;
         }
         String baseUrl = store.getBaseUrl();
-        if (baseUrl == null || baseUrl.isBlank()) {
+        if (StringUtils.isBlank(baseUrl)) {
             return;
         }
         java.net.URI uri;
@@ -273,7 +274,7 @@ public class BrokerSecurity {
             return;
         }
         String baseUrl = properties.getHarness().getBaseUrl();
-        if (baseUrl == null || baseUrl.isBlank()) {
+        if (StringUtils.isBlank(baseUrl)) {
             return;
         }
         java.net.URI uri;
@@ -310,7 +311,7 @@ public class BrokerSecurity {
             return;
         }
         String baseUrl = publication.getServiceBaseUrl();
-        if (baseUrl == null || baseUrl.isBlank()) {
+        if (StringUtils.isBlank(baseUrl)) {
             return;
         }
         java.net.URI uri;
@@ -376,7 +377,7 @@ public class BrokerSecurity {
     // is excluded — WHATWG URL parsing maps it to 0.0.0.127, which the
     // client rejects. The resolver is never consulted here.
     private static boolean isLiteralLoopbackHost(String host) {
-        if (host == null || host.isBlank()) {
+        if (StringUtils.isBlank(host)) {
             return false;
         }
         String value = host.trim().toLowerCase(Locale.ROOT);
@@ -411,7 +412,7 @@ public class BrokerSecurity {
     }
 
     static boolean isLoopback(String address) {
-        if (address == null || address.isBlank()) {
+        if (StringUtils.isBlank(address)) {
             return false;
         }
         String value = address.trim();
