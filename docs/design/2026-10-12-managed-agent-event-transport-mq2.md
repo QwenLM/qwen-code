@@ -228,15 +228,24 @@ with only the Harness stood in for. The rows:
   transport) and a flag-off composite (hub only) publish the same batches,
   interleaved: the committing thread's publish time and the hub
   subscriber's delivery time are compared per round, and the median of the
-  per-round growth may not exceed a millisecond locally — a runner stall
-  inside one arm's window moves one round, not the median. Shared CI runners
-  use a 20 ms allowance for scheduler noise. The journal wire's after-commit
-  hand-off stays under 20 ms at p95. The record keeps both arm levels
-  (p50/p95/p99/max), the growth's median and p95, and the count of rounds
-  over budget. In three
-  local runs (macOS, 300 rounds each) the transport added 13–186 µs at p95
-  and the journal hand-off measured 0.35–1.5 ms; CI writes its own figures
-  to `target/event-transport-latency.json`.
+  per-round growth may not exceed a millisecond — a runner stall inside one
+  arm's window moves one round, not the median — with no more than a tenth
+  of the retained rounds over budget. The bound is one millisecond in every
+  environment: the median is the scheduler-noise mitigation, so CI takes no
+  widened allowance (green CI runs measure medians in the tens of
+  microseconds). The journal wire's after-commit hand-off keeps its own
+  20 ms p95 bound. The record keeps both arm levels (p50/p95/p99/max), the
+  growth's median and p95, the count of rounds over budget, and the budget
+  the count was taken against. In three local runs (macOS, 300 rounds each)
+  the transport added 13–186 µs at p95 and the journal hand-off measured
+  0.35–1.5 ms; CI writes its own figures to
+  `target/event-transport-latency.json`. The recorded #14197 failure (run 38534586743) predates this statistic: it failed under the pre-#14178
+  unconditional 1 ms p95-of-levels bound, and #14178's 20 ms CI allowance
+  already tolerated its recorded magnitudes — this row's statistic change
+  is a sensitivity and noise-robustness improvement, not the change that
+  tolerates the recorded run, and the incident's arm asymmetry (hub
+  delivery on/off ≈ 28× at p95 with both arms far above local levels) is
+  not reproduced here and stays unexplained.
 - **Misconfiguration fails startup.** A NORMAL (not LITE) topic, which the
   subscription probe alone passes, is refused by a new send probe — one
   synchronous message to the probe's own lite topic — before any envelope

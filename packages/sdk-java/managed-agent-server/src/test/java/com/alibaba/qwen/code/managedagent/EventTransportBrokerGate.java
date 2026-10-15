@@ -101,6 +101,8 @@ class EventTransportBrokerGate {
     private static final String TENANT = "tenant-broker-gate";
     private static final String WORKSPACE = "workspace-broker-gate";
     private static final String WRITER = "gate-writer";
+    static final int ROUNDS = 300;
+    static final long GROWTH_BUDGET_NANOS = Duration.ofMillis(1).toNanos();
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration DELIVERY = Duration.ofSeconds(60);
     // Long enough for a broker to deliver a message it is going to deliver.
@@ -417,7 +419,11 @@ class EventTransportBrokerGate {
      * round and cancels in the difference; a stall that deschedules this
      * thread inside one arm's window survives in that round's growth at full
      * size, but it moves one round, not the median; a cost the flag adds to
-     * every round shifts the median in full. The journal wire's after-commit
+     * every round shifts the median in full, and a recurring minority that
+     * escapes the median is bounded separately: no more than a tenth of the
+     * retained rounds may exceed the budget. The budget is one millisecond
+     * in every environment — the median is the scheduler-noise mitigation,
+     * so CI takes no widened allowance. The journal wire's after-commit
      * hand-off is measured alongside. The figures are written to target/ for
      * the record.
      */
@@ -427,7 +433,6 @@ class EventTransportBrokerGate {
         SessionEventHub flagOffHub = new SessionEventHub();
         CompositeCommittedEventPublisher flagOff =
                 new CompositeCommittedEventPublisher(flagOffHub, List.of());
-        int rounds = 300;
         List<Long> onPublish = new ArrayList<>();
         List<Long> offPublish = new ArrayList<>();
         List<Long> onDelivery = new ArrayList<>();
@@ -436,7 +441,7 @@ class EventTransportBrokerGate {
         try (SessionEventHub.Subscription onHub = hub.subscribe(TENANT, session);
                 SessionEventHub.Subscription offHub =
                         flagOffHub.subscribe(TENANT, session)) {
-            for (int round = 1; round <= rounds; round++) {
+            for (int round = 1; round <= ROUNDS; round++) {
                 EventRecord event = publicEvent(session, round,
                         "item.output_text.delta");
                 measure(publisher, onHub, event, onPublish, onDelivery);
@@ -449,47 +454,45 @@ class EventTransportBrokerGate {
             }
         }
         // Discard the warm-up quarter, then the flag's per-round growth.
-        List<Long> publishGrowth = deltas(onPublish, offPublish, rounds / 4);
-        List<Long> deliveryGrowth = deltas(onDelivery, offDelivery, rounds / 4);
-        long onP95 = p95(onPublish.subList(rounds / 4, rounds));
-        long offP95 = p95(offPublish.subList(rounds / 4, rounds));
-        long onDeliveryP95 = p95(onDelivery.subList(rounds / 4, rounds));
-        long offDeliveryP95 = p95(offDelivery.subList(rounds / 4, rounds));
-        long publishGrowthMedian = median(publishGrowth);
-        long deliveryGrowthMedian = median(deliveryGrowth);
+        List<Long> publishGrowth = deltas(onPublish, offPublish, ROUNDS / 4);
+        List<Long> deliveryGrowth = deltas(onDelivery, offDelivery, ROUNDS / 4);
+        long onP95 = p95(onPublish.subList(ROUNDS / 4, ROUNDS));
+        long offP95 = p95(offPublish.subList(ROUNDS / 4, ROUNDS));
+        long onDeliveryP95 = p95(onDelivery.subList(ROUNDS / 4, ROUNDS));
+        long offDeliveryP95 = p95(offDelivery.subList(ROUNDS / 4, ROUNDS));
         long publishGrowthP95 = p95(publishGrowth);
         long deliveryGrowthP95 = p95(deliveryGrowth);
-        long journalP95 = p95(journalHandOff.subList(rounds / 4, rounds));
-        // Shared CI runners can deschedule this thread between nanoTime calls.
-        // Keep the 1 ms local benchmark; CI uses the journal hand-off's 20 ms budget.
-        long budget = Duration.ofMillis(
-                Boolean.parseBoolean(System.getenv("CI")) ? 20 : 1).toNanos();
+        long journalP95 = p95(journalHandOff.subList(ROUNDS / 4, ROUNDS));
         Map<String, Object> record = new LinkedHashMap<>();
-        record.put("rounds", rounds);
-        record.put("publishMicros", Map.of(
-                "on", armMicros(onPublish, rounds / 4),
-                "off", armMicros(offPublish, rounds / 4),
-                "growth", growthMicros(publishGrowth, budget)));
-        record.put("hubDeliveryMicros", Map.of(
-                "on", armMicros(onDelivery, rounds / 4),
-                "off", armMicros(offDelivery, rounds / 4),
-                "growth", growthMicros(deliveryGrowth, budget)));
+        record.put("rounds", ROUNDS);
+        record.put("publishMicros", metricMicros(
+                armMicros(onPublish, ROUNDS / 4),
+                armMicros(offPublish, ROUNDS / 4),
+                growthMicros(publishGrowth, GROWTH_BUDGET_NANOS)));
+        record.put("hubDeliveryMicros", metricMicros(
+                armMicros(onDelivery, ROUNDS / 4),
+                armMicros(offDelivery, ROUNDS / 4),
+                growthMicros(deliveryGrowth, GROWTH_BUDGET_NANOS)));
         record.put("journalHandOffP95Micros", journalP95 / 1000);
         Files.createDirectories(Path.of("target"));
         Files.writeString(Path.of("target/event-transport-latency.json"),
                 JSON.writerWithDefaultPrettyPrinter().writeValueAsString(record));
         // The public transport only copies and enqueues on the committing
         // thread: a regression is a whole millisecond of per-round growth.
-        assertThat(publishGrowthMedian)
-                .as("publish growth median, flag on vs off (on p95 %,d ns,"
-                        + " off p95 %,d ns, growth p95 %,d ns)",
-                        onP95, offP95, publishGrowthP95)
-                .isLessThanOrEqualTo(budget);
-        assertThat(deliveryGrowthMedian)
-                .as("hub delivery growth median, flag on vs off (on p95 %,d ns,"
-                        + " off p95 %,d ns, growth p95 %,d ns)",
-                        onDeliveryP95, offDeliveryP95, deliveryGrowthP95)
-                .isLessThanOrEqualTo(budget);
+        assertThat(growthWithinBudget(publishGrowth, GROWTH_BUDGET_NANOS))
+                .as("publish growth within budget (on p95 %,d ns,"
+                        + " off p95 %,d ns, growth p95 %,d ns,"
+                        + " rounds over budget %d)",
+                        onP95, offP95, publishGrowthP95,
+                        roundsOverBudget(publishGrowth, GROWTH_BUDGET_NANOS))
+                .isTrue();
+        assertThat(growthWithinBudget(deliveryGrowth, GROWTH_BUDGET_NANOS))
+                .as("hub delivery growth within budget (on p95 %,d ns,"
+                        + " off p95 %,d ns, growth p95 %,d ns,"
+                        + " rounds over budget %d)",
+                        onDeliveryP95, offDeliveryP95, deliveryGrowthP95,
+                        roundsOverBudget(deliveryGrowth, GROWTH_BUDGET_NANOS))
+                .isTrue();
         assertThat(journalP95).as("journal hand-off p95 (ns)")
                 .isLessThanOrEqualTo(Duration.ofMillis(20).toNanos());
     }
@@ -645,8 +648,9 @@ class EventTransportBrokerGate {
     }
 
     /**
-     * The growth's median and p95, in microseconds, and the count of its
-     * rounds over the budget.
+     * The growth's median and p95, in microseconds, the count of its
+     * rounds over the budget, and the budget itself, so the record states
+     * the threshold the count was taken against.
      */
     static Map<String, Long> growthMicros(List<Long> growth,
             long budgetNanos) {
@@ -654,7 +658,33 @@ class EventTransportBrokerGate {
         stats.put("median", median(growth) / 1000);
         stats.put("p95", p95(growth) / 1000);
         stats.put("roundsOverBudget", roundsOverBudget(growth, budgetNanos));
+        stats.put("budget", budgetNanos / 1000);
         return stats;
+    }
+
+    /**
+     * One metric's record block: both arms' levels and the growth
+     * statistics, in a fixed order so the artifact diffs run against run.
+     */
+    static Map<String, Object> metricMicros(Map<String, Long> on,
+            Map<String, Long> off, Map<String, Long> growth) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("on", on);
+        block.put("off", off);
+        block.put("growth", growth);
+        return block;
+    }
+
+    /**
+     * The post-commit gate's verdict: the growth's median within the
+     * budget, and no more than a tenth of the retained rounds over it. The
+     * median absorbs a stalled minority of rounds; the frequency bound
+     * keeps a recurring minority regression below the median's notice
+     * visible.
+     */
+    static boolean growthWithinBudget(List<Long> growth, long budgetNanos) {
+        return median(growth) <= budgetNanos
+                && roundsOverBudget(growth, budgetNanos) <= growth.size() / 10;
     }
 
     /** Retained rounds whose growth exceeded the budget. */

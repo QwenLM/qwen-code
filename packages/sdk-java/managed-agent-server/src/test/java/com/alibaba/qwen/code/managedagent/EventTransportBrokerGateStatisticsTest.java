@@ -2,30 +2,53 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
  * The post-commit gate's statistic contract, without a broker. Synthetic
- * 225-sample pairs (the gate's retained count) pin the properties the #14197
- * incident and its review established: the incident's recorded arm levels
- * breach the budget, an identical-noise control whose one-arm pauses land on
- * disjoint rounds stays green, a uniform per-round cost goes red, and a
- * stalled tail in one arm alone — the shape that flipped the p95 of the
- * per-round growth — no longer decides the verdict.
+ * pairs at the gate's retained round count pin the properties the #14197
+ * incident review established: a uniform per-round cost goes red, an
+ * identical-noise control whose one-arm pauses land on disjoint rounds
+ * stays green, and a stalled tail in one arm alone — the shape that flipped
+ * the p95 of the per-round growth — decides neither the median nor the
+ * verdict. The recorded incident itself (hubDeliveryP95Micros {on: 2040,
+ * off: 72}) has no unique per-round reconstruction: its pervasive form —
+ * every round at the recorded levels — goes red below, its twelve-stall
+ * parsimonious form stays green, and the artifact admits no distribution
+ * that separates the two, so the incident's arm asymmetry stays an open
+ * question this suite does not claim to answer.
  */
 class EventTransportBrokerGateStatisticsTest {
-    private static final int SAMPLES = 225;
-    private static final long BUDGET = Duration.ofMillis(1).toNanos();
+    private static final int SAMPLES =
+            EventTransportBrokerGate.ROUNDS - EventTransportBrokerGate.ROUNDS / 4;
+    private static final long BUDGET =
+            EventTransportBrokerGate.GROWTH_BUDGET_NANOS;
     // The recorded #14197 incident: hubDeliveryP95Micros {on: 2040, off: 72}.
     private static final long INCIDENT_ON_NANOS = 2_040_740;
     private static final long INCIDENT_OFF_NANOS = 72_144;
+    // The one-arm stall count at the p95 boundary: the p95 of SAMPLES
+    // samples is the STALLS-th largest, so one fewer stall leaves it on the
+    // floor.
+    private static final int STALLS =
+            SAMPLES - (int) Math.ceil(SAMPLES * 0.95) + 1;
 
     @Test
-    void theRecordedIncidentShapeBreachesTheBudget() {
+    void theGateRunsAtTheRecordedScale() {
+        assertThat(SAMPLES).isEqualTo(225);
+        assertThat(STALLS).isEqualTo(12);
+        assertThat(BUDGET).isEqualTo(1_000_000);
+    }
+
+    @Test
+    void thePervasiveIncidentReconstructionGoesRed() {
+        // Every round at the recorded arm levels. The removed p95-of-levels
+        // form caught this shape too: the median trips because the
+        // elevation is pervasive, and nothing here claims the recorded run
+        // looked like this.
         List<Long> on = Collections.nCopies(SAMPLES, INCIDENT_ON_NANOS);
         List<Long> off = Collections.nCopies(SAMPLES, INCIDENT_OFF_NANOS);
 
@@ -33,9 +56,25 @@ class EventTransportBrokerGateStatisticsTest {
 
         assertThat(EventTransportBrokerGate.p95(on)).isEqualTo(INCIDENT_ON_NANOS);
         assertThat(EventTransportBrokerGate.p95(off)).isEqualTo(INCIDENT_OFF_NANOS);
-        assertThat(EventTransportBrokerGate.median(growth))
-                .as("median growth of the incident's recorded arm levels")
-                .isGreaterThan(BUDGET);
+        assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
+                .as("the pervasive reconstruction of the recorded levels")
+                .isFalse();
+    }
+
+    @Test
+    void aUniformPerRoundCostGoesRed() {
+        List<Long> on = new ArrayList<>(Collections.nCopies(SAMPLES, 20_000L));
+        List<Long> off = Collections.nCopies(SAMPLES, 20_000L);
+        for (int index = 0; index < SAMPLES; index++) {
+            on.set(index, on.get(index) + 2_000_000);
+        }
+
+        List<Long> growth = EventTransportBrokerGate.deltas(on, off, 0);
+
+        assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
+                .as("a uniform +2 ms per-round cost breaches the gate's"
+                        + " own budget in every environment")
+                .isFalse();
     }
 
     @Test
@@ -52,47 +91,83 @@ class EventTransportBrokerGateStatisticsTest {
         assertThat(EventTransportBrokerGate.p95(growth))
                 .as("p95 of the growth still sees the disjoint pauses")
                 .isGreaterThan(BUDGET);
-        assertThat(EventTransportBrokerGate.median(growth))
-                .as("median growth of identical noisy arms")
-                .isLessThanOrEqualTo(BUDGET);
+        assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
+                .as("identical noisy arms stay within the gate's budget")
+                .isTrue();
     }
 
     @Test
-    void aUniformPerRoundCostGoesRed() {
+    void aStalledTailInOneArmStaysGreen() {
+        // The parsimonious per-round reconstruction of the recorded #14197
+        // arm levels: STALLS one-arm stalls of SAMPLES samples is exactly
+        // the p95 boundary — the p95 of the growth trips on it, the median
+        // does not.
+        List<Long> on = new ArrayList<>(
+                Collections.nCopies(SAMPLES, INCIDENT_OFF_NANOS));
+        List<Long> off = Collections.nCopies(SAMPLES, INCIDENT_OFF_NANOS);
+        for (int index = 0; index < STALLS; index++) {
+            on.set(index, INCIDENT_ON_NANOS);
+        }
+
+        List<Long> growth = EventTransportBrokerGate.deltas(on, off, 0);
+
+        assertThat(EventTransportBrokerGate.p95(on)).isEqualTo(INCIDENT_ON_NANOS);
+        assertThat(EventTransportBrokerGate.p95(off)).isEqualTo(INCIDENT_OFF_NANOS);
+        assertThat(EventTransportBrokerGate.p95(growth))
+                .as("p95 of the growth still trips on the tail")
+                .isGreaterThan(BUDGET);
+        assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
+                .as("a stalled tail in one arm stays within the budget")
+                .isTrue();
+        assertThat(EventTransportBrokerGate.roundsOverBudget(growth, BUDGET))
+                .isEqualTo(STALLS);
+    }
+
+    @Test
+    void aRecurringMinorityBeyondTheFrequencyCapGoesRed() {
+        // One over the frequency cap, all in one arm: the median stays on
+        // the floor, so only the frequency bound can go red — remove it and
+        // this case passes.
         List<Long> on = new ArrayList<>(Collections.nCopies(SAMPLES, 20_000L));
         List<Long> off = Collections.nCopies(SAMPLES, 20_000L);
-        for (int index = 0; index < SAMPLES; index++) {
+        for (int index = 0; index < SAMPLES / 10 + 1; index++) {
             on.set(index, on.get(index) + 2_000_000);
         }
 
         List<Long> growth = EventTransportBrokerGate.deltas(on, off, 0);
 
         assertThat(EventTransportBrokerGate.median(growth))
-                .as("median growth of a uniform +2 ms per-round cost")
-                .isGreaterThan(BUDGET);
+                .as("the median alone still passes")
+                .isLessThanOrEqualTo(BUDGET);
+        assertThat(EventTransportBrokerGate.roundsOverBudget(growth, BUDGET))
+                .isEqualTo(SAMPLES / 10 + 1);
+        assertThat(EventTransportBrokerGate.growthWithinBudget(growth, BUDGET))
+                .as("a recurring minority breaches the frequency bound")
+                .isFalse();
     }
 
     @Test
-    void aStalledTailInOneArmStaysGreen() {
-        // Twelve one-arm stalls of 225 samples is exactly the p95 boundary:
-        // the p95 of the growth trips on it, the median does not.
+    void theWarmUpDiscardDropsThePrefix() {
+        int from = EventTransportBrokerGate.ROUNDS / 4;
         List<Long> on = new ArrayList<>(
-                Collections.nCopies(SAMPLES, INCIDENT_OFF_NANOS));
-        List<Long> off = Collections.nCopies(SAMPLES, INCIDENT_OFF_NANOS);
-        for (int index = 0; index < 12; index++) {
-            on.set(index, INCIDENT_ON_NANOS);
-        }
+                Collections.nCopies(EventTransportBrokerGate.ROUNDS, 20_000L));
+        List<Long> off =
+                Collections.nCopies(EventTransportBrokerGate.ROUNDS, 20_000L);
+        on.set(0, 60_000_000L);
 
-        List<Long> growth = EventTransportBrokerGate.deltas(on, off, 0);
+        List<Long> growth = EventTransportBrokerGate.deltas(on, off, from);
+        Map<String, Long> arm = EventTransportBrokerGate.armMicros(on, from);
 
-        assertThat(EventTransportBrokerGate.median(growth))
-                .as("median growth with a twelve-round one-arm stall tail")
-                .isLessThanOrEqualTo(BUDGET);
-        assertThat(EventTransportBrokerGate.p95(growth))
-                .as("p95 of the same growth still trips on the tail")
-                .isGreaterThan(BUDGET);
-        assertThat(EventTransportBrokerGate.roundsOverBudget(growth, BUDGET))
-                .isEqualTo(12);
+        assertThat(growth).hasSize(SAMPLES).containsOnly(0L);
+        assertThat(arm.get("max")).isEqualTo(20L);
+    }
+
+    @Test
+    void theMedianIsTheUpperMiddleSample() {
+        assertThat(EventTransportBrokerGate.median(List.of(5L, 1L, 3L)))
+                .isEqualTo(3L);
+        assertThat(EventTransportBrokerGate.median(List.of(1L, 2L, 3L, 4L)))
+                .isEqualTo(3L);
     }
 
     @Test
@@ -102,6 +177,44 @@ class EventTransportBrokerGateStatisticsTest {
                 .containsExactly("p50", "p95", "p99", "max");
         assertThat(EventTransportBrokerGate.growthMicros(
                 Collections.nCopies(SAMPLES, 20_000L), BUDGET).keySet())
-                .containsExactly("median", "p95", "roundsOverBudget");
+                .containsExactly("median", "p95", "roundsOverBudget", "budget");
+        assertThat(EventTransportBrokerGate.metricMicros(Map.of("on", 1L),
+                Map.of("off", 2L), Map.of("growth", 3L)).keySet())
+                .containsExactly("on", "off", "growth");
+    }
+
+    @Test
+    void theRecordReportsTheValuesItsKeysName() {
+        Map<String, Long> constant = EventTransportBrokerGate.armMicros(
+                Collections.nCopies(SAMPLES, 20_000L), 0);
+        assertThat(constant.get("p50")).isEqualTo(20L);
+        assertThat(constant.get("p95")).isEqualTo(20L);
+        assertThat(constant.get("p99")).isEqualTo(20L);
+        assertThat(constant.get("max")).isEqualTo(20L);
+
+        // A two-level list with exactly STALLS high samples separates the
+        // p95 (and everything above it) from the p50.
+        List<Long> twoLevels =
+                new ArrayList<>(Collections.nCopies(SAMPLES, 20_000L));
+        for (int index = 0; index < STALLS; index++) {
+            twoLevels.set(index, 2_000_000L);
+        }
+        Map<String, Long> levels =
+                EventTransportBrokerGate.armMicros(twoLevels, 0);
+        assertThat(levels.get("p50")).isEqualTo(20L);
+        assertThat(levels.get("p95")).isEqualTo(2_000L);
+        assertThat(levels.get("p99")).isEqualTo(2_000L);
+        assertThat(levels.get("max")).isEqualTo(2_000L);
+
+        List<Long> ramp = new ArrayList<>();
+        for (long value = 0; value < SAMPLES; value++) {
+            ramp.add(value * 1_000);
+        }
+        Map<String, Long> growth =
+                EventTransportBrokerGate.growthMicros(ramp, BUDGET);
+        assertThat(growth.get("median")).isEqualTo(112L);
+        assertThat(growth.get("p95")).isEqualTo(213L);
+        assertThat(growth.get("roundsOverBudget")).isEqualTo(0L);
+        assertThat(growth.get("budget")).isEqualTo(BUDGET / 1000);
     }
 }
