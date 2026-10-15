@@ -14,8 +14,8 @@ mkdir -p .qwen/acceptance-h3
 git ls-tree -rz --name-only 669b2f0f91b0c787f7d8a26971c7c34210b935e1 -- \
   packages/core/src packages/cli/src \
   packages/sdk-java/qwencode/src/main \
-  packages/sdk-java/runtime-broker/src/main \
-  packages/sdk-java/managed-agent-server/src/main \
+  packages/managed-agent-server/src/main \
+  packages/managed-agent-server/src/main \
   integration-tests/fake-openai-server.ts \
   integration-tests/helpers/daemon-process.ts \
   integration-tests/helpers/hosted-harness-process.ts \
@@ -31,7 +31,7 @@ After installing the SDK and Broker artifacts as in the SDK Java workflow, build
 <!-- prettier-ignore -->
 ```sh
 mvn --batch-mode --no-transfer-progress \
-  -f packages/sdk-java/managed-agent-server/pom.xml \
+  -f packages/managed-agent-server/pom.xml \
   -DskipTests compile dependency:build-classpath \
   -Dmdep.outputFile=target/acceptance-classpath.txt
 chmod +x .qwen/acceptance-h3/run-gate.sh
@@ -52,7 +52,7 @@ The owned Lima VM supplied a non-root delegated systemd unit and a wrapper expor
   --property=WorkingDirectory=/home/qwen/acceptance/12904 \
   /home/qwen/managed-env/delegate-run.sh \
   /home/qwen/acceptance/12904/.qwen/acceptance-h3/run-gate.sh \
-  /home/qwen/acceptance/12904/packages/sdk-java/managed-agent-server/target/acceptance-classpath.txt \
+  /home/qwen/acceptance/12904/packages/managed-agent-server/target/acceptance-classpath.txt \
   /home/qwen/acceptance/13532-run-20261009-0920
 ```
 
@@ -87,7 +87,7 @@ sha256sum --status -c .qwen/acceptance-h3/exact-base-source.sha256
 qa_bundle_sha=$(sha256sum dist/cli.js | cut -d' ' -f1)
 test "$qa_bundle_sha" = 11db529ca76a62e3b19c95269da45583ffb6b820b5e9619ae38bb973661c5c2d
 printf 'H3_SOURCE_MATCH files=%s sourceHead=%s bundleSha256=%s\n' "$(wc -l < .qwen/acceptance-h3/exact-base-source.sha256)" 669b2f0f91b0c787f7d8a26971c7c34210b935e1 "$qa_bundle_sha"
-qa_classpath="packages/sdk-java/managed-agent-server/target/classes:$(cat "$qa_classpath_file")"
+qa_classpath="packages/managed-agent-server/target/classes:$(cat "$qa_classpath_file")"
 mkdir -p .qwen/acceptance-h3/classes
 javac -cp "$qa_classpath" -d .qwen/acceptance-h3/classes .qwen/acceptance-h3/H3GateProbe.java
 printf 'H3_LINUX %s\n' "$(uname -a)"
@@ -308,7 +308,7 @@ The second run reused the unchanged production classes, source manifest and pack
 
 <!-- prettier-ignore -->
 ```sh
-/Users/zzj/.qwen/tmp/managed-agent-two-issues-20261009/linux-env/lima-env.sh shell h3 sudo systemd-run --quiet --wait --pipe --collect --unit=qwen-h3-publication-gate-20261009-1007 --uid=qwen --property=Delegate=yes --property=WorkingDirectory=/home/qwen/acceptance/12904 /home/qwen/managed-env/delegate-run.sh /home/qwen/acceptance/12904/.qwen/acceptance-h3-publication/run-gate.sh /home/qwen/acceptance/12904/packages/sdk-java/managed-agent-server/target/acceptance-classpath.txt /home/qwen/acceptance/13532-publication-run-20261009-1007
+/Users/zzj/.qwen/tmp/managed-agent-two-issues-20261009/linux-env/lima-env.sh shell h3 sudo systemd-run --quiet --wait --pipe --collect --unit=qwen-h3-publication-gate-20261009-1007 --uid=qwen --property=Delegate=yes --property=WorkingDirectory=/home/qwen/acceptance/12904 /home/qwen/managed-env/delegate-run.sh /home/qwen/acceptance/12904/.qwen/acceptance-h3-publication/run-gate.sh /home/qwen/acceptance/12904/packages/managed-agent-server/target/acceptance-classpath.txt /home/qwen/acceptance/13532-publication-run-20261009-1007
 ```
 
 The foreground recorder deliberately does not assert success: its `recoveryBlocked`, missing marker and SQL `not_started` result are acceptance evidence of a blocked control, not a passing H3 result.
@@ -343,7 +343,7 @@ Second-run SHA256: `f472bf668dac01ea0c68e1253cd078080741b334fcf357ae8132aaa2052e
  test "$qa_bundle_sha" = 11db529ca76a62e3b19c95269da45583ffb6b820b5e9619ae38bb973661c5c2d
 -printf 'H3_SOURCE_MATCH files=%s sourceHead=%s bundleSha256=%s\n' "$(wc -l < .qwen/acceptance-h3/exact-base-source.sha256)" 669b2f0f91b0c787f7d8a26971c7c34210b935e1 "$qa_bundle_sha"
 +printf 'H3_SOURCE_MATCH files=%s sourceHead=%s bundleSha256=%s\n' "$(wc -l < .qwen/acceptance-h3-publication/exact-base-source.sha256)" 669b2f0f91b0c787f7d8a26971c7c34210b935e1 "$qa_bundle_sha"
- qa_classpath="packages/sdk-java/managed-agent-server/target/classes:$(cat "$qa_classpath_file")"
+ qa_classpath="packages/managed-agent-server/target/classes:$(cat "$qa_classpath_file")"
 -mkdir -p .qwen/acceptance-h3/classes
 -javac -cp "$qa_classpath" -d .qwen/acceptance-h3/classes .qwen/acceptance-h3/H3GateProbe.java
 +mkdir -p .qwen/acceptance-h3-publication/classes

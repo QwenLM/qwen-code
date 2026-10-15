@@ -166,7 +166,7 @@ describe('Hosted real-process gates', () => {
     expect(job.steps[relay].shell).toBeUndefined();
     expect(job.steps[relay]['working-directory']).toBeUndefined();
     expect(relay).toBeLessThan(job.steps.indexOf(run));
-    const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
+    const pom = read('packages/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
       '',
     );
@@ -176,9 +176,6 @@ describe('Hosted real-process gates', () => {
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
     expect(pom).not.toMatch(selection);
-    expect(read('packages/sdk-java/runtime-broker/pom.xml')).not.toMatch(
-      selection,
-    );
     const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
     expect(mariadb).toContain('<id>mysql-integration</id>');
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
@@ -200,12 +197,12 @@ describe('Hosted real-process gates', () => {
       [
         'mysql-integration',
         mariadbRun.name,
-        'non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server',
+        'non-hosted packages/managed-agent-server',
       ],
       [
         'hosted-harness-mysql',
         run.name,
-        'hosted packages/sdk-java/managed-agent-server',
+        'hosted packages/managed-agent-server',
       ],
     ]) {
       const steps = java.jobs[name].steps;
@@ -220,7 +217,7 @@ describe('Hosted real-process gates', () => {
     // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
     const its = readdirSync(
       new URL(
-        '../../packages/sdk-java/managed-agent-server/src/test/java/',
+        '../../packages/managed-agent-server/src/test/java/',
         import.meta.url,
       ),
       { recursive: true },
@@ -233,6 +230,9 @@ describe('Hosted real-process gates', () => {
     expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
       'ManagedAgentMySqlIT.java',
     );
+    expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
+      'JdbcRuntimeBrokerMySqlIT.java',
+    );
     const upload = job.steps.find(
       (step) => step.name === 'Upload Hosted process reports',
     );
@@ -242,7 +242,7 @@ describe('Hosted real-process gates', () => {
     // module-relative directory precisely so an artifact can carry it; the
     // writer and the upload path must not drift.
     expect(upload.with.path).toContain(
-      'packages/sdk-java/managed-agent-server/target/fg7-cases/',
+      'packages/managed-agent-server/target/fg7-cases/',
     );
   });
 
@@ -351,7 +351,7 @@ describe('Hosted real-process gates', () => {
       // re-pointed -P flag must not leave the row reading the old profile.
       expect(run.run).toContain(`-P${profile}`);
       const forkSeconds = Number(
-        read('packages/sdk-java/managed-agent-server/pom.xml')
+        read('packages/managed-agent-server/pom.xml')
           .split(`<id>${profile}</id>`)[1]
           .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
       );
@@ -386,12 +386,12 @@ describe('Hosted real-process gates', () => {
   const hostedForkHealthySeconds = 650;
   const hostedForkSeconds = () =>
     Number(
-      read('packages/sdk-java/managed-agent-server/pom.xml')
+      read('packages/managed-agent-server/pom.xml')
         .split('<id>hosted-harness-mysql</id>')[1]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
   const hostedTestPath = (className) =>
-    'packages/sdk-java/managed-agent-server/src/test/java/' +
+    'packages/managed-agent-server/src/test/java/' +
     `com/alibaba/qwen/code/managedagent/${className}.java`;
   // Java code without its string literals and comments, so neither a
   // commented-out annotation nor a "/*" inside a string skews the counts.
@@ -449,7 +449,7 @@ describe('Hosted real-process gates', () => {
   // claims the work of the classes that run after it. A context inherited
   // from a base class or a meta-annotation is not seen here; none exists.
   it('closes the Spring test context each Hosted IT class declares', () => {
-    const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
+    const root = 'packages/managed-agent-server/src/test/java/';
     const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
       recursive: true,
     })

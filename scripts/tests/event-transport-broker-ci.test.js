@@ -22,14 +22,11 @@ const step = (name) => {
   return found;
 };
 const script = readFileSync('scripts/rocketmq-lite-broker.sh', 'utf8');
-const pom = readFileSync(
-  'packages/sdk-java/managed-agent-server/pom.xml',
-  'utf8',
-);
+const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
 const profile = pom
   .split('<id>event-transport-broker-gates</id>')[1]
   .split('</profile>')[0];
-const server = 'packages/sdk-java/managed-agent-server/src';
+const server = 'packages/managed-agent-server/src';
 const properties = readFileSync(
   `${server}/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
   'utf8',
@@ -54,7 +51,7 @@ describe('EventTransport broker gates CI', () => {
       expect(run).toContain(`-Dqwen.gate.rocketmq.${property}=`);
     }
     expect(run).toContain(
-      'node scripts/check-failsafe-reports.js event-transport packages/sdk-java/managed-agent-server',
+      'node scripts/check-failsafe-reports.js event-transport packages/managed-agent-server',
     );
   });
 

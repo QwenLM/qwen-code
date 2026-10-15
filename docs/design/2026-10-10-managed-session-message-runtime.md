@@ -95,7 +95,7 @@ A child's message to its parent runs the same steps with the journals swapped; i
 - `packages/cli/src/serve/hosted-workspace-tool-turn.ts`: the two `send_message` declarations, their admission and execution.
 - `packages/cli/src/serve/hosted-harness-session.ts`: the funnel wiring, the wake source, consumption after the wake turn, close-time settlement, the recovery allowlist, and the `/messages/operations` route.
 - `packages/sdk-java/qwencode`: `HostedHarnessClient.runMessageOperation`.
-- `packages/sdk-java/managed-agent-server`: `V64__managed_session_message_relay.sql`, `SessionMessageRelayStore`, `SessionMessageRelay`, its scheduler, `HarnessConnector.runMessageOperation`, the completion rule and continuation composition in `ChildResultRelay`, the journal reads in `ChildResultRelayStore`, and `PREVIEW_TOOLS`.
+- `packages/managed-agent-server`: `V64__managed_session_message_relay.sql`, `SessionMessageRelayStore`, `SessionMessageRelay`, its scheduler, `HarnessConnector.runMessageOperation`, the completion rule and continuation composition in `ChildResultRelay`, the journal reads in `ChildResultRelayStore`, and `PREVIEW_TOOLS`.
 - Tests beside each file in both languages; this design in both languages; pointers from the H4d-a and H4b designs.
 
 ## Validation
