@@ -630,7 +630,9 @@ export async function runCodexImport(
           .filter(
             (entry) =>
               selectedIds.has(entry.id) &&
-              (entry.status === 'ready' || entry.status === 'duplicate'),
+              (entry.status === 'ready' ||
+                entry.status === 'duplicate' ||
+                entry.status === 'previously-imported'),
           )
           .map((entry) => entry.targetRoot!),
       ),

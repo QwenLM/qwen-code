@@ -56,6 +56,46 @@ afterEach(async () => {
 });
 
 describe('Codex import', () => {
+  it('repairs an interrupted index write on the same selected import without rewriting its topic', async () => {
+    const entry = (await preview()).entries[0];
+    const root = entry.targetRoot!;
+    const index = path.join(root, 'MEMORY.md');
+    await fs.mkdir(index, { recursive: true });
+    await expect(
+      runCodexImport({ ...options(), selectedIds: [entry.id] }),
+    ).rejects.toThrow();
+    const topic = path.join(root, 'codex-' + entry.id + '.md');
+    const content = await fs.readFile(topic, 'utf8');
+    const mtime = (await fs.stat(topic)).mtimeMs;
+    const ledger = await fs.readFile(
+      path.join(root, '.codex-import.json'),
+      'utf8',
+    );
+    await fs.rmdir(index);
+    await runCodexImport({
+      ...options(),
+      selectedIds: [entry.id],
+      dryRun: true,
+    });
+    await expect(fs.stat(index)).rejects.toMatchObject({ code: 'ENOENT' });
+    const retry = await runCodexImport({
+      ...options(),
+      selectedIds: [entry.id],
+    });
+    expect(retry.entries[0].status).toBe('previously-imported');
+    expect(await fs.readFile(index, 'utf8')).toContain(
+      'codex-' + entry.id + '.md',
+    );
+    expect(await fs.readFile(topic, 'utf8')).toBe(content);
+    expect((await fs.stat(topic)).mtimeMs).toBe(mtime);
+    expect(
+      await fs.readFile(path.join(root, '.codex-import.json'), 'utf8'),
+    ).toBe(ledger);
+    await expect(
+      fs.stat(path.join(root, '.codex-import.lock')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('previews by default and with selected IDs without creating destination files', async () => {
     const before = await fs.readFile(path.join(source, 'MEMORY.md'), 'utf8');
     const result = await runCodexImport(options());

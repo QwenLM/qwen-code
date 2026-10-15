@@ -104,7 +104,9 @@ function resolveProject(
   const appliesTo = lines.filter((line) => /^applies_to:/i.test(line));
   const explicit = lines.filter((line) => /^cwd:/i.test(line));
   const scopeLines =
-    appliesTo.length > 0 ? appliesTo : explicit.length > 0 ? explicit : lines;
+    appliesTo.length > 0 || explicit.length > 0
+      ? [...appliesTo, ...explicit]
+      : lines;
   const ambiguous = {
     reason:
       'Multiple or alternative project scopes. Choose one project in a reviewed source export.',
@@ -189,7 +191,7 @@ function resolveProject(
       suffix =
         end < 0 ? '' : suffix.slice(end + (parenthetical ? 1 : 0)).trim();
     }
-    if (/(?:^|[,;|]\s*)(?:\/|[A-Za-z]:[\\/])/.test(suffix)) {
+    if (/(?:^|[\s,;|(\x60])(?:\/|[A-Za-z]:[\\/])/.test(suffix)) {
       return ambiguous;
     }
     if (suffix && !/^[,;)]/.test(suffix)) return unsupported;
@@ -252,7 +254,13 @@ function entries(
       continue;
     }
     if (fence) continue;
-    const bullet = line.match(/^[-*+]\s+(.+)/);
+    if (/^\s*(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$/.test(line)) {
+      if (current) result.push(current);
+      current = undefined;
+      blank = false;
+      continue;
+    }
+    const bullet = line.match(/^(?:[-*+]|\d+[.)])\s+(.+)/);
     if (bullet) {
       if (current) result.push(current);
       current = { content: bullet[1], line: index + 1 };
@@ -348,6 +356,14 @@ export function parseCodexMemories(files: SourceFile[]): {
         continue;
       }
       recognized++;
+      const nested = allHeadings.find(
+        (next) => next.start === heading.end && next.level > heading.level,
+      );
+      if (nested) {
+        warnings.push(
+          `${file.path}:${nested.start + 1}: nested memory subsections skipped; move their entries into a supported section in a reviewed source export.`,
+        );
+      }
       let sourceMetadata = groupMetadata;
       if (task) {
         const end =

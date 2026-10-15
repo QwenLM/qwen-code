@@ -24,6 +24,67 @@ applies_to: cwd=/work/atlas; reuse_rule=verify current state
 `;
 
 describe('parseCodexMemories', () => {
+  it.each(['/work/atlas', '/work/borealis'])(
+    'checks same-level explicit cwd %s together with applies_to',
+    (cwd) => {
+      const result = parseHandbook(
+        '# Task Group: Atlas\napplies_to: cwd=/work/atlas\ncwd: ' +
+          cwd +
+          '\n## Reusable knowledge\n- Check provenance.\n',
+      );
+      if (cwd === '/work/atlas') {
+        expect(result.candidates[0].sourceProject).toBe('/work/atlas');
+        expect(result.warnings).toEqual([]);
+      } else {
+        expect(result.candidates[0].sourceProject).toBeUndefined();
+        expect(result.warnings.join('\n')).toContain(
+          'Multiple or alternative project scopes',
+        );
+      }
+    },
+  );
+
+  it.each(['see also /work/borealis', 'plus /work/borealis'])(
+    'keeps an additional path after prose ambiguous: %s',
+    (suffix) => {
+      const result = parseHandbook(
+        '# Task Group: Atlas\napplies_to: cwd=/work/atlas, ' +
+          suffix +
+          '\n## Reusable knowledge\n- Check provenance.\n',
+      );
+      expect(result.candidates[0].sourceProject).toBeUndefined();
+      expect(result.warnings.join('\n')).toContain(
+        'Multiple or alternative project scopes',
+      );
+    },
+  );
+
+  it('separates ordered entries and excludes thematic separators', () => {
+    const result = parseHandbook(
+      '# Task Group: Atlas\ncwd: /work/atlas\n## Reusable knowledge\n' +
+        '1. First fact.\n2) Second fact.\n\n---\n\n- Third fact.\n',
+    );
+    expect(result.candidates.map((entry) => entry.content)).toEqual([
+      'First fact.',
+      'Second fact.',
+      'Third fact.',
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('discloses skipped nested memory subsections', () => {
+    const result = parseHandbook(
+      '# Task Group: Atlas\ncwd: /work/atlas\n## Reusable knowledge\n' +
+        '- Visible fact.\n### Detail\n- Nested fact.\n',
+    );
+    expect(result.candidates.map((entry) => entry.content)).toEqual([
+      'Visible fact.',
+    ]);
+    expect(result.warnings.join('\n')).toContain(
+      'nested memory subsections skipped',
+    );
+  });
+
   it('extracts supported group sections with canonical project and provenance', () => {
     const source = `${GROUP}
 ## User preferences
