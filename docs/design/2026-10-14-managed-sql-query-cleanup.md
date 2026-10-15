@@ -30,6 +30,8 @@ Do not update timestamps whose semantics intentionally measure projection work o
 
 The Session request receipt uses a named Java record with deliberate identity, nullable boolean, and numeric readers instead of map casts. Recovery and CSI documents retain their existing versioned JSON shape. Their JDBC decoder reads integral, boolean, binary and text values explicitly so driver-specific `getObject` classes do not define the document types. Business timestamps are integer milliseconds. Boolean normalization preserves numeric SQL expressions, while the generated CSI guard always decodes as a boolean. Raw actor bytes and immutable payload bytes are not decoded as text.
 
+Retain the incoming main-branch replay and ordering fixes when adapting them to this baseline: typed command receipts carry the recorder's raw actor key, Session pagination and its V3 index use immutable `gmt_create`, and relay ordering keeps `first_sequence` after creation time and Session identity. V3 and its upgrade fixtures use the same renamed timestamp columns as V1; this does not add migration support for databases created with the former timestamp baseline.
+
 ## Risks and validation
 
 An omitted projection column can break a mapper or remove recovery evidence. Validate all 28 shared projections against the combined V1/V2 baseline and exercise existing receipt, Session, output, recovery, and broker repository tests. Nullable values, byte-exact identities and integer millisecond values must survive the mapping change. Keep the incoming CSI authority fields in the projections and preserve their mutation guards.

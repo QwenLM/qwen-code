@@ -12,7 +12,7 @@ import java.util.List;
 final class ManagedReceipts {
     record Receipt(String tenantId, String scopeId, String idempotencyKey,
             String requestDigest, String sessionId, String turnId, String state,
-            String sessionStatusBefore, Boolean workspaceBound, long createdAt,
+            String sessionStatusBefore, byte[] actorKey, Boolean workspaceBound, long createdAt,
             long updatedAt) {
     }
 
@@ -37,7 +37,7 @@ final class ManagedReceipts {
         List<Receipt> rows =
                 jdbc.query(
                         "SELECT tenant_id, scope_id, idempotency_key, request_digest, session_id,"
-                            + " turn_id, state, session_status_before, workspace_bound, gmt_create,"
+                            + " turn_id, state, session_status_before, actor_id, workspace_bound, gmt_create,"
                             + " gmt_modified FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
                             + " AND tenant_key = ? AND scope_key = ?"
                                 + (lock ? " FOR UPDATE" : ""),
@@ -50,6 +50,7 @@ final class ManagedReceipts {
                                 ManagedSchemaRows.identity(row, "turn_id"),
                                 row.getString("state"),
                                 row.getString("session_status_before"),
+                                row.getBytes("actor_id"),
                                 row.getObject("workspace_bound", Boolean.class),
                                 row.getLong("gmt_create"), row.getLong("gmt_modified")),
                         ManagedSchemaKeys.receiptKey(
@@ -128,6 +129,32 @@ final class ManagedReceipts {
             String state,
             String previousStatus,
             long now) {
+        insertCommand(
+                jdbc, tenant, operation, key, digest, session, turn, state, previousStatus, null,
+                now);
+    }
+
+    // A command this build records without an attributable actor — a
+    // server-keyed command, or an actor id the registry key cannot encode.
+    // Zero bytes, which no actor key equals (an actor id has at least one
+    // code point), so NULL stays reserved for receipts recorded before the
+    // recorder stamp existed.
+    static final byte[] UNATTRIBUTED = new byte[0];
+
+    // The recording actor rides on the receipt so a replay answers the
+    // actor who recorded the command, not only the Session's creator.
+    static void insertCommand(
+            JdbcTemplate jdbc,
+            String tenant,
+            String operation,
+            String key,
+            String digest,
+            String session,
+            String turn,
+            String state,
+            String previousStatus,
+            byte[] actor,
+            long now) {
         insert(
                 jdbc,
                 ReceiptNamespace.SESSION_COMMAND,
@@ -137,7 +164,7 @@ final class ManagedReceipts {
                 key,
                 digest,
                 operation,
-                null,
+                actor == null ? UNATTRIBUTED : actor,
                 session,
                 turn,
                 state,
