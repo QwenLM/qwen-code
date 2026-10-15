@@ -2,31 +2,34 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
-import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
-import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.StaticRuntimeProvisioner;
-import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -42,8 +45,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(
@@ -387,7 +388,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ManagedAgentProperties.RuntimeBroker broker,
             HttpRuntimeTransport transport) {
         if (broker.isTrustedLocalRebootRecovery()
-                && (!broker.isDurableLocalProcess() || !"local-process".equals(broker.getProvisioner()))) {
+                && (!broker.isDurableLocalProcess() || !LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner()))) {
             if (!broker.isDurableLocalProcess()) {
                 throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
                         + " provisioning; enable durable local-process"
@@ -401,7 +402,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     + " (QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false)"
                     + " for non-durable provisioners");
         }
-        if ("local-process".equals(broker.getProvisioner())) {
+        if (LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
             require(broker.getStateDirectory(),
                     "Runtime Broker state directory");
             require(broker.getNodeExecutable(), "Node.js executable");
@@ -481,7 +482,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             }
             return broker.getWorkspaceCwd();
         }
-        if (!"local-process".equals(broker.getProvisioner())) {
+        if (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
             return broker.getWorkspaceCwd();
         }
         try {
@@ -497,7 +498,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ManagedAgentProperties.RuntimeBroker broker,
             String workspaceCwd) {
         String configured = broker.getWorkspaceId();
-        if (!"local-process".equals(broker.getProvisioner())
+        if (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())
                 && !"kubernetes".equals(broker.getProvisioner())) {
             require(configured, "Runtime Broker workspace ID");
             return configured;

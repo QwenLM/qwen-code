@@ -5,6 +5,10 @@ import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -12,9 +16,6 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 public final class HostedProcessCrashFixtureMain {
     private HostedProcessCrashFixtureMain() {
@@ -60,25 +61,25 @@ public final class HostedProcessCrashFixtureMain {
                     + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
                     + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
             arguments.addAll(List.of(
-                "--server.port=0",
-                "--qwen.managed-agent.harness.enabled=false",
-                "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
-                "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
-                "--qwen.managed-agent.runtime-broker.durable-local-process=false",
-                "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                    "--server.port=0",
+                    "--qwen.managed-agent.harness.enabled=false",
+                    "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
+                    "--qwen.managed-agent.runtime-broker.enabled=true",
+                    "--qwen.managed-agent.runtime-broker.port=0",
+                    "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
+                    "--qwen.managed-agent.runtime-broker.durable-local-process=false",
+                    "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
+                    "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                         + "Linux".equals(System.getProperty("os.name")),
-                "--qwen.managed-agent.runtime-broker.workspace-cwd=" + root,
-                "--qwen.managed-agent.runtime-broker.state-directory=" + root.resolve("runtime"),
-                "--qwen.managed-agent.runtime-broker.credential-key-id=test",
-                "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                "--qwen.managed-agent.runtime-broker.node-executable=" + node,
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
-                "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
-                "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
-                "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
+                    "--qwen.managed-agent.runtime-broker.workspace-cwd=" + root,
+                    "--qwen.managed-agent.runtime-broker.state-directory=" + root.resolve("runtime"),
+                    "--qwen.managed-agent.runtime-broker.credential-key-id=test",
+                    "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "--qwen.managed-agent.runtime-broker.node-executable=" + node,
+                    "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
+                    "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
+                    "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
+                    "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
         }
         var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(arguments.toArray(String[]::new));
