@@ -12,7 +12,7 @@ on:
         required: true
         type: 'string'
       qwen_code_ref:
-        description: 'Qwen Code branch or commit to bundle, reachable from main. A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
+        description: 'Qwen Code branch or commit to bundle, reachable from main. Must contain the desktop crate (packages/desktop/src-tauri). A release tag whose own commit is off main is refused here: dispatch checks the ref itself, while only the release event peels to its parent.'
         required: true
         default: 'main'
         type: 'string'
@@ -291,10 +291,12 @@ jobs:
   build:
     name: 'Build ${{ matrix.name }}'
     if: "${{ needs.prepare.outputs.already_published != 'true' }}"
-    needs:
-      - 'prepare'
-      - 'desktop_shell'
-    runs-on: '${{ matrix.os }}'
+    needs: 'prepare'
+    # desktop_shell runs in parallel with build, not ahead of it: build
+    # itself compiles and tests the same pinned revision on every matrix
+    # entry, so serializing the shell lane would only add up to 45 minutes
+    # before the build. publish joins on both, so nothing is released
+    # unchecked.
     timeout-minutes: 120
     strategy:
       fail-fast: false

@@ -21,7 +21,7 @@ env:
 concurrency:
   group: 'sdk-java-${{ github.workflow }}-${{ github.ref }}'
   # Release callers and daily runs must not displace each other's validation.
-  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+  cancel-in-progress: false
 
 jobs:
   test:

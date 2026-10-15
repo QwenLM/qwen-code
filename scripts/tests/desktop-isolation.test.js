@@ -203,7 +203,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     expect(desktopJob.defaults.run.shell).toBe('bash');
   });
 
-  it('gates build and publish on checks of the same release commit', () => {
+  it('gates publication on parallel checks of the same release commit', () => {
     expect(desktopJob.needs).toBe('prepare');
     expect(desktopJob.if).toBe(
       "${{ needs.prepare.outputs.already_published != 'true' }}",
@@ -213,10 +213,15 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       'windows-2022',
     ]);
     expect(desktopJob['continue-on-error']).toBeUndefined();
-    for (const name of ['build', 'publish']) {
-      expect(release.jobs[name].needs).toContain('desktop_shell');
-      expect(release.jobs[name].if).not.toMatch(/always\(|!cancelled\(/u);
-    }
+    // The shell lane runs in parallel with build; publish joins on both, so
+    // a failed shell check blocks publication without serializing ahead of
+    // the 120-minute build that runs the same tests on every matrix entry.
+    expect(release.jobs.build.needs).toBe('prepare');
+    expect(release.jobs.publish.needs).toEqual([
+      'prepare',
+      'desktop_shell',
+      'build',
+    ]);
     for (const name of ['desktop_shell', 'build', 'publish']) {
       const checkout = release.jobs[name].steps.find((step) =>
         step.uses?.startsWith('actions/checkout@'),

@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       qwen_code_ref:
-        description: 'Qwen Code branch, tag, or commit to bundle.'
+        description: 'Qwen Code branch, tag, or commit to bundle; it must contain the desktop crate (packages/desktop/src-tauri), or the run fails.'
         required: true
         default: 'main'
         type: 'string'
