@@ -10,11 +10,25 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  getLastPeerInboxFailure,
+  type InboundPolicy,
+  parseHeldExpiry,
+  type PeerInboxStartFailure,
   isDebugLogFileEnabled,
   registerSession,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
+import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import {
+  PeerInboxFailureContext,
+  PeerMessagingContext,
+} from '../peerMessaging/PeerMessagingContext.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
+import {
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingOptedIn,
+} from '../peerMessaging/enabled.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -55,6 +69,7 @@ import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
+import { primeGitBranchName } from './hooks/useGitBranchName.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -77,6 +92,9 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
   options: StartInteractiveUIOptions = {},
 ) {
+  const branchPrimed = primeGitBranchName(config.getTargetDir()).catch(
+    () => {},
+  );
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
 
@@ -172,47 +190,113 @@ export async function startInteractiveUI(
       ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
       : { restore: () => {}, repaint: () => {} };
 
+  // Cross-session messaging (on by default; see peerMessaging/enabled.ts). The inbox is
+  // owned outside React — bound once per process by the block at the end of
+  // this function — and this promise is how the bound instance (or null,
+  // when the feature is off or the socket could not be bound) reaches the
+  // tree.
+  let publishPeerMessaging: (
+    messaging: PeerMessaging | null,
+  ) => void = () => {};
+  const peerMessagingReady = new Promise<PeerMessaging | null>((resolve) => {
+    publishPeerMessaging = resolve;
+  });
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
+
+    // Subscribe only. Binding the inbox from an effect would bind it twice
+    // under StrictMode's mount/unmount/remount, and both mounts resolve the
+    // same PID-keyed socket path: the first instance's deferred close()
+    // unlinks the socket file the second one just bound, leaving a server
+    // listening where no peer can reach it.
+    const [peerMessaging, setPeerMessaging] =
+      React.useState<PeerMessaging | null>(null);
+    const [peerInboxFailure, setPeerInboxFailure] =
+      React.useState<PeerInboxStartFailure | null>(null);
+    React.useEffect(() => {
+      let alive = true;
+      void peerMessagingReady.then((messaging) => {
+        if (!alive) return;
+        setPeerMessaging(messaging);
+        // A null inbox for a session that takes part is a bind that failed;
+        // the cause is what the user needs, not the null. A session that
+        // does not take part — the setting off, or `--bare`/`--safe-mode` —
+        // publishes null on purpose and has no failure to explain.
+        if (
+          messaging === null &&
+          isCrossSessionMessagingActive(settings.merged, config)
+        ) {
+          const failure = getLastPeerInboxFailure();
+          // A different question from the helper above: not "is messaging
+          // on", which an unset key also answers yes, but "did a person
+          // write `true`" — in their user settings or this workspace's, not
+          // in an operator's defaults, which merged settings cannot tell
+          // apart. The switch is on by default, so a platform with no inbox
+          // transport would otherwise greet every one of its users with a
+          // failure about a feature they never asked for; that one is said
+          // only to someone who opted in by hand. A bind that failed where
+          // it should have worked is said to everyone: they are
+          // unreachable, and this line is the only place they learn it.
+          const optedInByHand = isCrossSessionMessagingOptedIn(settings);
+          if (
+            failure !== null &&
+            (failure.cause !== 'unsupported_platform' || optedInByHand)
+          ) {
+            setPeerInboxFailure(failure);
+          }
+        }
+      });
+      return () => {
+        alive = false;
+      };
+    }, []);
+
     return (
-      <RemoteInputContext.Provider value={remoteInputWatcher}>
-        <DualOutputContext.Provider value={dualOutputBridge}>
-          <SettingsContext.Provider value={settings}>
-            <KeypressProvider
-              kittyProtocolEnabled={kittyProtocolStatus.enabled}
-              config={config}
-              debugKeystrokeLogging={
-                settings.merged.general?.debugKeystrokeLogging
-              }
-              pasteWorkaround={
-                process.platform === 'win32' || nodeMajorVersion < 20
-              }
-              initialCapturedInput={initialCapturedInput}
-            >
-              <SessionStatsProvider sessionId={config.getSessionId()}>
-                <VimModeProvider settings={settings}>
-                  <AgentViewProvider config={config}>
-                    <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                        initialUseVirtualViewport={useVP}
-                        extensionRefreshState={options.extensionRefreshState}
-                        repaintViewport={resizeReflow.repaint}
-                      />
-                    </BackgroundTaskViewProvider>
-                  </AgentViewProvider>
-                </VimModeProvider>
-              </SessionStatsProvider>
-            </KeypressProvider>
-          </SettingsContext.Provider>
-        </DualOutputContext.Provider>
-      </RemoteInputContext.Provider>
+      <PeerInboxFailureContext.Provider value={peerInboxFailure}>
+        <PeerMessagingContext.Provider value={peerMessaging}>
+          <RemoteInputContext.Provider value={remoteInputWatcher}>
+            <DualOutputContext.Provider value={dualOutputBridge}>
+              <SettingsContext.Provider value={settings}>
+                <KeypressProvider
+                  kittyProtocolEnabled={kittyProtocolStatus.enabled}
+                  config={config}
+                  debugKeystrokeLogging={
+                    settings.merged.general?.debugKeystrokeLogging
+                  }
+                  pasteWorkaround={
+                    process.platform === 'win32' || nodeMajorVersion < 20
+                  }
+                  initialCapturedInput={initialCapturedInput}
+                >
+                  <SessionStatsProvider sessionId={config.getSessionId()}>
+                    <VimModeProvider settings={settings}>
+                      <AgentViewProvider config={config}>
+                        <BackgroundTaskViewProvider config={config}>
+                          <AppContainer
+                            config={config}
+                            settings={settings}
+                            startupWarnings={startupWarnings}
+                            version={version}
+                            initializationResult={initializationResult}
+                            initialUseVirtualViewport={useVP}
+                            extensionRefreshState={
+                              options.extensionRefreshState
+                            }
+                            repaintViewport={resizeReflow.repaint}
+                          />
+                        </BackgroundTaskViewProvider>
+                      </AgentViewProvider>
+                    </VimModeProvider>
+                  </SessionStatsProvider>
+                </KeypressProvider>
+              </SettingsContext.Provider>
+            </DualOutputContext.Provider>
+          </RemoteInputContext.Provider>
+        </PeerMessagingContext.Provider>
+      </PeerInboxFailureContext.Provider>
     );
   };
 
@@ -223,6 +307,7 @@ export async function startInteractiveUI(
     // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
+  await branchPrimed;
   const appTree = (
     <ErrorBoundary
       recordForExitEcho
@@ -252,6 +337,7 @@ export async function startInteractiveUI(
       exitOnCtrlC: false,
       isScreenReaderEnabled: config.getScreenReader(),
       alternateScreen: useVP,
+      ...(useVP ? { maxFps: 60 } : {}),
     },
   );
   if (useVP) {
@@ -363,7 +449,7 @@ export async function startInteractiveUI(
         // record lands, and `--resume` refuses to load an empty one.
         // Non-emptiness here relies on config.shutdown() flushing the
         // recorder first — it is registered earlier in the cleanup chain
-        // in gemini.tsx; keep that registration order.
+        // in llm.tsx; keep that registration order.
         if (isValidSessionId(sessionId) && (await stat(sessionFile)).size > 0) {
           writeStdoutLine(
             `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
@@ -385,8 +471,73 @@ export async function startInteractiveUI(
       sessionId: config.getSessionId(),
       cwd: config.getTargetDir(),
       qwenVersion: version,
+      kind: 'tui',
     }),
   );
+
+  // Bind the peer-messaging inbox, strictly after the registration above was
+  // queued: the inbox advertises its address by patching this session's
+  // registry record, and `patchSessionRecord` no-ops when there is no record
+  // yet, so binding any earlier would publish the socket path into nothing.
+  // Not awaited — startup must never block on binding a socket.
+  // Off when the setting says so, or when the session was started with it
+  // suppressed: `--bare` and `--safe-mode` turn messaging off whatever the
+  // setting says, and the same predicate answers for `/peers` and for the
+  // ACP agent's hosted sessions.
+  if (!isCrossSessionMessagingActive(settings.merged, config)) {
+    publishPeerMessaging(null);
+  } else {
+    let exiting = false;
+    const peerMessagingStart = (async (): Promise<PeerMessaging | null> => {
+      try {
+        const registered = await config.whenSessionRegistered();
+        if (!registered || exiting) return null;
+        const peerMessaging = await PeerMessaging.start({
+          getApprovalMode: () => {
+            try {
+              return config.getApprovalMode();
+            } catch {
+              // An unreadable mode must read as unknown, which the gate
+              // treats as "hold", not as "accept".
+              return null;
+            }
+          },
+          getPolicySetting: () =>
+            settings.merged.agents?.crossSessionInbound as
+              | InboundPolicy
+              | undefined,
+          getHeldExpiryMs: () =>
+            parseHeldExpiry(settings.merged.agents?.crossSessionHeldExpiry),
+          getPolicyScope: () => inboundPolicyScope(settings),
+          updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
+            config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
+          getSessionId: () => config.getSessionId(),
+          reassertSessionRecord: () => config.reassertSessionRegistryRecord(),
+        });
+        if (exiting) {
+          await peerMessaging?.close();
+          return null;
+        }
+        return peerMessaging;
+      } catch (error) {
+        debugLogger.error('Failed to start cross-session messaging:', error);
+        return null;
+      }
+    })();
+    registerCleanup(async () => {
+      exiting = true;
+      // Awaited, unlike a fire-and-forget close on unmount: the socket file
+      // and the record's ipcPath have to be gone before the process exits.
+      // runExitCleanup caps every entry, so a stuck close cannot hang exit.
+      await (await peerMessagingStart)?.close();
+    });
+    void (async () => {
+      publishPeerMessaging(await peerMessagingStart);
+    })();
+  }
+  // The peer cleanup is registered first so its final ipcPath clear stays
+  // inside Config's serial registry queue before unregister removes the
+  // record. With messaging disabled this remains the next cleanup entry.
   registerCleanup(() => config.unregisterSessionRegistry());
 }
 

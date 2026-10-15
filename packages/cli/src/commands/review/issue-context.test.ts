@@ -55,6 +55,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: vi.fn(),
 }));
 
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import { issueContextCommand, runIssueContext } from './issue-context.js';
 
 const ARGS = {
@@ -523,6 +524,24 @@ describe('issueContextCommand handler', () => {
     // The usage error must preempt the auth gate — `gh auth login` can
     // never repair the invocation.
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('a repeated --out is a usage error before anything is fetched', () => {
+    // yargs hands a repeated flag over as an array; joined with String() it
+    // became the single path "a,b" and the output was written there.
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: ['/tmp/a.md', '/tmp/b.md'],
+    });
+    expect(process.exitCode).toBe(2);
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
+      'issue-context: --out must be given once, as a file path',
+    );
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('a discovery failure degrades into the file (exit 0 with discoveryError)', () => {

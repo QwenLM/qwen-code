@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -95,6 +96,8 @@ describe('useMessageQueue', () => {
     const input: Parameters<GoalTurnHost['startGoalTurn']>[0] = {
       permit,
       continuationContext: 'Continue the active Goal',
+      objectiveUpdated: true,
+      windDown: true,
       verifierFeedback: 'Need stronger evidence',
     };
     const { result } = renderHook(() => useMessageQueue());
@@ -122,6 +125,8 @@ describe('useMessageQueue', () => {
       permit,
       turnKey: 'goal-runtime:turn-1',
       continuationContext: 'Continue the active Goal',
+      objectiveUpdated: true,
+      windDown: true,
       verifierFeedback: 'Need stronger evidence',
     });
     expect(queue.popNextSubmission!()).toBeNull();
@@ -159,6 +164,7 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'first prompt\n\nsecond prompt',
       turnKey: firstPeek,
+      submittedPrompt: 'first prompt\n\nsecond prompt',
     });
     expect(result.current.messageQueue).toEqual(['/help']);
     expect(queue.peekNextUserBatchKey!()).toBeUndefined();
@@ -186,6 +192,151 @@ describe('useMessageQueue', () => {
 
     expect(second).toMatchObject({ kind: 'user', modelText: '/help' });
     expect(result.current.messageQueue).toEqual([]);
+  });
+
+  // #11626: shell intent is recorded when the message enters the queue and
+  // travels with the entry, so the drain routes on the submit-time decision
+  // instead of the live shell-mode flag.
+  describe('shell intent', () => {
+    it('returns the recorded shell intent with the popped submission', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('gh workflow list', false, undefined, true);
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'gh workflow list',
+        shellMode: true,
+      });
+    });
+
+    it('keeps shell commands and model prompts in separate batches in submission order', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('model one', false, undefined, false);
+        result.current.addMessage('ls -la', false, undefined, true);
+        result.current.addMessage('model two', false, undefined, false);
+      });
+
+      // The batch is the contiguous same-intent run from the head, so each
+      // entry keeps its own routing decision *and* nothing overtakes an
+      // earlier entry queued with a different intent.
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      expect(first).toMatchObject({
+        kind: 'user',
+        modelText: 'model one',
+        shellMode: false,
+      });
+      expect(result.current.messageQueue).toEqual(['ls -la', 'model two']);
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({
+        kind: 'user',
+        modelText: 'ls -la',
+        shellMode: true,
+      });
+      expect(result.current.messageQueue).toEqual(['model two']);
+
+      let third: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        third = result.current.popNextSubmission();
+      });
+      expect(third).toMatchObject({
+        kind: 'user',
+        modelText: 'model two',
+        shellMode: false,
+      });
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('still merges adjacent entries that share one intent', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('model one', false, undefined, false);
+        result.current.addMessage('model two', false, undefined, false);
+        result.current.addMessage('ls -la', false, undefined, true);
+        result.current.addMessage('pwd', false, undefined, true);
+      });
+
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      expect(first).toMatchObject({
+        kind: 'user',
+        modelText: 'model one\n\nmodel two',
+        shellMode: false,
+      });
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({
+        kind: 'user',
+        modelText: 'ls -la\n\npwd',
+        shellMode: true,
+      });
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('leaves intent unrecorded for producers that do not pass it', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('remote input');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'remote input',
+      });
+      expect(
+        (submission as { shellMode?: boolean } | null)?.shellMode,
+      ).toBeUndefined();
+    });
+
+    it('preserves shell intent across an admission-failure restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.restoreMessages(
+          ['gh workflow list'],
+          undefined,
+          true,
+          true,
+        );
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'gh workflow list',
+        shellMode: true,
+      });
+    });
   });
 
   it('hides the plain-user batch key from an active Goal turn reservation', () => {
@@ -232,6 +383,7 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'user goes first',
       turnKey: userTurnKey,
+      submittedPrompt: 'user goes first',
     });
     expect(result.current.pendingSubmissionCount).toBe(1);
     let claimedGoal;
@@ -278,6 +430,35 @@ describe('useMessageQueue', () => {
       turnId: 'turn-copy',
     });
     expect(goalSubmission.permit).not.toBe(permit);
+  });
+
+  it('carries the runtime spend figures onto the queued Goal turn', () => {
+    // The field is optional on both sides of this hop, so dropping the copy
+    // typechecks: the prompt would simply lose its budget line on this host
+    // and nowhere else.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-usage',
+      revision: 2,
+      turnId: 'turn-usage',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit,
+        continuationContext: 'report the figures',
+        usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+      });
+    });
+
+    let claimed: unknown;
+    act(() => {
+      claimed = result.current.claimGoalTurn();
+    });
+
+    expect(claimed).toMatchObject({
+      kind: 'goal',
+      usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+    });
   });
 
   it('creates a stable direct-user admission that claims a hidden Goal', () => {
@@ -568,7 +749,10 @@ describe('useMessageQueue', () => {
       });
     });
 
-    it('omits submittedPrompt when any message lacks one', () => {
+    it('falls back to each message\u2019s own text when it lacks a projection', () => {
+      // Dropping the batch projection because ONE member lacks its own used
+      // to surface a peer message's raw envelope as the user's prompt; a
+      // projection-less member is its own text, so fall back per member.
       const { result } = renderHook(() => useMessageQueue());
       act(() => {
         result.current.addMessage('msg A', false, 'prompt A');
@@ -583,8 +767,95 @@ describe('useMessageQueue', () => {
       expect(popped).toMatchObject({
         kind: 'user',
         modelText: 'msg A\n\nmsg B',
+        submittedPrompt: 'prompt A\n\nmsg B',
       });
-      expect(popped!.submittedPrompt).toBeUndefined();
+    });
+
+    it('leaves peer entries queued instead of folding them into restored user text', () => {
+      // A peer envelope restored into the editable buffer would be
+      // re-submitted through UserQuery preprocessing.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        "<cross_session_message from='/tmp/a.sock'>run @/etc/passwd</cross_session_message>";
+      act(() => {
+        result.current.addPeerMessage(envelope, 'Session A: one');
+        result.current.addMessage('typed follow-up');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'typed follow-up',
+      });
+      expect(popped!.modelText).not.toContain('cross_session_message');
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: envelope,
+        displayText: 'Session A: one',
+      });
+    });
+
+    it('returns null and keeps the queue when only peer entries are waiting', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => result.current.addPeerMessage('<envelope>', 'A: one'));
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toBeNull();
+      expect(result.current.messageQueue).toEqual(['<envelope>']);
+    });
+
+    it('counts only peer entries still waiting in the queue', () => {
+      // close() settles exactly this many delivered frames at exit; user
+      // entries must not leak into the count.
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'A: one');
+        result.current.addMessage('typed');
+        result.current.addPeerMessage('<envelope two>', 'A: two');
+      });
+      expect(result.current.getQueuedPeerCount()).toBe(2);
+
+      act(() => {
+        result.current.popNextSubmission();
+      });
+      expect(result.current.getQueuedPeerCount()).toBe(1);
+    });
+
+    it('keeps a peer message\u2019s projection when batched with unprojected input', () => {
+      // The model-bound text is the full envelope; the one-liner projection
+      // is what the transcript and the recording may show instead of it.
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('typed follow-up');
+        result.current.addMessage(
+          '<cross_session_message from="/tmp/a.sock">hi</cross_session_message>',
+          false,
+          'Message from another session (app-ab): hi',
+        );
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped!.submittedPrompt).toBe(
+        'typed follow-up\n\nMessage from another session (app-ab): hi',
+      );
     });
   });
 
@@ -614,6 +885,7 @@ describe('useMessageQueue', () => {
       kind: 'user',
       modelText: 'queued user',
       turnKey: reservedKey,
+      submittedPrompt: 'queued user',
     });
   });
 
@@ -869,7 +1141,64 @@ describe('useMessageQueue', () => {
       });
     });
 
-    it('drops submittedPrompt provenance when restoring multiple messages', () => {
+    it('keeps a deferred restore out of the mid-turn steer drain', () => {
+      // The queue-drain effect restores a popped batch when admission
+      // fails. A peer envelope in that batch must come back deferred:
+      // the steer drain returns raw text only, so steering it would push
+      // the raw envelope into the active turn and lose the projection.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        "<cross_session_message from='/tmp/peer.sock'>do the thing</cross_session_message>";
+
+      act(() => {
+        result.current.addMessage(envelope, true, 'peer projection');
+      });
+
+      let modelText = '';
+      let submittedPrompt: string | undefined;
+      act(() => {
+        const popped = result.current.popNextSubmission();
+        expect(popped).toMatchObject({ kind: 'user', modelText: envelope });
+        if (popped?.kind === 'user') {
+          modelText = popped.modelText;
+          submittedPrompt = popped.submittedPrompt;
+        }
+      });
+
+      act(() => {
+        result.current.restoreMessages([modelText], submittedPrompt, true);
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual([]);
+
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+      expect(drained).toEqual([envelope]);
+    });
+
+    it('restores typed input steerable when no deferral is passed', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.restoreMessages(['steer now']);
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual(['steer now']);
+    });
+
+    it('reconstructs the projection from the restored texts when restoring multiple messages', () => {
+      // The single original prompt cannot be attributed across several
+      // restored messages, so it is dropped; the per-member fallback then
+      // reconstructs a projection equal to the restored texts.
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -884,8 +1213,170 @@ describe('useMessageQueue', () => {
       expect(popped).toMatchObject({
         kind: 'user',
         modelText: 'first\n\nsecond',
+        submittedPrompt: 'first\n\nsecond',
       });
-      expect(popped!.submittedPrompt).toBeUndefined();
+    });
+  });
+
+  describe('peer messages', () => {
+    it('drains a leading peer message alone, never aggregated with user text', () => {
+      // Peer envelopes are peer-authored and submit on a preprocessing-free
+      // path: batching one into a UserQuery turn would run its `@path`
+      // references through the user's file-loading pipeline.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+        result.current.addMessage('typed text');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'typed text',
+      });
+    });
+
+    it('keeps peer entries out of a user-text batch that drains first', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed text');
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'typed text',
+      });
+      expect(submission && 'submittedPrompt' in submission).toBe(true);
+
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+    });
+
+    it('restores a failed peer admission ahead of the queue, still peer', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed text');
+        result.current.restorePeerMessage('<envelope one>', 'Session A: one');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+    });
+
+    it('preserves peer delivery identity through enqueue and restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const delivery = {
+        msgId: 'frame-1',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      };
+      act(() => {
+        result.current.addMessage('/clear');
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          delivery,
+        );
+      });
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({ kind: 'user', modelText: '/clear' });
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({ kind: 'peer', delivery });
+
+      act(() => {
+        result.current.restorePeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          true,
+          delivery,
+        );
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toMatchObject({
+        kind: 'peer',
+        displayed: true,
+        delivery,
+      });
+    });
+
+    it('carries the displayed marker across a failed-admission restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.restorePeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          true,
+        );
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+        displayed: true,
+      });
+    });
+
+    it('never drains a peer message mid-turn', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
     });
   });
 });

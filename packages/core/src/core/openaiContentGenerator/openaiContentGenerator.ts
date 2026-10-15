@@ -2,8 +2,6 @@ import type { ContentGenerator } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
 import { type OpenAICompatibleProvider } from './provider/index.js';
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -12,11 +10,11 @@ import type {
 import type { PipelineConfig } from './types.js';
 import { ContentGenerationPipeline } from './pipeline.js';
 import { EnhancedErrorHandler } from './errorHandler.js';
-import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { isAbortError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
+import { extractTextFromContents } from '../../utils/extract-text-from-contents.js';
 
 const debugLogger = createDebugLogger('OPENAI');
 
@@ -80,67 +78,10 @@ export class OpenAIContentGenerator implements ContentGenerator {
     return this.pipeline.executeStream(request, userPromptId);
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    try {
-      // Use the request token estimator (character-based).
-      const estimator = new RequestTokenEstimator();
-      const result = await estimator.calculateTokens(request);
-
-      return {
-        totalTokens: result.totalTokens,
-      };
-    } catch (error) {
-      debugLogger.warn(
-        'Failed to calculate tokens with new tokenizer, falling back to simple method:',
-        error,
-      );
-
-      // Fallback to original simple method
-      const content = JSON.stringify(request.contents);
-      const totalTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
-
-      return {
-        totalTokens,
-      };
-    }
-  }
-
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    // Extract text from contents
-    let text = '';
-    if (Array.isArray(request.contents)) {
-      text = request.contents
-        .map((content) => {
-          if (typeof content === 'string') return content;
-          if ('parts' in content && content.parts) {
-            return content.parts
-              .map((part) =>
-                typeof part === 'string'
-                  ? part
-                  : 'text' in part
-                    ? (part as { text?: string }).text || ''
-                    : '',
-              )
-              .join(' ');
-          }
-          return '';
-        })
-        .join(' ');
-    } else if (request.contents) {
-      if (typeof request.contents === 'string') {
-        text = request.contents;
-      } else if ('parts' in request.contents && request.contents.parts) {
-        text = request.contents.parts
-          .map((part) =>
-            typeof part === 'string' ? part : 'text' in part ? part.text : '',
-          )
-          .join(' ');
-      }
-    }
+    const text = extractTextFromContents(request.contents);
 
     try {
       const embedding = await this.pipeline.client.embeddings.create({
@@ -162,9 +103,5 @@ export class OpenAIContentGenerator implements ContentGenerator {
         `OpenAI API error: ${redactedError instanceof Error ? redactedError.message : String(redactedError)}`,
       );
     }
-  }
-
-  useSummarizedThinking(): boolean {
-    return false;
   }
 }

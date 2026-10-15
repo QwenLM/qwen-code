@@ -1,13 +1,10 @@
 name: 'PR Asset Branch Cleanup'
 
-# When a PR closes, delete its per-PR asset branches so the `pr-assets/*`
-# refs (one per PR that ever produced a preview or a verification report)
-# don't accumulate without bound in the base repository. Runs in the base
-# context (pull_request_target) but never checks out or runs PR code — it
-# only deletes refs by name.
-#
-# All producers are covered, and every new `pr-assets/*` producer must be
-# added here: a branch nothing deletes is permanent.
+# When a PR closes, delete legacy per-PR asset branches left by the former Git
+# publishers. New previews and verification reports use OSS, and automated
+# reviews cannot target this repository for assets, but historical refs still
+# need to drain. Runs in the base context (pull_request_target) and only deletes
+# refs by name; it never checks out or runs PR code.
 on:
   pull_request_target:
     types:

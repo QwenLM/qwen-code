@@ -9,6 +9,7 @@ import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
   ConversationRecord,
+  ChatRecord,
   Config,
   AnyDeclarativeTool,
   ToolResultDisplay,
@@ -23,6 +24,7 @@ import {
   isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
+  computeInitialTurnFromHistory,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -38,6 +40,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
   collectInlineImages,
@@ -201,6 +204,7 @@ function convertToHistoryItems(
     callId: string;
     name: string;
     description: string;
+    args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
     detailedDisplay?: string;
@@ -264,6 +268,10 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    const promptId =
+      typeof record.promptId === 'string' && record.promptId.length > 0
+        ? record.promptId
+        : undefined;
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -384,16 +392,41 @@ function convertToHistoryItems(
           items.push({ type: 'notification', text });
           break;
         }
+        // Session multi-agent records: `message` holds the model envelope,
+        // so restore the authored display text instead.
+        // TODO(multi-agent): the TUI has no authored-message item; an agent
+        // reply restores as a notification line prefixed with its name.
+        if (
+          record.subtype === 'agent_mention' ||
+          record.subtype === 'agent_message'
+        ) {
+          const payload = record.systemPayload as
+            | { displayText?: string; author?: { name?: string } }
+            | undefined;
+          const text = payload?.displayText;
+          if (text) {
+            if (record.subtype === 'agent_mention' && !payload?.author) {
+              items.push({ type: MessageType.USER, text, sentToModel: false });
+            } else {
+              const name = payload?.author?.name ?? record.agentName;
+              items.push({
+                type: 'notification',
+                text: name ? `${name}: ${text}` : text,
+              });
+            }
+          }
+          break;
+        }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
-            | { displayText?: string; mediaReferences?: unknown[] }
+            | { displayText?: string; attachmentReferences?: unknown[] }
             | undefined;
-          const hasMediaReferences =
-            Array.isArray(payload?.mediaReferences) &&
-            payload.mediaReferences.length > 0;
+          const hasAttachmentReferences =
+            Array.isArray(payload?.attachmentReferences) &&
+            payload.attachmentReferences.length > 0;
           const text =
             payload?.displayText ||
-            (hasMediaReferences
+            (hasAttachmentReferences
               ? '[User message with attachments]'
               : extractTextFromParts(record.message?.parts as Part[]));
           if (text) {
@@ -417,7 +450,11 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
-            items.push({ type: 'user', text });
+            items.push({
+              type: 'user',
+              text,
+              ...(promptId ? { promptId } : {}),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -440,18 +477,22 @@ function convertToHistoryItems(
 
         const projection = projectUserTranscriptForDisplay(record);
         const payload = record.systemPayload as
-          | { mediaReferences?: unknown[] }
+          | { attachmentReferences?: unknown[] }
           | undefined;
-        const hasMediaReferences =
-          Array.isArray(payload?.mediaReferences) &&
-          payload.mediaReferences.length > 0;
+        const hasAttachmentReferences =
+          Array.isArray(payload?.attachmentReferences) &&
+          payload.attachmentReferences.length > 0;
         const text =
           projection.displayText ||
-          (hasMediaReferences
+          (hasAttachmentReferences
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
-          items.push({ type: 'user', text });
+          items.push({
+            type: 'user',
+            text,
+            ...(promptId ? { promptId } : {}),
+          });
         }
         break;
       }
@@ -529,6 +570,9 @@ function convertToHistoryItems(
             callId: fc.id,
             name: tool?.displayName || fc.name,
             description: tool ? formatToolDescription(tool, fc.args) : '',
+            // Rendered inline only when `ui.showToolCallArgs` is on, so a
+            // resumed session shows the same args row as a live one.
+            args: fc.args,
             resultDisplay: undefined,
             status: ToolCallStatus.Success, // Will be updated by tool_result
             confirmationDetails: undefined,
@@ -631,7 +675,10 @@ function convertToHistoryItems(
     });
   }
 
-  return items;
+  // A report_findings re-report REPLACES the earlier list — restored
+  // transcripts collapse the superseded displays so the initial report and
+  // its outcome re-report do not render two checklists at once.
+  return coalesceFindingsHistoryItems(items);
 }
 
 /**
@@ -715,6 +762,26 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
     ...item,
     display: Object.keys(rest).length > 0 ? rest : undefined,
   };
+}
+
+/** Seeds a resumed prompt counter past both recorded turns and claimed ids. */
+export function computeResumedPromptCountSeed(
+  records: readonly ChatRecord[],
+  sessionId: string,
+): number {
+  const userTurnCount = records.filter(
+    (m) =>
+      m.type === 'user' &&
+      m.subtype !== 'mid_turn_user_message' &&
+      m.subtype !== 'realtime_message',
+  ).length;
+  if (records.length === 0) {
+    return 0;
+  }
+  return Math.max(
+    userTurnCount,
+    computeInitialTurnFromHistory(records, sessionId) + 1,
+  );
 }
 
 /**

@@ -12,6 +12,12 @@ import { homedir } from 'node:os';
 import * as path from 'node:path';
 import type { LockOptions } from 'proper-lockfile';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
+import {
+  ConversationRuntimeOwnershipError,
+  conversationRuntimeInUseError,
+  conversationRuntimeUnavailableError,
+  conversationRuntimeOwnershipCompromisedError,
+} from '../conversations/conversation-runtime-errors.js';
 
 export const LIVE_DISCOVERY_RELATIVE_PATH = path.join('live', 'daemon.json');
 const MAX_DISCOVERY_BYTES = 16 * 1024;
@@ -410,6 +416,62 @@ async function syncDirectory(directory: string): Promise<void> {
     await handle.sync();
   } finally {
     await handle.close();
+  }
+}
+
+export async function assertLiveDiscoveryPublisher(
+  stableBaseDir: string,
+  owner: LiveDiscoveryOwner,
+): Promise<void> {
+  try {
+    const target = await prepareDirectory(stableBaseDir, false);
+    if (!target) throw conversationRuntimeUnavailableError();
+    const lock = await lockDirectory(target);
+    let operationError: unknown;
+    try {
+      lock.assertHealthy();
+      await assertDirectoryIdentity(target);
+      const current = await readExistingRecord(
+        getLiveDiscoveryPath(stableBaseDir),
+      );
+      await assertDirectoryIdentity(target);
+      lock.assertHealthy();
+      if (!current) throw conversationRuntimeUnavailableError();
+      if (
+        current.pid !== owner.pid ||
+        current.instanceNonce !== owner.instanceNonce
+      ) {
+        throw conversationRuntimeInUseError();
+      }
+      if (current.protocolVersion !== LIVE_HOST_PROTOCOL_VERSION) {
+        throw new LiveDiscoveryStateError();
+      }
+    } catch (error) {
+      operationError = error;
+    }
+    try {
+      await lock.release();
+      lock.assertHealthy();
+    } catch (error) {
+      throw new LiveDiscoveryStateError(
+        operationError
+          ? new AggregateError(
+              [operationError, error],
+              'Live discovery admission cleanup failed.',
+            )
+          : error,
+      );
+    }
+    if (operationError) throw operationError;
+  } catch (error) {
+    if (error instanceof ConversationRuntimeOwnershipError) throw error;
+    if (
+      error instanceof LiveDiscoveryStateError ||
+      (error as NodeJS.ErrnoException).code === 'ECOMPROMISED'
+    ) {
+      throw conversationRuntimeOwnershipCompromisedError(error);
+    }
+    throw conversationRuntimeUnavailableError(error);
   }
 }
 

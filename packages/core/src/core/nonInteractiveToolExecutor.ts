@@ -4,20 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  ToolCallRequestInfo,
-  ToolCallResponseInfo,
-  Config,
-  RuntimeContentGeneratorView,
-} from '../index.js';
+import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
+import type { Config } from '../config/config.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type { ModToolCall, ModToolCheck } from '../mods/tool-events.js';
+import { executeModTool, modToolRequest } from '../mods/tool-execution.js';
 import {
   CoreToolScheduler,
   type AllToolCallsCompleteHandler,
   type OutputUpdateHandler,
   type ToolCallsUpdateHandler,
+  type CompletedToolCall,
 } from './coreToolScheduler.js';
 
 export interface ExecuteToolCallOptions {
+  modToolCall?: ModToolCall;
+  modToolCheck?: ModToolCheck;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
@@ -36,9 +38,44 @@ export async function executeToolCall(
   abortSignal: AbortSignal,
   options: ExecuteToolCallOptions = {},
 ): Promise<ToolCallResponseInfo> {
+  const execution =
+    options.modToolCall && (await modToolRequest(config, toolCallRequest));
+  if (execution && options.modToolCall) {
+    const { response, completed } = await executeModTool(
+      toolCallRequest,
+      execution,
+      options.modToolCall,
+      async (request, signal, check) => {
+        let completed: CompletedToolCall | undefined;
+        await executeToolCall(config, request, signal, {
+          ...options,
+          modToolCall: undefined,
+          modToolCheck: check,
+          recordToolResult: false,
+          onAllToolCallsComplete: async (calls) => {
+            completed = calls[0];
+          },
+        });
+        if (!completed) throw new Error('Mod native tool did not complete.');
+        return completed;
+      },
+      abortSignal,
+    );
+    if (completed)
+      await options.onAllToolCallsComplete?.([{ ...completed, response }]);
+    if (options.recordToolResult !== false)
+      config
+        .getChatRecordingService()
+        ?.recordToolResult(response.responseParts, {
+          ...response,
+          status: completed?.status ?? (response.error ? 'error' : 'success'),
+        });
+    return response;
+  }
   return new Promise<ToolCallResponseInfo>((resolve, reject) => {
     new CoreToolScheduler({
       config,
+      modToolCheck: options.modToolCheck,
       chatRecordingService:
         options.recordToolResult === false
           ? undefined

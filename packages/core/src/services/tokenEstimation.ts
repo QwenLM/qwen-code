@@ -26,6 +26,27 @@ import {
 export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
 
 /**
+ * Estimate text tokens for context-usage reporting. This intentionally keeps
+ * the CJK-aware `/context` heuristic separate from the conservative
+ * compaction estimator below.
+ */
+export function estimateContextTextTokens(text: string): number {
+  if (!text) return 0;
+
+  let asciiChars = 0;
+  let nonAsciiChars = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (text.charCodeAt(index) < 128) {
+      asciiChars++;
+    } else {
+      nonAsciiChars++;
+    }
+  }
+
+  return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
+}
+
+/**
  * Estimate the token count of a list of Content objects via char/4.
  *
  * Reuses `estimateContentChars` so that inlineData / functionCall /

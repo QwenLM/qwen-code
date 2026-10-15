@@ -9,6 +9,11 @@ import type {
   DaemonSessionListPage,
 } from '@qwen-code/sdk/daemon';
 import type { SessionCatalogQuery } from './session-catalog-store';
+import {
+  SESSION_CATALOG_ERROR_RETRY_MS,
+  SESSION_CATALOG_TRAILING_REFRESH_MS,
+  getSessionCatalogStore,
+} from './session-catalog-store';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -45,16 +50,24 @@ const mocks = vi.hoisted(() => ({
     newSession: vi.fn(),
     releaseSession: vi.fn(),
   })),
+  setDaemonActivePrompt: vi.fn(),
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useActions: () => ({
+    setDaemonActivePrompt: mocks.setDaemonActivePrompt,
+  }),
   useSessions: mocks.useSessions,
   useWorkspace: () => mocks.workspace,
 }));
 
-const { useSessionCatalogQuery, useWebShellSessions } = await import(
-  './session-catalog-hooks'
-);
+const {
+  useSessionCatalogQuery,
+  useSessionCatalogController,
+  useSessionActivePromptState,
+  useDaemonActivePromptBridge,
+  useWebShellSessions,
+} = await import('./session-catalog-hooks');
 
 let root: Root;
 let container: HTMLDivElement;
@@ -62,6 +75,7 @@ let legacy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   legacy = vi.fn();
+  mocks.setDaemonActivePrompt.mockReset();
   mocks.workspace.actions.deleteSession.mockReset();
   mocks.workspace.actions.deleteSessions.mockReset();
   mocks.workspace.actions.archiveSession.mockReset();
@@ -213,5 +227,429 @@ describe('session catalog hooks', () => {
       result = await facade!.reload();
     });
     expect(result).toBeUndefined();
+  });
+
+  it('routes turn completions by live-state ownership', () => {
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+    let controller: ReturnType<typeof useSessionCatalogController> | undefined;
+
+    function ControllerProbe() {
+      controller = useSessionCatalogController(client);
+      return null;
+    }
+
+    act(() => root.render(<ControllerProbe />));
+    const record = vi.spyOn(store, 'recordSessionActivity');
+    const invalidate = vi.spyOn(store, 'invalidateWorkspace');
+    const schedule = vi.spyOn(store, 'scheduleWorkspaceRefresh');
+
+    // Without live-state ownership the legacy rescan path stays.
+    act(() => controller!.turnCompleted('/w', 'sess-1'));
+    expect(invalidate).toHaveBeenCalledWith('/w');
+    expect(schedule).toHaveBeenCalledWith('/w');
+    expect(store.snapshotSessionActivity('/w')).toBeUndefined();
+
+    invalidate.mockClear();
+    schedule.mockClear();
+    const releaseLiveState = store.retainWorkspaceLiveState('/w');
+    act(() => controller!.turnCompleted('/w', 'sess-1'));
+    expect(record).toHaveBeenCalledWith('/w', 'sess-1');
+    expect(store.snapshotSessionActivity('/w')?.get('sess-1')).toBeDefined();
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+    releaseLiveState();
+  });
+});
+
+describe('useSessionActivePromptState (#9487)', () => {
+  function setQualifiedPage(sessions: unknown[]): ReturnType<typeof vi.fn> {
+    const listPage = vi.fn().mockResolvedValue({ sessions });
+    (mocks.workspace.client as { workspaceByCwd: unknown }).workspaceByCwd =
+      vi.fn(() => ({ listWorkspaceSessionsPage: listPage }));
+    return listPage;
+  }
+
+  function ActivePromptProbe({ sessionId = 'sess-1' }: { sessionId?: string }) {
+    const { hasActivePrompt } = useSessionActivePromptState(
+      mocks.workspace.client as DaemonClient,
+      '/work',
+      sessionId,
+    );
+    return <span>{String(hasActivePrompt)}</span>;
+  }
+
+  it('does not load the catalog while live-state is retained', async () => {
+    const listPage = setQualifiedPage([
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    const store = getSessionCatalogStore(
+      mocks.workspace.client as DaemonClient,
+    );
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+
+    expect(listPage).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('false');
+    releaseLiveState();
+  });
+
+  it('loads the catalog fallback when live-state is not retained', async () => {
+    const listPage = setQualifiedPage([
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+
+    expect(listPage).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toBe('true');
+  });
+
+  it('prefers the daemon live-state snapshot over a catalog page', async () => {
+    setQualifiedPage([
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    // No live-state snapshot yet: the catalog page fallback answers.
+    expect(container.textContent).toBe('true');
+
+    act(() => {
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sess-1',
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+      ]);
+    });
+    // Live state is authoritative even when it disagrees with the page.
+    expect(container.textContent).toBe('false');
+
+    act(() => {
+      store.applyLiveState('/work', []);
+    });
+    // A session absent from the live response has no active prompt.
+    expect(container.textContent).toBe('false');
+  });
+
+  it('is not authoritative until a live-state response covers the workspace', async () => {
+    // `authoritative` gates settling a running turn: an answer that is only a
+    // catalog page, or no answer at all, must never settle one.
+    const listPage = vi.fn(
+      () =>
+        new Promise<{ sessions: unknown[] }>(() => {
+          // never resolves: the fallback page is still in flight
+        }),
+    );
+    (mocks.workspace.client as { workspaceByCwd: unknown }).workspaceByCwd =
+      vi.fn(() => ({ listWorkspaceSessionsPage: listPage }));
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+
+    function KnownProbe() {
+      const state = useSessionActivePromptState(client, '/work', 'sess-1');
+      return <span>{`${state.hasActivePrompt}/${state.authoritative}`}</span>;
+    }
+
+    await act(async () => {
+      root.render(<KnownProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(container.textContent).toBe('false/false');
+
+    act(() => {
+      store.applyLiveState('/work', []);
+    });
+    // A live-state response that covers the workspace answers definitively:
+    // absent from it means the session has no prompt in flight.
+    expect(container.textContent).toBe('false/true');
+  });
+
+  it('tracks a live flip for a workspace it is already covering', async () => {
+    // Regression: the subscription used to expose only "does this workspace
+    // have live state", which stays true across polls — so useSyncExternalStore
+    // bailed out of re-rendering on the one change that matters, and the reader
+    // kept serving a stale answer through exactly the silent gaps this signal
+    // exists to cover.
+    setQualifiedPage([]);
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+    const live = (hasActivePrompt: boolean) => [
+      {
+        sessionId: 'sess-1',
+        clientCount: 1,
+        hasActivePrompt,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+    ];
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    // Establish live-state coverage first, so hasLiveSessions is already true.
+    act(() => {
+      store.applyLiveState('/work', live(false));
+    });
+    expect(container.textContent).toBe('false');
+    // Now only the per-session flag flips.
+    act(() => {
+      store.applyLiveState('/work', live(true));
+    });
+    expect(container.textContent).toBe('true');
+  });
+
+  it('publishes only authoritative live prompt state to the provider', async () => {
+    setQualifiedPage([]);
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+
+    function BridgeProbe({ sessionId = 'sess-1' }: { sessionId?: string }) {
+      const active = useDaemonActivePromptBridge(client, '/work', sessionId);
+      return <span>{String(active)}</span>;
+    }
+
+    await act(async () => {
+      root.render(<BridgeProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(
+      undefined,
+      {
+        workspaceCwd: '/work',
+        sessionId: 'sess-1',
+      },
+      undefined,
+      undefined,
+    );
+
+    act(() => {
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sess-1',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+      ]);
+    });
+    expect(container.textContent).toBe('true');
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(
+      true,
+      {
+        workspaceCwd: '/work',
+        sessionId: 'sess-1',
+      },
+      undefined,
+      undefined,
+    );
+
+    act(() => {
+      store.applyLiveState('/work', [], 123);
+    });
+    expect(container.textContent).toBe('false');
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(
+      false,
+      {
+        workspaceCwd: '/work',
+        sessionId: 'sess-1',
+      },
+      undefined,
+      123,
+    );
+  });
+
+  it('withholds a cached idle answer until a fresh poll covers the new session', async () => {
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+    const live = [
+      {
+        sessionId: 'sess-1',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+      {
+        sessionId: 'sess-2',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+      },
+    ];
+
+    function BridgeProbe({ sessionId }: { sessionId: string }) {
+      useDaemonActivePromptBridge(client, '/work', sessionId);
+      return null;
+    }
+
+    act(() => root.render(<BridgeProbe sessionId="sess-1" />));
+    act(() => store.applyLiveState('/work', live));
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(
+      false,
+      {
+        workspaceCwd: '/work',
+        sessionId: 'sess-1',
+      },
+      undefined,
+      undefined,
+    );
+
+    const callsBeforeSwitch = mocks.setDaemonActivePrompt.mock.calls.length;
+    act(() => root.render(<BridgeProbe sessionId="sess-2" />));
+    expect(mocks.setDaemonActivePrompt).toHaveBeenCalledTimes(
+      callsBeforeSwitch,
+    );
+
+    act(() => store.applyLiveState('/work', live));
+    expect(mocks.setDaemonActivePrompt).toHaveBeenLastCalledWith(
+      false,
+      {
+        workspaceCwd: '/work',
+        sessionId: 'sess-2',
+      },
+      undefined,
+      undefined,
+    );
+  });
+
+  it('never lets the bounded fallback page settle a turn', async () => {
+    // The catalog page is bounded and refetched on any invalidation, so a
+    // running session can drop off it and come back. Lighting the indicator
+    // from the page is fine; letting it settle a turn is the #9487 bug, so the
+    // page answer is never authoritative — present or absent.
+    setQualifiedPage([
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    const client = mocks.workspace.client as DaemonClient;
+
+    function AuthorityProbe() {
+      const state = useSessionActivePromptState(client, '/work', 'sess-1');
+      return <span>{`${state.hasActivePrompt}/${state.authoritative}`}</span>;
+    }
+
+    await act(async () => {
+      root.render(<AuthorityProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    // The row lights the indicator, but carries no settling power.
+    expect(container.textContent).toBe('true/false');
+
+    // The row falls off a refetched first page: still not authoritative, so
+    // nothing downstream can read this as "the turn ended".
+    setQualifiedPage([
+      { sessionId: 'other', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    act(() => {
+      getSessionCatalogStore(client).invalidateWorkspace('/work');
+    });
+    await act(async () => {
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(container.textContent).toBe('false/false');
+  });
+
+  it('sees an active prompt the loaded catalog page does not contain', async () => {
+    // The connected session fell off the bounded first page (20+ fresher
+    // sessions): only the live-state snapshot can still see it.
+    setQualifiedPage([
+      { sessionId: 'other', workspaceCwd: '/work', hasActivePrompt: false },
+    ]);
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(container.textContent).toBe('false');
+
+    act(() => {
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sess-1',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+        },
+      ]);
+    });
+    expect(container.textContent).toBe('true');
+  });
+
+  it('keeps a turn-completion clear when every clearing refresh fails', async () => {
+    vi.useFakeTimers();
+    try {
+      legacy
+        .mockResolvedValueOnce({
+          sessions: [
+            { sessionId: 'sess-1', workspaceCwd: '/w', hasActivePrompt: true },
+          ],
+        })
+        .mockRejectedValue(new Error('offline'));
+      const client = mocks.workspace.client as DaemonClient;
+      let controller: ReturnType<typeof useSessionCatalogController>;
+      let latestFlag: boolean | undefined;
+
+      function Probe() {
+        controller = useSessionCatalogController(client);
+        const result = useSessionCatalogQuery(
+          client,
+          { routeKind: 'legacy', workspaceCwd: '/w', options: {} },
+          { autoLoad: true },
+        );
+        latestFlag = result.sessions[0]?.hasActivePrompt;
+        return null;
+      }
+
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(latestFlag!).toBe(true);
+
+      act(() => controller!.turnCompleted('/w', 'sess-1'));
+      // The optimistic clear lands ahead of any refresh.
+      expect(latestFlag!).toBe(false);
+
+      // Trailing refresh and error retries all fail (daemon restart window):
+      // they must refresh the PAGE, never resurrect the stale true.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          SESSION_CATALOG_TRAILING_REFRESH_MS + 10,
+        );
+      });
+      expect(latestFlag!).toBe(false);
+      const callsAfterTrailing = legacy.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SESSION_CATALOG_ERROR_RETRY_MS + 10);
+      });
+      // The autoLoad subscription arms the store's error-retry timer, so the
+      // catalog keeps reconciling instead of freezing on the failed refresh.
+      expect(legacy.mock.calls.length).toBeGreaterThan(callsAfterTrailing);
+      expect(latestFlag!).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

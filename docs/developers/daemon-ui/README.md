@@ -370,8 +370,7 @@ when daemon doesn't explicitly stamp provenance, MCP tools are detectable.
 ## Debug reason categorization
 
 `DaemonUiStatusEvent.debugReason` is a closed-enum the normalizer stamps
-when it projects a `debug` block instead of a typed event (mirrored onto
-`DaemonStatusTranscriptBlock` for transcript consumers):
+when it projects a `debug` event instead of a typed event:
 
 ```ts
 import type { DaemonUiDebugReason } from '@qwen-code/sdk/daemon';
@@ -385,8 +384,18 @@ diagnostics rather than conversation content. `malformed_*` means a frame
 the SDK _does_ know arrived with an unusable payload — a real defect
 signal.
 
-Renderers should branch on `debugReason`, not the debug text — the text
-prefix is diagnostic wording and changes without notice:
+**Routing differs by category.** `unrecognized_*` diagnostics are routed
+to the bounded `unrecognizedDiagnostics` sidechannel and never enter
+`blocks[]` (so they cannot finalize a streaming assistant/thought block or
+consume the `maxBlocks` budget). Read them with
+`selectUnrecognizedDiagnostics`; the cap is `UNRECOGNIZED_DIAGNOSTICS_LIMIT`
+and the routed subset is `DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS`.
+`malformed_*` diagnostics — and legacy blocks persisted before this split —
+stay in the transcript as `DaemonStatusTranscriptBlock`s, so block-level
+`debugReason` handling now applies to those only.
+
+Renderers filtering blocks should branch on `debugReason`, not the debug
+text — the text prefix is diagnostic wording and changes without notice:
 
 ```ts
 function hideDebugBlock(reason?: DaemonUiDebugReason): boolean {
@@ -407,7 +416,8 @@ Every layer in the daemon UI SDK follows the **forward-compat principle**:
 unknown values do NOT throw; they degrade gracefully.
 
 - Unknown daemon event types → `debug` event with the raw type name,
-  stamped with an `unrecognized_*` `debugReason` (see above)
+  stamped with an `unrecognized_*` `debugReason` and routed to the bounded
+  `unrecognizedDiagnostics` sidechannel (see above)
 - Unknown tool status → `currentToolCallId` left untouched (no clear)
 - Unknown error kind → `errorKind` undefined (renderer falls back to text)
 - Missing serverTimestamp → falls back to `clientReceivedAt`

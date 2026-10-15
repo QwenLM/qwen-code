@@ -132,7 +132,7 @@ export function workspaceDirFor(
  * every member.
  *
  * Such a file belongs to a workspace the npm graph does not contain — this
- * repo's `!packages/desktop` is a separate bun workspace with its own
+ * repo's `!packages/desktop` is a separate toolchain with its own
  * lockfile — so no included workspace's tests can feel a change to it, and it
  * must not earn the incomplete-scope caveat a genuinely outside file does. A
  * file whose nested member is negated while an OUTER member survives
@@ -352,7 +352,7 @@ export function readWorkspacePackages(root: string): WorkspaceGraph {
     if (workspaceDirFor(`${dir}/package.json`, globs) !== dir) {
       // A directory a negation excludes is not a workspace, and its own
       // `package.json` says nothing about that — `packages/desktop` is a
-      // separate bun workspace with its own lockfile, and building it from
+      // separate toolchain with its own lockfile, and building it from
       // here fails. The tell: the POSITIVE globs alone still make the dir its
       // own owner, so a negation is what took the ownership away.
       const positives = globs.filter((g) => !g.startsWith('!'));

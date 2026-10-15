@@ -27,12 +27,11 @@
 //! ## Fetch source
 //!
 //! The default fetch URL is the versioned release asset matched to the
-//! binary's own version: `cua-driver-rs-v<v>-skills.tar.gz` from
-//! `https://github.com/QwenLM/qwen-code/releases/...`. This pins the skill
+//! binary's own version: `cua-driver-rs-v<v>-skills.tar.gz` from the
+//! matching stable or nightly Qwen GitHub release tag. This pins the skill
 //! content to the binary release so an agent loading the doc knows
 //! every example matches the daemon it'll talk to.
 //!
-//! `--from <tag>` lets the user pin a different release tag.
 //! `--from main` fetches the latest from the `main` branch via the
 //! `Skills/cua-driver/` directory (one HTTP call per file — used
 //! for bleeding-edge dev validation; not the default).
@@ -43,6 +42,7 @@
 //!
 //! - Claude Code: `~/.claude/skills/`
 //! - Codex:       `~/.agents/skills/`
+//! - Prime Agent: `~/.prime/agent/skills/`
 //! - OpenClaw:    `~/.openclaw/skills/`
 //! - OpenCode: `~/.config/opencode/skills/` (macOS / Linux),
 //!   `%APPDATA%\opencode\skills\` (Windows)
@@ -65,6 +65,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const SKILL_PACK_NAME: &str = "cua-driver";
+const STABLE_RELEASE_TAG_PREFIX: &str = "cua-driver-rs-v";
+const NIGHTLY_RELEASE_TAG_PREFIX: &str = "nightly-cua-driver-rs-v";
 /// Pre-rename name. The skill pack used to install as `cua-driver-rs`
 /// (when the Rust port lived at `packages/cua-driver-rs/`). On install /
 /// uninstall we sweep this name out of every agent skills dir and the
@@ -201,6 +203,10 @@ const AGENTS: &[Agent] = &[
         parent: AgentParent::Home(".agents/skills"),
     },
     Agent {
+        label: "Prime Agent",
+        parent: AgentParent::Home(".prime/agent/skills"),
+    },
+    Agent {
         label: "OpenClaw",
         parent: AgentParent::Home(".openclaw/skills"),
     },
@@ -331,7 +337,7 @@ fn install(flags: &[String], force: bool) -> Result<()> {
         }
     }
     if !linked_any {
-        println!("(No agent skills dirs present yet — install Claude Code / Codex / OpenClaw / OpenCode / Antigravity / Hermes then re-run.)");
+        println!("(No agent skills dirs present yet — install Claude Code / Codex / Prime Agent / OpenClaw / OpenCode / Antigravity / Hermes then re-run.)");
     }
     Ok(())
 }
@@ -536,12 +542,38 @@ fn fetch_into(dest: &Path, from_main: bool, all_platforms: bool) -> Result<()> {
 
     // Versioned release asset.
     let version = env!("CARGO_PKG_VERSION");
-    let url = format!(
-        "https://github.com/QwenLM/qwen-code/releases/download/cua-driver-rs-v{version}/cua-driver-rs-v{version}-skills.tar.gz"
-    );
+    let url = skill_release_url(version);
     let bytes = http_get_bytes(&url).with_context(|| format!("GET {url}"))?;
     extract_tar_gz(&bytes, dest, all_platforms)?;
     Ok(())
+}
+
+fn skill_release_url(version: &str) -> String {
+    let tag_prefix = if is_nightly_version(version) {
+        NIGHTLY_RELEASE_TAG_PREFIX
+    } else {
+        STABLE_RELEASE_TAG_PREFIX
+    };
+    format!(
+        "https://github.com/QwenLM/qwen-code/releases/download/{tag_prefix}{version}/\
+         {STABLE_RELEASE_TAG_PREFIX}{version}-skills.tar.gz"
+    )
+}
+
+fn is_nightly_version(version: &str) -> bool {
+    let Ok(version) = semver::Version::parse(version) else {
+        return false;
+    };
+    if !version.build.is_empty() {
+        return false;
+    }
+    let parts = version.pre.as_str().split('.').collect::<Vec<_>>();
+    matches!(parts.as_slice(), ["nightly", date, run]
+        if date.len() == 8
+            && date.bytes().all(|byte| byte.is_ascii_digit())
+            && !run.is_empty()
+            && !run.starts_with('0')
+            && run.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn http_get_text(url: &str) -> Result<String> {
@@ -810,9 +842,43 @@ fn print_path() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tar_gz, link_points_to_any, SKILL_FILES};
+    use super::{
+        extract_tar_gz, link_points_to_any, skill_release_url, AgentParent, AGENTS, SKILL_FILES,
+    };
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[test]
+    fn prime_agent_target_matches_its_native_global_skill_directory() {
+        let target = AGENTS
+            .iter()
+            .find(|agent| agent.label == "Prime Agent")
+            .expect("Prime Agent must remain a supported skill target");
+
+        assert!(matches!(
+            target.parent,
+            AgentParent::Home(".prime/agent/skills")
+        ));
+    }
+
+    #[test]
+    fn stable_skill_pack_uses_the_stable_release_tag() {
+        assert_eq!(
+            skill_release_url("0.19.3"),
+            "https://github.com/QwenLM/qwen-code/releases/download/\
+             cua-driver-rs-v0.19.3/cua-driver-rs-v0.19.3-skills.tar.gz"
+        );
+    }
+
+    #[test]
+    fn nightly_skill_pack_uses_the_nightly_tag_and_compatible_asset_name() {
+        assert_eq!(
+            skill_release_url("0.19.4-nightly.20260812.3097"),
+            "https://github.com/QwenLM/qwen-code/releases/download/\
+             nightly-cua-driver-rs-v0.19.4-nightly.20260812.3097/\
+             cua-driver-rs-v0.19.4-nightly.20260812.3097-skills.tar.gz"
+        );
+    }
 
     /// Build a gzipped tarball with the entries given as
     /// `(path, contents)` pairs. Returns the raw `.tar.gz` bytes.
@@ -912,6 +978,87 @@ mod tests {
             assert!(
                 skill.contains(required),
                 "skill lost required filesystem outcome guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_skill_keeps_semantic_clipboard_outcome_ladder() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let skill = std::fs::read_to_string(crate_dir.join("../../Skills/cua-driver/SKILL.md"))
+            .expect("canonical skill must be readable");
+        let browser = std::fs::read_to_string(crate_dir.join("../../Skills/cua-driver/BROWSER.md"))
+            .expect("canonical browser skill must be readable");
+
+        for required in [
+            "exact value on the system clipboard",
+            "`clipboard_write`",
+            "`clipboard_read`",
+            "passive page-text ref",
+        ] {
+            assert!(
+                skill.contains(required),
+                "skill lost required clipboard outcome guidance: {required}"
+            );
+        }
+        for required in [
+            "exact page content on the system clipboard",
+            "passive headings and text nodes are evidence sources",
+            "foreground escalation rules in `SKILL.md`",
+        ] {
+            assert!(
+                browser.contains(required),
+                "browser skill lost required clipboard outcome guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_skill_keeps_sessions_and_authorization_as_separate_concepts() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let skill = std::fs::read_to_string(crate_dir.join("../../Skills/cua-driver/SKILL.md"))
+            .expect("canonical skill must be readable");
+        let browser = std::fs::read_to_string(crate_dir.join("../../Skills/cua-driver/BROWSER.md"))
+            .expect("canonical browser skill must be readable");
+
+        for required in [
+            "Choose the target on each action",
+            "transport's implicit session",
+            "prefer a short public",
+            "pass the same label on every call that accepts it",
+            "Passing it once is not sticky",
+            "revive a name after",
+            "There is no `deescalate_session`",
+            "--capability-manifest",
+            "--approve-capability-manifest",
+            "It can remove tools or typed resources",
+            "permission authority. A public session",
+        ] {
+            assert!(
+                skill.contains(required),
+                "skill lost required lifecycle/authorization guidance: {required}"
+            );
+        }
+        for forbidden in [
+            "one-way session phase",
+            "if session policy allows",
+            "Pass `session` on the first action",
+        ] {
+            assert!(
+                !skill.contains(forbidden),
+                "skill restored stale session-state guidance: {forbidden}"
+            );
+        }
+        for required in [
+            "start_session(session?)",
+            "optional; can name before acting",
+            "prefer a short `session` label",
+            "Passing it once is not sticky",
+            "one-shot CLI calls use disposable transports",
+        ] {
+            assert!(
+                browser.contains(required),
+                "browser skill lost required session guidance: {required}"
             );
         }
     }

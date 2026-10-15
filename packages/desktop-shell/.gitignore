@@ -1,6 +1,0 @@
-node_modules/
-runtime/*
-!runtime/qwen-code/
-runtime/qwen-code/*
-!runtime/qwen-code/.gitkeep
-src-tauri/target/

@@ -12,9 +12,20 @@ import {
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { CacheSafeParams } from '../agents/forkedAgent.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
+  getCacheSafeParams: vi.fn<
+    (expectedSessionId?: string) => CacheSafeParams | null
+  >(() => ({
+    generationConfig: {},
+    history: [],
+    model: 'qwen-fast',
+    version: 1,
+  })),
+  createForkedChat: vi.fn(),
   runForkedAgent: vi.fn(),
   sendMessageStream: vi.fn(),
 }));
@@ -23,25 +34,22 @@ const boundaryMocks = vi.hoisted(() => ({
 }));
 
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryMocks.observe,
   }),
 );
 
-vi.mock('../utils/forkedAgent.js', () => ({
-  getCacheSafeParams: vi.fn(() => ({
-    generationConfig: {},
-    history: [],
-    model: 'qwen-fast',
-    version: 1,
-  })),
-  createForkedChat: vi.fn(() => ({
-    sendMessageStream: forkedAgentMocks.sendMessageStream,
-  })),
+vi.mock('../agents/forkedAgent.js', () => ({
+  getCacheSafeParams: forkedAgentMocks.getCacheSafeParams,
+  createForkedChat: forkedAgentMocks.createForkedChat.mockImplementation(
+    () => ({
+      sendMessageStream: forkedAgentMocks.sendMessageStream,
+    }),
+  ),
   runForkedAgent: forkedAgentMocks.runForkedAgent,
   runWithForkedChatModel: vi.fn(
     async (
@@ -57,6 +65,80 @@ afterEach(() => {
 });
 
 describe('startSpeculation', () => {
+  it('rejects tool sandbox sessions before starting host speculation', async () => {
+    const config = {
+      getShellExecutionSandbox: () => ({}),
+    } as unknown as Config;
+    await expect(startSpeculation(config, 'write a.ts')).rejects.toThrow(
+      'unavailable with tools.executionSandbox',
+    );
+    expect(forkedAgentMocks.getCacheSafeParams).not.toHaveBeenCalled();
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+  it('does not start when the session-scoped lookup returns null', async () => {
+    const config = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+
+    await expect(startSpeculation(config, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+
+    expect(forkedAgentMocks.createForkedChat).not.toHaveBeenCalled();
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('stops before executing a permission-deferred tool', async () => {
+    const ensureTool = vi.fn();
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(true),
+      ensureTool,
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    fnCall(
+                      'read_file',
+                      { path: '.env' },
+                      'call-permission-deferred',
+                    ),
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read .env');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+    expect(toolRegistry.isPermissionDeferred).toHaveBeenCalledWith('read_file');
+    expect(ensureTool).not.toHaveBeenCalled();
+
+    await abortSpeculation(state);
+  });
+
   it('stops at a boundary when the host guard denies a speculative invocation', async () => {
     const execute = vi.fn();
     const guard = vi.fn().mockResolvedValue({
@@ -93,13 +175,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-guard',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-guard',
+                    ),
                   ],
                 },
               },
@@ -112,6 +192,9 @@ describe('startSpeculation', () => {
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() => expect(state.status).toBe('boundary'));
 
+    expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledWith(
+      'spec-session',
+    );
     expect(guard).toHaveBeenCalledWith({
       callId: 'call-speculation-guard',
       toolName: 'read_file',
@@ -161,13 +244,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-guard-allow',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-guard-allow',
+                    ),
                   ],
                 },
               },
@@ -179,7 +260,14 @@ describe('startSpeculation', () => {
 
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() => expect(state.status).toBe('completed'));
+    await vi.waitFor(() =>
+      expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledTimes(2),
+    );
 
+    expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenNthCalledWith(
+      2,
+      'spec-session',
+    );
     expect(guard).toHaveBeenCalledWith({
       callId: 'call-speculation-guard-allow',
       toolName: 'read_file',
@@ -212,6 +300,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -227,13 +316,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-reject',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-reject',
+                    ),
                   ],
                 },
               },
@@ -295,6 +382,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -310,13 +398,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-metadata',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-metadata',
+                    ),
                   ],
                 },
               },
@@ -357,6 +443,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -371,15 +458,7 @@ describe('startSpeculation', () => {
             candidates: [
               {
                 content: {
-                  parts: [
-                    {
-                      functionCall: {
-                        id: 'call_123',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
-                  ],
+                  parts: [fnCall('read_file', { path: 'a.ts' }, 'call_123')],
                 },
               },
             ],
@@ -418,6 +497,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -481,6 +561,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolOutputBatchBudget: vi.fn().mockReturnValue(10_000),
     } as unknown as Config;
@@ -544,6 +625,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
     forkedAgentMocks.runForkedAgent.mockResolvedValue({
@@ -558,13 +640,7 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-image',
-                        name: 'read_file',
-                        args: { path: 'image.png' },
-                      },
-                    },
+                    fnCall('read_file', { path: 'image.png' }, 'call-image'),
                   ],
                 },
               },
@@ -582,6 +658,42 @@ describe('startSpeculation', () => {
       /omitted during speculative execution/i,
     );
     expect(speculativeResponse).not.toHaveProperty('parts');
+
+    await abortSpeculation(state);
+  });
+
+  it('does not generate a pipelined suggestion when its scoped lookup returns null', async () => {
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams
+      .mockReturnValueOnce({
+        generationConfig: {},
+        history: [],
+        model: 'qwen-fast',
+        version: 1,
+      })
+      .mockReturnValueOnce(null);
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: [{ text: 'done' }] } }],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'do something');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+    await vi.waitFor(() =>
+      expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledTimes(2),
+    );
+
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+    expect(state.pipelinedSuggestion).toBeUndefined();
 
     await abortSpeculation(state);
   });
@@ -606,6 +718,7 @@ describe.each([
         getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
         getCwd: vi.fn().mockReturnValue(process.cwd()),
         getFastModel: vi.fn().mockReturnValue(fastModel),
+        getSessionId: vi.fn().mockReturnValue('spec-session'),
         getToolRegistry: vi.fn().mockReturnValue({
           ensureTool: vi.fn().mockResolvedValue({
             build: vi.fn().mockReturnValue({
@@ -668,24 +781,12 @@ describe('ensureToolResultPairing', () => {
   it('preserves paired functionCall + functionResponse', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'edit file' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'editing...' },
-          { functionCall: { name: 'edit', args: { file: 'a.ts' } } },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'edit',
-              response: { output: 'done' },
-            },
-          },
-        ],
-      },
+      content(
+        'model',
+        { text: 'editing...' },
+        fnCall('edit', { file: 'a.ts' }),
+      ),
+      content('user', fnResponse('edit', { output: 'done' })),
       { role: 'model', parts: [{ text: 'file edited' }] },
     ];
     const result = ensureToolResultPairing(messages);
@@ -695,13 +796,7 @@ describe('ensureToolResultPairing', () => {
   it('strips unpaired functionCalls from last model message (keeps text)', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'do something' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'I will edit the file' },
-          { functionCall: { name: 'edit', args: {} } },
-        ],
-      },
+      content('model', { text: 'I will edit the file' }, fnCall('edit', {})),
       // No functionResponse follows — boundary truncation
     ];
     const result = ensureToolResultPairing(messages);
@@ -712,13 +807,7 @@ describe('ensureToolResultPairing', () => {
   it('removes last model message entirely if only functionCalls', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'do something' }] },
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'edit', args: {} } },
-          { functionCall: { name: 'shell', args: {} } },
-        ],
-      },
+      content('model', fnCall('edit', {}), fnCall('shell', {})),
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toHaveLength(1);
@@ -729,17 +818,7 @@ describe('ensureToolResultPairing', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'hello' }] },
       { role: 'model', parts: [{ text: 'response' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'tool',
-              response: { output: 'result' },
-            },
-          },
-        ],
-      },
+      content('user', fnResponse('tool', { output: 'result' })),
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toEqual(messages);

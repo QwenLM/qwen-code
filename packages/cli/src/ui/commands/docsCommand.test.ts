@@ -35,6 +35,10 @@ describe('docsCommand', () => {
     vi.unstubAllEnvs();
   });
 
+  it('opts in to running during streaming', () => {
+    expect(docsCommand.canRunDuringStreaming).toBe(true);
+  });
+
   it("should add an info message and call 'open' in a non-sandbox environment", async () => {
     if (!docsCommand.action) {
       throw new Error('docsCommand must have an action.');

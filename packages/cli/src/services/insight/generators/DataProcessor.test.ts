@@ -1083,6 +1083,57 @@ describe('DataProcessor', () => {
       expect(paths.some((p) => p.includes('chat3.jsonl'))).toBe(true);
     });
 
+    it('should skip prompt terminal ledger sidecars when scanning chat files', async () => {
+      mockedFs.readdir.mockResolvedValueOnce(['project1'] as unknown as Awaited<
+        ReturnType<typeof fs.readdir>
+      >);
+
+      mockedFs.stat.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.includes('project1') && !pathStr.includes('chats')) {
+          return Promise.resolve({
+            isDirectory: () => true,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        if (pathStr.endsWith('.jsonl')) {
+          return Promise.resolve({
+            isDirectory: () => false,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        throw new Error('Unexpected path: ' + pathStr);
+      });
+
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      mockedFs.readdir.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.endsWith('chats')) {
+          return Promise.resolve([
+            `${sessionId}.jsonl`,
+            `${sessionId}.ledger.jsonl`,
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      const result = await (
+        dataProcessor as unknown as {
+          scanChatFiles(
+            baseDir: string,
+          ): Promise<Array<{ path: string; mtime: number }>>;
+        }
+      ).scanChatFiles('/base');
+
+      // The ledger sidecar is not a transcript: only the real session
+      // JSONL may be selected.
+      expect(result).toHaveLength(1);
+      expect(result[0].path).toContain(`${sessionId}.jsonl`);
+      expect(result[0].path).not.toContain('.ledger.jsonl');
+    });
+
     it('should skip projects without chats directory', async () => {
       mockedFs.readdir.mockResolvedValueOnce([
         'project1',
@@ -1245,6 +1296,84 @@ describe('DataProcessor', () => {
         heatmap: expect.any(Object),
         activeHours: expect.any(Object),
         topTools: expect.any(Array),
+      });
+    });
+
+    it('keeps nested Code Mode writes out of file and line totals', async () => {
+      const base = {
+        sessionId: 'session1',
+        uuid: '',
+        parentUuid: null,
+        cwd: '',
+        version: '',
+      };
+      const mockRecords: ChatRecord[] = [
+        {
+          ...base,
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'outer',
+            resultDisplay: {
+              fileName: '/workspace/direct.txt',
+              fileDiff: '',
+              originalContent: '',
+              newContent: '',
+              diffStat: {
+                model_added_lines: 2,
+                model_removed_lines: 0,
+                model_added_chars: 0,
+                model_removed_chars: 0,
+                user_added_lines: 0,
+                user_removed_lines: 0,
+                user_added_chars: 0,
+                user_removed_chars: 0,
+              },
+            },
+          },
+        },
+        {
+          ...base,
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'tool_result',
+          subtype: 'code_mode_tool_result',
+          toolCallResult: {
+            callId: 'outer:code:1',
+            resultDisplay: {
+              fileName: '/workspace/nested.txt',
+              fileDiff: '',
+              originalContent: '',
+              newContent: '',
+              diffStat: {
+                model_added_lines: 12,
+                model_removed_lines: 2,
+                model_added_chars: 0,
+                model_removed_chars: 0,
+                user_added_lines: 0,
+                user_removed_lines: 0,
+                user_added_chars: 0,
+                user_removed_chars: 0,
+              },
+            },
+          },
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = await (
+        dataProcessor as unknown as {
+          generateMetrics(
+            files: Array<{ path: string; mtime: number }>,
+          ): Promise<unknown>;
+        }
+      ).generateMetrics(files);
+
+      expect(result).toMatchObject({
+        totalFiles: 1,
+        totalLinesAdded: 2,
+        totalLinesRemoved: 0,
       });
     });
 

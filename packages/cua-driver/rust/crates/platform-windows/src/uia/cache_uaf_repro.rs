@@ -129,6 +129,7 @@ fn snapshot_with(ptrs: Vec<usize>) -> CachedSnapshot {
         centers: vec![(0, 0); n],
         rects: vec![None; n],
         msaa_roles: vec![None; n],
+        actions: vec![Vec::new(); n],
     }
 }
 

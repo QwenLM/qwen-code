@@ -10,8 +10,11 @@ import { loadSettings } from '../../config/settings.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
-import { createTransport, ExtensionManager } from '@qwen-code/qwen-code-core';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import {
+  createMcpClient,
+  createTransport,
+  ExtensionManager,
+} from '@qwen-code/qwen-code-core';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -38,6 +41,7 @@ vi.mock('../../config/trustedFolders.js', () => ({
 }));
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createTransport: vi.fn(),
+  createMcpClient: vi.fn(),
   MCPServerStatus: {
     CONNECTED: 'CONNECTED',
     CONNECTING: 'CONNECTING',
@@ -65,19 +69,17 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   isGatedMcpScope: (scope: string | undefined) =>
     scope === 'project' || scope === 'workspace',
 }));
-vi.mock('@modelcontextprotocol/sdk/client/index.js');
 
 const mockedLoadSettings = loadSettings as Mock;
 const mockedAssembleMcpServers = assembleMcpServers as Mock;
 const mockedLoadMcpApprovals = loadMcpApprovals as Mock;
 const mockedIsWorkspaceTrusted = isWorkspaceTrusted as Mock;
 const mockedCreateTransport = createTransport as Mock;
+const mockedCreateMcpClient = createMcpClient as Mock;
 const MockedExtensionManager = ExtensionManager as Mock;
-const MockedClient = Client as Mock;
 
 interface MockClient {
   connect: Mock;
-  ping: Mock;
   close: Mock;
 }
 
@@ -100,7 +102,6 @@ describe('mcp list command', () => {
     mockTransport = { close: vi.fn() };
     mockClient = {
       connect: vi.fn(),
-      ping: vi.fn(),
       close: vi.fn(),
     };
 
@@ -109,7 +110,7 @@ describe('mcp list command', () => {
       getLoadedExtensions: vi.fn().mockReturnValue([]),
     };
 
-    MockedClient.mockImplementation(() => mockClient);
+    mockedCreateMcpClient.mockReturnValue(mockClient);
     mockedCreateTransport.mockResolvedValue(mockTransport);
     MockedExtensionManager.mockImplementation(() => mockExtensionManager);
     mockedIsWorkspaceTrusted.mockReturnValue({
@@ -160,7 +161,6 @@ describe('mcp list command', () => {
     });
 
     mockClient.connect.mockResolvedValue(undefined);
-    mockClient.ping.mockResolvedValue(undefined);
 
     await listMcpServers();
 
@@ -182,6 +182,21 @@ describe('mcp list command', () => {
         'http-server: https://example.com/http (http) - Connected',
       ),
     );
+    expect(mockedCreateMcpClient).toHaveBeenCalledWith(
+      'mcp-test-client',
+      expect.objectContaining({ command: '/path/to/server' }),
+    );
+    expect(mockedCreateMcpClient).toHaveBeenCalledWith(
+      'mcp-test-client',
+      expect.objectContaining({ url: 'https://example.com/sse' }),
+    );
+    expect(mockedCreateMcpClient).toHaveBeenCalledWith(
+      'mcp-test-client',
+      expect.objectContaining({ httpUrl: 'https://example.com/http' }),
+    );
+    expect(mockClient.connect).toHaveBeenCalledWith(mockTransport, {
+      timeout: 10_000,
+    });
   });
 
   it('should display disconnected status when connection fails', async () => {
@@ -217,7 +232,7 @@ describe('mcp list command', () => {
       mockClient.connect.mockImplementation(() => new Promise(() => {}));
 
       const listPromise = listMcpServers();
-      await vi.advanceTimersByTimeAsync(4999);
+      await vi.advanceTimersByTimeAsync(9999);
       expect(mockTransport.close).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
@@ -226,7 +241,7 @@ describe('mcp list command', () => {
       expect(mockTransport.close).toHaveBeenCalledOnce();
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         expect.stringContaining(
-          'slow-server: https://example.com/sse (sse) - Disconnected (timed out after 5000ms)',
+          'slow-server: https://example.com/sse (sse) - Disconnected (timed out after 10000ms)',
         ),
       );
     } finally {
@@ -245,7 +260,6 @@ describe('mcp list command', () => {
         },
       });
       mockClient.connect.mockResolvedValue(undefined);
-      mockClient.ping.mockResolvedValue(undefined);
 
       await listMcpServers();
 
@@ -273,7 +287,6 @@ describe('mcp list command', () => {
     ]);
 
     mockClient.connect.mockResolvedValue(undefined);
-    mockClient.ping.mockResolvedValue(undefined);
 
     await listMcpServers();
 

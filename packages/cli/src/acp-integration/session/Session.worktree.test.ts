@@ -18,7 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
-import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
+import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
@@ -66,7 +66,7 @@ describe('Session.pendingWorktreeNotice', () => {
 
   /** Parts arrays captured on each sendMessageStream call. */
   let capturedMessages: unknown[][];
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   let mockClient: AgentSideConnection;
   let mockSettings: LoadedSettings;
@@ -90,18 +90,30 @@ describe('Session.pendingWorktreeNotice', () => {
         ),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      getHistoryShallow: vi.fn(() => mockChat.getHistory()),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
 
-    const mockGeminiClient = {
+    const mockLlmClient = {
+      isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue(mockChat),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      activatePreparedMemoryRecallTransition: vi
+        .fn()
+        .mockResolvedValue(undefined),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      commitManagedAutoMemoryRecallDelivery: vi.fn(),
+      discardManagedAutoMemoryRecallDelivery: vi.fn(),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
     };
 
     mockConfig = {
@@ -114,7 +126,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -125,6 +139,7 @@ describe('Session.pendingWorktreeNotice', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         getBranchCheckpointCursor: vi.fn().mockReturnValue({
           recordId: null,
           activeRecordCount: 0,
@@ -132,11 +147,15 @@ describe('Session.pendingWorktreeNotice', () => {
         }),
         recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
+        recordTurnAttempt: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
         rewindRecording: vi.fn(),
         setTitleRecordedCallback: vi.fn(),
+      }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
@@ -159,7 +178,11 @@ describe('Session.pendingWorktreeNotice', () => {
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
-      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+      getMemoryManager: vi.fn().mockReturnValue({
+        resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -183,8 +206,16 @@ describe('Session.pendingWorktreeNotice', () => {
         clearStatusChangeCallback: vi.fn(),
         hasRunningEntries: vi.fn().mockReturnValue(false),
       }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
+      }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
       // The Session constructor and Session.prompt both reach for the
       // canonical Goal runtime. A real Config throws this exact error when
       // Goal persistence is off, and both call sites are written to fall

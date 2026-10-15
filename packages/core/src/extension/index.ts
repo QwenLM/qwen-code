@@ -3,6 +3,7 @@ export * from './i18n.js';
 export * from './variables.js';
 export * from './github.js';
 export * from './extensionSettings.js';
+export * from './extension-git-credentials.js';
 export * from './marketplace.js';
 export * from './sourceRegistry.js';
 export * from './extensionPreferences.js';

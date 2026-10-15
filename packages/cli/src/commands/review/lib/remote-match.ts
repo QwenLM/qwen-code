@@ -36,10 +36,34 @@ export function normalizeSegment(value: string): string {
 // `…/codereview/<id>` target (web host) matches its clone's remote (git host).
 const AONE_HOSTS = new Set(['code.alibaba-inc.com', 'gitlab.alibaba-inc.com']);
 
+/** The ONE host spelling normalization: a port, one trailing dot (FQDN
+ *  form), and case all spell the same DNS name. Both host predicates route
+ *  through it so the authorisation gate and the write router can never
+ *  normalize differently — the CR-URL grammar keeps `(?::\d+)?` inside the
+ *  host capture, so a predicate that skipped this refused
+ *  `code.alibaba-inc.com:443` against the skill-mandated
+ *  `gitlab.alibaba-inc.com` after the whole review ran. */
+function normalizeHostSpelling(host: string): string {
+  return host.toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
+}
+
 /** Hosts compare equal when identical, or both are an Aone web/git alias. */
 export function hostsEquivalent(a: string, b: string): boolean {
-  if (a === b) return true;
-  return AONE_HOSTS.has(a) && AONE_HOSTS.has(b);
+  const na = normalizeHostSpelling(a);
+  const nb = normalizeHostSpelling(b);
+  if (na === nb) return true;
+  return AONE_HOSTS.has(na) && AONE_HOSTS.has(nb);
+}
+
+/** The CANONICAL Aone hosts, normalized through the shared spelling helper
+ *  — but strict: no `.alibaba-inc.com` wildcard. Write routing keys on
+ *  THIS, not the family: a bare `*.alibaba-inc.com` suffix also names
+ *  GitHub Enterprise instances (an org's `ghe.alibaba-inc.com`), and an
+ *  irreversible public write must not select the a1 path on a family
+ *  resemblance. */
+export function isAoneCanonicalHost(host: string | undefined): boolean {
+  if (!host) return false;
+  return AONE_HOSTS.has(normalizeHostSpelling(host));
 }
 
 /** Hosts that count as the Aone platform family — one canonical predicate,

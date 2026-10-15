@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  type SuggestionCategory,
+} from './SuggestionsDisplay.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
@@ -26,13 +30,12 @@ import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { parseSlashCommand } from '../commands/commands.js';
 import { StreamingState } from '../types.js';
-import {
-  ApprovalMode,
-  type Config,
-  Storage,
-  createDebugLogger,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -51,7 +54,9 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
+import { useScrollActions } from '../contexts/ScrollContext.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -73,6 +78,7 @@ import type { RenderLineOptions } from './BaseTextInput.js';
 import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
 import {
   useVoiceInput,
+  type MicrophonePermission,
   type VoiceTranscriber,
 } from '../hooks/use-voice-input.js';
 import { createVoiceRecorder } from '../voice/voice-recorder.js';
@@ -215,6 +221,8 @@ export interface InputPromptProps {
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
   clipboardUnavailableShownRef?: React.MutableRefObject<boolean>;
+  /** Session-scoped so the microphone notice survives InputPrompt remounts. */
+  voiceMicWarnedStatusRef?: React.MutableRefObject<MicrophonePermission | null>;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -249,20 +257,32 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   promptSuggestion,
   onPromptSuggestionDismiss,
   clipboardUnavailableShownRef: sessionClipboardUnavailableShownRef,
+  voiceMicWarnedStatusRef: sessionVoiceMicWarnedStatusRef,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
   const settings = useSettings();
+  const scrollActions = useScrollActions();
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
   const mouseTrackingEnabled = useMouseTrackingEnabled();
-  const mouseInteractionsEnabled =
-    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
-    mouseTrackingEnabled;
+  const isVpMode = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
+  const mouseInteractionsEnabled = isVpMode && mouseTrackingEnabled;
+  // Bare ↑/↓ belong to input history; the transcript is scrolled with
+  // Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End or the mouse wheel (the contract
+  // ui.useTerminalBuffer documents). Opt-in only: on a terminal or
+  // multiplexer that does not pass mouse reporting through, the wheel arrives
+  // as a burst of ↑/↓ and would rewrite the composer with an older
+  // prompt (#10749), so
+  // ui.arrowKeysScrollTranscript hands those keys to the viewport instead.
+  // Derived once so the ↑ and ↓ branches cannot drift apart.
+  const arrowKeysScrollTranscript =
+    isVpMode && settings.merged.ui?.arrowKeysScrollTranscript === true;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
+  const { menu: contextMenu, closeMenu: closeContextMenu } = useContextMenu();
   const {
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
@@ -300,12 +320,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const hasActiveToolConfirmation = useMemo(
     () =>
       Boolean(uiState.confirmationRequest) ||
-      (uiState.pendingGeminiHistoryItems ?? []).some(
+      (uiState.pendingLlmHistoryItems ?? []).some(
         (item) =>
           item.type === 'tool_group' &&
           item.tools.some((tool) => tool.confirmationDetails),
       ),
-    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+    [uiState.confirmationRequest, uiState.pendingLlmHistoryItems],
   );
   const [historyRestoredText, setHistoryRestoredText] = useState<string | null>(
     null,
@@ -451,7 +471,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       refineVoiceTranscript(config, raw, signal),
     [config],
   );
-  const voiceMicWarnedStatusRef = useRef<string | null>(null);
+  const localVoiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(
+    null,
+  );
+  // Falls back to a local ref only when no session-scoped ref is supplied; the
+  // session ref keeps the notice to once per run across InputPrompt remounts.
+  const voiceMicWarnedStatusRef =
+    sessionVoiceMicWarnedStatusRef ?? localVoiceMicWarnedStatusRef;
   const voiceRecorderRef = useRef<ReturnType<
     typeof createVoiceRecorder
   > | null>(null);
@@ -462,6 +488,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const warmupVoice = useCallback(() => {
     const recorder = getVoiceRecorder();
     void Promise.resolve(recorder.warmup?.()).catch(() => {});
+  }, [getVoiceRecorder]);
+  // Runs when a recording starts, not on warmup: users who never dictate
+  // should not be told about microphone access on every startup.
+  const checkVoiceMicPermission = useCallback(() => {
+    const recorder = getVoiceRecorder();
     void Promise.resolve(recorder.microphoneStatus?.())
       .then((status) => {
         if (voiceMicWarnedStatusRef.current === status) {
@@ -495,7 +526,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       })
       .catch(() => {});
-  }, [getVoiceRecorder, uiState.historyManager]);
+  }, [getVoiceRecorder, uiState.historyManager, voiceMicWarnedStatusRef]);
   const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
   const openVoiceStreamSession = useCallback(
     (callbacks: {
@@ -541,6 +572,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     refine: voiceRefineEnabled ? refineVoice : undefined,
     onSubmit: (text) => voiceSubmitRef.current(text),
     warmup: warmupVoice,
+    checkMicrophonePermission: checkVoiceMicPermission,
     streaming: voiceStreaming,
     openStream: voiceStreaming ? openVoiceStreamSession : undefined,
   });
@@ -740,12 +772,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       return;
     }
     clipboardUnavailableShownRef.current = true;
+    const messageKey =
+      process.platform === 'linux'
+        ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+        : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.';
     uiState.historyManager?.addItem(
       {
         type: 'error',
-        text: t(
-          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
-        ),
+        text: t(messageKey),
       },
       Date.now(),
     );
@@ -872,6 +906,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setBgPillFocused,
   ]);
 
+  // Mirror of descendFromComposer's target condition: the VP-mode scroll
+  // fallback must yield to it, because descending is the only keyboard route
+  // into the live agent panel, the Arena tab bar and the background-tasks pill.
+  const hasComposerDescendTarget = useCallback(
+    () => getVisibleBgAgents().length > 0 || hasAgents || bgEntries.length > 0,
+    [getVisibleBgAgents, hasAgents, bgEntries],
+  );
+
   // Single source of truth for "is there a suggestion the user can accept right
   // now": the live followup suggestion if visible, otherwise the persisted
   // `promptSuggestion` prop (type-then-delete / pre-show-delay). Tab/Right/Enter
@@ -884,6 +926,25 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      // While the right-click context menu is open it owns navigation keys
+      // (the menu overlay handles them); any other key closes the menu and is
+      // then processed normally — mirroring click-away dismissal.
+      if (contextMenu !== null) {
+        if (
+          key.name === 'up' ||
+          key.name === 'down' ||
+          key.name === 'return' ||
+          key.name === 'escape'
+        ) {
+          return true;
+        }
+        closeContextMenu();
+        // Fall through: the dismissing key continues through the normal
+        // pipeline (vim, paste handling, shell-mode, shortcuts) after the
+        // menu closes — returning here would skip every remaining
+        // interceptor and drop the key into the bare readline layer.
+      }
+
       // When the Background tasks dialog is open, swallow every key so
       // nothing reaches the composer buffer — the dialog's own keypress
       // handler owns selection, open/close, and stop actions. Keep this ahead
@@ -1406,10 +1467,28 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       };
 
-      // If the command is a perfect match, pressing enter should execute it.
+      // The buffer updates synchronously, but completion is render-derived and
+      // can still describe the previous keystroke when Enter arrives.
+      const isSubmit = keyMatchers[Command.SUBMIT](key);
+      let isLiveSlashCommand = false;
+      if (isSubmit && buffer.text.startsWith('/') && !/\s$/.test(buffer.text)) {
+        const { commandToExecute, args, canonicalPath } = parseSlashCommand(
+          buffer.text,
+          slashCommands,
+        );
+        const commandPartCount = buffer.text.slice(1).split(/\s+/).length;
+        isLiveSlashCommand =
+          commandToExecute?.action !== undefined &&
+          args.length === 0 &&
+          canonicalPath.length === commandPartCount;
+      }
+
       // Use SUBMIT (which requires shift: false) instead of RETURN to avoid
       // intercepting Shift+Enter as submit when the user wants a newline.
-      if (completion.isPerfectMatch && keyMatchers[Command.SUBMIT](key)) {
+      const isCurrentPerfectMatch = buffer.text.startsWith('/')
+        ? isLiveSlashCommand
+        : completion.isPerfectMatch;
+      if (isSubmit && isCurrentPerfectMatch) {
         if (
           showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
@@ -1482,7 +1561,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+        // While suggestions are loading the list is empty and there is
+        // nothing to accept; the dropdown state is render-derived and can lag
+        // the buffer, so Enter must fall through to SUBMIT instead of being
+        // swallowed here.
+        if (
+          keyMatchers[Command.ACCEPT_SUGGESTION](key) &&
+          !key.paste &&
+          completion.suggestions.length > 0
+        ) {
           // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
           // mutates the buffer/index. When the suggestion's command opted
           // into `submitOnAccept` (a leaf command whose bare action takes
@@ -1664,6 +1751,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
+          // Opt-in wheel fallback (ui.arrowKeysScrollTranscript): a terminal
+          // that cannot report the mouse wheel delivers it as bare ↑/↓, so
+          // hand those to the viewport while the composer is empty. Only take
+          // the key when the transcript actually overflows: in a short
+          // conversation there is nothing to scroll and ↑ must keep recalling
+          // history rather than going dead.
+          if (
+            arrowKeysScrollTranscript &&
+            buffer.text.length === 0 &&
+            scrollActions?.hasScrollableTranscript()
+          ) {
+            scrollActions.scrollBy(-1);
+            return true;
+          }
           // Two-step edge transition: snap cursor to col 0 before triggering history
           if (buffer.visualCursor[1] > 0) {
             buffer.move('home');
@@ -1679,6 +1780,19 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // Opt-in wheel fallback (ui.arrowKeysScrollTranscript), mirroring ↑.
+          // Yields to history when the transcript does not overflow, and to
+          // descendFromComposer when an agent surface is on screen —
+          // descending is the only keyboard route into those.
+          if (
+            arrowKeysScrollTranscript &&
+            buffer.text.length === 0 &&
+            scrollActions?.hasScrollableTranscript() &&
+            !hasComposerDescendTarget()
+          ) {
+            scrollActions.scrollBy(1);
+            return true;
+          }
           // Two-step edge transition: snap cursor to end of line before triggering history
           const lastRowIdx = buffer.allVisualLines.length - 1;
           const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
@@ -1854,6 +1968,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       focus,
       buffer,
       completion,
+      slashCommands,
       shellModeActive,
       setShellModeActive,
       onClearScreen,
@@ -1890,6 +2005,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       parsePlaceholder,
       freePlaceholderId,
       agentTabBarFocused,
+      contextMenu,
+      closeContextMenu,
       bgDialogOpen,
       bgPillFocused,
       hasAgents,
@@ -1902,6 +2019,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgEntries,
       getVisibleBgAgents,
       descendFromComposer,
+      hasComposerDescendTarget,
       enterBgDetailFromPanel,
       setBgSelectedIndex,
       followup,
@@ -1914,6 +2032,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       categoryTabsVisible,
       voiceInput,
       targetDir,
+      arrowKeysScrollTranscript,
+      scrollActions,
     ],
   );
 
@@ -2136,6 +2256,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       uiActions,
     ],
   );
+  const handleCategorySelect = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      completion.selectCategory(category);
+      setExpandedSuggestionIndex(-1);
+    },
+    [completion],
+  );
 
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
@@ -2320,6 +2447,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             onSelectIndex={
               suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
+            onSelectCategory={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : handleCategorySelect
             }
           />
         </Box>

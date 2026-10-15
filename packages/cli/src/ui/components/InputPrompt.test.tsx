@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
@@ -32,6 +33,8 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from '../voice/voice-recorder.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
@@ -47,6 +50,7 @@ import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
+import { ScrollContext } from '../contexts/ScrollContext.js';
 import {
   clearPromptStash,
   savePromptStash,
@@ -66,6 +70,9 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
+vi.mock('../voice/voice-recorder.js', () => ({
+  createVoiceRecorder: vi.fn(),
+}));
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
@@ -109,6 +116,12 @@ vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
 
 const mockSlashCommands: SlashCommand[] = [
   {
+    name: 'quit',
+    kind: CommandKind.BUILT_IN,
+    description: 'Quit',
+    action: vi.fn(),
+  },
+  {
     name: 'clear',
     kind: CommandKind.BUILT_IN,
     description: 'Clear screen',
@@ -118,6 +131,8 @@ const mockSlashCommands: SlashCommand[] = [
     name: 'memory',
     kind: CommandKind.BUILT_IN,
     description: 'Manage memory',
+    // InputPrompt's live-slash submit gate requires action !== undefined.
+    action: vi.fn(),
     subCommands: [
       {
         name: 'show',
@@ -216,7 +231,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
@@ -322,6 +337,7 @@ describe('InputPrompt', () => {
       handleAutocomplete: vi.fn(),
       activeCategory: 'all' as const,
       availableCategories: ['all'] as Array<'all'>,
+      selectCategory: vi.fn(),
       switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
@@ -635,7 +651,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: true,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -646,6 +662,217 @@ describe('InputPrompt', () => {
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
     unmount();
+  });
+
+  describe('voice microphone permission', () => {
+    const setupRecorder = (status: MicrophonePermission) => {
+      const microphoneStatus = vi.fn().mockResolvedValue(status);
+      const { addItem } = setupRecorderWith(microphoneStatus);
+      return { addItem, microphoneStatus };
+    };
+
+    const setupRecorderWith = (
+      microphoneStatus: (() => Promise<MicrophonePermission>) | undefined,
+    ) => {
+      const addItem = vi.fn();
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(createVoiceRecorder).mockReturnValue({
+        start: vi.fn(),
+        stop: vi.fn(),
+        warmup: vi.fn(),
+        microphoneStatus,
+      } as unknown as ReturnType<typeof createVoiceRecorder>);
+      return { addItem };
+    };
+
+    const lastVoiceArgs = () =>
+      mockedUseVoiceInput.mock.calls.at(-1)![0] as Parameters<
+        typeof useVoiceInput
+      >[0];
+
+    it('does not probe or warn about microphone permission during warmup', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        await lastVoiceArgs().warmup?.();
+      });
+
+      expect(microphoneStatus).not.toHaveBeenCalled();
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('warns about a pending permission when a recording starts', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining('needs microphone access'),
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(microphoneStatus).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('reports a denied permission as an error when a recording starts', async () => {
+      const { addItem } = setupRecorder('denied');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'error',
+            text: expect.stringContaining('Microphone access is denied.'),
+          }),
+          expect.any(Number),
+        );
+      });
+      unmount();
+    });
+
+    it('warns only once for repeated recordings with the same status', async () => {
+      const { addItem } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('warns again when the permission status changes between recordings', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      // The user dismisses or denies the OS dialog: the next probe reports
+      // 'denied', which must re-warn — as an error — despite the earlier
+      // 'prompt' notice.
+      microphoneStatus.mockResolvedValue('denied');
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(2);
+      });
+      expect(addItem).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining('Microphone access is denied'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
+
+    it('warns only once across remounts when a session ref is supplied', async () => {
+      const { addItem } = setupRecorder('prompt');
+      const voiceMicWarnedStatusRef = { current: null };
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+        />,
+      );
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+        />,
+      );
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      second.unmount();
+    });
+
+    it('stays quiet when the recorder cannot report permission', async () => {
+      const { addItem } = setupRecorderWith(undefined);
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('stays quiet when the permission probe rejects', async () => {
+      const { addItem } = setupRecorderWith(() =>
+        Promise.reject(new Error('TCC query failed')),
+      );
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('stays quiet when permission is already granted', async () => {
+      const { addItem } = setupRecorder('granted');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
   });
 
   it('lets non-voice keys fall through while voice recording is active', async () => {
@@ -1540,7 +1767,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         historyManager: { addItem },
       } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
@@ -1579,12 +1806,72 @@ describe('InputPrompt', () => {
       expect(addItem).toHaveBeenCalledWith(
         {
           type: 'error',
-          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          text:
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
         },
         expect.any(Number),
       );
       second.unmount();
     });
+
+    // Issue #12504. PASTE_CLIPBOARD_IMAGE is computed once at module-import
+    // time from the real host platform, so `process.platform` cannot be
+    // stubbed late. Only run on a real Linux runner; skip on Windows
+    // (where the Ctrl+V byte would never trigger the keybinding) and
+    // macOS (where the Linux message branch wouldn't fire anyway).
+    const linuxOnly = process.platform === 'linux' ? describe : describe.skip;
+    linuxOnly(
+      'uses a Linux-specific unavailable message on Linux (#12504)',
+      () => {
+        it('emits the wl-clipboard/xclip message under stubbed process.platform', async () => {
+          const originalPlatform = process.platform;
+          Object.defineProperty(process, 'platform', { value: 'linux' });
+          try {
+            const addItem = vi.fn();
+            const clipboardUnavailableShownRef = { current: false };
+            mockedUseUIState.mockReturnValue({
+              isFeedbackDialogOpen: false,
+              messageQueue: [],
+              pendingLlmHistoryItems: [],
+              historyManager: { addItem },
+            } as unknown as ReturnType<typeof useUIState>);
+            vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+              async (onUnavailable) => {
+                onUnavailable?.();
+                return false;
+              },
+            );
+
+            const view = renderWithProviders(
+              <InputPrompt
+                {...props}
+                clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+              />,
+            );
+            await wait();
+
+            view.stdin.write('\x16');
+            await wait();
+
+            expect(addItem).toHaveBeenCalledTimes(1);
+            expect(addItem).toHaveBeenCalledWith(
+              {
+                type: 'error',
+                text: 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
+              },
+              expect.any(Number),
+            );
+            view.unmount();
+          } finally {
+            Object.defineProperty(process, 'platform', {
+              value: originalPlatform,
+            });
+          }
+        });
+      },
+    );
 
     it('should handle image save failure gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -1820,6 +2107,53 @@ describe('InputPrompt', () => {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
     });
+    unmount();
+  });
+
+  it('should submit a live exact slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'model', value: 'model' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/quit');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('/quit', {
+      deferUntilIdle: false,
+      submittedPrompt: '/quit',
+    });
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should not submit a live partial slash command when completion is stale', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'clear', value: 'clear' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: true,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/cle');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     unmount();
   });
 
@@ -2937,6 +3271,38 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should submit on Enter when completion suggestions are still loading', async () => {
+    // The dropdown shows "Loading suggestions..." with an empty list
+    // (showSuggestions true, no suggestions yet) — there is nothing to
+    // accept, so Enter must submit the buffer rather than be swallowed.
+    // Regression for render-derived completion state lagging a fast
+    // `@file` + Enter burst (#13015).
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [],
+      isLoadingSuggestions: true,
+      completionMode: CompletionMode.AT,
+    });
+    props.buffer.setText('@context.txt Inspect this context.');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      '@context.txt Inspect this context.',
+      {
+        deferUntilIdle: false,
+        submittedPrompt: '@context.txt Inspect this context.',
+      },
+    );
     unmount();
   });
 
@@ -5269,7 +5635,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [
+        pendingLlmHistoryItems: [
           {
             type: 'tool_group',
             tools: [
@@ -5772,7 +6138,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued message'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -5803,7 +6169,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
 
@@ -5830,7 +6196,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -5865,7 +6231,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued follow-up'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -5899,7 +6265,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       props.buffer.setText('draft to clear');
@@ -5917,6 +6283,257 @@ describe('InputPrompt', () => {
       await wait(50);
       // Second ESC within the timeout: clear typed input.
       expect(props.buffer.text).toBe('');
+      unmount();
+    });
+  });
+
+  describe('VP-mode bare Up/Down recalls input history by default', () => {
+    // `ui.useTerminalBuffer` (VP mode, on by default) documents the transcript
+    // scroll keys as Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End and the mouse wheel,
+    // so a bare ↑/↓ reaching an empty composer has to walk input history —
+    // even when the transcript overflows and the scrollbar is on screen.
+    const vpSettings = {
+      merged: { ui: { useTerminalBuffer: true } },
+    } as LoadedSettings;
+
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
+      renderWithProviders(
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        { settings: vpSettings },
+      );
+
+    it('Up from an empty composer recalls history instead of scrolling the transcript', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer recalls history instead of scrolling the transcript', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer still descends when history is exhausted', async () => {
+      // The pre-existing ↓ fall-through (history → descendFromComposer) must
+      // survive unchanged now that the scroll fallback no longer preempts it.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+  });
+
+  describe('VP-mode bare Up/Down scrolls the conversation when opted in (#10749)', () => {
+    // Terminals without SGR mouse reporting turn wheel events into bare ↑/↓.
+    // ui.arrowKeysScrollTranscript is the explicit opt-in that lets those keys
+    // scroll the transcript while the composer is empty instead of rewriting
+    // the input with an old prompt.
+    const vpSettings = {
+      merged: {
+        ui: { useTerminalBuffer: true, arrowKeysScrollTranscript: true },
+      },
+    } as LoadedSettings;
+
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
+      renderWithProviders(
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        { settings: vpSettings },
+      );
+
+    it('Up from an empty composer scrolls up instead of navigating history', async () => {
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer scrolls down instead of navigating history', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(1);
+      expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps history navigation when the composer has text', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('draft');
+      // Pre-position at col 0 so the two-step edge transition goes straight to
+      // history instead of consuming the first press to snap the cursor home.
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps history navigation when VP mode is off', async () => {
+      // The opt-in is meaningless outside VP mode — there the host terminal
+      // still owns native scrollback and never translates the wheel into ↑/↓.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderWithProviders(
+        <ScrollContext.Provider
+          value={{ scrollBy, hasScrollableTranscript: () => true }}
+        >
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        {
+          settings: {
+            merged: {
+              ui: {
+                useTerminalBuffer: false,
+                arrowKeysScrollTranscript: true,
+              },
+            },
+          } as LoadedSettings,
+        },
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down still descends to the background-tasks pill instead of scrolling', async () => {
+      // ↓ from an empty composer is the only keyboard route into the pill, so
+      // the scroll fallback has to yield whenever a descend target is on
+      // screen — otherwise a workflow-only session could never open it.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up still recalls history when the transcript does not overflow', async () => {
+      // A short conversation has nothing to scroll. Consuming ↑ there would
+      // leave it dead — no scroll and no history — so it falls through.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy, () => false);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up at the top of a scrollable transcript does not replay history', async () => {
+      // The other half of the tradeoff: once the transcript overflows, ↑ stays
+      // owned by scrolling even at the top edge. A wheel spun past the top
+      // emits a burst of ↑ presses, and letting the first dead one fall through
+      // to history would reintroduce exactly the bug being fixed.
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
     });
   });

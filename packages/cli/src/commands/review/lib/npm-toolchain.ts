@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
 import {
@@ -64,13 +64,51 @@ function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
 /**
+ * The installer a repo's lockfile calls for, or null when it commits neither.
+ * `pnpm-lock.yaml` alone means pnpm. Beside a `package-lock.json` (a repo
+ * mid-migration commits both) the root manifest's `packageManager` decides,
+ * and anything but `pnpm@…` keeps npm, so an npm repo installs exactly as
+ * before. Only the install differs: scripts still run through `npm run`.
+ */
+export function lockfileInstaller(root: string): 'npm' | 'pnpm' | null {
+  const npmLock = existsSync(join(root, 'package-lock.json'));
+  if (!existsSync(join(root, 'pnpm-lock.yaml'))) return npmLock ? 'npm' : null;
+  if (!npmLock) return 'pnpm';
+  try {
+    const manager: unknown = JSON.parse(
+      readFileSync(join(root, 'package.json'), 'utf8'),
+    )?.packageManager;
+    return typeof manager === 'string' && manager.startsWith('pnpm@')
+      ? 'pnpm'
+      : 'npm';
+  } catch {
+    return 'npm';
+  }
+}
+
+/**
+ * The installer's completeness marker — `npm ci` writes
+ * `node_modules/.package-lock.json`, and pnpm `node_modules/.modules.yaml`,
+ * only once the tree is fully materialised. This is the gate the install
+ * phase below reads, exported so `prebuild.ts` answers the fetch report's
+ * `installed` off the SAME predicate: the report and Agent 7 can never
+ * disagree about whether the tree needs an install.
+ */
+export function npmInstallComplete(root: string): boolean {
+  const marker =
+    lockfileInstaller(root) === 'pnpm' ? '.modules.yaml' : '.package-lock.json';
+  return existsSync(join(root, 'node_modules', marker));
+}
+/**
  * The one grammar `testCommand` above emits. Exported for the `--resume`
  * shape gate: a continuation re-executes report-stored `test[].command`
  * strings verbatim under `shell: true`, and the run-identity check pins a
  * report to this run's TREE, not to this program's authorship — a report
  * edited in place keeps its identity. Anything outside the emitter's own
- * grammar is therefore refused before it can be re-run, the same policy
- * `test-delta` already applies to report-derived commands it re-executes.
+ * grammar is therefore refused before it can be re-run — and `test-delta`
+ * imports this same predicate for the report commands it re-runs: one
+ * grammar, beside the emitter, for every site that hands a stored command
+ * to a shell, so a grammar change cannot silently diverge the two gates.
  * The character class covers every workspace dir this repo shape produces;
  * a dir exotic enough to fall outside it costs that report its resume (a
  * named refusal, pointing at a fresh run), never a verbatim re-execution.
@@ -90,7 +128,7 @@ export function unresolvedWorkspaceDeps(
 ): string[] {
   const known = new Map(packages.map((p) => [p.name, p.dir]));
   const found = new Set<string>();
-  // `error TS2307: Cannot find module '@qwen-code/webui' or its corresponding
+  // `error TS2307: Cannot find module '@scope/workspace' or its corresponding
   // type declarations.` — and the same shape from a bundler.
   const re = /Cannot find module '([^']+)'|Could not resolve "([^"]+)"/g;
   let m: RegExpExecArray | null;
@@ -210,14 +248,38 @@ function resumeNpmToolchain(
     // scope it would run is computed by the phase that never happened. Saying
     // it reached every suite would be this PR's own Chinese-placeholder defect
     // in English — prose asserting the opposite of the evidence beside it.
+    //
+    // But the SAME shape also belongs to a run that finished: a single-root
+    // package with no test script completes with `test: []` and no scope,
+    // and calling that "ended before its test phase" was self-contradictory
+    // beside its own carried note ("defines no test script, so no tests
+    // ran") — and its re-run advice re-derived the same zero-suite answer at
+    // the price of a full fresh install+build. The split is structural:
+    // `buildOnly` marks the deliberate probe, `ok: false` marks the runs
+    // that died early (failed install, disk gate, budget in the build);
+    // an `ok: true` non-probe with no scope and no results ran to
+    // completion and simply had nothing to run. The third signal,
+    // `endedBeforeTests`, covers the shape the other two cannot: a
+    // single-root run whose budget fell below the attempt floor before the
+    // first suite — build green (`ok: true`), no probe, no scope — where
+    // only the fresh path's own stamp knows the phase ran nothing it was
+    // supposed to run.
     const neverTested = previous.test.length === 0 && !previous.testScope;
+    const endedEarly =
+      neverTested &&
+      (previous.buildOnly === true ||
+        previous.ok === false ||
+        previous.endedBeforeTests === true);
     return withNote(
-      neverTested
+      endedEarly
         ? 'Nothing to resume: the run being continued ended before its test ' +
             'phase, so it left no scope to continue — no suite ran. Re-run ' +
             'build-test without --resume.'
-        : 'Nothing to resume: the run being continued reached every suite in ' +
-            'scope.',
+        : neverTested
+          ? 'Nothing to resume: the run being continued completed with no ' +
+            'suite to run.'
+          : 'Nothing to resume: the run being continued reached every suite ' +
+            'in scope.',
     );
   }
 
@@ -315,10 +377,24 @@ function resumeNpmToolchain(
           `command(s), ${outstanding.length} still to run: ` +
           outstanding.join(', '),
       );
-    } else if (stillClamped.length > 0) {
+    }
+    // NOT an else: a resume can leave BOTH unattempted work and suites
+    // killed again on a shortened deadline, and an else-if kept the
+    // provisional half out of the caveat exactly then — the brief quotes
+    // the caveat as the live limitation, so a reader of it alone
+    // under-counted the work left. An unattempted retry is already named
+    // by the still-to-run segment above; naming its stale clamped entry
+    // here too would claim it was "killed" on a deadline this call never
+    // gave it, so the provisional segment lists only commands the
+    // still-to-run segment does not.
+    const provisionalOnly = stillClamped.filter(
+      (c) => !outstanding.includes(c),
+    );
+    if (provisionalOnly.length > 0) {
       liveSegments.push(
-        `a --resume call left ${stillClamped.length} command(s) provisional ` +
-          `(killed on a budget-shortened deadline): ${stillClamped.join(', ')}`,
+        `a --resume call left ${provisionalOnly.length} command(s) ` +
+          `provisional (killed on a budget-shortened deadline): ` +
+          `${provisionalOnly.join(', ')}`,
       );
     }
     const caveat = liveSegments.join('; ');
@@ -343,6 +419,12 @@ function resumeNpmToolchain(
     // Recomputed, not inherited: the previous `false` may have been nothing
     // but the clamped timeout this call just replaced with a pass.
     ok: previous.build.every(succeeded) && mergedTest.every(succeeded),
+    // Recomputed for the same staleness reason: the stamp claims the test
+    // phase ENTERED and ran nothing, which any suite in `mergedTest`
+    // falsifies. A continuation that ran none keeps it — the claim still
+    // holds then. JSON.stringify drops the undefined key.
+    endedBeforeTests:
+      mergedTest.length === 0 ? previous.endedBeforeTests : undefined,
     timedOut,
     // REPLACED, not appended. The note being continued says things that were
     // true when it was written and are not now — "the whole-call budget was
@@ -415,11 +497,20 @@ function resumedNote(
         `run — not run: ${stillPending.join(', ')}. Resume again to reach them.`,
     );
   }
-  if (stillClamped.length > 0) {
+  // An unattempted retry rides BOTH lists — its command is still-to-run, and
+  // its stale clamped entry survives in the merged test[] — and two
+  // additive-looking clauses both naming it made one command read as two or
+  // three against the MAX_RESUME_CALLS budget. Worse, this clause claims the
+  // command was "killed on a deadline the budget shortened", which is false
+  // for a retry this call never started. So the provisional clause names
+  // only commands the still-to-run clause does not; a command in both is
+  // fully described by "not run".
+  const provisionalOnly = stillClamped.filter((c) => !stillPending.includes(c));
+  if (provisionalOnly.length > 0) {
     parts.push(
-      `${stillClamped.length} command(s) are still provisional — killed on a ` +
-        `deadline the budget shortened, not on their own: ` +
-        `${stillClamped.join(', ')}. Resume again to give them a full one.`,
+      `${provisionalOnly.length} command(s) are still provisional — killed ` +
+        `on a deadline the budget shortened, not on their own: ` +
+        `${provisionalOnly.join(', ')}. Resume again to give them a full one.`,
     );
   }
   if (stillPending.length === 0 && stillClamped.length === 0) {
@@ -577,6 +668,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       build: [],
       test: [],
       ...(testScope ? { testScope } : {}),
+      // The probe stamp rides EVERY producer path: this return already
+      // branches on args.buildOnly for its note, and a probe report without
+      // the stamp lost its probe answer on --resume.
+      ...(args.buildOnly ? { buildOnly: true } : {}),
       ok: true,
       timedOut: [],
       note: args.buildOnly
@@ -633,6 +728,11 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     ok: true,
     timedOut: [],
     note: '',
+    // Stamped structurally, not narrated: `--resume` on a report with no
+    // tests and no scope needs to tell a deliberate probe apart from a
+    // completed zero-suite run, and the note is prose an agent must never
+    // have to parse.
+    ...(args.buildOnly ? { buildOnly: true } : {}),
   };
 
   // The install. It lives here, not in the orchestrator, because nothing before
@@ -660,34 +760,34 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // in the diff and are not — so a timed-out install aborts, exactly like an install
   // that left no tree at all.
   //
-  // Whether to install is gated on npm's **completeness marker**, not the bare
-  // directory. `npm ci` writes `node_modules/.package-lock.json` only once the tree
-  // is fully materialised, so a partial tree — left by a timeout here, or by the
+  // Whether to install is gated on the installer's **completeness marker**, not the
+  // bare directory. `npm ci` writes `node_modules/.package-lock.json`, and pnpm
+  // `node_modules/.modules.yaml`, only once the tree is fully materialised, so a
+  // partial tree — left by a timeout here, or by the
   // agent's own shell-tool kill one level up — has the directory but not the marker.
   // Gating on the directory would let every later run *skip* the install and build
   // against that partial tree; gating on the marker reinstalls it.
   //
-  // But `npm ci` is only right for an npm repo. `workspaces` is also yarn/bun/pnpm
-  // syntax, and those write no `package-lock.json`, so `npm ci` would fail-fast on
-  // the missing lockfile and mislabel a perfectly usable `node_modules` as a failed
-  // install. So install only when there IS a `package-lock.json` (an npm repo) whose
-  // tree is incomplete; a non-npm repo that already has a tree is trusted — the build
+  // But the installer has to match the lockfile. `workspaces` is also yarn/bun
+  // syntax, and those commit neither `package-lock.json` nor `pnpm-lock.yaml`, so
+  // `npm ci` would fail-fast on the missing lockfile and mislabel a perfectly usable
+  // `node_modules` as a failed install. So install only when there IS one of the two
+  // (`lockfileInstaller` picks `npm ci` or `corepack pnpm install`) and the tree
+  // is incomplete; a yarn/bun repo that already has a tree is trusted — the build
   // is the authoritative signal, by this command's own argument.
-  const npmLock = existsSync(join(root, 'package-lock.json'));
-  const installComplete = (): boolean =>
-    existsSync(join(root, 'node_modules', '.package-lock.json'));
+  const installer = lockfileInstaller(root);
+  const installComplete = (): boolean => npmInstallComplete(root);
 
-  // A non-npm repo (yarn/bun/pnpm — `workspaces` is their syntax too) with no
-  // installed tree cannot be installed here: `npm ci` needs the npm lockfile, and
+  // A yarn or bun repo (`workspaces` is their syntax too) with no installed tree
+  // cannot be installed here: neither installer reads its lockfile, and
   // building against absent dependencies fails with `Cannot find module` **inside the
   // PR's own changed files** — the false-Critical steer this command exists to
   // prevent. A review worktree is cold by construction, so this is the common case,
   // not an edge. Hand it to the brief, naming the tool to install with. (The warm
   // case — a tree already present — is trusted below and never reaches here.)
-  if (args.install && !npmLock && !existsSync(join(root, 'node_modules'))) {
+  if (args.install && !installer && !existsSync(join(root, 'node_modules'))) {
     const altLock = [
       ['yarn.lock', 'yarn install --frozen-lockfile'],
-      ['pnpm-lock.yaml', 'pnpm install --frozen-lockfile'],
       ['bun.lockb', 'bun install --frozen-lockfile'],
       ['bun.lock', 'bun install --frozen-lockfile'],
     ].find(([f]) => existsSync(join(root, f)));
@@ -701,14 +801,17 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
             'build/test precedence in your brief.',
     );
   }
-  if (args.install && npmLock && !installComplete()) {
+  if (args.install && installer && !installComplete()) {
     // Disk preflight. The deadline already treats "cannot finish in time" as an
     // infrastructure result and skips ahead with a disclosure; "cannot fit on
     // the disk" is the same class of result, discovered before the command runs
     // instead of 33 seconds into it. An `npm ci` that dies on ENOSPC is
     // strictly worse than one that never starts: it leaves a partial tree AND a
     // full disk that fails every agent scheduled after this one.
-    const installCmd = 'npm ci --no-audit --no-fund';
+    const installCmd =
+      installer === 'pnpm'
+        ? 'corepack pnpm install --frozen-lockfile --reporter=append-only'
+        : 'npm ci --no-audit --no-fund';
     const free = freeDiskBytes(root);
     if (free !== null && free < INSTALL_MIN_FREE_BYTES) {
       results.ok = false;
@@ -734,6 +837,9 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       installCmd,
       root,
       Math.min(perCommandMs, remainingMs()),
+      // The one command that needs the registry. Everything else this adapter
+      // runs is offline under the sandbox policy — see `containerCommand`.
+      'install',
     );
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
@@ -1014,6 +1120,16 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     if (r.exitCode !== 0) results.ok = false;
   }
 
+  // The test phase ran NOTHING and left work behind: stamp it. A single-root
+  // run in this state writes no testScope and keeps ok: true (the build
+  // passed), so the stamp is the only structural evidence separating "ended
+  // before its test phase" from "completed with no suite to run" — the
+  // resume split reads it, and without it a --resume certified the one
+  // existing suite as finished (multi-root runs carry the same fact in
+  // testScope.notRun; the stamp is simply the phase-level truth either way).
+  if (results.test.length === 0 && notRun.length > 0) {
+    results.endedBeforeTests = true;
+  }
   // A budget stop is STRUCTURAL, not just prose: `testScope.workspaces` is
   // documented (and quoted by the agent's brief) as exactly the suites that
   // ran, so the trimmed suites leave it, and `notRun` names them. Sorted, so

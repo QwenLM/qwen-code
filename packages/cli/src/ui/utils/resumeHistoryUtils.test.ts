@@ -10,12 +10,18 @@ import {
   buildResumedHistoryItems,
   stripSuppressOnRestore,
   expandCollapsedHistory,
+  computeResumedPromptCountSeed,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
+import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { computeApiTruncationIndex } from './historyMapping.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
   AnyDeclarativeTool,
   Config,
+  ChatRecord,
   ConversationRecord,
+  FindingsResultDisplay,
   GoalSnapshotV2,
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
@@ -55,6 +61,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -119,6 +126,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -145,12 +153,14 @@ describe('resumeHistoryUtils', () => {
       ...goal,
       turnCount: 1,
       activeTimeMs: 10,
+      tokensUsed: 0,
       updatedAt: 2,
     };
     const rejected = {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 20,
+      tokensUsed: 0,
       updatedAt: 3,
     };
     const checkpointed = {
@@ -169,6 +179,7 @@ describe('resumeHistoryUtils', () => {
         ],
       },
       activeTimeMs: 30,
+      tokensUsed: 0,
       updatedAt: 4,
     };
     const limited = {
@@ -176,6 +187,7 @@ describe('resumeHistoryUtils', () => {
       status: 'usage_limited' as const,
       lastReason: 'provider failed',
       activeTimeMs: 40,
+      tokensUsed: 0,
       updatedAt: 5,
     };
     const conversation = {
@@ -327,6 +339,7 @@ describe('resumeHistoryUtils', () => {
       evidenceCursor: { recordId: 'goal-create' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     };
@@ -385,13 +398,21 @@ describe('resumeHistoryUtils', () => {
     it('prefers recorded displayText over the augmented parts', () => {
       const items = buildUserItems({
         type: 'user',
+        promptId: 'prompt-1',
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
         systemPayload: {
           displayText: 'my prompt',
           hookContext: 'injected hook context',
         },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          promptId: 'prompt-1',
+        },
+      ]);
     });
 
     it('does not fall back to hidden text when displayText is empty', () => {
@@ -457,7 +478,11 @@ describe('resumeHistoryUtils', () => {
         },
       });
       expect(items).toEqual([
-        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt\nbare injected context',
+        },
       ]);
     });
 
@@ -581,6 +606,7 @@ describe('resumeHistoryUtils', () => {
             callId: 'call-1',
             name: 'Replace',
             description: 'Mocked description',
+            args: { old: 'a', new: 'b' },
             resultDisplay: 'All set',
             status: ToolCallStatus.Success,
             confirmationDetails: undefined,
@@ -636,7 +662,7 @@ describe('resumeHistoryUtils', () => {
 
   it('restores media-reference mid-turn messages as an attachment placeholder', () => {
     // Image-only mid-turn messages are recorded with an empty displayText and
-    // mediaReferences; resuming must not fall back to the raw internal prefix.
+    // attachmentReferences; resuming must not fall back to the raw internal prefix.
     const conversation = {
       messages: [
         {
@@ -651,10 +677,10 @@ describe('resumeHistoryUtils', () => {
           },
           systemPayload: {
             displayText: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },
@@ -684,7 +710,7 @@ describe('resumeHistoryUtils', () => {
 
   it('restores media-reference ordinary user messages as an attachment placeholder', () => {
     // Image-only prompts are recorded with an empty displayText and
-    // mediaReferences; resuming must keep the prompt visible instead of
+    // attachmentReferences; resuming must keep the prompt visible instead of
     // dropping it from the restored history.
     const conversation = {
       messages: [
@@ -700,10 +726,10 @@ describe('resumeHistoryUtils', () => {
           systemPayload: {
             displayText: '',
             hookContext: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },
@@ -720,7 +746,11 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 50);
 
     expect(items).toEqual([
-      { id: 51, type: 'user', text: '[User message with attachments]' },
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+      },
     ]);
   });
 
@@ -755,7 +785,13 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'raw @file prompt',
+      },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {
@@ -944,6 +980,7 @@ describe('resumeHistoryUtils', () => {
             callId: 'missing-call',
             name: 'unknown_tool',
             description: '',
+            args: { foo: 'bar' },
             resultDisplay: { summary: 'failure' },
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,
@@ -1035,6 +1072,7 @@ describe('resumeHistoryUtils', () => {
           callId: 'call-2',
           name: 'Replace',
           description: 'Mocked description',
+          args: { target: 'a' },
           resultDisplay: undefined,
           status: ToolCallStatus.Success,
           confirmationDetails: undefined,
@@ -1435,6 +1473,51 @@ describe('resumeHistoryUtils', () => {
         ],
       },
     ]);
+  });
+
+  describe('raw args on resume (ui.showToolCallArgs)', () => {
+    type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+
+    it('carries the persisted functionCall args onto the display object', () => {
+      const editTool = {
+        name: 'replace',
+        displayName: 'Edit',
+        description: 'Edit a file',
+        build: vi.fn().mockReturnValue({ getDescription: () => 'a.ts' }),
+      } as unknown as AnyDeclarativeTool;
+
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'replace',
+                    args: { file_path: 'a.ts', old_string: 'x' },
+                  },
+                } as unknown as Part,
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ replace: editTool }),
+        10,
+      );
+      const tool = (
+        items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined
+      )?.tools[0];
+
+      // A resumed session must show the same args row as a live one.
+      expect(tool?.description).toBe('a.ts');
+      expect(tool?.args).toEqual({ file_path: 'a.ts', old_string: 'x' });
+    });
   });
 
   describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
@@ -1846,4 +1929,358 @@ describe('expandCollapsedHistory', () => {
     const result = expandCollapsedHistory(items);
     expect(result).toEqual([]);
   });
+
+  describe('report_findings replacement semantics', () => {
+    const reportFindingsTool = {
+      name: 'report_findings',
+      displayName: 'ReportFindings',
+      description: 'Report findings',
+      build: vi
+        .fn()
+        .mockReturnValue({ getDescription: () => 'Report 1 finding' }),
+    } as unknown as AnyDeclarativeTool;
+
+    const findingsDisplay = (outcome?: 'fixed') => ({
+      type: 'findings_list',
+      level: 'high',
+      findings: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          confidence: 'high',
+          file: 'src/foo.ts',
+          line: 42,
+          summary: 'wrong return value',
+          shortSummary: 'wrong return',
+          failureScenario: 'first call returns undefined',
+          ...(outcome ? { outcome } : {}),
+        },
+      ],
+    });
+
+    it('keeps only the latest delivered findings list in the restored transcript', () => {
+      // An initial report, fix work, then the outcome re-report: two distinct
+      // tool records. The restored transcript must render ONLY the latest
+      // list — the initial report collapses to the replacement marker.
+      const reportCall = (callId: string) => ({
+        type: 'assistant',
+        message: {
+          parts: [
+            {
+              functionCall: { id: callId, name: 'report_findings', args: {} },
+            } as unknown as Part,
+          ],
+        },
+      });
+      const reportResult = (callId: string, resultDisplay: unknown) => ({
+        type: 'tool_result',
+        toolCallResult: { callId, resultDisplay, status: 'success' },
+      });
+      const conversation = {
+        messages: [
+          reportCall('call-report-1'),
+          reportResult('call-report-1', findingsDisplay()),
+          {
+            type: 'assistant',
+            message: { parts: [{ text: 'applying fixes' }] },
+          },
+          reportCall('call-report-2'),
+          reportResult('call-report-2', findingsDisplay('fixed')),
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ report_findings: reportFindingsTool }),
+        500,
+      );
+
+      type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+      const toolGroups = items.filter(
+        (i): i is ToolGroupItem => i.type === 'tool_group',
+      );
+      expect(toolGroups).toHaveLength(2);
+
+      const everyTool = toolGroups.flatMap((group) => group.tools);
+      const deliveredLists = everyTool.filter(
+        (
+          tool,
+        ): tool is typeof tool & { resultDisplay: FindingsResultDisplay } =>
+          typeof tool.resultDisplay === 'object' &&
+          (tool.resultDisplay as FindingsResultDisplay | undefined)?.type ===
+            'findings_list',
+      );
+      expect(deliveredLists).toHaveLength(1);
+      expect(deliveredLists[0].resultDisplay.findings[0].outcome).toBe('fixed');
+      expect(toolGroups[0].tools[0].resultDisplay).toBe(
+        SUPERSEDED_FINDINGS_MESSAGE,
+      );
+    });
+  });
+});
+
+describe('resumed identity survives a synthetic display string', () => {
+  // The fixture makes identity and positional alignment disagree after a
+  // media-only turn, using the real UI and API resume builders.
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  const model = (text: string) =>
+    rec({ type: 'assistant', message: { role: 'model', parts: [{ text }] } });
+
+  function truncationIndexForLastUserTurn(messages: ChatRecord[]): number {
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const userItems = ui.filter((item) => item.type === 'user');
+    return computeApiTruncationIndex(
+      ui,
+      userItems[userItems.length - 1]!.id,
+      api,
+    );
+  }
+
+  const leadingTurns = (): ChatRecord[] => [
+    rec({
+      type: 'user',
+      promptId: 's########0',
+      message: { role: 'user', parts: [{ text: 'hello' }] },
+    }),
+    model('r0'),
+    rec({
+      type: 'user',
+      promptId: 's########1',
+      message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+    }),
+    model('r1'),
+  ];
+
+  it('resolves it identically when the record carries attachments', () => {
+    // Identity is independent of the synthetic attachment display text.
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'run the tests' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('lands an identified target past a goal_runtime record that inflates the walk', () => {
+    // goal_runtime has API content but no UI item, shifting positional order.
+    expect(
+      truncationIndexForLastUserTurn([
+        rec({
+          type: 'user',
+          promptId: 's########0',
+          message: { role: 'user', parts: [{ text: 'first prompt' }] },
+        }),
+        model('r0'),
+        rec({
+          type: 'user',
+          subtype: 'goal_runtime',
+          message: { role: 'user', parts: [{ text: 'goal tick' }] },
+        }),
+        model('rX'),
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'target prompt' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(6);
+  });
+
+  it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
+    // Attachment-only and placeholder turns are counted differently by the
+    // legacy positional mapper.
+    expect(
+      truncationIndexForLastUserTurn([
+        leadingTurns()[0]!,
+        model('r0'),
+        rec({
+          type: 'user',
+          promptId: 's########1',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+              } as unknown as Part,
+            ],
+          },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('resolves an attachment-only target by identity', () => {
+    const messages = [
+      leadingTurns()[0]!,
+      model('r0'),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+            } as unknown as Part,
+          ],
+        },
+        systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+      }),
+      model('r1'),
+      rec({
+        type: 'user',
+        promptId: 's########2',
+        message: { role: 'user', parts: [{ text: 'run the tests' }] },
+      }),
+      model('r2'),
+    ];
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const attachmentItem = ui.find(
+      (item) =>
+        item.type === 'user' && item.text === '[User message with attachments]',
+    )!;
+    expect(computeApiTruncationIndex(ui, attachmentItem.id, api)).toBe(2);
+  });
+});
+
+describe('resumed promptId attachment', () => {
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  it('attaches recorded prompt identities to resumed user items', () => {
+    const sessionData = {
+      conversation: {
+        messages: [
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'first prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r0' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r1' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########2',
+            message: { role: 'user', parts: [{ text: 'third prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r2' }] },
+          }),
+        ],
+      },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const userItems = ui.filter(
+      (item): item is HistoryItem & { promptId?: string } =>
+        item.type === 'user',
+    );
+    expect(userItems).toHaveLength(3);
+    // Duplicates are carried through verbatim rather than deduplicated:
+    // refusing an ambiguous id is the resolver's job (historyMapping), not
+    // the builder's.
+    expect(userItems.map((item) => item.promptId)).toEqual([
+      's########0',
+      's########0',
+      's########2',
+    ]);
+  });
+});
+
+describe('computeResumedPromptCountSeed', () => {
+  it('keeps seeding from zero when history is empty', () => {
+    expect(computeResumedPromptCountSeed([], 's')).toBe(0);
+  });
+
+  it.each([0, 12])(
+    'does not reuse retained snapshot turn %i without surviving user turns',
+    (turn) => {
+      const snapshotRecord: ChatRecord = {
+        uuid: 'retained-snapshots',
+        parentUuid: null,
+        sessionId: 's',
+        timestamp: '2026-10-08T00:00:00.000Z',
+        cwd: '/workspace',
+        version: '0.25.0',
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: {
+          snapshots: [
+            `s########${turn}`,
+            'other-session########99',
+            's########invalid',
+            `s########${'9'.repeat(400)}`,
+            's########9007199254740992',
+            `s########${Number.MAX_SAFE_INTEGER}`,
+          ].map((promptId) => ({
+            promptId,
+            timestamp: '2026-10-08T00:00:00.000Z',
+            trackedFileBackups: {},
+          })),
+        },
+      };
+
+      expect(computeResumedPromptCountSeed([snapshotRecord], 's')).toBe(
+        turn + 1,
+      );
+    },
+  );
 });

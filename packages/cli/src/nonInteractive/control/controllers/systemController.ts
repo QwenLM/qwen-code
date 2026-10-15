@@ -402,6 +402,14 @@ export class SystemController extends BaseController {
       authProvider,
       config.targetAudience,
       config.targetServiceAccount,
+      undefined, // type
+      undefined, // discoveryTimeoutMs
+      undefined, // scope
+      undefined, // alwaysLoadTools
+      undefined, // agentPluginV1
+      config.versionNegotiation,
+      config.appResourceMaxBytes,
+      config.appResourceTimeoutMs,
     );
   }
 
@@ -699,6 +707,7 @@ export class SystemController extends BaseController {
         this.context.config,
         signal,
         'non_interactive',
+        this.context.settings,
       );
 
       if (signal.aborted) {

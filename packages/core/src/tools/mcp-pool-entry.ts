@@ -1015,7 +1015,8 @@ export class PoolEntry {
           });
         })(),
         timeoutMs,
-        `pool restart for ${this.id}`,
+        `pool restart for ${this.id} ` +
+          `(pool will roll back the restart and free its budget slot)`,
       );
     } catch (err) {
       debugLogger.error(

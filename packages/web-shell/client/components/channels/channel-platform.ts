@@ -8,6 +8,7 @@ import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
+  dws: 'DWS',
   wecom: 'W',
   feishu: 'F',
   github: 'GH',
@@ -16,6 +17,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
   'dingtalk',
+  'dws',
   'wecom',
   'feishu',
   'github',
@@ -24,7 +26,7 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
 
 export function isSupportedChannelType(
   type: unknown,
-): type is 'dingtalk' | 'wecom' | 'feishu' | 'github' | 'gitlab' {
+): type is 'dingtalk' | 'dws' | 'wecom' | 'feishu' | 'github' | 'gitlab' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
 

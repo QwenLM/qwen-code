@@ -191,13 +191,18 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  * client-side validation error until loop detection kills the run.
  *
  * The relaxation is deliberately surgical:
- * - `additionalProperties: false` is removed ONLY on object levels that
- *   declare optional properties (some `properties` key missing from
- *   `required`). Levels where every property is required keep the
+ * - `additionalProperties: false` is removed on object levels that declare
+ *   optional properties (some `properties` key missing from `required`) or
+ *   no declared properties. Levels where every property is required keep the
  *   constraint — there is nothing for a gateway to promote.
- * - `$schema` / `$id` metadata is dropped at every level (some gateways
- *   reject unknown keywords).
- * - Everything else passes through untouched; client-side
+ * - `$schema` / `$id` metadata is dropped at every schema level (some
+ *   gateways reject unknown keywords).
+ * - `uniqueItems` is dropped at every schema level because some
+ *   OpenAI-compatible function-calling endpoints reject it.
+ * - When the source schema can be validated locally, empty object declarations
+ *   and string / array length limits at or above 1999 are dropped because
+ *   grammar-based endpoints can turn them into invalid or rejected rules.
+ * - Other constraints pass through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
  *
@@ -205,6 +210,7 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  */
 export function relaxSchemaForFunctionCalling(
   schema: Record<string, unknown>,
+  relaxGrammarConstraints = false,
 ): Record<string, unknown> {
   const relax = (obj: unknown): unknown => {
     if (typeof obj !== 'object' || obj === null) {
@@ -227,24 +233,72 @@ export function relaxSchemaForFunctionCalling(
       properties !== null &&
       !Array.isArray(properties) &&
       Object.keys(properties).some((key) => !required.includes(key));
+    const hasEmptyProperties =
+      typeof properties === 'object' &&
+      properties !== null &&
+      !Array.isArray(properties) &&
+      Object.keys(properties).length === 0;
+    const type = source['type'];
+    const canBeObject =
+      type === undefined ||
+      type === 'object' ||
+      (Array.isArray(type) && type.includes('object'));
+    const hasNoDeclaredProperties =
+      hasEmptyProperties || (canBeObject && properties === undefined);
 
     for (const [key, value] of Object.entries(source)) {
-      if (key === '$schema' || key === '$id') {
+      if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
+        continue;
+      }
+      if (
+        relaxGrammarConstraints &&
+        key === 'properties' &&
+        hasEmptyProperties
+      ) {
+        continue;
+      }
+      if (
+        relaxGrammarConstraints &&
+        (key === 'minLength' ||
+          key === 'maxLength' ||
+          key === 'minItems' ||
+          key === 'maxItems') &&
+        typeof value === 'number' &&
+        value >= 1999
+      ) {
         continue;
       }
       if (
         key === 'additionalProperties' &&
         value === false &&
-        hasOptionalProperties
+        (hasOptionalProperties ||
+          (relaxGrammarConstraints && hasNoDeclaredProperties))
       ) {
         continue;
       }
-      // `properties` / `$defs` / `definitions` are name->schema MAPS: their
-      // keys are property/definition names, not JSON Schema keywords. A
-      // property literally named `$schema` or `additionalProperties` must
-      // survive — only the VALUES are schemas to relax.
+      // These keywords contain JSON values, not nested schemas.
       if (
-        (key === 'properties' || key === '$defs' || key === 'definitions') &&
+        key === 'const' ||
+        key === 'default' ||
+        key === 'enum' ||
+        key === 'example' ||
+        key === 'examples'
+      ) {
+        target[key] = structuredClone(value);
+        continue;
+      }
+      // These keywords are name->schema/value maps: their keys are names, not
+      // JSON Schema keywords. A map entry literally named `$schema`,
+      // `uniqueItems`, or `additionalProperties` must survive — only the
+      // values are schemas to relax.
+      if (
+        (key === 'properties' ||
+          key === 'patternProperties' ||
+          key === '$defs' ||
+          key === 'definitions' ||
+          key === 'dependencies' ||
+          key === 'dependentSchemas' ||
+          key === 'dependentRequired') &&
         typeof value === 'object' &&
         value !== null &&
         !Array.isArray(value)

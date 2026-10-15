@@ -7,6 +7,10 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import {
+  coalesceFindingsHistoryItems,
+  isFindingsListDisplay,
+} from '../utils/findings-coalescing.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('HISTORY_MANAGER');
@@ -43,15 +47,46 @@ export interface UseHistoryManagerReturn {
 export function useHistory(): UseHistoryManagerReturn {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const messageIdCounterRef = useRef(0);
+  const lastMessageIdRef = useRef(0);
 
   // Generates a unique message ID based on a timestamp and a counter.
+  // Callers pass bases captured at different wall-clock times: a turn's items
+  // reuse the timestamp taken at submitQuery entry, while notification items
+  // are minted mid-turn from onRequestStarted with a fresh Date.now(). When
+  // the ms gap between two bases equals the counter delta between the two
+  // mints, base + counter repeats — a duplicate React key in the <Static>
+  // transcript. Clamp against the last minted id so ids stay strictly
+  // increasing no matter which base a caller supplies.
   const getNextMessageId = useCallback((baseTimestamp: number): number => {
     messageIdCounterRef.current += 1;
-    return baseTimestamp + messageIdCounterRef.current;
+    const id = Math.max(
+      baseTimestamp + messageIdCounterRef.current,
+      lastMessageIdRef.current + 1,
+    );
+    lastMessageIdRef.current = id;
+    return id;
   }, []);
 
   const loadHistory = useCallback((newHistory: HistoryItem[]) => {
     setHistory(newHistory);
+    // Restored transcripts stamp items with IDs relative to their own load
+    // timestamp (base + 1..N, see buildResumedHistoryItems). Advance the ID
+    // counter past the highest loaded ID so a subsequent addItem — which
+    // computes Date.now() + ++counter — cannot land inside the restored
+    // range and duplicate a React key in the <Static> transcript. The next
+    // getNextMessageId call increments again, so equality here still yields
+    // maxLoadedId + 1 at the earliest.
+    let maxLoadedId = 0;
+    for (const item of newHistory) {
+      if (item.id > maxLoadedId) {
+        maxLoadedId = item.id;
+      }
+    }
+    messageIdCounterRef.current = Math.max(
+      messageIdCounterRef.current,
+      maxLoadedId - Date.now(),
+    );
+    lastMessageIdRef.current = Math.max(lastMessageIdRef.current, maxLoadedId);
   }, []);
 
   // Adds a new item to the history state with a unique ID.
@@ -81,6 +116,18 @@ export function useHistory(): UseHistoryManagerReturn {
               `textSize=${textSize}, ` +
               `historyLength=${newHistory.length}`,
           );
+        }
+        // A delivered report_findings list REPLACES the session's earlier
+        // one; collapse the superseded displays the moment the new group
+        // commits so live history, the Ctrl+O transcript, and every
+        // re-render surface show only the latest list.
+        if (
+          newItem.type === 'tool_group' &&
+          newItem.tools.some((tool) =>
+            isFindingsListDisplay(tool.resultDisplay),
+          )
+        ) {
+          return coalesceFindingsHistoryItems(newHistory);
         }
         return newHistory;
       });
@@ -134,6 +181,7 @@ export function useHistory(): UseHistoryManagerReturn {
     }
     setHistory([]);
     messageIdCounterRef.current = 0;
+    lastMessageIdRef.current = 0;
   }, []);
 
   // Truncates history to exclude the item with the given ID and everything after it.
@@ -264,6 +312,7 @@ export function useHistory(): UseHistoryManagerReturn {
                   ...t,
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   detailedDisplay: undefined,
+                  supersededFindingsDisplay: undefined,
                   images: undefined,
                   omittedImageCount: undefined,
                 };

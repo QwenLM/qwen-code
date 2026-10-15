@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import type { TodoItem } from '../../adapters/types';
+import { todoStateKey, type TodoDetail } from '../../utils/todos';
 
-// PlanMessage's expanded list reads TodoTimelineContext and (via TodoFullList)
-// TodoDetailContext from App; mock both so the unit test doesn't pull the whole
-// application graph.
-vi.mock('../../App', async () => {
+// Mock the todo contexts so the unit test controls their provider values.
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -17,7 +20,9 @@ vi.mock('../../App', async () => {
 });
 
 const { PlanMessage } = await import('./PlanMessage');
-const { TodoTimelineContext } = await import('../../App');
+const { TodoDetailContext, TodoTimelineContext } = await import(
+  '../../WebShellContexts'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -44,6 +49,9 @@ function renderPlan(
   id: string,
   todos: TodoItem[],
   timeline?: Map<string, unknown>,
+  documentMode = false,
+  details = new Map<string, TodoDetail>(),
+  documentExpanded = true,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -51,9 +59,17 @@ function renderPlan(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TodoTimelineContext.Provider value={timeline ?? new Map()}>
-          <PlanMessage id={id} todos={todos} />
-        </TodoTimelineContext.Provider>
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+              <TodoDetailContext.Provider value={details}>
+                <PlanMessage id={id} todos={todos} />
+              </TodoDetailContext.Provider>
+            </TodoTimelineContext.Provider>
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -92,6 +108,40 @@ describe('PlanMessage', () => {
     expect(container.textContent).toContain('Second task');
     expect(container.textContent).toContain('Third task');
     expect(container.textContent).toContain('▾');
+  });
+
+  it('renders the complete plan without controls in document mode', () => {
+    const details = new Map<string, TodoDetail>([
+      [
+        todoStateKey(TODOS[0]!),
+        { startTs: 1_000, endTs: 4_000, resources: { inputTokens: 12 } },
+      ],
+    ]);
+    const container = renderPlan('p1', TODOS, undefined, true, details);
+    expect(container.textContent).toContain('First task');
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).toContain('Third task');
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.firstElementChild?.firstElementChild?.className).toContain(
+      'headerStatic',
+    );
+    expect(container.textContent).toContain('Input');
+    expect(container.textContent).toContain('12');
+  });
+
+  it('honors the document-wide collapsed state for plans', () => {
+    const container = renderPlan(
+      'p1',
+      TODOS,
+      undefined,
+      true,
+      new Map(),
+      false,
+    );
+
+    expect(container.textContent).toContain('Second task');
+    expect(container.textContent).not.toContain('Third task');
+    expect(container.querySelector('button')).toBeNull();
   });
 
   it('shows the plan-keyed diff when a timeline is present', () => {

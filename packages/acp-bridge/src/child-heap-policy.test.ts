@@ -4,12 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createChildHeapPolicy } from './child-heap-policy.js';
 import {
   MIN_CHILD_HEAP_MB,
   resolveDaemonMemoryBudget,
 } from './daemon-memory-budget.js';
+
+vi.mock('./channel-control-timeouts.js', () => ({
+  MAX_DAEMON_WORKSPACES: 256,
+}));
+
+describe.each(['admit', 'enforce'] as const)(
+  'child count admission: %s',
+  (mode) => {
+    it('uses the unchanged six-slot model on a 7265 MiB host', () => {
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 7265 });
+      const policy = createChildHeapPolicy({ budget, mode });
+      expect(policy.snapshot()).toMatchObject({
+        maxConcurrentChildren: 6,
+        perChildCeilingMb: 544,
+      });
+      expect(policy.decide(6)).toEqual({ refuse: false });
+      expect(policy.decide(7)).toEqual({ refuse: true });
+      expect(policy.snapshot().refusals).toBe(1);
+    });
+    it('rejects an admitting configuration that cannot model a child', () => {
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
+      expect(() => createChildHeapPolicy({ budget, mode })).toThrow(
+        'at least one child',
+      );
+      expect(
+        createChildHeapPolicy({ budget, mode: 'observe' }).snapshot()
+          .maxConcurrentChildren,
+      ).toBe(0);
+    });
+  },
+);
 
 describe('createChildHeapPolicy', () => {
   it.each([2_048, 8_192, 32_768, 262_144])(
@@ -107,9 +138,9 @@ describe('createChildHeapPolicy', () => {
     ).toMatchObject({ maxConcurrentChildren: 1, perChildCeilingMb: 512 });
   });
 
-  it('sizes an 8 GB host for seven children, and a large host by the workspace cap', () => {
+  it('sizes an 8 GB host for seven children, and a large host independently of the legacy workspace cap', () => {
     // Pinned: these are the numbers an operator plans against. The large host
-    // divides by MAX_DAEMON_WORKSPACES rather than pool/512, so the ceiling is
+    // divides by the modeled child cap rather than pool/512, so the ceiling is
     // 614 MB and not the floor.
     expect(
       createChildHeapPolicy({

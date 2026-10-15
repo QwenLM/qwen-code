@@ -39,6 +39,7 @@ function setup(
 ) {
   const handlers = {
     onDelete: vi.fn(),
+    onInsert: vi.fn(),
     onEdit: vi.fn(),
   };
   const prompts: QueuedPrompt[] = overrides.prompts
@@ -95,6 +96,40 @@ describe('QueuedPromptDisplay', () => {
     expect(row).not.toBeNull();
     const position = row?.compareDocumentPosition(img as Node) ?? 0;
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('renders attached files after the text and opens their preview', () => {
+    const onAttachmentPreview = vi.fn();
+    const file = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      attachmentId: 'attachment-1',
+    };
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '带附件消息',
+          files: [file],
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+      onAttachmentPreview,
+    });
+
+    const text = container.querySelector('[class*="queuedPromptText"]');
+    const fileButton = container.querySelector<HTMLButtonElement>(
+      '[class*="queuedPromptFile"]',
+    );
+    expect(text?.nextElementSibling).toContain(fileButton);
+    expect(fileButton?.textContent).toContain('notes.txt');
+    act(() => fileButton?.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'attachment-1',
+    });
   });
 
   it('does not render unsafe image data URIs', () => {
@@ -165,6 +200,83 @@ describe('QueuedPromptDisplay', () => {
     expect(container.textContent).not.toContain('插入');
   });
 
+  it('shows an explicit insert action for a locally held message', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待主动插入' }],
+    });
+    expect(container.textContent).toContain('插入');
+  });
+
+  it('hides insert when mid-turn mutation is unavailable', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待主动插入' }],
+      canMutateMidTurn: false,
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
+  it('hides insert when there is no running turn', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待主动插入' }],
+      canInsertMidTurn: false,
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
+  it('hides insert for prompts with input annotations', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: 'inspect this file',
+          inputAnnotations: [
+            {
+              type: 'reference',
+              start: 8,
+              end: 17,
+              text: 'this file',
+              reference: {
+                id: 'file-1',
+                kind: 'data-table',
+                label: 'File',
+                value: '/tmp/a.ts',
+                serialized: 'this file',
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
+  it('hides insert for prompts with file attachments', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: 'inspect this file',
+          files: [
+            {
+              name: 'a.ts',
+              media_type: 'text/typescript',
+              text: 'export {};',
+            },
+          ],
+        },
+      ],
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
   it('allows deleting but not editing a summary-only server row', () => {
     const { container } = setup({
       prompts: [
@@ -216,6 +328,70 @@ describe('QueuedPromptDisplay', () => {
     ).toBe(true);
   });
 
+  it('offers send-now on a queued mid-turn row when the daemon supports it', () => {
+    const onSendNow = vi.fn();
+    const { container } = setup({
+      canSendMidTurnNow: true,
+      onSendNow,
+      prompts: [
+        { id: 1, text: '本地排队' },
+        {
+          id: 2,
+          text: '补充信息',
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+    });
+
+    const sendNow = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].filter((button) => button.textContent === t('queue.sendNow'));
+    expect(sendNow).toHaveLength(1);
+    expect(sendNow[0]?.title).toBe(t('queue.sendNowTip'));
+    act(() => sendNow[0]?.click());
+    expect(onSendNow).toHaveBeenCalledWith(2);
+  });
+
+  it('hides send-now without the capability or before the daemon owns the row', () => {
+    const queued: QueuedPrompt = {
+      id: 1,
+      text: '补充信息',
+      midTurnState: 'queued',
+      midTurnMessageId: 'mid-1',
+    };
+    const labels = (container: HTMLElement) =>
+      [...container.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      );
+
+    expect(
+      labels(setup({ onSendNow: vi.fn(), prompts: [queued] }).container),
+    ).not.toContain(t('queue.sendNow'));
+    expect(
+      labels(
+        setup({
+          canSendMidTurnNow: true,
+          onSendNow: vi.fn(),
+          prompts: [{ ...queued, midTurnState: 'submitting' }],
+        }).container,
+      ),
+    ).not.toContain(t('queue.sendNow'));
+    // An older daemon that answered without a message id.
+    expect(
+      labels(
+        setup({
+          canSendMidTurnNow: true,
+          onSendNow: vi.fn(),
+          prompts: [{ ...queued, midTurnMessageId: undefined }],
+        }).container,
+      ),
+    ).not.toContain(t('queue.sendNow'));
+    expect(
+      labels(setup({ canSendMidTurnNow: true, prompts: [queued] }).container),
+    ).not.toContain(t('queue.sendNow'));
+  });
+
   it('keeps actions disabled when an older daemon returns no message id', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '补充信息', midTurnState: 'queued' }],
@@ -251,6 +427,31 @@ describe('QueuedPromptDisplay', () => {
     expect(
       container.querySelector('[class*="queuedPromptSpinner"]'),
     ).toBeTruthy();
+  });
+
+  it('allows deleting an ordinary submission while keeping other busy actions locked', () => {
+    const { container, handlers } = setup({
+      prompts: [
+        { id: 1, text: 'pending admission', serverState: 'submitting' },
+        { id: 2, text: 'mid-turn admission', midTurnState: 'submitting' },
+        { id: 3, text: 'already running', serverState: 'running' },
+      ],
+    });
+    const deletes = container.querySelectorAll<HTMLButtonElement>(
+      `[aria-label="${t('queue.delete')}"]`,
+    );
+    expect([...deletes].map((button) => button.disabled)).toEqual([
+      false,
+      true,
+      true,
+    ]);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        `[aria-label="${t('queue.edit')}"]`,
+      )?.disabled,
+    ).toBe(true);
+    act(() => deletes[0]!.click());
+    expect(handlers.onDelete).toHaveBeenCalledWith(1);
   });
 
   it('renders queued reference annotations as tags', () => {
@@ -416,11 +617,15 @@ describe('QueuedPromptDisplay', () => {
     expect(handlers.onDelete).toHaveBeenCalledWith(42);
   });
 
-  it('does not render an insert action for a command prompt', () => {
+  it('disables the insert action for a command prompt', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '/help me' }],
     });
-    expect(container.querySelectorAll('button')).toHaveLength(2);
-    expect(container.textContent).not.toContain('插入');
+    expect(container.querySelectorAll('button')).toHaveLength(3);
+    const insert = container.querySelector<HTMLButtonElement>(
+      `[aria-label="${t('queue.insert')}"]`,
+    );
+    expect(insert?.disabled).toBe(true);
+    expect(insert?.title).toBe(t('queue.insertCommandDisabled'));
   });
 });

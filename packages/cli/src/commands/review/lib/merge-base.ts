@@ -15,7 +15,11 @@ export interface GitProbe {
   fetch(remote: string, ref: string): boolean;
   /** Does this ref resolve locally? */
   refExists(ref: string): boolean;
-  /** Merge-base of two refs, or null when there is none. */
+  /**
+   * Merge-base of two refs, or null when there is none. An implementation
+   * may THROW when the git surface cannot answer — distinct from answering
+   * "none" — and the throw propagates to the caller.
+   */
   mergeBase(a: string, b: string): string | null;
 }
 

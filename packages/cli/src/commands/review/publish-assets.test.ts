@@ -1091,3 +1091,87 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 });
+
+describe('publish-assets — minimal topology at the second caller shape', () => {
+  // The gate is shape-sensitive: this caller passes an env-resolved host and
+  // no absentHostFollowsRecording, so an absent host reads as a github.com
+  // claim. The minimal fall-through must order its refusals the SAME way
+  // here — the topology names only the sole blocker — or a future reorder
+  // regresses one caller's shape while the other caller's suite stays green.
+  let dir: string;
+  let argsFile: string;
+  let savedSessionId: string | undefined;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'publish-assets-min-'));
+    argsFile = join(dir, 'args.txt');
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'owner/assets';
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
+    ghMock.mockReset();
+    ghWithInputMock.mockReset();
+    setGhHostMock.mockReset();
+    stderrSpy.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env['QWEN_REVIEW_ASSETS_REPO'];
+    if (savedSessionId !== undefined) {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+    process.exitCode = undefined;
+  });
+
+  const png = (name: string): string => {
+    const p = join(dir, name);
+    writeFileSync(p, Buffer.from('89504e470d0a1a0a', 'hex'));
+    return p;
+  };
+  const runAt = (): void =>
+    runPublishAssets({
+      pr: 8346,
+      reviewedRepo: undefined,
+      files: [png('a.png')],
+      findings: undefined,
+      findingsOut: undefined,
+      out: join(dir, 'm.json'),
+      host: undefined,
+      userAuthorized: false,
+      skillArgs: argsFile,
+    } as never);
+
+  it('a fully-bound minimal record names the topology (evidence-images advice)', () => {
+    writeFileSync(argsFile, '8346 --topology minimal --comment\n');
+    runAt();
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('`--topology minimal`');
+    expect(why).toContain('Evidence images');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a wrong-host minimal record leads with the host binding, not the topology', () => {
+    // Without --reviewed-repo the gate binds number and host alone; the
+    // Enterprise-host record fails the host check before the topology
+    // refusal, exactly as it does at submit's shape — leading with the
+    // topology here would send the operator to re-run without it into the
+    // same still-unnamed host refusal.
+    writeFileSync(
+      argsFile,
+      'https://ghe.corp.example/reviewed/upstream/pull/8346 --topology minimal --comment\n',
+    );
+    runAt();
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('authorise ghe.corp.example');
+    expect(why).toContain('targets github.com');
+    expect(why).not.toContain('`--topology minimal`');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+});

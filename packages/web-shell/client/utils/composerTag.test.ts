@@ -4,6 +4,7 @@ import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from './composerTag';
@@ -138,6 +139,27 @@ describe('getComposerTagViewModel', () => {
   });
 });
 
+describe('isPreviewableFileComposerTag', () => {
+  it('accepts files and rejects directories', () => {
+    expect(
+      isPreviewableFileComposerTag({
+        id: 'file:@notes.txt',
+        kind: 'file',
+        value: 'notes.txt',
+        metadata: { fileKind: 'file' },
+      }),
+    ).toBe(true);
+    expect(
+      isPreviewableFileComposerTag({
+        id: 'file:@docs/',
+        kind: 'file',
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+      }),
+    ).toBe(false);
+  });
+});
+
 describe('parseUserMessageContentSafely', () => {
   it('rejects an empty parser result', () => {
     expect(
@@ -198,6 +220,31 @@ describe('parseUserMessageContentSafely', () => {
 });
 
 describe('composer tag input annotations', () => {
+  it('preserves file kinds for replayed tags', () => {
+    const content = '@docs/';
+    const annotations = createInputAnnotationsFromComposerTags(content, [
+      {
+        id: 'file:@docs/',
+        kind: 'file',
+        value: 'docs',
+        metadata: { fileKind: 'directory' },
+        serialized: content,
+      },
+    ]);
+
+    expect(annotations[0]?.reference.metadata).toEqual({
+      fileKind: 'directory',
+    });
+    expect(splitComposerTagContentByAnnotations(content, annotations)).toEqual([
+      {
+        type: 'reference',
+        tag: expect.objectContaining({
+          metadata: { fileKind: 'directory' },
+        }),
+      },
+    ]);
+  });
+
   it('creates reference annotations using ranges from final prompt text', () => {
     expect(
       createInputAnnotationsFromComposerTags('@dataset:users\n\nshow rows', [
@@ -373,6 +420,139 @@ describe('composer tag input annotations', () => {
     ]);
   });
 
+  it('uses known placements instead of matching earlier identical text', () => {
+    // Issue #12980: plain text spelled like a chip's serialized text must
+    // not steal the chip's annotation.
+    const content = 'literal @foo then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 18,
+            end: 22,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+        ],
+      ),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 18,
+        end: 22,
+        text: '@foo',
+        reference: { id: 'file:@foo', kind: 'file', value: '@foo' },
+      },
+    ]);
+  });
+
+  it('combines searched tags with known inline placements', () => {
+    const content = '@ctx\n\nliteral @foo then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [{ id: 'file:@ctx', kind: 'file', value: '@ctx' }],
+        [
+          {
+            start: 24,
+            end: 28,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+        ],
+      ).map(({ start, end, reference }) => [start, end, reference.id]),
+    ).toEqual([
+      [0, 4, 'file:@ctx'],
+      [24, 28, 'file:@foo'],
+    ]);
+  });
+
+  it('skips known placements whose range does not match the prompt text', () => {
+    const content = 'literal @foo then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 0,
+            end: 4,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+          {
+            start: 8,
+            end: 30,
+            tag: { id: 'file:@bar', kind: 'file', value: '@bar' },
+          },
+        ],
+      ),
+    ).toEqual([]);
+  });
+
+  it('falls back to a unique textual match when a known placement is stale', () => {
+    // The editor range no longer matches the prompt text (the document text
+    // under a chip drifted from its serialized form, e.g. an edit inside the
+    // chip's range): a serialized form occurring exactly once can still be
+    // annotated without risking the wrong span, while a repeated one stays
+    // plain text.
+    const content = 'open @foo and @bar then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 0,
+            end: 3,
+            tag: { id: 'file:@bar', kind: 'file', value: '@bar' },
+          },
+          {
+            start: 0,
+            end: 3,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+        ],
+      ),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 14,
+        end: 18,
+        text: '@bar',
+        reference: { id: 'file:@bar', kind: 'file', value: '@bar' },
+      },
+    ]);
+  });
+
+  it('recovers a stale placement whose true occurrence is behind its recorded start', () => {
+    // The first chip's inserted text was longer than its serialized form, so
+    // every later chip's recorded range sits past its true position. The
+    // fallback therefore has to search the whole prompt: anchoring the search
+    // at the stale start would silently drop the later chip's annotation.
+    const content = '@alpha X @beta';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 0,
+            end: 12,
+            tag: { id: 'file:@alpha', kind: 'file', value: '@alpha' },
+          },
+          {
+            start: 15,
+            end: 21,
+            tag: { id: 'file:@beta', kind: 'file', value: '@beta' },
+          },
+        ],
+      ).map(({ start, end, reference }) => [start, end, reference.id]),
+    ).toEqual([
+      [0, 6, 'file:@alpha'],
+      [9, 14, 'file:@beta'],
+    ]);
+  });
+
   it('uses annotations for custom provider references', () => {
     expect(
       splitComposerTagContentByAnnotations('open @dataset:users now', [
@@ -539,6 +719,38 @@ describe('composer tag input annotations', () => {
         } as unknown as DaemonInputAnnotation,
       ]),
     ).toEqual([{ type: 'text', text: 'list @.qwen/ files' }]);
+  });
+
+  it('skips non-object annotation entries from untrusted metadata', () => {
+    const content = 'open @one';
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        null,
+        referenceAnnotation(content, '@one', {
+          id: 'file:@one',
+          kind: 'file',
+          value: 'one',
+          serialized: '@one',
+        }),
+        undefined,
+      ] as unknown as DaemonInputAnnotation[]),
+    ).toEqual([
+      { type: 'text', text: 'open ' },
+      {
+        type: 'reference',
+        tag: {
+          id: 'file:@one',
+          kind: 'file',
+          value: 'one',
+          serialized: '@one',
+        },
+      },
+    ]);
+    expect(
+      splitComposerTagContentByAnnotations(content, [
+        null,
+      ] as unknown as DaemonInputAnnotation[]),
+    ).toEqual([{ type: 'text', text: 'open @one' }]);
   });
 
   it('skips overlapping annotations', () => {

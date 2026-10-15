@@ -9,9 +9,19 @@ import {
   getSessionCatalogStore,
   type StagedWorkspaceSessionCatalog,
 } from './session-catalog-store';
+import { resolveSessionLiveStatePollInterval } from './session-live-state-poll-interval';
 
-export const SESSION_LIVE_STATE_POLL_MS = 2_000;
+export { SESSION_LIVE_STATE_POLL_MS } from './session-live-state-poll-interval';
 export const SESSION_LIVE_STATE_ERROR_RETRY_MS = 30_000;
+/**
+ * Consecutive live-state request failures before the retained snapshot is
+ * dropped as no longer current. Failures are spaced by
+ * `SESSION_LIVE_STATE_ERROR_RETRY_MS`, so this is a ~minute of a channel that
+ * cannot answer — long enough to ride out a daemon restart, short enough that
+ * a pane held loading by this authority is released while the turn is still
+ * interesting (#9487).
+ */
+export const SESSION_LIVE_STATE_STALE_AFTER_FAILURES = 3;
 export const SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS = 10_000;
 
 interface WorkspacePollState {
@@ -22,6 +32,7 @@ interface WorkspacePollState {
   reconcileRetryAt: number;
   lastReconcileAt: number;
   fallbackAttempted: boolean;
+  interactiveRefreshRequested: boolean;
   reconcileRequested: boolean;
   invalidationRequested: boolean;
   invalidationReconcileAt: number;
@@ -29,6 +40,7 @@ interface WorkspacePollState {
 
 interface WorkspaceSessionLiveStateOptions {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds: readonly string[];
   groupWorkspaceCwds: readonly string[];
 }
@@ -69,11 +81,16 @@ export function useWorkspaceSessionLiveState(
   client: DaemonClient,
   {
     enabled,
+    pollIntervalMs: configuredPollIntervalMs,
     workspaceCwds,
     groupWorkspaceCwds,
   }: WorkspaceSessionLiveStateOptions,
 ): ReadonlyMap<string, DaemonSessionGroupCatalog> {
   const catalogStore = useMemo(() => getSessionCatalogStore(client), [client]);
+  const pollIntervalMs = resolveSessionLiveStatePollInterval(
+    configuredPollIntervalMs,
+  );
+  const pollAllRef = useRef<(() => void) | undefined>(undefined);
   const targetsKey = [...new Set(workspaceCwds)].sort().join('\n');
   const targets = useMemo(
     () => targetsKey.split('\n').filter(Boolean),
@@ -137,6 +154,7 @@ export function useWorkspaceSessionLiveState(
       reconcileRetryAt: 0,
       lastReconcileAt: Number.NEGATIVE_INFINITY,
       fallbackAttempted: false,
+      interactiveRefreshRequested: false,
       reconcileRequested: false,
       invalidationRequested: false,
       invalidationReconcileAt: Number.NEGATIVE_INFINITY,
@@ -158,10 +176,12 @@ export function useWorkspaceSessionLiveState(
       });
     };
 
-    const readLiveState = async (
-      workspaceCwd: string,
-    ): Promise<DaemonWorkspaceSessionLiveState> => {
-      return await client.getWorkspaceSessionLiveState(workspaceCwd);
+    const readLiveState = async (workspaceCwd: string) => {
+      const requestStartedAt = performance.now();
+      return {
+        ...(await client.getWorkspaceSessionLiveState(workspaceCwd)),
+        requestStartedAt,
+      };
     };
 
     const stageCatalogBundle = async (
@@ -198,8 +218,8 @@ export function useWorkspaceSessionLiveState(
       const request = catalogStore.consumeWorkspaceLiveStateRefreshRequest(
         state.workspaceCwd,
       );
-      state.reconcileRequested =
-        state.reconcileRequested || request === 'interactive';
+      const interactive = request === 'interactive';
+      state.reconcileRequested = state.reconcileRequested || interactive;
       state.invalidationRequested =
         state.invalidationRequested || request === 'invalidated';
     };
@@ -215,7 +235,11 @@ export function useWorkspaceSessionLiveState(
       if (disposed) return;
       const liveB = await readLiveState(state.workspaceCwd);
       if (disposed) return;
-      catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
+      catalogStore.applyLiveState(
+        state.workspaceCwd,
+        liveB.sessions,
+        liveB.requestStartedAt,
+      );
       if (versionsEqual(liveA.catalogVersion, liveB.catalogVersion)) {
         if (!catalogStore.commitWorkspaceRefresh(stagedCatalog)) {
           if (allowTrailing) {
@@ -230,7 +254,11 @@ export function useWorkspaceSessionLiveState(
           state.invalidationRequested = false;
           return;
         }
-        catalogStore.applyLiveState(state.workspaceCwd, liveB.sessions);
+        catalogStore.applyLiveState(
+          state.workspaceCwd,
+          liveB.sessions,
+          liveB.requestStartedAt,
+        );
         state.acceptedVersion = liveB.catalogVersion;
         state.reconcileRequested = false;
         state.invalidationRequested = false;
@@ -248,18 +276,45 @@ export function useWorkspaceSessionLiveState(
       if (
         disposed ||
         state.inFlight ||
-        Date.now() < state.liveRetryAt ||
         (typeof document !== 'undefined' && document.hidden)
       ) {
         return;
       }
+      const bypassRetry = state.interactiveRefreshRequested;
+      if (!bypassRetry && Date.now() < state.liveRetryAt) return;
+      state.interactiveRefreshRequested = false;
       state.inFlight = true;
-      let live: DaemonWorkspaceSessionLiveState;
+      const finish = (): void => {
+        state.inFlight = false;
+        if (state.interactiveRefreshRequested) void poll(state);
+      };
+      // Contract: only a response from a request started after a completion
+      // was recorded may settle it, so the pending set is snapshotted before
+      // the request goes out. Completions recorded mid-flight keep their
+      // newer sequence and settle on the next tick.
+      const pendingActivity = catalogStore.snapshotSessionActivity(
+        state.workspaceCwd,
+      );
+      let live: Awaited<ReturnType<typeof readLiveState>>;
       try {
         live = await readLiveState(state.workspaceCwd);
       } catch (error) {
         if (disposed) return;
         state.liveRetryAt = Date.now() + SESSION_LIVE_STATE_ERROR_RETRY_MS;
+        // Only backoff-paced failures count. Interactive refreshes bypass
+        // `liveRetryAt`, so a user deleting or archiving a few sessions during
+        // a 10s daemon restart could otherwise push the streak to the
+        // threshold seconds apart — dropping the snapshot inside the very blip
+        // the threshold exists to ride out.
+        if (
+          !bypassRetry &&
+          catalogStore.recordLiveStateFailure(state.workspaceCwd) ===
+            SESSION_LIVE_STATE_STALE_AFTER_FAILURES
+        ) {
+          // The channel has stopped answering. Retaining the last snapshot
+          // would let a reader keep vouching for a turn nobody can confirm.
+          catalogStore.markWorkspaceLiveStateUnavailable(state.workspaceCwd);
+        }
         console.warn('[session-live-state] request failed:', error);
         if (!state.acceptedVersion && !state.fallbackAttempted) {
           try {
@@ -275,22 +330,45 @@ export function useWorkspaceSessionLiveState(
             }
           }
         }
-        state.inFlight = false;
+        finish();
         return;
       }
       if (disposed) {
-        state.inFlight = false;
+        finish();
         return;
       }
-      catalogStore.applyLiveState(state.workspaceCwd, live.sessions);
+      const absorbedActivity = catalogStore.applyLiveState(
+        state.workspaceCwd,
+        live.sessions,
+        live.requestStartedAt,
+      );
       state.liveRetryAt = 0;
+      if (pendingActivity) {
+        for (const [sessionId, sequence] of pendingActivity) {
+          // applyLiveState reports which sessions absorbed a usable watermark
+          // on a loaded active page; anything else (missing row, absent or
+          // invalid stamp, row outside the loaded catalog) falls back to the
+          // rate-limited full reconcile.
+          if (!absorbedActivity.has(sessionId)) {
+            state.invalidationRequested = true;
+          }
+          catalogStore.resolveSessionActivity(
+            state.workspaceCwd,
+            sessionId,
+            sequence,
+          );
+        }
+      }
       consumeRefreshRequest(state);
+      const bypassReconcileRetry =
+        bypassRetry || state.interactiveRefreshRequested;
+      state.interactiveRefreshRequested = false;
       if (
         !state.reconcileRequested &&
         !state.invalidationRequested &&
         versionsEqual(state.acceptedVersion, live.catalogVersion)
       ) {
-        state.inFlight = false;
+        finish();
         return;
       }
       // Interactive requests bypass the reconcile cooldown. Lifecycle
@@ -298,14 +376,14 @@ export function useWorkspaceSessionLiveState(
       // on a separate timestamp so a single local create stays immediate
       // while sustained event churn stays rate-limited.
       if (
-        Date.now() < state.reconcileRetryAt ||
+        (!bypassReconcileRetry && Date.now() < state.reconcileRetryAt) ||
         (!state.reconcileRequested &&
           (state.invalidationRequested
             ? Date.now() - state.invalidationReconcileAt
             : Date.now() - state.lastReconcileAt) <
             SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS)
       ) {
-        state.inFlight = false;
+        finish();
         return;
       }
       try {
@@ -321,19 +399,24 @@ export function useWorkspaceSessionLiveState(
           console.warn('[session-live-state] reconciliation failed:', error);
         }
       } finally {
-        state.inFlight = false;
+        finish();
       }
     };
 
     // Interactive refresh requests (explicit refresh(), expiring
-    // maxAgeMs subscriptions, group-membership growth) wake the loop
-    // immediately instead of waiting for the next 2s tick.
-    const stopWake = catalogStore.onLiveStateWake((workspaceCwd) => {
-      const state = states.find(
-        (candidate) => candidate.workspaceCwd === workspaceCwd,
-      );
-      if (state) void poll(state);
-    });
+    // maxAgeMs subscriptions, group-membership growth) and recorded turn
+    // completions wake the loop immediately instead of waiting for the
+    // next periodic tick.
+    const stopWake = catalogStore.onLiveStateWake(
+      (workspaceCwd, bypassRetry) => {
+        const state = states.find(
+          (candidate) => candidate.workspaceCwd === workspaceCwd,
+        );
+        if (!state) return;
+        if (bypassRetry) state.interactiveRefreshRequested = true;
+        void poll(state);
+      },
+    );
     const onVisibilityWake = (): void => {
       if (typeof document !== 'undefined' && document.hidden) return;
       for (const state of states) void poll(state);
@@ -341,20 +424,27 @@ export function useWorkspaceSessionLiveState(
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', onVisibilityWake);
     }
+    pollAllRef.current = onVisibilityWake;
     for (const state of states) void poll(state);
-    const interval = window.setInterval(() => {
-      for (const state of states) void poll(state);
-    }, SESSION_LIVE_STATE_POLL_MS);
     return () => {
       disposed = true;
+      pollAllRef.current = undefined;
       stopWake();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibilityWake);
       }
-      window.clearInterval(interval);
       for (const release of releaseLiveState) release();
     };
   }, [catalogStore, client, enabled, targets]);
+
+  useEffect(() => {
+    if (!enabled || targets.length === 0) return;
+    const interval = window.setInterval(
+      () => pollAllRef.current?.(),
+      pollIntervalMs,
+    );
+    return () => window.clearInterval(interval);
+  }, [client, enabled, pollIntervalMs, targets]);
 
   return groupCatalogs;
 }

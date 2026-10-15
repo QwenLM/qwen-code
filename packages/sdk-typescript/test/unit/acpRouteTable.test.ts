@@ -57,6 +57,37 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ model: 'gpt-4' });
   });
 
+  it('preserves startup configuration and explicit scope for daemon validation', () => {
+    const result = matchRoute('/session', 'POST')!;
+    const body = {
+      startupConfig: {
+        modelServiceId: 'gpt-5.4(openai)',
+        reasoningEffort: 'high',
+      },
+      sessionScope: 'single',
+    };
+    expect(result.mapping.extractParams(result.segments, body, 'POST')).toEqual(
+      body,
+    );
+  });
+
+  it('preserves startup scope when mapping a caller-supplied session id', () => {
+    const route = matchRoute('/session', 'POST')!;
+    const startupConfig = { modelServiceId: 'gpt-5.4(openai)' };
+    const sessionId = '550E8400-E29B-41D4-A716-446655440000';
+    expect(
+      route.mapping.extractParams(
+        route.segments,
+        { sessionId, startupConfig, sessionScope: 'single' },
+        'POST',
+      ),
+    ).toEqual({
+      startupConfig,
+      sessionScope: 'single',
+      _meta: { 'qwen-code/sessionId': sessionId },
+    });
+  });
+
   it('POST /session maps sessionId into ACP metadata', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(
@@ -460,6 +491,77 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s17/tasks', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/tasks');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('includeWorkflows=true'),
+    );
+    expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
+  });
+
+  it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
+    const result = matchRoute('/session/s17/tasks/task%2F1/cancel', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/cancel');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { kind: 'workflow' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'task/1',
+      kind: 'workflow',
+    });
+  });
+
+  it('POST /session/:id/tasks/:taskId/workflow-action maps to _qwen/session/tasks/workflow_action', () => {
+    const result = matchRoute(
+      '/session/s17/tasks/workflow%201/workflow-action',
+      'POST',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/workflow_action');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { action: 'retry' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'workflow 1',
+      action: 'retry',
+    });
+  });
+
+  it('GET /session/:id/agents maps to _qwen/session/agents', () => {
+    const result = matchRoute('/session/s17/agents', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/agents');
+  });
+
+  it('GET /session/:id/agent-trace maps its optional root filter', () => {
+    const result = matchRoute('/session/s17/agent-trace', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/agent_trace');
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        undefined,
+        'GET',
+        new URLSearchParams('rootAgentId=root-1'),
+      ),
+    ).toEqual({ sessionId: 's17', rootAgentId: 'root-1' });
+  });
+
+  it('GET /session/:id/attachments maps to _qwen/session/attachments', () => {
+    const result = matchRoute('/session/s17/attachments', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/attachments');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
+    ).toEqual({ sessionId: 's17' });
   });
 
   it('GET /session/:id/lsp maps to _qwen/session/lsp', () => {
@@ -472,6 +574,21 @@ describe('acpRouteTable – matchRoute', () => {
       'GET',
     );
     expect(params).toEqual({ sessionId: 's18' });
+  });
+
+  it('GET /session/:id/saved-workflows/:name maps to _qwen/session/saved_workflow', () => {
+    const result = matchRoute(
+      '/session/s19/saved-workflows/deep%20review',
+      'GET',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/saved_workflow');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's19', name: 'deep review' });
   });
 
   // ---- Granular workspace routes ----------------------------------------
@@ -537,6 +654,15 @@ describe('acpRouteTable – matchRoute', () => {
       desiredState: 'trusted',
       reason: 'operator prompt',
     });
+  });
+
+  it('POST /workspace/trust/grant maps to _qwen/workspace/trust/grant', () => {
+    const result = matchRoute('/workspace/trust/grant', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust/grant');
+    expect(result!.mapping.extractParams(result!.segments, {}, 'POST')).toEqual(
+      {},
+    );
   });
 
   it('GET /workspace/permissions maps to _qwen/workspace/permissions', () => {
@@ -1034,6 +1160,14 @@ describe('acpRouteTable – query param coercion', () => {
     expect(method).toBe('_qwen/session/context_usage');
     expect(params).toEqual({ sessionId: 's1', detail: true });
     expect(params['detail']).toBe(true); // not the string 'true'
+  });
+
+  it('GET workspace/memory forwards content as the boolean true', () => {
+    expect(extract('/workspace/memory?content=true', 'GET')).toEqual({
+      method: '_qwen/workspace/memory',
+      params: { content: true },
+    });
+    expect(extract('/workspace/memory', 'GET').params).toEqual({});
   });
 
   it('GET context-usage without detail omits it (sessionId only)', () => {

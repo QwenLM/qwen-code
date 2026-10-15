@@ -1,12 +1,69 @@
 // Copyright 2026 Qwen Team
 // SPDX-License-Identifier: Apache-2.0
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+/** `gitProbe`'s answer: the split cleanup's two refusal tests steer. */
+type ProbeAnswer = {
+  out: string | null;
+  status: number | null;
+  refusal: string | null;
+};
+
+/** Everything cleanup reads from an lstat result, across both of its readers:
+ * the capture sweep's entry guard and post-kill identity re-check, and the
+ * worktree-family symlink guard with the ancestor walk beside it.
+ * `isDirectory` is optional because no cleanup path reads it — the family
+ * fixtures set it to say what the entry beside the link is.
+ *
+ * The MOCK below returns `Partial<>` of this, and that is load-bearing. A
+ * `beforeEach` that only has to say "nothing here is a symlink" is boilerplate
+ * every `runCleanup` describe carries and main keeps adding more of; requiring
+ * the sweep's four fields there breaks each new one at `tsc` with nothing
+ * about the sweep at fault. Measured: CI went red on this branch the round a
+ * fourth such describe landed (#9633), on a line no capture code touches. A
+ * fixture that DOES speak for the sweep annotates the full type and keeps the
+ * strict check. */
+type SweepEntryStat = {
+  isSymbolicLink: () => boolean;
+  isSocket: () => boolean;
+  isDirectory?: () => boolean;
+  nlink: number;
+  ino: number;
+  mode: number;
+};
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
+  // The sweep resolves `tmux` on PATH before it will spawn it, and that walk
+  // reads node:fs — so it has to come through this file's mock like every
+  // other read, or the tests would depend on where the host installed tmux.
+  // The default refuses every candidate: a describe that needs a resolvable
+  // binary says so.
+  accessSync: vi.fn((_path: string): void => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   existsSync: vi.fn((_path: string): boolean => false),
+  // The path is taken because several tests dispatch on it. The default
+  // answer serves BOTH lstat consumers at once: the redirect guard reads
+  // isSymbolicLink/isDirectory, and the capture-server reap's entry guard
+  // and post-kill identity re-check read the SweepEntryStat fields
+  // (isSocket/nlink/ino/mode) — "a plain entry that is a socket" lets the
+  // name-matched fixtures reach the pid probe and kill while no ancestor
+  // looks redirected.
+  lstatSync: vi.fn(
+    (_path: string): Partial<SweepEntryStat> => ({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+      isSocket: () => true,
+      nlink: 1,
+      ino: 1,
+      mode: 0o140700,
+    }),
+  ),
   // The return type is declared so `mockReturnValue` can take string arrays —
   // the sweep-retention tests hand it the tmp-dir listing.
   readdirSync: vi.fn((_path: string): string[] => []),
@@ -20,13 +77,38 @@ const mocks = vi.hoisted(() => ({
   statSync: vi.fn((_path: string): { mtimeMs: number } => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
+  // realpathSync is redirectedAncestor's canonicalisation probe. Unmocked it
+  // hit the REAL filesystem, and on Windows each call on the '/repo/…'
+  // fixture spellings — drive-relative there — re-read the spied
+  // process.cwd() through win32 drive resolution, so the cwd-once witness
+  // counted 9 such reads against the expected 1 (#11890). The default is the
+  // same fail-open throw statSync carries: every fixture path is nonexistent.
+  realpathSync: vi.fn((_path: string): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   rmSync: vi.fn(),
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
   clearReviewWorktreeLease: vi.fn(),
-  readReviewWorktreeLease: vi.fn((): unknown => null),
+  readReviewWorktreeLease: vi.fn(
+    (_repositoryRoot: string, _target: string): unknown => null,
+  ),
   reviewLeaseHeldByAnotherSession: vi.fn((_lease: unknown): boolean => false),
-  refExists: vi.fn(() => true),
+  // cleanup's two remaining git spawns go through `lib/git`'s gated wrappers:
+  // both resolve their repository from `process.cwd()`, and a launch directory
+  // inside a review temp dir is one the reviewed code can point elsewhere.
+  git: vi.fn((..._args: string[]): string => ''),
+  // The probe, not `gitOpt`/`refExists`: a launch-dir refusal has to stay
+  // distinguishable from git's own "no such branch" and "nothing to prune",
+  // which is what the two refusal tests below steer. `status: 0` is the
+  // `refExists` default this replaces — the branch leg deletes.
+  gitProbe: vi.fn(
+    (..._args: string[]): ProbeAnswer => ({
+      out: '',
+      status: 0,
+      refusal: null,
+    }),
+  ),
   // The parameter is declared so `mock.calls` is typed `[string][]` rather than
   // `[][]` — the paths it was asked to free are the assertion in the sweep test.
   releaseWorktree: vi.fn((_path: string) => ({
@@ -38,7 +120,23 @@ const mocks = vi.hoisted(() => ({
   currentUser: vi.fn(() => 'reviewer'),
   setGhHost: vi.fn(),
   getGhHost: vi.fn((): string | undefined => undefined),
+  // Default 'github' keeps every pre-Aone test on the gh audit path — the
+  // dispatch is only visible to tests that steer it.
+  detectPlatformKind: vi.fn((): 'github' | 'aone' => 'github'),
+  a1Json: vi.fn((..._args: string[]): unknown => []),
+  aoneWhoamiAccount: vi.fn(() => 'reviewer'),
 }));
+
+// The fixtures below key on POSIX path literals (`/repo/.qwen/tmp/…`), but
+// cleanup.ts and the helpers it calls (redirectedAncestor, promptRecordDir,
+// the deadline readers) run those strings through node:path. On Windows that
+// would spell them with a drive letter and backslashes, so no literal-keyed
+// mock or assertion could ever match. Pin POSIX semantics for this module
+// graph; on POSIX hosts this is the identity.
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:path')>();
+  return { ...actual, ...actual.posix, default: actual.posix };
+});
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -51,20 +149,29 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const realpathSync = Object.assign(mocks.realpathSync, {
+    native: mocks.realpathSync,
+  });
   return {
     ...actual,
     default: {
       ...actual,
+      accessSync: mocks.accessSync,
       existsSync: mocks.existsSync,
+      lstatSync: mocks.lstatSync,
       readdirSync: mocks.readdirSync,
       readFileSync: mocks.readFileSync,
       statSync: mocks.statSync,
+      realpathSync,
       rmSync: mocks.rmSync,
     },
+    accessSync: mocks.accessSync,
     existsSync: mocks.existsSync,
+    lstatSync: mocks.lstatSync,
     readdirSync: mocks.readdirSync,
     readFileSync: mocks.readFileSync,
     statSync: mocks.statSync,
+    realpathSync,
     rmSync: mocks.rmSync,
   };
 });
@@ -77,16 +184,28 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 vi.mock('../../services/review-worktree-lease.js', () => ({
   clearReviewWorktreeLease: mocks.clearReviewWorktreeLease,
   readReviewWorktreeLease: mocks.readReviewWorktreeLease,
+  // The found-at variant the holder-skip message uses: delegate to the same
+  // mock so `mockReturnValueOnce` steering and call assertions reach both.
+  readReviewWorktreeLeaseAt: (repositoryRoot: string, target: string) => {
+    const lease = mocks.readReviewWorktreeLease(repositoryRoot, target);
+    return lease
+      ? {
+          lease,
+          path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
+        }
+      : null;
+  },
   reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
-  reviewLeasePath: (repositoryRoot: string, target: string) =>
-    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
+  reviewLeasePath: (_repositoryRoot: string, target: string) =>
+    `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
   isReviewLeaseFile: (fileName: string) =>
     /^qwen-review-lease-pr-\d+\.json$/.test(fileName),
 }));
 
 vi.mock('./lib/git.js', () => ({
-  refExists: mocks.refExists,
   releaseWorktree: mocks.releaseWorktree,
+  git: mocks.git,
+  gitProbe: mocks.gitProbe,
 }));
 
 vi.mock('./lib/gh.js', () => ({
@@ -96,29 +215,58 @@ vi.mock('./lib/gh.js', () => ({
   getGhHost: mocks.getGhHost,
 }));
 
-vi.mock('./lib/paths.js', () => ({
-  worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
-  probeWorktreePath: (path: string) => `${path}-probe`,
-  baseWorktreePath: (path: string) => `${path}-base`,
-  reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
-  LEASE_PREFIX: 'qwen-review-lease-',
-  REVIEW_TMP_DIR: '/repo/.qwen/tmp',
-  tmpFile: (target: string, suffix: string) =>
-    `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
-  tmpPrefix: (target: string) => `qwen-review-${target}-`,
+// The audit's platform dispatch — steered per test; the registry's real
+// detection probes git remotes, which do not exist under vitest.
+vi.mock('./lib/platform/registry.js', () => ({
+  detectPlatformKind: mocks.detectPlatformKind,
 }));
 
+// The a1 seams — mocked so no test reaches a real `a1` (a platform query is
+// never a test fixture).
+vi.mock('./lib/platform/aone-client.js', () => ({
+  a1Json: mocks.a1Json,
+  aoneWhoamiAccount: mocks.aoneWhoamiAccount,
+}));
+
+vi.mock('./lib/paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  return {
+    ...actual,
+    worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
+    probeWorktreePath: (path: string) => `${path}-probe`,
+    baseWorktreePath: (path: string) => `${path}-base`,
+    scratchWorktreePrefix: (path: string) => `${path}-scratch-`,
+    reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
+    LEASE_PREFIX: 'qwen-review-lease-',
+    REVIEW_TMP_DIR: '/repo/.qwen/tmp',
+    tmpFile: (target: string, suffix: string) =>
+      `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
+    tmpPrefix: (target: string) => `qwen-review-${target}-`,
+  };
+});
+
 import {
+  findUnsanctionedAoneComments,
   findUnsanctionedIssueComments,
   findUnsanctionedReviews,
   runCleanup,
+  type RawAoneComment,
   type RawIssueComment,
   type RawReview,
 } from './cleanup.js';
+import { captureServerName } from './lib/tui-capture.js';
+
+// The deleted-cwd witness creates and removes a REAL directory, but node:fs
+// is mocked module-wide above — reach the real module through importActual.
+const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 
 describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not implementations: a `mockReturnValue`
+    // set in one test would otherwise decide what the next one's directory
+    // sweep sees.
+    mocks.readdirSync.mockReturnValue([]);
     mocks.existsSync.mockReturnValue(false);
     // Implementations survive clearAllMocks — restore the fail-open throw
     // so one retention test's mtimes cannot leak into the next test. The
@@ -129,14 +277,31 @@ describe('runCleanup', () => {
     mocks.statSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
+    mocks.accessSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.realpathSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     // Same leak class for the listing (#9272): the retention tests install
     // path-dependent implementations, and a later test reading the declared
     // `[]` default would otherwise inherit them.
     mocks.readdirSync.mockImplementation((_path: string): string[] => []);
-    mocks.refExists.mockReturnValue(true);
+    mocks.lstatSync.mockImplementation(
+      (_path: string): SweepEntryStat => ({
+        isSymbolicLink: () => false,
+        isSocket: () => true,
+        nlink: 1,
+        ino: 1,
+        mode: 0o140700,
+      }),
+    );
+    // Implementations survive clearAllMocks, and both refusal tests below
+    // install one: restore the branch-exists / no-prune-failure default.
+    mocks.gitProbe.mockReturnValue({ out: '', status: 0, refusal: null });
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
       freed: false,
@@ -147,20 +312,350 @@ describe('runCleanup', () => {
     mocks.rmSync.mockReset();
   });
 
+  it('spares THIS run\u2019s stop sidecar, sweeps a foreign one', () => {
+    // The PR stop path writes the sidecar and runs cleanup in the same
+    // breath, and the parent's first poll is up to 250 ms away — swept
+    // here, no reader could ever observe the decision and a decided round
+    // exited 1 (human review on #9659). Kept only under a matching runId;
+    // foreign or unstamped residue sweeps as before.
+    const prev = process.env['QWEN_REVIEW_RUN_ID'];
+    process.env['QWEN_REVIEW_RUN_ID'] = 'run-A';
+    try {
+      mocks.existsSync.mockReturnValue(true);
+      mocks.readdirSync.mockImplementation((p: string): string[] =>
+        String(p).endsWith('tmp') ? ['qwen-review-pr-9-stop.json'] : [],
+      );
+      mocks.readFileSync.mockImplementation((p: string) => {
+        if (String(p).endsWith('qwen-review-pr-9-stop.json')) {
+          return JSON.stringify({ reason: 'up-to-date', runId: 'run-A' });
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      runCleanup('pr-9');
+      expect(mocks.rmSync).not.toHaveBeenCalledWith(
+        expect.stringContaining('qwen-review-pr-9-stop.json'),
+        expect.anything(),
+      );
+
+      mocks.rmSync.mockClear();
+      process.env['QWEN_REVIEW_RUN_ID'] = 'run-B';
+      runCleanup('pr-9');
+      expect(mocks.rmSync).toHaveBeenCalledWith(
+        expect.stringContaining('qwen-review-pr-9-stop.json'),
+        expect.anything(),
+      );
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+      else process.env['QWEN_REVIEW_RUN_ID'] = prev;
+    }
+  });
+
+  it('refuses the bare `pr` target — its prefix engulfs every PR family', () => {
+    // R20-4 follow-up: `tmpPrefix('pr')` is `qwen-review-pr-`, a strict
+    // prefix of EVERY PR round's family, and the lease guard lives inside
+    // the `pr-<n>` branch a bare `pr` never enters — one `cleanup pr` swept
+    // every PR's artifacts at once, unguarded. A repo-root file literally
+    // named `pr` derives exactly this token.
+    runCleanup('pr');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean target "pr"'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    // The numbered form is untouched.
+    expect(() => runCleanup('pr-123')).not.toThrow();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'degrades instead of throwing when the process cwd is deleted out from under it',
+    () => {
+      // Gated off Windows (R28-9): the fixture deletes the process's own
+      // cwd, which Windows forbids — the rmSync throws ERROR_ACCESS_DENIED
+      // before any assertion, and the uv_cwd shape under test cannot be
+      // produced there at all.
+      // R19-4 (cleanup half): `redirectedAncestor`'s default stop reads
+      // process.cwd() in the CALLER's frame, outside the walk's own try, and
+      // REVIEW_TMP_DIR is a relative spelling — a launch directory deleted out
+      // from under the process (an operator `rm -rf` mid-review, the nested
+      // geometry) threw uv_cwd out of runCleanup before any degradation could
+      // run. With no live cwd the relative root cannot be resolved at all, so
+      // the sweep refuses with an explanation instead.
+      const anchor = process.cwd();
+      const gone = realFs.mkdtempSync(join(tmpdir(), 'cleanup-deleted-cwd-'));
+      process.chdir(gone);
+      try {
+        realFs.rmSync(gone, { recursive: true, force: true });
+        // The precondition, asserted rather than assumed: this is the throw the
+        // default stopAt used to let escape (the same shape the gitProbe
+        // witness pins in lib/git.integration.test.ts).
+        expect(process.cwd).toThrow(/uv_cwd/);
+
+        expect(() => runCleanup('pr-123')).not.toThrow();
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('working directory no longer exists'),
+        );
+        expect(process.exitCode).toBe(1);
+        // Nothing was swept from inside a root that cannot be resolved.
+        expect(mocks.rmSync).not.toHaveBeenCalled();
+        expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+      } finally {
+        process.chdir(anchor);
+        process.exitCode = 0;
+      }
+    },
+  );
+
+  it('reads process.cwd() ONCE per run — the entry capture — and never downstream (R30-6)', () => {
+    // The mid-run half of the deleted-cwd class: the entry guard covers a cwd
+    // already gone, but `scratchWorktreesOf` used to read the cwd again later
+    // (`resolve(worktree)` against it, `redirectedAncestor`'s default stop),
+    // so a deletion AFTER the capture still threw uv_cwd out of the sweep.
+    // Both now anchor at the captured root. The call-count is the pin: any
+    // downstream cwd read returns this to red.
+    //
+    // The cwd is pinned to the fixture root instead of skipping this on
+    // Windows. This file mocks `node:path` to posix, and a real Windows cwd
+    // (`C:\…`) is not posix-absolute, so every downstream `resolve()` re-read
+    // `process.cwd()` and the count came back 16 against an expected 1. That
+    // is an artifact of the module-level posix mock, not of production, which
+    // uses win32 semantics on Windows and has exactly one live `process.cwd()`
+    // (`cleanup.ts:754`) with no platform branch. A posix-absolute cwd makes
+    // the count platform-independent, so the witness runs on every lane.
+    //
+    // The second leg of the same artifact (#11890): `redirectedAncestor`'s
+    // canonicalisation probes go through the real `realpathSync`, and on
+    // Windows each one re-resolves the drive-relative '/repo/…' spellings
+    // through win32 path resolution, which reads `process.cwd()` for the
+    // drive — 9 reads across the run's three ancestor walks, counted against
+    // the expected 1. `realpathSync` is mocked above with the same
+    // fail-open ENOENT those probes always met here, so no fs internal
+    // reaches the spy.
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/repo');
+    try {
+      runCleanup('pr-123');
+      expect(cwdSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
   it('keeps the lease when branch deletion fails', () => {
-    mocks.execFileSync.mockImplementation(() => {
+    // Once, because this suite's mocks keep their implementations across tests
+    // and each one sets what it needs: a standing throw here would fail every
+    // later branch delete and hold the lease for the wrong reason.
+    mocks.git.mockImplementationOnce(() => {
       throw new Error('branch is locked');
     });
 
     runCleanup('pr-123');
 
-    expect(mocks.execFileSync).toHaveBeenCalledWith(
-      'git',
-      ['branch', '-D', 'qwen-review/pr-123'],
-      { stdio: 'pipe' },
+    // The throwing wrapper, which carries the sanitized env and the launch-dir
+    // gate the direct spawn had neither of.
+    expect(mocks.git).toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Failed to delete branch qwen-review/pr-123'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('keeps the lease when the branch leg is REFUSED, not merely absent', () => {
+    // `refExists` answered a launch-dir refusal as "no such branch", so this
+    // leg was skipped before `git` was ever reached: nothing on stderr, no
+    // `failedDestruction`, the lease released and "Nothing to clean" printed
+    // over a branch and a registration that both survived — the next
+    // `worktree add` at the fixed path then fails "missing but already
+    // registered" with nobody told why. The probe keeps the two apart.
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'rev-parse'
+          ? { out: null, status: null, refusal: 'POISONED LAUNCH DIR' }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.git).not.toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Failed to delete branch qwen-review/pr-123: git could not run from this directory',
+      ),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('POISONED LAUNCH DIR'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('keeps the lease when the branch probe answers a fatal, not absence (exit 128)', () => {
+    // R19-1: with `--verify --quiet`, exit 1 is the ONLY genuine "no such
+    // branch". A 128 fatal (a corrupt .git) is a non-answer, and the leg used
+    // to read every non-refusal failure as absence: the delete was silently
+    // skipped, `failedDestruction` never set, the lease released, and
+    // "Nothing to clean" printed over a surviving branch.
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'rev-parse'
+          ? { out: null, status: 128, refusal: null }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.git).not.toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Failed to delete branch qwen-review/pr-123: git could not answer whether it exists (exit 128)',
+      ),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+    // The success report over a destruction that never ran.
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Nothing to clean'),
+    );
+  });
+
+  it('keeps the lease when the branch probe could not run at all (status null)', () => {
+    // R19-1's third shape: spawn ENOENT or the 120s timeout kill answers
+    // `{out: null, status: null, refusal: null}` — "the command could not be
+    // run at all" — which the leg read as absence exactly like the 128.
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'rev-parse'
+          ? { out: null, status: null, refusal: null }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.git).not.toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Failed to delete branch qwen-review/pr-123: git could not answer whether it exists (exit null)',
+      ),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Nothing to clean'),
+    );
+  });
+
+  it('treats exit 1 from the branch probe as genuine absence — silently', () => {
+    // The idempotency contract at the top of cleanup.ts: missing branches are
+    // silent OK. Only OTHER non-zero/null statuses are non-answers.
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'rev-parse'
+          ? { out: null, status: 1, refusal: null }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.git).not.toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
+    );
+    expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('branch'),
+    );
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      'Nothing to clean for target "pr-123".',
+    );
+  });
+
+  it('keeps the lease when the symlink arm cannot prune', () => {
+    // The same collapse one call earlier: `pruneWorktrees()` answered null for
+    // "refused" and for "nothing to prune" alike, so the arm announced
+    // `Removed … link` and released the lease while the registration the prune
+    // was there to clear survived. A genuine prune failure stays swallowed —
+    // it must not mask the error that got us here — but a refusal is the one
+    // cause a user can act on, so it is reported and holds the lease.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-123'),
+      isDirectory: () => !String(p).includes('review-pr-123'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'worktree'
+          ? { out: null, status: null, refusal: 'POISONED LAUNCH DIR' }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    // The link IS gone, so the announcement stays true — the stderr line is
+    // about the registration behind it, not about the unlink.
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to prune after removing worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('POISONED LAUNCH DIR'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('keeps the lease when the symlink arm cannot even ASK git to prune (R23-8)', () => {
+    // The probe's third shape — `{out: null, status: null, refusal: null}`,
+    // "the command could not be run at all" — used to read as a successful
+    // prune: the arm announced `Removed … link`, wrote no stderr line, and
+    // released the lease over a registration git never swept, so the next
+    // `worktree add` met "missing but already registered" with nobody told
+    // why. Only a genuine non-zero exit stays swallowed. Removing the
+    // `status === null` arm in pruneWorktrees turns this red.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-123'),
+      isDirectory: () => !String(p).includes('review-pr-123'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'worktree'
+          ? { out: null, status: null, refusal: null }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to prune after removing worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not be run at all'),
     );
     expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
   });
@@ -284,14 +779,13 @@ describe('runCleanup', () => {
       worktreePath: '/repo/.qwen/tmp/review-pr-123',
       branch: 'qwen-review/pr-123',
     };
-    // First read (the gate): no lease yet. Second read (post-audit): session B
-    // has acquired one.
+    // First read (the gate): no lease yet — the gate short-circuits on the
+    // absent holder without asking the held question about nothing. Second
+    // read (post-audit): session B has acquired one.
     mocks.readReviewWorktreeLease
       .mockReturnValueOnce(null)
       .mockReturnValueOnce(lease);
-    mocks.reviewLeaseHeldByAnotherSession
-      .mockReturnValueOnce(false)
-      .mockReturnValueOnce(true);
+    mocks.reviewLeaseHeldByAnotherSession.mockReturnValueOnce(true);
 
     runCleanup('pr-123');
 
@@ -350,6 +844,1204 @@ describe('runCleanup', () => {
     ]);
   });
 
+  describe.skipIf(process.platform === 'win32')(
+    'orphaned capture-tui servers',
+    () => {
+      // win32: the implementation early-returns when process.getuid is
+      // undefined, so both halves under test are unreachable there and the
+      // fixtures (POSIX socket-dir layout) would fail for the wrong reason.
+      // A SIGKILL'd harness leaves the private tmux server alive; cleanup is
+      // the sweep that reclaims it, keyed on the launcher pid in the socket
+      // name. The pid liveness probe and the tmux kill are the two halves.
+      const uid = process.getuid?.();
+      const dir = `/fake-tmp/tmux-${String(uid)}`;
+      // The sweep resolves `tmux` on PATH before it will spawn anything, and
+      // that walk goes through this file's own node:fs mock — so the walk is
+      // given a deterministic answer rather than the host's real tmux, which
+      // would make these assertions depend on where the machine installed it.
+      const SWEEP_PATH_DIR = '/fake-bin';
+      const SWEEP_TMUX = `${SWEEP_PATH_DIR}/tmux`;
+      let realPath: string | undefined;
+      // A pid that WAS alive and is not: spawn a process and let it exit.
+      const deadPid = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
+      const deadPid2 = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
+      // Built with the PRODUCER, not hand-spelled: the sweep's matcher
+      // (`^${CAPTURE_SERVER_PREFIX}(\\d+)-`) only works while the pid sits
+      // immediately after the prefix, and a captureServerName edit that
+      // inserted a segment before it would leave every hand-written fixture
+      // matching while the real sweep stopped recognising real sockets.
+      const orphan = captureServerName(Number(deadPid), 'aaaa');
+      // Listed AFTER the wedged orphan: an unreapable entry must not stop the
+      // sweep (a continue→break mutant leaves this one alive for the
+      // holder's full bounded window — up to three hours — with no stderr trail).
+      const orphan2 = captureServerName(Number(deadPid2), 'cccc');
+      const live = captureServerName(process.pid, 'bbbb');
+
+      beforeEach(() => {
+        process.env['TMUX_TMPDIR'] = '/fake-tmp';
+        realPath = process.env['PATH'];
+        // One absolute element, holding one binary: the resolution the sweep
+        // performs is then a fact of the fixture rather than of the host.
+        process.env['PATH'] = SWEEP_PATH_DIR;
+        mocks.accessSync.mockImplementation((p: string) => {
+          if (p !== SWEEP_TMUX) {
+            throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          }
+        });
+        mocks.statSync.mockImplementation((p: string) => {
+          if (p === SWEEP_TMUX) return { isFile: () => true } as never;
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        });
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          // The foreign socket comes FIRST: a continue→break mutant stops the
+          // sweep at the first non-matching name (typically the user's own
+          // socket), leaving every orphan after it alive.
+          // Live socket BEFORE the orphans: an `if (alive) continue` →
+          // `break` mutant would stop at the first live socket and leave
+          // every orphan after it holding its bounded pane hold.
+          p === dir ? ['some-other-socket', live, orphan, orphan2] : [],
+        );
+        mocks.execFileSync.mockReturnValue(Buffer.from(''));
+      });
+
+      afterEach(() => {
+        delete process.env['TMUX_TMPDIR'];
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+      });
+
+      it('reaps sockets whose launcher pid is dead and leaves live ones alone', () => {
+        runCleanup('local');
+
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', orphan, 'kill-server'],
+          expect.objectContaining({
+            stdio: 'pipe',
+            timeout: 15_000,
+            killSignal: 'SIGKILL',
+            // The kill runs in the base the socket was found under; the
+            // dedicated env tests pin the value.
+            env: expect.objectContaining({ TMUX_TMPDIR: expect.any(String) }),
+          }),
+        );
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', live, 'kill-server'],
+          expect.objectContaining({
+            stdio: 'pipe',
+            timeout: 15_000,
+            killSignal: 'SIGKILL',
+            // The kill runs in the base the socket was found under; the
+            // dedicated env tests pin the value.
+            env: expect.objectContaining({ TMUX_TMPDIR: expect.any(String) }),
+          }),
+        );
+        expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
+          force: true,
+        });
+        // And the LIVE socket is never announced as reaped: every stdout
+        // negative in this suite named the orphan, so a mutant printing the
+        // success line for a skipped live server escaped all of them.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${live}`,
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        // BOTH orphans: a break-after-first-reap mutant left every later
+        // orphan alive on multi-review hosts and shipped green.
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+        // The foreign socket stands in for the USER's own tmux server: the
+        // regex gate keeps the sweep off it entirely — a deleted `continue`
+        // on non-match kill-server'd the user's default server in probe (the
+        // blast radius private -L isolation exists to prevent).
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', 'some-other-socket', 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/some-other-socket`,
+          expect.anything(),
+        );
+        // The orphans were host-wide reaps, not target-scoped removals:
+        // the target-scoped answer stands on target-scoped facts, and
+        // nothing of THIS target's was there to clean.
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          'Nothing to clean for target "local".',
+        );
+      });
+
+      it('sweeps orphans even when another session holds the lease', () => {
+        // The harness crash that leaves an orphan leaves the lease too,
+        // held by the dead session — and the lease check is session-id
+        // only. A sweep gated behind the lease skipped on exactly the
+        // cleanup calls meant to reclaim the orphan (probe-reproduced);
+        // the sweep touches only servers whose launcher pid is dead,
+        // never the leased worktree, so the skip and the sweep coexist.
+        const lease = {
+          sessionId: 'session-a',
+          promptId: 'prompt-a',
+          target: 'pr-123',
+          repositoryRoot: '/repo',
+          worktreePath: '/repo/.qwen/tmp/review-pr-123',
+          branch: 'qwen-review/pr-123',
+        };
+        mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+        mocks.reviewLeaseHeldByAnotherSession.mockImplementationOnce(
+          (l: unknown) => l === lease,
+        );
+        runCleanup('pr-123');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining('skipped cleanup for "pr-123"'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+        // The skip still protects the holder's worktree.
+        expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+      });
+
+      it('notes a server it cannot kill and does not unlink a live server socket', () => {
+        // Throw for the FIRST orphan only (both retry attempts), so the sweep
+        // must note it and CONTINUE to the second one.
+        mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
+          if (bin === SWEEP_TMUX && argv?.[1] === orphan) {
+            throw Object.assign(new Error('wedged'), {
+              stderr: 'tmux: server is wedged',
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `could not reap orphaned capture server ${orphan}`,
+          ),
+        );
+        // And the hand-reap command it suggests carries the base override
+        // the sweep itself needed: without it `-L` resolves elsewhere and
+        // answers 'no server running', reading as "already gone".
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`TMUX_TMPDIR='/fake-tmp'`),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${orphan}`,
+          expect.anything(),
+        );
+        // ...and stdout must not claim it WAS reaped. Hoisting the success
+        // line above the failure branch escaped every other assertion here.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        // The sweep REACHED the orphan listed after the wedged one — a
+        // continue→break mutant left it alive for the holder's bounded window, unnoted.
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', orphan2, 'kill-server'],
+          expect.objectContaining({
+            stdio: 'pipe',
+            timeout: 15_000,
+            killSignal: 'SIGKILL',
+            // The kill runs in the base the socket was found under; the
+            // dedicated env tests pin the value.
+            env: expect.objectContaining({ TMUX_TMPDIR: expect.any(String) }),
+          }),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+        // The title's second clause, pinned directly: the LIVE server's
+        // socket is never unlinked (unlinking it would make the live server
+        // unreachable forever).
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${live}`,
+          expect.anything(),
+        );
+        // An unreapable orphan is a FAILURE, not a nothing: stdout must not
+        // contradict the stderr note with a "Nothing to clean" claim.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('shell-quotes the manual-reap base — $ and backticks survive the paste', () => {
+        // JSON.stringify does not escape $ or backticks: a base carrying
+        // one expanded when the operator pasted the suggested command,
+        // resolving the wrong base and answering 'already gone' while the
+        // orphan ran out its window (probe-verified for a $-carrying
+        // base).
+        const base = '/fake-$tmp';
+        const dollarDir = `${base}/tmux-${String(uid)}`;
+        process.env['TMUX_TMPDIR'] = base;
+        mocks.existsSync.mockImplementation((p: string) => p === dollarDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dollarDir ? [orphan] : [],
+        );
+        mocks.execFileSync.mockImplementation(() => {
+          throw Object.assign(new Error('wedged'), { stderr: 'wedged' });
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`TMUX_TMPDIR='/fake-$tmp'`),
+        );
+      });
+
+      it('treats "no server running" as reaped — socket unlinked, success printed', () => {
+        // The kill throwing because the server is ALREADY dead is the goal
+        // state, not a failure: the socket is litter and must still go. A
+        // `serverDead = false` mutant ships this branch green otherwise.
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === SWEEP_TMUX) {
+            throw Object.assign(new Error('exited 1'), {
+              stderr: Buffer.from(`no server running on ${dir}/${orphan}`),
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
+          force: true,
+        });
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('could not reap'),
+        );
+      });
+
+      it('never spawns a bare tmux name — the cwd is the reviewed tree', () => {
+        // execvp honours the empty-PATH-element → cwd rule, and `cleanup`
+        // runs with the reviewed worktree as its cwd: on a host whose PATH
+        // carries an empty element, a `tmux` committed to the PR under
+        // review is what the pinned kill-server executes, with the
+        // reviewer's environment. The sweep resolves on absolute elements
+        // only, so an unresolvable tmux is a disclosed skip rather than a
+        // spawn of whatever the tree supplied.
+        mocks.accessSync.mockImplementation(() => {
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        });
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          expect.anything(),
+          expect.anything(),
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('not reachable at any absolute PATH element'),
+        );
+        // A skip is a failure to reap, so it must not read as a clean run.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('ignores a capture-PREFIXED name that the producer cannot mint', () => {
+        // The matcher is anchored to the producer's whole shape, not its
+        // prefix. With an open suffix a same-uid planter chose the rest of
+        // the name — and the sweep put that name into a command built to be
+        // PASTED, plus its stdout and stderr lines, so `$(…)` in a socket
+        // name reached an operator's shell. Nothing here is escaped after
+        // the fact; the name simply never becomes this sweep's business.
+        const forged = `${captureServerName(Number(deadPid), 'aaaa')}$(touch pwned)`;
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [forged] : [],
+        );
+
+        runCleanup('local');
+
+        // Never inspected, never killed, never named on either stream.
+        expect(mocks.lstatSync).not.toHaveBeenCalledWith(`${dir}/${forged}`);
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', forged, 'kill-server'],
+          expect.anything(),
+        );
+        for (const spy of [mocks.writeStdoutLine, mocks.writeStderrLine]) {
+          for (const call of spy.mock.calls) {
+            expect(String(call[0])).not.toContain('touch pwned');
+          }
+        }
+      });
+
+      it('never follows a symlink planted under a capture-shaped name', () => {
+        // The sweep matches by NAME and used to inspect nothing else: a
+        // symlink planted under a capture-shaped name redirected the
+        // pinned kill-server to whatever socket it points at — the user's
+        // own server among them — and the exit-0 branch printed "Reaped"
+        // while the victim died and the link was unlinked behind it
+        // (probe-verified end to end; no race needed). The guard inspects
+        // the entry TYPE before the pid probe.
+        const planted = captureServerName(Number(deadPid), 'eeee');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (p: string): SweepEntryStat => ({
+            isSymbolicLink: () => p === `${dir}/${planted}`,
+            isSocket: () => p !== `${dir}/${planted}`,
+            nlink: 1,
+            ino: 1,
+            mode: 0o140700,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${planted}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('never reaps through a HARD LINK to a foreign socket', () => {
+        // link() succeeds on a unix socket (measured on Linux: same inode,
+        // nlink 2), and connect(2) is inode-addressed — so a hard link to
+        // the user's own server sails through a symlink-only guard, the
+        // dead-pid probe and the pinned kill-server, and destroys the
+        // victim race-free with exit 0 while the sweep prints "Reaped"
+        // (probe-verified end to end). A tmux-created socket has exactly
+        // one link, so nlink > 1 is never an orphan.
+        const planted = captureServerName(Number(deadPid), 'ffff');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (_p: string): SweepEntryStat => ({
+            isSymbolicLink: () => false,
+            isSocket: () => true,
+            nlink: 2,
+            ino: 1,
+            mode: 0o140700,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${planted}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('never reaps a non-socket entry under a capture-shaped name', () => {
+        // isSocket() completes the guard: a planted regular file or FIFO
+        // is not a server, and a kill-server pointed at it probes at best
+        // an error and at worst something unrelated.
+        const planted = captureServerName(Number(deadPid), '0d0d');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        mocks.lstatSync.mockImplementation(
+          (_p: string): SweepEntryStat => ({
+            isSymbolicLink: () => false,
+            isSocket: () => false,
+            nlink: 1,
+            ino: 1,
+            mode: 0o100644,
+          }),
+        );
+
+        runCleanup('local');
+
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', planted, 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(`not reaping ${planted}`),
+        );
+      });
+
+      it('warns instead of claiming "Reaped" when the entry changed under the kill', () => {
+        // tmux re-resolves the entry at connect(), after the fork+exec, so
+        // a racer can swap it between the guard's lstat and the kill and
+        // land the pinned kill-server on an unrelated server (probe-
+        // verified: the race won on the first attempt). No portable close
+        // exists on the connect itself — but the success line must not
+        // assert a certainty the sweep does not have, so the post-kill
+        // identity re-check names the swap instead.
+        const planted = captureServerName(Number(deadPid), '1e1e');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        let lstatCalls = 0;
+        mocks.lstatSync.mockImplementation(
+          (_p: string): SweepEntryStat => ({
+            isSymbolicLink: () => false,
+            isSocket: () => true,
+            nlink: 1,
+            // The guard's lstat and the post-kill re-check disagree on the
+            // entry's identity: the racer won the window.
+            ino: lstatCalls++ === 0 ? 111 : 222,
+            mode: 0o140700,
+          }),
+        );
+
+        runCleanup('local');
+
+        // The entry is NOT unlinked: a racer renamed something onto the name
+        // in the connect→re-check window, and it may be a live server whose
+        // socket, once unlinked, is unreachable forever — the harm the
+        // function's own "unlink ONLY when known dead" rule forbids. Leaving
+        // it is self-healing; the next sweep re-examines it.
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(`${dir}/${planted}`, {
+          force: true,
+        });
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `${planted} changed between the type guard and the kill`,
+          ),
+        );
+        // A possibly-wrong kill is not a clean nothing.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('treats an already-GONE entry after the kill as the goal state, not a swap', () => {
+        // The mirror of the change-under-kill warning above: tmux itself
+        // unlinks the socket with the server it just killed (version-
+        // dependent), and a host-wide sibling sweep can land its rmSync
+        // between this kill and this re-check. Folding that ENOENT into
+        // `entryChanged` printed a WARNING whose own words — "its socket
+        // was left in place" — were false, withheld the Reaped line on a
+        // successful kill, and let failedAny suppress the run's
+        // Nothing-to-clean claim for a host that was clean (witnessed
+        // on a real sweep both directions).
+        const planted = captureServerName(Number(deadPid), '2f2f');
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [planted] : [],
+        );
+        let lstatCalls = 0;
+        mocks.lstatSync.mockImplementation((_p: string): SweepEntryStat => {
+          if (lstatCalls++ === 0) {
+            // The guard's look: the plain socket the scan found.
+            return {
+              isSymbolicLink: () => false,
+              isSocket: () => true,
+              nlink: 1,
+              ino: 111,
+              mode: 0o140700,
+            };
+          }
+          // The post-kill re-check: already gone — the kill's own tmux
+          // unlinked it, or a sibling sweep did.
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        });
+
+        runCleanup('local');
+
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${planted}`,
+        );
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('changed between the type guard'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('does not credit an ENOENT answer as death — the file can vanish under a live server', () => {
+        // The sweep found the entry by readdir, so an ENOENT answer from
+        // the kill means the file vanished between the scan and the kill —
+        // possibly off a LIVE server (probed: rm the socket under a
+        // running server and kill answers exactly this). Not death, not an
+        // unlink, and loud like the other never-death wordings.
+        mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
+          if (bin === SWEEP_TMUX && argv?.[1] === orphan) {
+            throw Object.assign(new Error('exited 1'), {
+              stderr: Buffer.from(
+                `error connecting to ${dir}/${orphan} ` +
+                  '(No such file or directory)',
+              ),
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${orphan}`,
+          expect.anything(),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `could not reap orphaned capture server ${orphan}`,
+          ),
+        );
+      });
+
+      it('accumulates orphans across BOTH bases, not just the last one', () => {
+        // No fixture returned entries from both socket bases at once, so
+        // the cross-base `entries.concat(...)` was unpinned and an
+        // overwrite mutant shipped green — losing every orphan under the
+        // env base whenever /tmp also had one (and vice versa).
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation(
+          (p: string) => p === dir || p === tmpDir,
+        );
+        mocks.readdirSync.mockImplementation((p: string) => {
+          if (p === dir) return [orphan];
+          if (p === tmpDir) return [orphan2];
+          return [];
+        });
+        runCleanup('local');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+      });
+
+      /** The pid probe, stubbed: the literal pids below are assumed dead,
+       * and on a busy host one of them can be alive — the sweep would then
+       * skip the socket and the test would fail for a reason that has
+       * nothing to do with what it pins. ESRCH is "dead", which is the
+       * precondition these tests want. */
+      function withDeadPids(fn: () => void): void {
+        const realKill = process.kill;
+        process.kill = ((): never => {
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+        }) as typeof process.kill;
+        try {
+          fn();
+        } finally {
+          process.kill = realKill;
+        }
+      }
+
+      it('unlinks EVERY reaped socket, not just the first', () => {
+        // Positive rmSync assertions covered only the first matching
+        // socket; the second orphan was pinned by its kill argv and its
+        // "Reaped" line, so a mutant unlinking one socket per sweep left
+        // dead sockets littering the base and shipped this suite green.
+        const o1 = captureServerName(717171, 'aaa');
+        const o2 = captureServerName(727272, 'bbb');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [o1, o2] : [],
+        );
+        withDeadPids(() => runCleanup('local'));
+        for (const name of [o1, o2]) {
+          expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+            `Reaped orphaned capture server: ${name}`,
+          );
+          expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${name}`, {
+            force: true,
+          });
+        }
+      });
+
+      it('never unlinks on a CLIENT-side refusal — and says which it was', () => {
+        // `directory … has unsafe permissions` and `… is not a directory`
+        // are refusals tmux makes before looking at the server, so a live
+        // orphan can be sitting behind that socket. Neither wording
+        // appeared in any fixture, so the whole isSocketDirUnusable wiring
+        // — the note's parenthetical included — was unexercised.
+        for (const wording of [
+          'directory /tmp/tmux-501 has unsafe permissions',
+          '/tmp/tmux-501 is not a directory',
+        ]) {
+          vi.clearAllMocks();
+          const orphan = captureServerName(838383, 'ccc');
+          mocks.existsSync.mockImplementation((p: string) => p === dir);
+          mocks.readdirSync.mockImplementation((p: string) =>
+            p === dir ? [orphan] : [],
+          );
+          mocks.execFileSync.mockImplementation(() => {
+            throw Object.assign(new Error('kill failed'), { stderr: wording });
+          });
+          withDeadPids(() => runCleanup('local'));
+          expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+            expect.stringContaining('Reaped orphaned capture server'),
+          );
+          expect(mocks.rmSync).not.toHaveBeenCalledWith(
+            `${dir}/${orphan}`,
+            expect.anything(),
+          );
+          expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+            expect.stringContaining('before reaching the socket directory'),
+          );
+        }
+        mocks.execFileSync.mockReset();
+      });
+
+      it('treats a NON-EPERM probe error as alive too — only ESRCH reaps', () => {
+        // The invariant is "reap only a pid positively known dead". Pinning
+        // EPERM alone left `alive = code === 'EPERM'` shipping green, and a
+        // host answering EINVAL would then have its live server reaped.
+        const orphan = captureServerName(515151, 'def');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        const realKill = process.kill;
+        process.kill = ((): never => {
+          throw Object.assign(new Error('EINVAL'), { code: 'EINVAL' });
+        }) as typeof process.kill;
+        try {
+          runCleanup('local');
+        } finally {
+          process.kill = realKill;
+        }
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Reaped orphaned capture server'),
+        );
+      });
+
+      it('keeps the run alive when the post-kill UNLINK fails', () => {
+        // The unlink guard's `catch {}` has no test: mocks.rmSync is a bare
+        // vi.fn() that never throws, so removing the catch — turning
+        // cosmetic litter into a crash that aborts the sweep mid-way —
+        // ships green.
+        const orphan = captureServerName(626262, 'aaa');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        mocks.rmSync.mockImplementation(() => {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        });
+        try {
+          expect(() => runCleanup('local')).not.toThrow();
+          expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+            `Reaped orphaned capture server: ${orphan}`,
+          );
+        } finally {
+          // RESET, not clear: the suite's beforeEach uses
+          // vi.clearAllMocks(), which drops call history and keeps
+          // implementations — so without this the throwing rmSync leaks
+          // into every later test in this file, and the six orphan-reap
+          // tests after it would silently exercise this catch instead of
+          // the success path they present themselves as pinning.
+          mocks.rmSync.mockReset();
+        }
+      });
+
+      it('reports nothing swept where there are no uids — the win32 arm', () => {
+        // process.getuid is undefined on win32, which is the only platform
+        // that reaches this arm — and the describe holding these tests is
+        // skipIf(win32), so its contract ({reaped:false, failed:false},
+        // and no scan) was asserted on no lane at all.
+        const realGetuid = process.getuid;
+        // Modelling the win32 shape on a POSIX lane. `delete` on an
+        // optional property needs no suppression — an @ts-expect-error
+        // here is itself an error under `tsc --build`, which is what CI
+        // runs (and what `npm run typecheck` did not catch).
+        delete (process as { getuid?: unknown }).getuid;
+        try {
+          runCleanup('local');
+        } finally {
+          process.getuid = realGetuid;
+        }
+        expect(mocks.readdirSync).not.toHaveBeenCalled();
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Reaped orphaned capture server'),
+        );
+      });
+
+      it('leaves a socket alone when the pid probe answers EPERM', () => {
+        // EPERM means the pid is alive under another user, so the socket
+        // named for it in THIS uid's 0700 directory is pid reuse, not our
+        // launcher — reaping on that assumption would kill a server this
+        // sweep cannot prove is ours. The simplifying mutant (`alive =
+        // false` on any throw) shipped green through the whole suite
+        // because process.kill was never stubbed here.
+        const orphan = captureServerName(424242, 'abc');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        const realKill = process.kill;
+        process.kill = ((): never => {
+          throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        }) as typeof process.kill;
+        try {
+          runCleanup('local');
+        } finally {
+          process.kill = realKill;
+        }
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Reaped orphaned capture server'),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          expect.stringContaining(orphan),
+          expect.anything(),
+        );
+      });
+
+      it('surfaces an UNTRAVERSABLE ancestor instead of skipping the base', () => {
+        // existsSync swallows EACCES and answers false, so an ancestor
+        // without +x made the whole base look absent: skipped in silence,
+        // past the catch that exists to be loud, with any orphan under it
+        // invisible. The scan asks readdir directly now — ENOENT is the
+        // only answer quiet enough to ignore.
+        mocks.existsSync.mockReturnValue(false);
+        mocks.readdirSync.mockImplementation(() => {
+          throw Object.assign(new Error('EACCES: permission denied'), {
+            code: 'EACCES',
+          });
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+      });
+
+      it('scans the OTHER base after one of them cannot be read', () => {
+        // The unreadable-dir fixture makes both bases throw, so a
+        // catch-then-break mutant shipped green: an env-base tmux-<uid>
+        // that exists but is mode-000 would then hide every orphan under
+        // /tmp behind one stderr note.
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation(
+          (p: string) => p === dir || p === tmpDir,
+        );
+        mocks.readdirSync.mockImplementation((p: string) => {
+          if (p === dir) {
+            throw Object.assign(new Error('EACCES: permission denied'), {
+              code: 'EACCES',
+            });
+          }
+          if (p === tmpDir) return [orphan];
+          return [];
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('sweeps under a pr-<n> target too — the sweep is host-wide', () => {
+        // Every other fixture drives 'local'. The sweep is deliberately not
+        // target-scoped (an orphan belongs to the host, not to one review),
+        // so an edit that moves it into a local-only path would leave nine
+        // orphan tests green while PR runs — where captures actually
+        // happen — stopped reaping.
+        runCleanup('pr-8388');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('falls back to /tmp when TMUX_TMPDIR is unset — the common host', () => {
+        // All other fixtures set TMUX_TMPDIR; the fallback branch governs
+        // standard CI lanes and dev machines, and a wrong-literal mutant
+        // scanned the wrong directory and returned clean forever.
+        delete process.env['TMUX_TMPDIR'];
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation((p: string) => p === tmpDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === tmpDir ? [orphan] : [],
+        );
+        runCleanup('local');
+        expect(mocks.readdirSync).toHaveBeenCalledWith(tmpDir);
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('scans /tmp even when TMUX_TMPDIR points elsewhere — tmux fell back', () => {
+        // tmux takes the first USABLE base: a stale profile-exported
+        // TMUX_TMPDIR pointing at an unusable path puts the socket under
+        // /tmp while a single-base sweep `[envBase || '/tmp']` scans only
+        // the env base and reports clean with the orphan still live
+        // (measured end-to-end: 'Nothing to clean' beside a live orphan).
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation((p: string) => p === tmpDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === tmpDir ? [orphan] : [],
+        );
+        runCleanup('local');
+        expect(mocks.readdirSync).toHaveBeenCalledWith(tmpDir);
+        // And the KILL goes to the base the socket was FOUND under, not to
+        // this process's env: `-L` re-resolves the socket dir from the
+        // environment and tmux does NOT fall back when the env base exists
+        // (it creates it) — measured on 3.3a, the kill answered
+        // `error connecting to <env>/tmux-<uid>/<name>` and the orphan
+        // survived, while the same call under the found base reaped it.
+        // The mocked execFileSync cannot show that; the env it is called
+        // with can.
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', orphan, 'kill-server'],
+          expect.objectContaining({
+            env: expect.objectContaining({
+              TMUX_TMPDIR: '/tmp',
+              // The parent environment rides along: `env: { TMUX_TMPDIR }`
+              // alone leaves tmux without a PATH, and every kill then fails
+              // for a reason that has nothing to do with the socket.
+              PATH: process.env['PATH'],
+            }),
+          }),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('reads TMUX_TMPDIR UNTRIMMED — tmux uses a padded value verbatim', () => {
+        // Measured against real tmux 3.4: with a trailing space in
+        // TMUX_TMPDIR the socket landed under the PADDED path, while a
+        // trimming sweep scanned a directory tmux never used and reported
+        // clean — re-adding .trim() must turn this red.
+        process.env['TMUX_TMPDIR'] = '/fake-tmp ';
+        const paddedDir = `/fake-tmp /tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation((p: string) => p === paddedDir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === paddedDir ? [orphan] : [],
+        );
+        runCleanup('local');
+        expect(mocks.readdirSync).toHaveBeenCalledWith(paddedDir);
+        // The kill carries the padded base too — trimming EITHER side
+        // sends tmux to a directory it never used.
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          SWEEP_TMUX,
+          ['-L', orphan, 'kill-server'],
+          expect.objectContaining({
+            env: expect.objectContaining({ TMUX_TMPDIR: '/fake-tmp ' }),
+          }),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
+      it('surfaces an unreadable socket dir — a scan failure is not a silent nothing', () => {
+        // A mode-000 tmux-<uid> or a filesystem hiccup makes readdirSync
+        // throw; the sweep must note the unreadable dir on stderr, must
+        // not claim 'Nothing to clean' while an orphan may be hiding, and
+        // must still clear the target-scoped lease. The swallowing mutant
+        // `catch {}` hid orphans for the holder's whole bounded window and
+        // shipped green.
+        mocks.existsSync.mockImplementation((p: string) =>
+          p.endsWith(`/tmux-${String(uid)}`),
+        );
+        mocks.readdirSync.mockImplementation((p: string) => {
+          if (p.endsWith(`/tmux-${String(uid)}`)) {
+            throw Object.assign(new Error('EACCES: permission denied'), {
+              code: 'EACCES',
+            });
+          }
+          return [];
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+        expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+          process.cwd(),
+          'local',
+        );
+      });
+
+      it('reaps on the SECOND kill attempt — the sweep retry is real', () => {
+        let calls = 0;
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === SWEEP_TMUX) {
+            calls++;
+            if (calls === 1) {
+              throw Object.assign(new Error('transient'), {
+                stderr: 'transient client failure',
+              });
+            }
+          }
+          return Buffer.from('');
+        });
+        runCleanup('local');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('could not reap'),
+        );
+        // The cap is ONE retry, pinned from ABOVE as well: every earlier
+        // assertion here holds for any cap >= 2, so a "robustness" edit
+        // could widen it silently — and against a genuinely wedged server
+        // each attempt pays the full 15s belt before the cleanup moves on.
+        const killCalls = mocks.execFileSync.mock.calls.filter(
+          (c: unknown[]) =>
+            c[0] === SWEEP_TMUX &&
+            Array.isArray(c[1]) &&
+            (c[1] as string[]).includes('kill-server') &&
+            (c[1] as string[]).includes(orphan),
+        );
+        expect(killCalls).toHaveLength(2);
+      });
+
+      it('gives up after ONE retry — the cap, pinned from above', () => {
+        // The fixture above stops throwing after the first call, so the
+        // loop exits via serverDead on attempt 2 for ANY cap >= 2. Here
+        // every attempt throws, so the count IS the cap: a widened cap pays
+        // the full 15s belt per attempt against a genuinely wedged server
+        // while the cleanup waits.
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === SWEEP_TMUX) {
+            throw Object.assign(new Error('wedged'), {
+              stderr: 'tmux: server is wedged',
+            });
+          }
+          return Buffer.from('');
+        });
+        // The pause between the two attempts is REAL, mirroring
+        // capture-tui's own reap: back-to-back, both attempts failed
+        // under fd exhaustion in the same microsecond — the precise host
+        // shape the pause exists for — and the retry bought nothing. A
+        // floor at 0.8x the 100ms budget tolerates timer coarseness
+        // without tolerating its removal.
+        const started = performance.now();
+        runCleanup('local');
+        expect(performance.now() - started).toBeGreaterThanOrEqual(80);
+        const killCalls = mocks.execFileSync.mock.calls.filter(
+          (c: unknown[]) =>
+            c[0] === SWEEP_TMUX &&
+            Array.isArray(c[1]) &&
+            (c[1] as string[]).includes('kill-server') &&
+            (c[1] as string[]).includes(orphan),
+        );
+        expect(killCalls).toHaveLength(2);
+      });
+
+      it('reports an ONLY-unreapable-orphan sweep without "Nothing to clean" — and without holding the lease', () => {
+        // With a second reapable orphan in the fixture, removedAny masks
+        // the sweep.failed propagation — deleting it shipped green. Here
+        // the sole capture socket is unreapable: stdout must not claim
+        // nothing needed cleaning while stderr says the reap failed.
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === SWEEP_TMUX) {
+            throw Object.assign(new Error('wedged'), {
+              stderr: 'tmux: server is wedged',
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not reap'),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+        // The sweep is host-wide, the lease is target-scoped: an
+        // unreapable orphan from ANY capture must not wedge THIS target's
+        // worktree lease (measured complaint: an unrelated review's orphan
+        // blocked the lease release with nothing connecting the two).
+        expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+          process.cwd(),
+          'local',
+        );
+      });
+    },
+  );
+  it('sweeps every verifier scratch tree, which it can only find by prefix', () => {
+    // One per verifier shard, named for the shard's record key — so unlike the
+    // probe and base siblings, the sweeper cannot reconstruct the names and
+    // reads the directory instead. Missing them leaks a checkout per shard and
+    // wedges the next review's `git worktree add` on the leftovers.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockReturnValue([
+      'review-pr-123',
+      'review-pr-123-scratch-verify--round-1--aaa',
+      'review-pr-123-scratch-verify--round-2--bbb',
+      // Neither of these belongs to this review: one is another PR's scratch
+      // tree, the other an ordinary side file.
+      'review-pr-999-scratch-verify--round-1--ccc',
+      'qwen-review-pr-123-diff.txt',
+    ] as unknown as []);
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree.mock.calls.map((c) => c[0])).toEqual([
+      '/repo/.qwen/tmp/review-pr-123',
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      '/repo/.qwen/tmp/review-pr-123-base',
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-1--aaa',
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-2--bbb',
+    ]);
+  });
+
+  it('unlinks a dangling symlink at a family path, which releaseWorktree cannot see', () => {
+    // `releaseWorktree`'s `existsSync` follows the link, reports "never
+    // existed", and never runs its `rmSync` — while the link still wedges the
+    // next review's `git worktree add` with `already exists`.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockReturnValue([
+      'review-pr-123-scratch-verify--round-1--aaa',
+    ] as unknown as []);
+    mocks.existsSync.mockReturnValue(false);
+    mocks.lstatSync.mockImplementation((p: string) => ({
+      // Only the family entry is a link; its parent directory is a directory.
+      isSymbolicLink: () => String(p).includes('-scratch-'),
+      isDirectory: () => !String(p).includes('-scratch-'),
+    }));
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-1--aaa',
+      { force: true },
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed scratch worktree link'),
+    );
+  });
+
+  it('unlinks a symlink at the three NAMED family paths instead of releasing what it points at', () => {
+    // A LIVE link at any of them used to reach `releaseWorktree`: its
+    // `existsSync` followed the link and `git worktree remove --force`
+    // resolved it — together they deleted whichever registered worktree the
+    // link named, measured against the real function, while reporting the
+    // family path as swept. A DANGLING one was invisible to it and survived
+    // to wedge the next review's `worktree add`. Both shapes are unlinked
+    // the way the scratch family's always were.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    // The family paths are links; their ANCESTORS are ordinary directories —
+    // a symlink above the temp dir refuses the whole clean, which is a
+    // different test.
+    mocks.lstatSync.mockImplementation((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-'),
+      isDirectory: () => !String(p).includes('review-pr-'),
+    }));
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.rmSync).toHaveBeenCalledWith('/repo/.qwen/tmp/review-pr-123', {
+      force: true,
+    });
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      { force: true },
+    );
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/tmp/review-pr-123-base',
+      { force: true },
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed probe worktree link'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed base worktree link'),
+    );
+    // The registration outlives the link. This branch returns before ever
+    // reaching `releaseWorktree`, which is where the pipeline's only other
+    // prune lives — so without one here the family paths were reported swept
+    // while their admin entries stayed behind and wedged the next
+    // `worktree add` with `already exists`.
+    expect(mocks.gitProbe).toHaveBeenCalledWith('worktree', 'prune');
+  });
+
+  it('does not announce a clean sweep when it could not list the family', () => {
+    // A silent skip leaks a full checkout per shard while stdout says
+    // "Nothing to clean" and the lease is cleared.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('for scratch worktrees'),
+    );
+    expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Nothing to clean'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('refuses to clean anything when the temp dir hangs off a symlink', () => {
+    // The scratch sweep alone used to answer this: it announced the hazard and
+    // the same function kept deleting under it — the base-tree lock and every
+    // side file, all resolved through the same redirected ancestor.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation((p: string) => ({
+      isSymbolicLink: () => String(p) === '/repo/.qwen',
+      isDirectory: () => String(p) !== '/repo/.qwen',
+    }));
+
+    runCleanup('pr-123');
+
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
   it('sweeps a stale base-tree build lock left by a killed builder', () => {
     // The lock is a plain directory (`mkdirSync` test-and-set), not a worktree,
     // so `releaseWorktree` never touches it; a builder killed mid-build leaves it
@@ -363,6 +2055,38 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123-base.lock',
       { recursive: true, force: true },
     );
+    // ...AND the host-side one, once the tree it guards is gone (the default
+    // `existsSync` answer above): the lease-release reclaim skips locks, so
+    // without this sweep a killed builder's lock outlived its tree and wedged
+    // the next review of this PR for the whole staleness window — every ask
+    // took EEXIST from `mkdirSync` and reported "another probe is building —
+    // the fast path will then reuse it" over a tree this command had already
+    // removed, a recovery that cannot happen.
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /\/review-state\/[0-9a-f]{64}\/base-tree\/pr-123\/review-pr-123-base\.lock$/,
+      ),
+      { recursive: true, force: true },
+    );
+  });
+
+  it('keeps the host-side base-tree build lock while its tree still stands', () => {
+    // The release is keyed on the tree being GONE: a base tree that would not
+    // delete may still have a killed builder's container writing into it, and
+    // removing its lock lets the next review build over that tree at once,
+    // where a lock that ages out at least holds the next build off for the
+    // staleness window.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      (path: string) => path === '/repo/.qwen/tmp/review-pr-123-base',
+    );
+
+    runCleanup('pr-123');
+
+    const hostSide = mocks.rmSync.mock.calls
+      .map(([path]) => String(path))
+      .filter((path) => path.includes('/review-state/'));
+    expect(hostSide).toEqual([]);
   });
 
   it('never sweeps lease files, even for a target whose name collides with the lease prefix (#9205)', () => {
@@ -738,13 +2462,25 @@ describe('runCleanup — bypass-write audit', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Implementations survive `clearAllMocks`, so a `mockReturnValue` set in
+    // the other describe would otherwise decide what this one's directory
+    // sweep sees — the same drift the sibling beforeEach pins against.
+    mocks.readdirSync.mockReturnValue([]);
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
     mocks.existsSync.mockReturnValue(false);
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
+
     mocks.currentUser.mockReturnValue('reviewer');
     mocks.ghApiAll.mockReturnValue([]);
+    // Same leak class: the Aone audit describe steers the dispatch, and a
+    // leaked 'aone' would reroute every gh-path test here through a1.
+    mocks.detectPlatformKind.mockReturnValue('github');
   });
 
   it('flags reviewer issue comments posted inside the window', () => {
@@ -1028,6 +2764,8 @@ describe('runCleanup — bypass-write audit', () => {
     // The relay instruction is the sentence that actually moves the warning to
     // a human — the rest of the audit is inert without it, so pin it here.
     expect(warnings.join('\n')).toContain('Relay this warning verbatim');
+    // The footer's platform noun is contract text relayed verbatim.
+    expect(warnings.join('\n')).toContain('writes to the PR');
   });
 
   it('spares every review in a multi-id receipt (two sanctioned submits in one window)', () => {
@@ -1134,5 +2872,636 @@ describe('runCleanup — bypass-write audit', () => {
 
     expect(() => runCleanup('pr-123')).not.toThrow();
     expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
+  });
+});
+
+describe('findUnsanctionedAoneComments', () => {
+  // Window boundary as epoch milliseconds; Aone stamps a NUMERIC utc offset
+  // (+08:00), so the fixtures carry it — the lexicographic comparison the
+  // gh twin uses would misorder every one of them.
+  const sinceMs = Date.parse('2026-07-24T00:30:00.000Z');
+  const comment = (over: Partial<RawAoneComment> & { id: number }) =>
+    ({
+      author: { username: 'reviewer' },
+      // 2026-07-24T09:00:00+08:00 = 01:00Z — inside the window.
+      createdAt: '2026-07-24T09:00:00+08:00',
+      ...over,
+    }) as RawAoneComment;
+
+  it('keeps only the authenticated account inside the window, case-insensitively', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({ id: 1 }),
+        comment({ id: 2, author: { username: 'Reviewer' } }),
+        comment({ id: 3, author: { username: 'someone-else' } }),
+        // 2026-07-24T08:15:00+08:00 = 00:15Z — BEFORE the 00:30Z boundary.
+        comment({ id: 4, createdAt: '2026-07-24T08:15:00+08:00' }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([1, 2]);
+    expect(got.edited).toEqual([]);
+  });
+
+  it('compares instants, not wall-clock strings, in both directions', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        // 00:15Z — OUTSIDE the window, yet its wall-clock string
+        // ('…T08:15…') sorts AFTER the boundary's ('…T00:30…'): a
+        // lexicographic comparison would flag it.
+        comment({ id: 1, createdAt: '2026-07-24T08:15:00+08:00' }),
+        // The previous day's 16:45-08:00 = 00:45Z — INSIDE the window,
+        // yet its string sorts BEFORE the boundary's date: a lexicographic
+        // comparison would drop it.
+        comment({ id: 2, createdAt: '2026-07-23T16:45:00-08:00' }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([2]);
+  });
+
+  it('excludes every receipt-vouched comment id, not just the last', () => {
+    // Two sanctioned submits in one window (drift restart) — both ids are on
+    // the receipt, and NEITHER may be flagged.
+    const got = findUnsanctionedAoneComments(
+      [comment({ id: 1 }), comment({ id: 2 }), comment({ id: 3 })],
+      'reviewer',
+      sinceMs,
+      new Set([2, 3]),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([1]);
+  });
+
+  it('excludes a vouched comment from the EDITED arm too, not only the posted one', () => {
+    // The vouch sits in the shared `relevant` filter: a submit-posted
+    // comment whose updatedAt bumps inside the window (a hand-edit of
+    // submit's own summary, or a backend state flip) must not be flagged
+    // as an edited bypass.
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 9,
+          // 2026-07-23T23:00Z — before the window …
+          createdAt: '2026-07-24T07:00:00+08:00',
+          // … bumped at 2026-07-24T01:10Z — inside it.
+          updatedAt: '2026-07-24T09:10:00+08:00',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set([9]),
+    );
+    expect(got.posted).toEqual([]);
+    expect(got.edited).toEqual([]);
+  });
+
+  it('classifies a pre-window comment edited inside the window as an edit', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 5,
+          // 2026-07-23T23:00Z — before the window …
+          createdAt: '2026-07-24T07:00:00+08:00',
+          // … edited at 2026-07-24T01:10Z — inside it.
+          updatedAt: '2026-07-24T09:10:00+08:00',
+        }),
+        comment({
+          id: 6,
+          createdAt: '2026-07-24T07:00:00+08:00',
+          updatedAt: '2026-07-24T07:00:00+08:00',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.edited.map((c) => c.id)).toEqual([5]);
+    expect(got.posted).toEqual([]);
+  });
+
+  it('drops comments carrying the repo automation marker, but not ones merely quoting it', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({
+          id: 7,
+          note: '<!-- qwen-pr-precheck:manual-required -->\nchecks…',
+        }),
+        comment({
+          id: 8,
+          note: 'summary quoting:\n<!-- qwen-triage stage=1 -->',
+        }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([8]);
+  });
+
+  it('drops comments with no author, no timestamp, or an unparseable one instead of guessing', () => {
+    const got = findUnsanctionedAoneComments(
+      [
+        comment({ id: 1, author: null }),
+        comment({ id: 2, createdAt: undefined }),
+        comment({ id: 3, createdAt: 'not a timestamp' }),
+      ],
+      'reviewer',
+      sinceMs,
+      new Set(),
+    );
+    expect(got.posted).toEqual([]);
+    expect(got.edited).toEqual([]);
+  });
+});
+
+describe('runCleanup — Aone bypass-write audit', () => {
+  const aoneFetchReport = JSON.stringify({
+    prNumber: '123',
+    ownerRepo: 'maxcompute/odps_src',
+    fetchedAt: '2026-07-24T08:00:00Z',
+    host: 'gitlab.alibaba-inc.com',
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.readdirSync.mockReturnValue([]);
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
+    mocks.existsSync.mockReturnValue(false);
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    mocks.detectPlatformKind.mockReturnValue('aone');
+    mocks.aoneWhoamiAccount.mockReturnValue('reviewer');
+    mocks.a1Json.mockReturnValue([]);
+  });
+
+  const warnings = () =>
+    mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+
+  it('routes the audit through a1, never gh, and flags an in-window same-account comment', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 777,
+        note: 'hand-posted summary',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00', // 09:02Z — inside the window
+        path: 'src/foo.ts',
+        line: 12,
+      },
+      {
+        id: 778,
+        note: 'author reply',
+        author: { username: 'pr-author' },
+        createdAt: '2026-07-24T17:03:00+08:00',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    // The dispatch saw the recorded host; BOTH comment-list queries rode a1
+    // with the report's coordinates (the default list plus the --resolved
+    // union half) — and nothing touched the gh seam.
+    expect(mocks.detectPlatformKind).toHaveBeenCalledWith({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(mocks.a1Json).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'maxcompute/odps_src',
+    );
+    expect(mocks.a1Json).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'maxcompute/odps_src',
+      '--resolved',
+    );
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+    expect(mocks.setGhHost).not.toHaveBeenCalled();
+    expect(warnings().join('\n')).toContain(
+      'posted comment 777 at 2026-07-24T17:02:32+08:00 on src/foo.ts:12',
+    );
+    expect(warnings().join('\n')).not.toContain('778');
+    expect(warnings().join('\n')).toContain('qwen review submit');
+    // The union dedupes by id: BOTH queries returned comment 777, and the
+    // relayed lines flag it once, under a header counting it once.
+    expect(
+      warnings().filter((l) => l.includes('posted comment 777')),
+    ).toHaveLength(1);
+    expect(warnings().join('\n')).toContain(
+      'warning: 1 comment(s) by the reviewing account on maxcompute/odps_src MR 123',
+    );
+    // The footer names the account and the relay instruction, as on GitHub.
+    expect(warnings().join('\n')).toContain('(reviewer)');
+    expect(warnings().join('\n')).toContain('Relay this warning verbatim');
+    // The footer's platform noun is contract text relayed verbatim.
+    expect(warnings().join('\n')).toContain('writes to the MR');
+  });
+
+  it('flags a posted-then-RESOLVED bypass through the --resolved union half', () => {
+    // The default list hides resolved comments (measured a1 behaviour); the
+    // union half must bring a bypass that was resolved inside the window
+    // back into the posted arm.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation((...args: string[]) =>
+      args.includes('--resolved')
+        ? [
+            {
+              id: 88,
+              note: 'hand-posted, then resolved to hide',
+              author: { username: 'reviewer' },
+              createdAt: '2026-07-24T17:05:00+08:00',
+              closed: 1,
+              path: 'src/bar.ts',
+              line: 4,
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain(
+      'posted comment 88 at 2026-07-24T17:05:00+08:00 on src/bar.ts:4',
+    );
+  });
+
+  it('does not read a resolution bump on a resolved comment as an edit', () => {
+    // Resolving a comment bumps updatedAt exactly like an edit; the edited
+    // arm skips closed comments so an author resolving an old discussion
+    // inside the window draws no flag.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation((...args: string[]) =>
+      args.includes('--resolved')
+        ? [
+            {
+              id: 89,
+              note: 'pre-window comment, resolved inside the window',
+              author: { username: 'reviewer' },
+              createdAt: '2026-07-24T07:00:00+08:00', // 23:00Z — pre-window
+              updatedAt: '2026-07-24T17:10:00+08:00', // resolution bump
+              closed: 1,
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    expect(warnings()).toEqual([]);
+  });
+
+  it('spares receipt-vouched comment ids, and reads ONLY the comment-id axis', () => {
+    mocks.readFileSync.mockImplementation((path: string) => {
+      if (String(path).endsWith('submit-receipt.json')) {
+        // reviewIds on the same receipt must not vouch for a comment.
+        return JSON.stringify({ commentIds: [777, 779], reviewIds: [778] });
+      }
+      return aoneFetchReport;
+    });
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 777,
+        note: 'sanctioned inline',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00',
+      },
+      {
+        id: 778,
+        note: 'hand-posted',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:03:00+08:00',
+      },
+      {
+        id: 779,
+        note: 'sanctioned summary, bumped inside the window',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T07:00:00+08:00', // pre-window
+        updatedAt: '2026-07-24T17:10:00+08:00', // in-window bump
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).not.toContain('777');
+    expect(warnings().join('\n')).toContain('posted comment 778');
+    // The vouch also covers the EDITED arm: a vouched comment whose
+    // updatedAt moves inside the window is no edited bypass.
+    expect(warnings().join('\n')).not.toContain('779');
+  });
+
+  it('stays silent when the window is clean', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 7,
+        note: 'bot pipeline note',
+        author: { username: 'odps-cm' },
+        createdAt: '2026-07-24T17:00:00+08:00',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings()).toEqual([]);
+  });
+
+  it('does not resolve the account when the MR has no comments at all', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([]);
+
+    runCleanup('pr-123');
+
+    expect(mocks.aoneWhoamiAccount).not.toHaveBeenCalled();
+    expect(warnings()).toEqual([]);
+  });
+
+  it('flattens control sequences out of an MR-author-controlled path before the terminal', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 31,
+        note: 'inline on a hostile filename',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00',
+        path: 'src/evil\u001b[31m.ts',
+        line: 3,
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    const joined = warnings().join('\n');
+    expect(joined).toContain('posted comment 31');
+    // inertPath swaps the control run for a space — the escape never
+    // reaches the terminal as an escape.
+    expect(joined).toContain('on src/evil [31m.ts:3');
+    expect(joined).not.toContain('\u001b');
+  });
+
+  it('renders an edited-comment warning with id and updatedAt', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 21,
+        note: 'pre-window comment, edited inside the window',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T07:00:00+08:00', // 23:00Z the day before
+        updatedAt: '2026-07-24T17:10:00+08:00', // 09:10Z — inside
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    const joined = warnings().join('\n');
+    expect(joined).toContain('edited comment 21 at 2026-07-24T17:10:00+08:00');
+    // Comment 21 carries no path — the absent-path branch of the location
+    // suffix must render nothing, not `undefined` (the lines are relayed
+    // verbatim into the user-facing summary).
+    const editedLine = warnings().find((l) => l.includes('edited comment 21'));
+    expect(editedLine).not.toContain('undefined');
+    expect(editedLine).toBe(
+      'warning:   edited comment 21 at 2026-07-24T17:10:00+08:00',
+    );
+  });
+
+  it('reaches back past the recorded opening by the clock-skew allowance', () => {
+    // auditSince 08:00:00Z → boundary 07:58:00Z; a comment at 15:58:30+08:00
+    // (07:58:30Z) predates the recorded opening by less than the allowance,
+    // so a fast local clock cannot hide it.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 11,
+        note: 'just inside the skew allowance',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T15:58:30+08:00',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain('posted comment 11');
+  });
+
+  it('audits from auditSince when drift restarts pushed fetchedAt forward', () => {
+    // The Aone twin of the gh drift test: fetchedAt 10:00Z but auditSince
+    // 08:00Z → boundary 07:58Z; a comment at 08:30Z sits inside the
+    // auditSince window yet outside any fetchedAt-based one.
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'maxcompute/odps_src',
+        fetchedAt: '2026-07-24T10:00:00Z',
+        auditSince: '2026-07-24T08:00:00Z',
+        host: 'gitlab.alibaba-inc.com',
+      }),
+    );
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 12,
+        note: 'posted during the abandoned attempt',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T16:30:00+08:00', // 08:30Z
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(warnings().join('\n')).toContain('posted comment 12');
+  });
+
+  it('passes host undefined to the dispatch for a hostless report (the cwd-origin fall-through)', () => {
+    // A bare-number Aone run that omitted --host records no host; the
+    // dispatch then falls back to the cwd clone's origin (the registry's
+    // own fall-through, steered to 'aone' here). The pin is the call shape:
+    // host null must arrive as undefined, not as a string gh could route.
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'maxcompute/odps_src',
+        fetchedAt: '2026-07-24T08:00:00Z',
+        host: null,
+      }),
+    );
+    mocks.a1Json.mockReturnValue([]);
+
+    runCleanup('pr-123');
+
+    expect(mocks.detectPlatformKind).toHaveBeenCalledWith({ host: undefined });
+    expect(mocks.a1Json).toHaveBeenCalled();
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+  });
+
+  it('treats a non-array comment list as a failure, not a clean window', () => {
+    // a1 can answer a well-formed error OBJECT with exit 0; reading it as
+    // "no comments" would make the tripwire's off state indistinguishable
+    // from its all-clear state.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue({
+      schemaVersion: 'a1.error/v1',
+      code: 'COMMAND_FAILED',
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('unexpected shape');
+    expect(warnings()).toEqual([]);
+  });
+
+  it('surfaces the message of an exit-0 error OBJECT, not just the shape complaint', () => {
+    // Measured a1 behaviour: a backend auth failure or a client timeout
+    // answers the error object with exit 0. The operator paging at 3 AM
+    // needs the cause (auth outage vs schema drift), not only "unexpected
+    // shape".
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue({
+      schemaVersion: 'a1.error/v1',
+      code: 'COMMAND_FAILED',
+      message:
+        'listing MR comments: failed to initialize NCS CLI executor: ncs below minimum version',
+      retryable: false,
+      exitCode: 1,
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('unexpected shape');
+    expect(notes.join('\n')).toContain('failed to initialize NCS CLI executor');
+    expect(warnings()).toEqual([]);
+  });
+
+  it('names the skip when whoami fails, and still finishes cleanup', () => {
+    // The author arm cannot run without the account; matching nothing would
+    // read like a clean window, so the failure must surface as a skip.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockReturnValue([
+      {
+        id: 41,
+        note: 'some comment',
+        author: { username: 'reviewer' },
+        createdAt: '2026-07-24T17:02:32+08:00',
+      },
+    ]);
+    mocks.aoneWhoamiAccount.mockImplementation(() => {
+      throw new Error('a1 auth whoami returned no account');
+    });
+
+    expect(() => runCleanup('pr-123')).not.toThrow();
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('whoami returned no account');
+    expect(warnings()).toEqual([]);
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
+  });
+
+  it('surfaces the first non-empty stderr line when a1 fails, and still finishes cleanup', () => {
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: '\nno repo context: run this command in a git repository\n',
+        },
+      );
+    });
+
+    expect(() => runCleanup('pr-123')).not.toThrow();
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('no repo context');
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalled();
+  });
+
+  it("reads the message field of a1's JSON error object, not its opening brace", () => {
+    // a1 fails with a PRETTY-PRINTED JSON error object on stderr; the first
+    // non-empty line is `{`, which says nothing. The cause rides `message`.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: JSON.stringify(
+            {
+              schemaVersion: 'a1.error/v1',
+              code: 'COMMAND_FAILED',
+              message: 'merge request not found: 999999999',
+              retryable: false,
+              exitCode: 1,
+            },
+            null,
+            2,
+          ),
+        },
+      );
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('merge request not found: 999999999');
+    expect(notes.join('\n')).not.toContain('skipped ({)');
+  });
+
+  it('flattens a message-less JSON error object instead of paging its opening brace', () => {
+    // The `message` field is the cause when present; an error object
+    // without one must still reach the operator as more than the
+    // pretty-print's opening brace.
+    mocks.readFileSync.mockReturnValue(aoneFetchReport);
+    mocks.a1Json.mockImplementation(() => {
+      throw Object.assign(
+        new Error('Command failed: a1 repo mr comment list …'),
+        {
+          stderr: JSON.stringify(
+            {
+              schemaVersion: 'a1.error/v1',
+              code: 'COMMAND_FAILED',
+              retryable: false,
+              exitCode: 1,
+            },
+            null,
+            2,
+          ),
+        },
+      );
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('"code":"COMMAND_FAILED"');
+    expect(notes.join('\n')).not.toContain('skipped ({)');
   });
 });

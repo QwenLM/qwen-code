@@ -5,6 +5,7 @@
  */
 
 import type {
+  ApprovalModeValue,
   Config,
   ToolArtifact,
   ToolResultBoundaryArtifact,
@@ -17,12 +18,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { MessageRewriteMiddleware } from './rewrite/index.js';
 
-export type ApprovalModeValue =
-  | 'plan'
-  | 'default'
-  | 'auto-edit'
-  | 'auto'
-  | 'yolo';
+export type { ApprovalModeValue };
 
 /**
  * Interface for sending session updates to the ACP client.
@@ -71,6 +67,7 @@ export interface SessionEmitterContext extends SessionUpdateSender {
  */
 export interface SessionContext extends SessionEmitterContext {
   readonly config: Config;
+  isDisposed?(): boolean;
 }
 
 export function hasFullSessionContext(
@@ -107,6 +104,7 @@ export interface ToolCallStartParams {
   subagentMeta?: SubagentMeta;
   /** Server-side timestamp (ISO string or ms) for message ordering */
   timestamp?: string | number;
+  startedAt?: number;
 }
 
 /**
@@ -135,6 +133,8 @@ export interface ToolCallResultParams {
   subagentMeta?: SubagentMeta;
   /** Server-side timestamp (ISO string or ms) for message ordering */
   timestamp?: string | number;
+  startedAt?: number;
+  durationMs?: number;
 }
 
 /**
@@ -149,6 +149,7 @@ export interface TodoItem {
 
 export interface TodoPlanSnapshot {
   planId?: string;
+  sessionWorkflow?: boolean;
   todos: TodoItem[];
 }
 

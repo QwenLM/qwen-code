@@ -5,7 +5,6 @@
  */
 
 import type { ConversationWorkspace } from './conversation-workspace.js';
-import type { ConversationRuntimeOwnership } from './conversation-runtime-ownership.js';
 import {
   ConversationRuntimeOwnershipError,
   conversationRootCompromisedError,
@@ -15,24 +14,45 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
+
+export type ConversationRuntimeQuarantineReason =
+  | 'standalone_session_containment_failed'
+  | 'missing_mandatory_lease_attestation';
 
 export interface ConversationRuntimeManagerOptions {
-  ownership: ConversationRuntimeOwnership;
+  checkLegacyOwner: () => Promise<void>;
   workspace: Pick<ConversationWorkspace, 'revalidate' | 'assertExactRoot'>;
   registry: WorkspaceRegistry;
   publishRuntime: (
     canonicalRoot: string,
     validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
   ) => Promise<WorkspaceRuntime>;
+  quarantineRuntime: (
+    runtime: WorkspaceRuntime,
+    reason: ConversationRuntimeQuarantineReason,
+  ) => Promise<void>;
+  onTerminalQuarantine?: (
+    runtime: WorkspaceRuntime,
+    reason: ConversationRuntimeQuarantineReason,
+  ) => void;
 }
 
 export class ConversationRuntimeManager {
   private runtime?: WorkspaceRuntime;
   private pending?: Promise<WorkspaceRuntime>;
+  private terminalRuntime?: WorkspaceRuntime;
+  private terminalError?: ConversationRuntimeOwnershipError;
+  private quarantinePromise?: Promise<void>;
 
   constructor(private readonly options: ConversationRuntimeManagerOptions) {}
 
   ensure(): Promise<WorkspaceRuntime> {
+    if (this.terminalRuntime) {
+      return Promise.reject(
+        this.terminalError ?? conversationRuntimeUnavailableError(),
+      );
+    }
     if (this.pending) return this.pending;
     const pending = this.ensureOnce().finally(() => {
       if (this.pending === pending) this.pending = undefined;
@@ -41,12 +61,64 @@ export class ConversationRuntimeManager {
     return pending;
   }
 
+  assertCurrent(expectedRuntime: WorkspaceRuntime): WorkspaceRuntime {
+    this.assertNotTerminal();
+    if (this.runtime !== expectedRuntime) {
+      throw conversationRuntimeUnavailableError();
+    }
+    this.assertActiveRuntime(expectedRuntime.workspaceCwd, expectedRuntime);
+    return expectedRuntime;
+  }
+
+  quarantine(
+    expectedRuntime: WorkspaceRuntime,
+    reason: ConversationRuntimeQuarantineReason,
+  ): Promise<void> {
+    if (this.terminalRuntime === expectedRuntime && this.quarantinePromise) {
+      return this.quarantinePromise;
+    }
+    if (this.terminalRuntime) {
+      throw this.terminalError ?? conversationRuntimeUnavailableError();
+    }
+    if (this.runtime !== expectedRuntime) {
+      throw conversationRuntimeUnavailableError();
+    }
+    this.assertActiveRuntime(expectedRuntime.workspaceCwd, expectedRuntime);
+    this.terminalRuntime = expectedRuntime;
+    if (reason === 'missing_mandatory_lease_attestation') {
+      // A static runtime contract violation never heals in place; keep every
+      // later access on the same non-retryable classification instead of
+      // degrading to retryable `conversation_runtime_unavailable`.
+      this.terminalError = conversationRootCompromisedError();
+    }
+    try {
+      this.options.onTerminalQuarantine?.(expectedRuntime, reason);
+    } catch {
+      try {
+        writeStderrLine(
+          'qwen serve: Conversations quarantine observer failed; runtime disposal will continue.',
+        );
+      } catch {
+        // Terminal containment must not depend on diagnostics.
+      }
+    }
+    const promise = Promise.resolve().then(() =>
+      this.options.quarantineRuntime(expectedRuntime, reason),
+    );
+    this.quarantinePromise = promise;
+    return promise;
+  }
+
   private async ensureOnce(): Promise<WorkspaceRuntime> {
-    await this.options.ownership.acquire();
+    this.assertNotTerminal();
+    if (!this.runtime) await this.options.checkLegacyOwner();
+    this.assertNotTerminal();
     const root = await this.revalidateRoot();
+    this.assertNotTerminal();
     if (this.runtime) {
       await this.assertExactRoot(this.runtime.workspaceCwd);
       this.assertActiveRuntime(root.canonicalRoot, this.runtime);
+      this.assertNotTerminal();
       return this.runtime;
     }
 
@@ -62,6 +134,18 @@ export class ConversationRuntimeManager {
       await this.assertExactRoot(existing.workspaceCwd);
       this.assertActiveRuntime(root.canonicalRoot, existing);
       this.runtime = existing;
+      try {
+        this.assertMandatoryLeaseAttestation(existing);
+      } catch (error) {
+        // An equivalent registered runtime that cannot prove the mandatory
+        // lease reaches its children is terminally quarantined, never served.
+        await this.quarantine(
+          existing,
+          'missing_mandatory_lease_attestation',
+        ).catch(() => undefined);
+        throw error;
+      }
+      this.assertNotTerminal();
       return existing;
     }
 
@@ -72,6 +156,7 @@ export class ConversationRuntimeManager {
         async (candidate) => {
           await this.assertExactRoot(candidate.workspaceCwd);
           this.assertOwnedRuntime(candidate);
+          this.assertMandatoryLeaseAttestation(candidate);
         },
       );
     } catch (error) {
@@ -80,7 +165,14 @@ export class ConversationRuntimeManager {
     }
     this.assertActiveRuntime(root.canonicalRoot, created);
     this.runtime = created;
+    this.assertNotTerminal();
     return created;
+  }
+
+  private assertNotTerminal(): void {
+    if (this.terminalRuntime) {
+      throw this.terminalError ?? conversationRuntimeUnavailableError();
+    }
   }
 
   private async revalidateRoot(): Promise<
@@ -122,6 +214,12 @@ export class ConversationRuntimeManager {
       !runtime.trusted ||
       runtime.removable !== false
     ) {
+      throw conversationRootCompromisedError();
+    }
+  }
+
+  private assertMandatoryLeaseAttestation(runtime: WorkspaceRuntime): void {
+    if (runtime.bridge.mandatoryLeaseAttested !== true) {
       throw conversationRootCompromisedError();
     }
   }

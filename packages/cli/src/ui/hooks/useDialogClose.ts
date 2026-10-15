@@ -29,6 +29,10 @@ export interface DialogCloseOptions {
   isEffortDialogOpen: boolean;
   handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
 
+  // Output style dialog
+  isOutputStyleDialogOpen: boolean;
+  handleOutputStyleSelect: (styleName: string | undefined) => void;
+
   // Auth dialog
   isAuthDialogOpen: boolean;
   closeAuthDialog: () => void;
@@ -109,6 +113,12 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isEffortDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined) - keeps the current effort.
       options.handleEffortSelect(undefined);
+      return true;
+    }
+
+    if (options.isOutputStyleDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined) - keeps the current style.
+      options.handleOutputStyleSelect(undefined);
       return true;
     }
 

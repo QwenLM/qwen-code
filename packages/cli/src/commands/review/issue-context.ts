@@ -42,7 +42,9 @@ export interface RequestedIssue {
 interface IssueContextArgs {
   prNumber: number;
   repo: string;
-  out: string;
+  /** As yargs gave it: a repeated --out is an array, ruled by
+   * `assertWritableOutPath` before any use. */
+  out: unknown;
   /** Additional issues to fetch beyond the closing set (from --issue). */
   extraIssues: RequestedIssue[];
   /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
@@ -260,7 +262,7 @@ export const issueContextCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          "The host the target lives on. An Aone host (*.alibaba-inc.com) selects the a1 backend; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
+          "The host the target lives on. The canonical Aone hosts (code.alibaba-inc.com / gitlab.alibaba-inc.com) select the a1 backend — a non-canonical *.alibaba-inc.com host is a GitHub Enterprise instance and stays on gh; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       })
       .option('issue', {
         type: 'string',
@@ -317,7 +319,10 @@ export const issueContextCommand: CommandModule = {
       const result = runIssueContext({
         prNumber,
         repo,
-        out: String(argv['out']),
+        // As yargs gave it: a repeated --out is an array, which the shared
+        // ruling refuses as a usage error. `String()` joined it into one
+        // comma path and wrote there.
+        out: argv['out'],
         extraIssues: extras,
         host,
       });

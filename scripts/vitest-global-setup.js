@@ -46,6 +46,8 @@ export const DIST_PREREQUISITES = {
     'packages/web-templates',
     'packages/channels/base',
     'packages/channels/dingtalk',
+    'packages/channels/dws',
+    'packages/channels/email',
     'packages/channels/feishu',
     'packages/channels/github',
     'packages/channels/gitlab',

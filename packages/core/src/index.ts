@@ -24,6 +24,7 @@ export {
 } from './config/models.js';
 export {
   type AvailableModel,
+  type ModelWireApi,
   type ModelCapabilities,
   type ModelConfig as ProviderModelConfig,
   type ModelConfigCliInput,
@@ -32,8 +33,13 @@ export {
   type ModelConfigSourcesInput,
   type ModelConfigValidationResult,
   ModelRegistry,
+  isImageGenerationCapable,
   modelRegistryKey,
   resolveProviderProtocol,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  validateModelProvidersConfig,
+  resolveModelSelectionAuthType,
   type ModelGenerationConfig,
   ModelsConfig,
   type ModelsConfigOptions,
@@ -46,6 +52,7 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  VERTEX_ADC_HINT,
 } from './models/index.js';
 
 // Output formatting
@@ -65,6 +72,7 @@ export {
   runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
+export { isOpenRouterHostname } from './core/openaiContentGenerator/provider/openrouter.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
@@ -81,15 +89,19 @@ export {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   findPlanModeEntryBatchBoundaryIndex,
 } from './core/plan-mode-entry-policy.js';
-export * from './core/geminiChat.js';
-export * from './core/geminiRequest.js';
+export * from './core/llm-chat.js';
+export * from './core/llm-request.js';
 export * from './core/inlineMediaLimit.js';
 export * from './core/insightProtocol.js';
 export * from './core/logger.js';
 export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
+export * from './core/output-styles.js';
+export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
+export { buildSessionHistoryFromConversation } from './services/session-api-history.js';
+export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
@@ -138,14 +150,37 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export type {
+  ManagedToolExecutionResult,
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
+} from './tools/managed-tool-runtime.js';
+export {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from './tools/managed-tool-protocol.js';
+export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  // `applySkillHooks` is deliberately not exported: it is the one entry point
+  // whose caller must apply the folder-trust gate itself, and skipping that
+  // gate is how #11067 happened. Callers outside this module use
+  // `applySkillSideEffects`, which applies the gate for them.
+  applySkillSideEffects,
+  canApplySkillSideEffects,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
+export { isWsl } from './utils/terminal-env.js';
+export {
+  isUnverifiableIdentityError,
+  openNoFollow,
+  openSyncNoFollow,
+  UNVERIFIABLE_IDENTITY_CODE,
+} from './utils/no-follow-open.js';
 export * from './services/session-organization-service.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
@@ -185,6 +220,7 @@ export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
   WorkflowTool,
   WorkflowParams,
+  WorkflowToolResult,
 } from './tools/workflow/workflow.js';
 export type {
   TodoWriteTool,
@@ -196,6 +232,12 @@ export type {
   WebSearchTool,
   WebSearchToolParams,
   WebSearchSettings,
+} from './tools/web-search.js';
+export {
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  MAX_WEB_SEARCH_MAX_PER_SESSION,
+  MAX_WEB_SEARCH_TIMEOUT_MS,
 } from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 // Exported for the cross-package contract test in packages/cli (see the
@@ -209,20 +251,77 @@ export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
 } from './utils/workspace-artifact-path.js';
+export {
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
+  MAX_DIRECTORY_ARTIFACT_FILES,
+  OFFICE_DOCUMENT_EXTENSIONS,
+  collectRecordableWorkspaceFiles,
+  isOfficeDocumentExtension,
+  pathHasSkippedDirectoryComponent,
+  shouldSkipDirectoryArtifactName,
+  stripWorktreeArtifactPrefix,
+} from './utils/workspace-artifact-directory.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export { RecordArtifactTool } from './tools/record-artifact.js';
+export {
+  deleteArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+} from './tools/artifact/artifact-snapshots.js';
+export {
+  RecordArtifactTool,
+  isRecordableDerivedChild,
+} from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export {
+  ReportFindingsTool,
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  FINDING_DIRECTIONS,
+  FINDING_BASELINES,
+  REPORT_FINDINGS_LEVELS,
+  compressFindingSummary,
+} from './tools/report-findings.js';
+export type {
+  ReportFindingsParams,
+  ReportFindingsFindingParams,
+  FindingSeverity,
+  FindingConfidence,
+  FindingOutcome,
+  FindingSource,
+  FindingDirection,
+  FindingBaseline,
+  ReportFindingsLevel,
+} from './tools/report-findings.js';
+export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type {
+  CurrentSessionScheduledTaskCreateRequest,
+  CurrentSessionScheduledTaskCreateResult,
+  CurrentSessionScheduledTaskCreator,
+} from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
+  resolveDeferredToolCall,
+} from './tools/tool-call.js';
+export type {
+  DeferredToolCallResolution,
+  ToolCallTool,
+  ToolCallParams,
+} from './tools/tool-call.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export type {
   TeamPlanApprovalTool,
@@ -243,10 +342,18 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export { estimateContextTextTokens } from './services/tokenEstimation.js';
 export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
+export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
+export {
+  isApiUserPrompt,
+  findApiRewindCutPoint,
+  countApiUserPrompts,
+  type ApiUserPromptOptions,
+} from './services/api-user-prompt.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
@@ -254,16 +361,21 @@ export type {
   CronTaskDelivery,
   DurableCronTask,
   CronTaskRun,
+  CronRunSessionOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
+  annotateCronRunSession,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+  isValidCronTaskRoutingId,
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
@@ -275,7 +387,7 @@ export * from './services/tool-write-origin.js';
 export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
-} from './utils/sync-file-encoding.js';
+} from './services/sync-file-encoding.js';
 export {
   CursorNotAtLineBoundaryError,
   LargeNonUtf8TextError,
@@ -297,6 +409,20 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
+export * from './ipc/inbound-gate.js';
+export * from './ipc/peer-admission.js';
+export * from './ipc/peer-controllers.js';
+export * from './ipc/peer-directory.js';
+export * from './ipc/peer-drop-reports.js';
+export * from './ipc/peer-envelope.js';
+export * from './agents/session-agents/contract.js';
+export * from './agents/session-agents/envelope.js';
+export * from './ipc/peer-frames.js';
+export * from './ipc/peer-routing.js';
+export * from './ipc/peer-send.js';
+export * from './ipc/socket-path.js';
+export * from './ipc/uds-client.js';
+export * from './ipc/uds-inbox.js';
 export * from './services/session-registry.js';
 export * from './services/sessionService.js';
 export {
@@ -306,9 +432,12 @@ export {
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
+  decodeSessionTranscriptSnapshot,
   encodeSessionTranscriptCursor,
+  encodeSessionTranscriptSnapshot,
   findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
@@ -316,6 +445,7 @@ export {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+  SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptPageTooLargeError,
@@ -330,8 +460,13 @@ export type {
   SessionRestoreReplaySelection,
   SessionRuntimeResumeState,
   SessionTranscriptCursorState,
+  SessionTranscriptNavigationTurn,
+  SessionTranscriptNavigationTurnKind,
   SessionTranscriptReadPageOptions,
+  SessionTranscriptReadTurnIndexOptions,
   SessionTranscriptRecordPage,
+  SessionTranscriptSnapshotState,
+  SessionTranscriptTurnIndexPage,
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';
@@ -360,6 +495,7 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/session-pr-service.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,
@@ -373,8 +509,16 @@ export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
+export * from './agents/background-notification-queue.js';
+export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
+export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-checkpoint.js';
+export {
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+} from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -382,18 +526,34 @@ export {
   validateWorkflowName,
   getSavedWorkflowDirs,
   WORKFLOW_NAME_PATTERN,
+  EXTENSION_WORKFLOW_NAME_PATTERN,
+  qualifyExtensionWorkflowName,
+  parseExtensionWorkflowName,
+  isWorkflowRunId,
   type SavedWorkflowEntry,
+  type SavedWorkflowScope,
   type SavedWorkflowSource,
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
+export {
+  loadExtensionWorkflows,
+  MAX_EXTENSION_WORKFLOW_SCRIPT_BYTES,
+  type ExtensionWorkflowDefinition,
+} from './agents/runtime/workflow-extension.js';
+export {
+  extractAndStripMeta,
+  type WorkflowMeta,
+} from './agents/runtime/workflow-sandbox.js';
+export * from './agents/runtime/workflow-size.js';
+export * from './agents/runtime/workflow-script-shape.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
-export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
+export { isUnusableScriptEntry } from './services/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -410,7 +570,7 @@ export * from './memory/manager.js';
 export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
-export * from './memory/const.js';
+export * from './utils/memory-constants.js';
 export * from './memory/channel-memory-document.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
@@ -446,9 +606,9 @@ export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';
-export * from './lsp/LspServerManager.js';
+export * from './lsp/lsp-server-manager.js';
 export * from './lsp/NativeLspClient.js';
-export * from './lsp/NativeLspService.js';
+export * from './lsp/native-lsp-service.js';
 export * from './lsp/types.js';
 
 // ============================================================================
@@ -496,6 +656,7 @@ export {
   logSpeculation,
   logWorkflowKeyword,
   logWorkflowRun,
+  logWorkflowSizeWarning,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -513,6 +674,7 @@ export {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
@@ -543,10 +705,11 @@ export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
-export * from './utils/environmentContext.js';
+export * from './core/environmentContext.js';
 export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
+export * from './utils/file-identity.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
 export * as crawlCache from './utils/filesearch/crawlCache.js';
@@ -559,13 +722,17 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
+export * from './utils/git-worktrees.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
+export * from './utils/git-ignore.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/github-prs.js';
+export * from './utils/github-pr-issues.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
+export * from './utils/conversations-runtime-marker.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,
@@ -573,12 +740,12 @@ export {
 export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
-export * from './utils/tool-result-retention.js';
-export * from './utils/memoryDiscovery.js';
+export * from './tools/tool-result-retention.js';
+export * from './memory/memoryDiscovery.js';
 export * from './utils/modelId.js';
 export * from './utils/runtimeDiagnostics.js';
-export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
-export type { RuleFile } from './utils/rulesDiscovery.js';
+export { ConditionalRulesRegistry } from './config/rulesDiscovery.js';
+export type { RuleFile } from './config/rulesDiscovery.js';
 export {
   OpenAILogger,
   openaiLogger,
@@ -591,11 +758,12 @@ export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
-export * from './utils/tool-result-boundary-diagnostics.js';
+export * from './utils/background-turn-context.js';
+export * from './tools/tool-result-boundary-diagnostics.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
 export * from './utils/rateLimit.js';
-export * from './utils/readManyFiles.js';
+export * from './tools/readManyFiles.js';
 export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
@@ -612,6 +780,7 @@ export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/sessionIdContext.js';
 export * from './utils/secure-browser-launcher.js';
+export { initParser as initShellAstParser } from './utils/shellAstParser.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
 export * from './utils/symlink.js';
@@ -620,12 +789,12 @@ export * from './utils/terminalSerializer.js';
 export * from './utils/textUtils.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
-export * from './utils/tool-utils.js';
-export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
+export * from './tools/tool-utils.js';
+export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
-export * from './utils/yaml-parser.js';
+export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
-export * from './utils/forkedAgent.js';
+export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
 
 // ============================================================================
@@ -651,6 +820,21 @@ export { MessageBus } from './confirmation-bus/message-bus.js';
 
 export { makeFakeConfig } from './test-utils/config.js';
 export * from './test-utils/index.js';
+export {
+  extractCodeModeImageContent,
+  getToolCallRuntime,
+  runWithoutToolCallRuntime,
+  runWithToolCallRuntime,
+  type CodeModeImageContent,
+  type CodeModeToolResult,
+  type ToolCallRuntimeContext,
+} from './code-mode/tool-call-runtime.js';
+export {
+  getToolExposure,
+  isCodeModeToolCallAllowed,
+  ToolMode,
+  type ToolExposure,
+} from './tools/code-mode.js';
 
 // ============================================================================
 // Hooks
@@ -664,6 +848,13 @@ export {
   hookEventSupportsMatcher,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export { buildHooksListing } from './hooks/hooks-listing.js';
+export type {
+  HooksListing,
+  HooksListingDisabledReason,
+  HooksListingOrigin,
+  HooksListingRow,
+} from './hooks/hooks-listing.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   STOP_HOOK_BLOCK_CAP_ENV,
@@ -671,7 +862,25 @@ export {
   resolveStopHookBlockingCap,
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
-export { type StopFailureErrorType } from './hooks/types.js';
+export type { StopFailureErrorType } from './hooks/types.js';
+export {
+  HOOK_EVENT_DISPLAY,
+  hookEventDisplay,
+} from './hooks/hook-event-display.js';
+export type { HookEventDisplayMeta } from './hooks/hook-event-display.js';
+export {
+  DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_FUNCTION_HOOK_TIMEOUT_MS,
+  describeHookTimeout,
+  isLegacyMillisecondHookTimeout,
+  resolveCommandHookTimeoutMs,
+} from './hooks/hook-timeout.js';
+export type {
+  HookTimeoutDescription,
+  HookTimeoutSource,
+} from './hooks/hook-timeout.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
@@ -703,6 +912,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -714,3 +927,67 @@ export {
   type StartupEventSink,
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
+
+// ============================================================================
+// Omni multimodal experiment — upload-based media delivery
+// ============================================================================
+
+export {
+  isOmniDeliveryActive,
+  processMediaForOmniDelivery,
+  readMediaViaOmniDelivery,
+  parseHttpUrlRef,
+  downloadMediaUrl,
+  effectiveMaxDownloadFileBytes,
+  recognizeMediaFile,
+  formatDisclosureText,
+  formatOmissionText,
+  buildAdditionalMediaParts,
+  buildTranscriptParts,
+  OmniObjectStore,
+  OmniDeliveryError,
+  OmniDownloadError,
+  OmniTransportGuardError,
+  type OmniModality,
+  type OmniMediaDelivery,
+  type OmniAdditionalMediaDelivery,
+  type OmniAdditionalMediaPart,
+  type OmniTokenEstimate,
+  type DownloadedMedia,
+} from './omni/index.js';
+export { processToolResultOmniMedia } from './omni/tool-result-media.js';
+export {
+  resolveMediaPolicyModelAccess,
+  isMediaPolicyToolHiddenFromModel,
+  evaluateMediaPolicyToolCall,
+  type MediaPolicyConfigView,
+  type MediaPolicyCallGateResult,
+  type ResolvedMediaPolicyModelAccess,
+} from './omni/policy/model-access.js';
+export type {
+  OmniPolicyToolSettings,
+  OmniPolicyToolModelAccessSettings,
+  OmniPolicyToolsSettings,
+} from './omni/policy/types.js';
+export * from './services/session-sources.js';
+export { RecordSourceTool } from './tools/record-source.js';
+export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
+
+export {
+  createToolLifecycle,
+  TOOL_LIFECYCLE_DRAIN_MS,
+} from './telemetry/tool-lifecycle.js';
+export type {
+  ToolLifecycleEvent,
+  ToolLifecycleRecord,
+  ToolLifecycleOutcome,
+} from './telemetry/tool-lifecycle.js';

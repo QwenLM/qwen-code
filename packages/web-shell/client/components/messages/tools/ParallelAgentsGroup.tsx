@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronRightIcon } from 'lucide-react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
+import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
+import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
 import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
   getAgentType,
   isDefaultAgentType,
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentCurrentToolHint,
   formatTokenCount,
   getAgentCancellationReason,
@@ -115,7 +118,10 @@ export function ParallelAgentsGroup({
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const subagentDetails = useSubagentDetails();
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const [groupExpanded, setGroupExpanded] = useState(false);
   const [automaticCollapseAnimating, setAutomaticCollapseAnimating] =
     useState(false);
@@ -357,7 +363,7 @@ export function ParallelAgentsGroup({
   ).length;
   const total = agents.length;
 
-  const showGroup = groupExpanded || !!approvalAgent;
+  const showGroup = documentMode || groupExpanded || !!approvalAgent;
   const renderGroup = showGroup || automaticCollapseAnimating;
   const automaticCollapseClosing =
     automaticCollapseAnimating && !hasApprovalAgent;
@@ -366,9 +372,12 @@ export function ParallelAgentsGroup({
     <div className={styles.wrap} ref={wrapRef}>
       <button
         type="button"
+        disabled={documentMode}
+        tabIndex={documentMode ? -1 : undefined}
         ref={summaryRef}
         className={styles.summary}
         onClick={() => {
+          if (documentMode) return;
           if (automaticCollapseClosing) return;
           clearTimeout(autoCollapseTimerRef.current);
           autoCollapseTimerRef.current = undefined;
@@ -384,8 +393,14 @@ export function ParallelAgentsGroup({
           setGroupExpanded((value) => !value);
         }}
         aria-disabled={automaticCollapseClosing || undefined}
-        aria-expanded={showGroup}
-        title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
+        aria-expanded={documentMode ? undefined : showGroup}
+        title={
+          documentMode
+            ? undefined
+            : showGroup
+              ? t('tool.collapseHint')
+              : t('tool.expand')
+        }
       >
         <span className={styles.summaryIcon} aria-hidden="true">
           <ToolGroupIcon />
@@ -434,6 +449,8 @@ export function ParallelAgentsGroup({
                 {agents.map((agent) => {
                   const agentType = getAgentType(agent);
                   const desc = getAgentDescription(agent);
+                  const unavailableReason =
+                    getSubagentDetailsUnavailableReason(agent);
                   const toolHint = getAgentCurrentToolHint(agent, t);
                   const stats = getAgentStats(agent, now);
                   const activity = toolHint || stats.cancellationReason;
@@ -450,84 +467,138 @@ export function ParallelAgentsGroup({
                       : rowStatus === 'failed'
                         ? t('subagent.failed')
                         : t('subagent.completed');
-                  const isExpanded = expandedId === agent.callId;
+                  const isExpanded =
+                    documentMode || expandedId === agent.callId;
+                  // While the agent's own launch approval is unanswered there
+                  // is nothing to show yet — keep the row compact and
+                  // non-interactive, mirroring ToolLine's pending guard.
+                  const approvalPending =
+                    pendingApproval?.toolCallId === agent.callId;
+                  const statusLabel = approvalPending
+                    ? t('subagent.pending')
+                    : rowStatusLabel;
                   const localizedAgentType = localizeAgentTypeName(
                     agentType,
                     t,
                   );
                   const showAgentType =
                     !!desc && !isDefaultAgentType(agentType);
-                  return (
-                    <div key={agent.callId}>
-                      <button
-                        type="button"
-                        className={
-                          rowStatus === 'active'
-                            ? `${styles.row} ${styles.rowActive}`
-                            : styles.row
-                        }
-                        data-agent-status={rowStatus}
-                        data-detail-mode={subagentDetails ? 'panel' : 'inline'}
-                        aria-expanded={subagentDetails ? undefined : isExpanded}
-                        title={
-                          subagentDetails
-                            ? t('planExecution.openDetails')
-                            : t('subagent.toggleStream')
-                        }
-                        onClick={() => {
-                          if (subagentDetails) subagentDetails.onOpen(agent);
-                          else setExpandedId(isExpanded ? null : agent.callId);
-                        }}
+                  const rowContent = (
+                    <>
+                      <span
+                        className={styles.rowStatus}
+                        // role="img" makes the span nameable; aria-label on a
+                        // bare <span> (generic role) is not exposed to
+                        // assistive tech (see ChatPane's workspace tag).
+                        role="img"
+                        aria-label={statusLabel}
+                        title={statusLabel}
                       >
-                        <span
-                          className={styles.rowStatus}
-                          // role="img" makes the span nameable; aria-label on a
-                          // bare <span> (generic role) is not exposed to
-                          // assistive tech (see ChatPane's workspace tag).
-                          role="img"
-                          aria-label={rowStatusLabel}
-                          title={rowStatusLabel}
-                        >
-                          {rowStatus === 'active'
-                            ? '●'
-                            : rowStatus === 'failed'
-                              ? '×'
-                              : '✓'}
-                        </span>
-                        <span className={styles.rowText}>
-                          {showAgentType && (
-                            <span className={styles.rowType}>
-                              {truncateText(localizedAgentType, 50)}:
-                            </span>
-                          )}
-                          <span className={styles.rowTask}>
-                            {truncateText(desc || localizedAgentType, 50)}
-                          </span>
-                          {activity && (
-                            <span className={styles.rowActivity}>
-                              ({activity})
-                            </span>
-                          )}
-                        </span>
-                        {(stats.duration || stats.tokens) && (
-                          <span className={styles.rowStats}>
-                            {stats.duration && <span>{stats.duration}</span>}
-                            {stats.duration && stats.tokens && (
-                              <span aria-hidden="true"> · </span>
-                            )}
-                            {stats.tokens && <span>{stats.tokens}</span>}
+                        {rowStatus === 'active'
+                          ? '●'
+                          : rowStatus === 'failed'
+                            ? '×'
+                            : '✓'}
+                      </span>
+                      <span className={styles.rowText}>
+                        {showAgentType && (
+                          <span className={styles.rowType}>
+                            {truncateText(localizedAgentType, 50)}:
                           </span>
                         )}
-                        <ChevronRightIcon
-                          className={styles.rowAction}
-                          aria-hidden="true"
-                        />
-                      </button>
-                      {!subagentDetails && isExpanded && (
-                        <div className={styles.detail}>
-                          <SubAgentPanel tool={agent} hideHeader />
-                        </div>
+                        <span className={styles.rowTask}>
+                          {truncateText(desc || localizedAgentType, 50)}
+                        </span>
+                        {agent.backgroundResultPending && (
+                          <span className={styles.rowActivity}>
+                            · {t('background.pending')}
+                          </span>
+                        )}
+                        {activity && (
+                          <span className={styles.rowActivity}>
+                            ({activity})
+                          </span>
+                        )}
+                      </span>
+                      {(stats.duration || stats.tokens) && (
+                        <span className={styles.rowStats}>
+                          {stats.duration && <span>{stats.duration}</span>}
+                          {stats.duration && stats.tokens && (
+                            <span aria-hidden="true"> · </span>
+                          )}
+                          {stats.tokens && <span>{stats.tokens}</span>}
+                        </span>
                       )}
+                    </>
+                  );
+                  return (
+                    <div
+                      key={agent.callId}
+                      data-transcript-tool-call-id={agent.callId}
+                    >
+                      {approvalPending || documentMode ? (
+                        <div
+                          className={styles.row}
+                          data-agent-status={rowStatus}
+                          data-detail-mode={documentMode ? 'inline' : undefined}
+                          aria-disabled={approvalPending || undefined}
+                        >
+                          {rowContent}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className={
+                            rowStatus === 'active'
+                              ? `${styles.row} ${styles.rowActive}`
+                              : styles.row
+                          }
+                          data-agent-status={rowStatus}
+                          data-detail-mode={
+                            subagentDetails ? 'panel' : 'inline'
+                          }
+                          aria-disabled={!!unavailableReason || undefined}
+                          aria-expanded={
+                            subagentDetails ? undefined : isExpanded
+                          }
+                          title={
+                            unavailableReason
+                              ? t(unavailableReason)
+                              : subagentDetails
+                                ? t('planExecution.openDetails')
+                                : t('subagent.toggleStream')
+                          }
+                          onClick={() => {
+                            if (unavailableReason) return;
+                            if (subagentDetails) subagentDetails.onOpen(agent);
+                            else
+                              setExpandedId(isExpanded ? null : agent.callId);
+                          }}
+                        >
+                          {rowContent}
+                          <ChevronRightIcon
+                            className={styles.rowAction}
+                            aria-hidden="true"
+                          />
+                        </button>
+                      )}
+                      {!approvalPending &&
+                        (!subagentDetails || documentMode) &&
+                        isExpanded && (
+                          <div className={styles.detail}>
+                            <SubAgentPanel
+                              tool={agent}
+                              approval={
+                                hostOwnsEditDiffPreview &&
+                                approvalAgent?.callId === agent.callId
+                                  ? pendingApproval
+                                  : undefined
+                              }
+                              hideHeader
+                              defaultExpanded={documentMode}
+                            />
+                          </div>
+                        )}
                     </div>
                   );
                 })}

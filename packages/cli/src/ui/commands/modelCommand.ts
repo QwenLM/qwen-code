@@ -19,14 +19,18 @@ import {
   type AvailableModel,
   type Config,
   isImageCapable,
-  parseVisionModelSetting,
+  isImageGenerationCapable,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
+  resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
+import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
+import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -45,7 +49,7 @@ const COMPACTION_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.';
 
 const IMAGE_MODEL_CONFIGURATION_HINT =
-  'Configure a model with imageOnly: true, baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
+  'Configure a model with supportsImageGeneration: true (or legacy imageOnly: true), baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
 
 const MODEL_PICKER_FLAGS = [
   'fast',
@@ -109,12 +113,40 @@ function persistScopeSpread(
   return {};
 }
 
-function formatVisionModelSettingForDisplay(setting: string): string {
-  const parsed = parseVisionModelSetting(setting);
-  if (!parsed) return setting.replace(/\0/g, '\\0');
-  return parsed.baseUrl
-    ? `${parsed.selector} (${parsed.baseUrl})`
-    : parsed.selector;
+/**
+ * `/model --fast <id>` prints and accepts the selector half of a persisted
+ * `authType:id\0<baseUrl>` pin; re-entering that printed value must not
+ * silently drop the live endpoint pin and rebind the first same-id registry
+ * entry (#12760). Keep the pinned setting when it names the same model; an
+ * argument carrying its own `\0` endpoint, or naming a different model, is
+ * persisted as given.
+ */
+function preservedAuxModelSetting(
+  persisted: unknown,
+  modelName: string,
+  selector: { authType?: AuthType; modelId: string },
+): string {
+  if (
+    typeof persisted !== 'string' ||
+    !persisted.includes('\0') ||
+    modelName.includes('\0')
+  ) {
+    return modelName;
+  }
+  try {
+    const pinned = resolveModelId(persisted.trim().split('\0', 1)[0]);
+    if (
+      pinned?.modelId === selector.modelId &&
+      (!selector.authType ||
+        !pinned?.authType ||
+        pinned.authType === selector.authType)
+    ) {
+      return persisted;
+    }
+  } catch {
+    // An unparseable pin is not preserved.
+  }
+  return modelName;
 }
 
 function persistSetting(
@@ -132,6 +164,7 @@ async function switchMainModel(
   currentAuthType: AuthType,
   modelArg: string,
   scopeOverride?: SettingScope,
+  persistSelection = true,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
 
@@ -144,25 +177,29 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
-    persistSetting(
-      settings,
-      'security.auth.selectedType',
-      parsed.authType,
-      scopeOverride,
-    );
-    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
-    // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
-    // by a previous model-picker selection — otherwise next launch would
-    // resolve to a different provider than this switch just chose. Use an
-    // empty-string tombstone so the clear overrides a lower-scope value (an
-    // undefined write is dropped from JSON and would not override on merge).
-    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    if (persistSelection) {
+      persistSetting(
+        settings,
+        'security.auth.selectedType',
+        parsed.authType,
+        scopeOverride,
+      );
+      persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
+      // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
+      // by a previous model-picker selection — otherwise next launch would
+      // resolve to a different provider than this switch just chose. Use an
+      // empty-string tombstone so the clear overrides a lower-scope value (an
+      // undefined write is dropped from JSON and would not override on merge).
+      persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    }
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
-  persistSetting(settings, 'model.name', modelArg, scopeOverride);
-  persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  if (persistSelection) {
+    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  }
   return modelArg;
 }
 
@@ -364,7 +401,7 @@ function getAvailableModelIds(
       : config.getAvailableModels();
   const availableModels = models.filter((m) => {
     if (mode === 'image')
-      return m.imageOnly === true && !m.fastOnly && !m.voiceOnly;
+      return isImageGenerationCapable(m) && !m.fastOnly && !m.voiceOnly;
     if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
     if (mode === 'fast') return !m.voiceOnly && !m.imageOnly && !m.visionOnly;
     if (mode === 'voice') return !m.fastOnly && !m.imageOnly && !m.visionOnly;
@@ -500,6 +537,20 @@ export const modelCommand: SlashCommand = {
         ),
       };
     }
+    const auxiliarySelection =
+      /(?:^|\s)--(?:fast|voice|vision|compaction|image)(?:\s|$)/.test(rawArgs);
+    if (
+      (hasProject &&
+        context.executionPolicy?.allowWorkspaceSettingsWrite === false) ||
+      (context.executionPolicy?.persistModelSelection === false &&
+        (hasProject || hasGlobal || auxiliarySelection))
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('This model selection is not available in this session.'),
+      };
+    }
     // Reject --project when workspace is untrusted — workspace settings are
     // ignored on merge, so the save would silently not take effect.
     if (
@@ -598,8 +649,15 @@ export const modelCommand: SlashCommand = {
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value (the
+          // workspace-models routes test that shape) — report "not set"
+          // instead of throwing on `.split`.
+          const rawFastModel = context.services.settings?.merged?.fastModel;
           const fastModel =
-            context.services.settings?.merged?.fastModel ?? 'not set';
+            (typeof rawFastModel === 'string'
+              ? rawFastModel.trim().split('\0', 1)[0]
+              : '') || 'not set';
           return {
             type: 'message',
             messageType: 'info',
@@ -631,14 +689,24 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const fastModelSelector =
+        modelName.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(modelName).authType
+          ? resolveAcpFastModelSelector(
+              modelName,
+              config.getAllConfiguredModels(),
+            )
+          : modelName;
       const selector = (() => {
         try {
-          return resolveModelId(modelName);
+          return fastModelSelector
+            ? resolveModelId(fastModelSelector)
+            : undefined;
         } catch {
           return undefined;
         }
       })();
-      if (!selector) {
+      if (!selector || !fastModelSelector) {
         return {
           type: 'message',
           messageType: 'error',
@@ -666,10 +734,15 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', modelName, scopeOverride);
+      const fastModelToPersist = preservedAuxModelSetting(
+        settings.merged?.fastModel,
+        fastModelSelector,
+        selector,
+      );
+      persistSetting(settings, 'fastModel', fastModelToPersist, scopeOverride);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
-      config.setFastModel(modelName);
+      config.setFastModel(fastModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -694,7 +767,7 @@ export const modelCommand: SlashCommand = {
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
               {
                 visionModel: visionModel
-                  ? formatVisionModelSettingForDisplay(visionModel)
+                  ? formatAuxModelSelectorForDisplay(visionModel)
                   : t('not set'),
               },
             ),
@@ -818,9 +891,15 @@ export const modelCommand: SlashCommand = {
           };
         }
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value — report
+          // "not set" instead of throwing on `.trim`.
+          const rawCompactionModel =
+            context.services.settings?.merged?.compactionModel;
           const compactionModel =
-            context.services.settings?.merged?.compactionModel?.trim() ||
-            t('not set (falls back to the main model)');
+            (typeof rawCompactionModel === 'string'
+              ? rawCompactionModel.trim().split('\0', 1)[0]
+              : '') || t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',
@@ -884,9 +963,19 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'compactionModel', modelName, scopeOverride);
+      const compactionModelToPersist = preservedAuxModelSetting(
+        settings.merged?.compactionModel,
+        modelName,
+        selector,
+      );
+      persistSetting(
+        settings,
+        'compactionModel',
+        compactionModelToPersist,
+        scopeOverride,
+      );
       // Sync runtime Config so the compression service picks it up immediately.
-      config.setCompactionModel(modelName);
+      config.setCompactionModel(compactionModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -909,7 +998,7 @@ export const modelCommand: SlashCommand = {
               'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
               {
                 imageModel: imageModel
-                  ? formatVisionModelSettingForDisplay(imageModel)
+                  ? formatAuxModelSelectorForDisplay(imageModel)
                   : t('not set'),
               },
             ),
@@ -950,7 +1039,9 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (model) =>
-          model.imageOnly === true && !model.fastOnly && !model.voiceOnly,
+          isImageGenerationCapable(model) &&
+          !model.fastOnly &&
+          !model.voiceOnly,
       );
       const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
@@ -1132,7 +1223,11 @@ export const modelCommand: SlashCommand = {
         authType,
         modelName,
         scopeOverride,
+        context.executionPolicy?.persistModelSelection !== false,
       );
+      if (context.executionMode === 'acp') {
+        await recordDaemonSessionModelFromConfig(config);
+      }
       return {
         type: 'message',
         messageType: 'info',

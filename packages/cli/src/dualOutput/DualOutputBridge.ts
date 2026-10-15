@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
@@ -21,7 +21,7 @@ import type { PermissionSuggestion } from '../nonInteractive/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
-import { reportChatRecordingFailureToAdapter } from '../utils/chat-recording-failure.js';
+import { reportChatRecordingFailureToAdapter } from '../nonInteractive/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 
@@ -205,7 +205,7 @@ export class DualOutputBridge {
     }
   }
 
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
     if (!this.active) return;

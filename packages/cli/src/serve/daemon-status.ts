@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import {
@@ -42,6 +43,11 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+} from './channel-worker-startup-ipc.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
@@ -49,7 +55,10 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
-import type { WorkspaceRegistry } from './workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
@@ -102,6 +111,7 @@ export interface DaemonStatusIssue {
     | 'workspace_status_unavailable'
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
+    | 'channel_restore_failed'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
     | 'daemon_log_degraded'
@@ -135,11 +145,15 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   /** Returns undefined when no policy was built — direct-embed, or no budget. */
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 interface DaemonStatusSection<T> {
@@ -183,6 +197,8 @@ interface DaemonStatusSecurity {
 }
 
 interface DaemonStatusLimits {
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxSessions: number | null;
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -195,6 +211,7 @@ interface DaemonStatusLimits {
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
   acpConnectionCap: number | null;
   acpPreAttachMaxFramesPerStream: number | null;
   acpPreAttachMaxFramesPerConnection: number | null;
@@ -202,27 +219,21 @@ interface DaemonStatusLimits {
   acpPreAttachMaxPayloadBytesPerConnection: number | null;
   acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
-   * The daemon's resolved memory figures. Observed and reported only: nothing
-   * consumes them to size a child. `null` on paths that resolve none, such as
-   * direct-embed bridges.
+   * The daemon's resolved memory figures and child policy. `null` on paths
+   * that resolve none, such as direct-embed bridges.
    */
   memory: DaemonStatusMemoryLimits | null;
 }
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required — scoped to the CHILD-HEAP model: every figure in
-   * this section except `journalGrowth` is resolved input or a model of a
-   * policy that does not exist yet; nothing sizes or bounds a child
-   * process. The flag exists so a client can never mistake the modeled
-   * partition for enforcement that has not shipped. Adaptive live-journal
-   * growth IS a runtime effect of the budget and is reported separately
-   * under `journalGrowth`.
+   * True only when managed child-count admission and the fixed old-space
+   * ceiling are both applied. Does not bound total process RSS. Adaptive
+   * journal growth is reported separately under `journalGrowth`.
    */
-  enforced: false;
+  enforced: boolean;
   /**
-   * Adaptive live-journal growth derived from this budget — the one figure
-   * in this section with runtime effect: session journal caps really do
+   * Adaptive live-journal growth derived from this budget: session caps really do
    * grow within this pool mid-turn (per-session effective limits appear on
    * each session diagnostic in `detail=full`). `null` when growth is
    * disabled (an operator-pinned journal cap, or a budget that leaves no
@@ -236,11 +247,12 @@ export interface DaemonStatusMemoryLimits {
     baselineMaxBytes: number;
   } | null;
   /**
-   * The per-child heap partition the daemon models but does not apply.
+   * The fixed per-child heap partition, applied only under `enforce`.
    * `null` when no policy was built.
    */
   childHeap: {
     mode: ChildHeapMode;
+    admissionEnforced: boolean;
     /**
      * Children the pool could host at once. 0 when no partition can be
      * modeled — either the pool cannot cover one child at the minimum heap,
@@ -250,15 +262,15 @@ export interface DaemonStatusMemoryLimits {
      */
     maxConcurrentChildren: number | null;
     /**
-     * What each would receive. Never 0 and never below
+     * What each receives under `enforce`. Never 0 and never below
      * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
      * the partition cannot be modeled within that floor.
      */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission
-     * pressure only: 0 does **not** mean the partition is safe to apply,
-     * because children still run on the much larger host-derived ceiling.
+     * pressure only: 0 does **not** prove the workload fits the ceiling.
+     * Under `observe` and `admit`, children retain the legacy heap arguments.
      *
      * Two known sources of counts that are not capacity pressure: a channel
      * swap on a daemon already at `maxConcurrentChildren` books one, because
@@ -278,9 +290,8 @@ export interface DaemonStatusMemoryLimits {
   availableMemorySource: 'constrained' | 'host';
   insufficientMemory: boolean;
   /**
-   * Derived figures for a capacity policy that has not shipped. Grouped, and
-   * named for what they are, so they cannot read as memory already reserved or
-   * limits already applied.
+   * Derived memory model used to calculate child-count admission and the
+   * fixed old-space ceiling. These values do not reserve physical memory.
    */
   modeled: {
     rootReserveMb: number;
@@ -300,14 +311,16 @@ export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
   childHeap?: ChildHeapPolicySnapshot,
   journalGrowth?: DaemonStatusMemoryLimits['journalGrowth'],
+  admissionEnforced = false,
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    enforced: admissionEnforced && childHeap?.mode === 'enforce',
     journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {
           mode: childHeap.mode,
+          admissionEnforced,
           maxConcurrentChildren: childHeap.maxConcurrentChildren,
           perChildCeilingMb: childHeap.perChildCeilingMb,
           refusals: childHeap.refusals,
@@ -414,6 +427,7 @@ interface DaemonStatusRuntimeMemory {
    * need an in-flight spawn count to admit without racing.
    */
   activeAcpChildren: number;
+  committedAcpChildren: number | null;
   /**
    * Which children the daemon's RSS sampling covers: every ACP child with a
    * live channel, i.e. the same set `activeAcpChildren` counts. Still not
@@ -454,6 +468,48 @@ interface DaemonStatusRuntimeMemory {
      * every contributor predates the field, so `null` never means "fresh".
      */
     oldestReadingAgeMs: number | null;
+    /**
+     * Lifetime V8 old-generation high-water marks across the sampled children,
+     * as a **maximum, not a sum**. A heap ceiling applies per child, and the
+     * peaks were reached at different times, so a total answers no question
+     * anybody has; each field is an independent maximum, not a portrait of
+     * one child. A per-child ceiling is judged against each axis on its own.
+     *
+     * `null` — never a zeroed object — when no sampled child reported. The
+     * gating on `childRssCoverage` makes this the common case rather than an
+     * edge one: with no SSE/WS watcher attached the daemon takes no sample at
+     * all while children keep running. Publishing zeros there would assert
+     * that no child needs any heap.
+     *
+     * Observational. Nothing in this block sizes a child or refuses a spawn;
+     * `limits.memory.enforced` reports whether the modeled child ceiling is
+     * currently applied.
+     */
+    heap: {
+      /** Committed high-water. Rises with the ceiling the child was given, so
+       *  it bounds what the workload needs rather than stating it. */
+      peakOldGenerationBytes: number;
+      /** Retained-after-major-GC high-water, independent of the ceiling. The
+       *  figure able to say a child cannot fit one. */
+      peakLiveSetBytes: number;
+      /** `total_heap_size` high-water. Includes the young generation. */
+      peakTotalHeapBytes: number;
+      majorGcCount: number;
+      majorGcMs: number;
+      /**
+       * Union across the sampled children of heap spaces none of them could
+       * classify. Non-empty means the byte figures are incomplete and must not
+       * be read as a full measurement — a V8 taxonomy change is the way this
+       * goes wrong, and it under-counts, making a child look like it fits.
+       */
+      unclassifiedSpaceNames: string[];
+      /**
+       * How many of `children.sampled` contributed a heap report. Below
+       * `sampled` when some children predate the fields, so the maxima above
+       * cover only part of the sampled set.
+       */
+      reported: number;
+    } | null;
   };
   /**
    * Modeled per-child shares. Advisory; nothing applies them. Each is capped
@@ -620,18 +676,21 @@ export async function buildDaemonStatusResponse(
   const memoryBudget = input.opts.daemonMemoryBudget;
   let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
   if (memoryBudget) {
-    // Count managed runtimes whose channel is live (non-dying), not what is
+    // Count the live (non-dying) channels of managed runtimes, not what is
     // merely active-state. `list()` (active-state only) drops workspaces
     // mid-replacement or blocked, which would under-report children in exactly
     // the window an admission policy must not treat as free capacity.
     // `listManaged()` is the managed set; `listEntries()` is the registration
     // count. A workspace whose kill has started but whose child has not exited
     // is excluded (dying channel); registered-but-dormant workspaces have no
-    // live child, so the registered count remains unsafe to divide by.
+    // live child, so the registered count remains unsafe to divide by. A
+    // paired runtime holds up to one live child per engine.
     const managedRuntimes = input.workspaceRegistry?.listManaged();
+    const liveChildren = (runtime: WorkspaceRuntime): number =>
+      runtime.bridge.liveChannelCount ??
+      (runtime.bridge.isChannelLive() ? 1 : 0);
     const activeAcpChildCount = managedRuntimes
-      ? managedRuntimes.filter((runtime) => runtime.bridge.isChannelLive())
-          .length
+      ? managedRuntimes.reduce((sum, runtime) => sum + liveChildren(runtime), 0)
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
       ? (
@@ -650,6 +709,16 @@ export async function buildDaemonStatusResponse(
     let childRssBytesTotal = 0;
     let childRssSampled = 0;
     let oldestChildReadingAgeMs: number | null = null;
+    // Maxima, not running totals — see the `heap` field docs. `heapReported`
+    // is tracked separately from `childRssSampled` because a sampled child
+    // that predates the fields contributes rss but no heap.
+    let heapReported = 0;
+    let peakOldGenerationBytes = 0;
+    let peakLiveSetBytes = 0;
+    let peakTotalHeapBytes = 0;
+    let heapMajorGcCount = 0;
+    let heapMajorGcMs = 0;
+    const heapUnclassified = new Set<string>();
     for (const runtime of managedRuntimes ?? []) {
       // Gate on the same predicate `activeAcpChildCount` used, rather than
       // trusting `getChildResourceSnapshot` to return nothing for a dead
@@ -657,11 +726,14 @@ export async function buildDaemonStatusResponse(
       // leaning on it would make `sampled <= activeAcpChildren` — the one
       // thing this block promises — hold by coincidence instead of by
       // construction.
-      if (!runtime.bridge.isChannelLive()) continue;
+      const children = liveChildren(runtime);
+      if (children === 0) continue;
       const snapshot = runtime.bridge.getChildResourceSnapshot?.();
       if (!snapshot) continue;
       childRssBytesTotal += snapshot.rssBytes;
-      childRssSampled += 1;
+      // Capped by the same count `activeAcpChildCount` added for this runtime.
+      const sampled = Math.min(children, snapshot.children ?? 1);
+      childRssSampled += sampled;
       // Absent on bridges predating the field; such a child still counts
       // toward the sum, it just cannot say how old its reading is.
       if (snapshot.ageMs !== undefined) {
@@ -669,6 +741,28 @@ export async function buildDaemonStatusResponse(
           oldestChildReadingAgeMs ?? 0,
           snapshot.ageMs,
         );
+      }
+      // Absent on a child spawned without the daemon marker or predating the
+      // fields. Skipped rather than counted as zero, so `reported` stays an
+      // honest denominator for the maxima.
+      const heap = snapshot.heap;
+      if (!heap) continue;
+      heapReported += Math.min(sampled, snapshot.heapReported ?? 1);
+      peakOldGenerationBytes = Math.max(
+        peakOldGenerationBytes,
+        heap.peakOldGenerationBytes,
+      );
+      peakLiveSetBytes = Math.max(peakLiveSetBytes, heap.peakLiveSetBytes);
+      peakTotalHeapBytes = Math.max(
+        peakTotalHeapBytes,
+        heap.peakTotalHeapBytes,
+      );
+      heapMajorGcCount = Math.max(heapMajorGcCount, heap.majorGcCount);
+      heapMajorGcMs = Math.max(heapMajorGcMs, heap.majorGcMs);
+      // Union, not max: one child seeing an unknown space is enough to make
+      // the aggregate incomplete, and naming which space is the whole point.
+      for (const name of heap.unclassifiedSpaceNames) {
+        heapUnclassified.add(name);
       }
     }
     const pressureMode = input.opts.memoryPressureMode ?? 'observe';
@@ -684,11 +778,26 @@ export async function buildDaemonStatusResponse(
     runtimeMemory = {
       registeredWorkspaces: registeredWorkspaceCount,
       activeAcpChildren: activeAcpChildCount,
+      committedAcpChildren: input.getCommittedAcpChildCount?.() ?? null,
       childRssCoverage: 'active_children',
       children: {
         rssBytes: childRssBytesTotal,
         sampled: childRssSampled,
         oldestReadingAgeMs: oldestChildReadingAgeMs,
+        // `null` on zero reporters, so an unmeasured daemon never publishes a
+        // zeroed object that reads as "no child needs any heap".
+        heap:
+          heapReported > 0
+            ? {
+                peakOldGenerationBytes,
+                peakLiveSetBytes,
+                peakTotalHeapBytes,
+                majorGcCount: heapMajorGcCount,
+                majorGcMs: heapMajorGcMs,
+                unclassifiedSpaceNames: [...heapUnclassified],
+                reported: heapReported,
+              }
+            : null,
       },
       modeled: {
         recommendedShareAtRegisteredMb:
@@ -888,6 +997,11 @@ export async function buildDaemonStatusResponse(
       sessionShellCommandEnabled: input.sessionShellCommandEnabled,
     },
     limits: {
+      maxRegisteredWorkspaces:
+        input.opts.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES,
+      ...(input.maxChannelControlWorkspaces !== undefined
+        ? { maxChannelControlWorkspaces: input.maxChannelControlWorkspaces }
+        : {}),
       maxSessions: bridgeSnapshot.limits.maxSessions,
       maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
@@ -901,6 +1015,8 @@ export async function buildDaemonStatusResponse(
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
+      sessionPromptSettledCloseGraceMs:
+        bridgeSnapshot.limits.sessionPromptSettledCloseGraceMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
       acpPreAttachMaxFramesPerStream:
         acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM : null,
@@ -928,6 +1044,7 @@ export async function buildDaemonStatusResponse(
               baselineMaxBytes: bridgeSnapshot.limits.maxJournalBytes,
             }
           : null,
+        input.childAdmissionEnforced,
       ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
@@ -1257,6 +1374,47 @@ function pushRuntimeIssues(
   const workers = groupedWorkers ?? [channelWorker];
   for (const worker of workers) {
     pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+  pushChannelRestoreIssues(issues, input.getChannelRestoreFailures?.() ?? []);
+}
+
+// A channel that failed to restore has no worker, so nothing above sees it.
+// One issue per workspace, naming each channel with its own error; the same
+// error is the channel's `runtime.lastError` in the workspace channel list.
+// Exported because the bootstrap status route builds its own response, and
+// boot records are written before the runtime app that serves the other one.
+export function pushChannelRestoreIssues(
+  issues: DaemonStatusIssue[],
+  failures: readonly ChannelRestoreFailure[],
+): void {
+  const byWorkspace = new Map<string, ChannelRestoreFailure[]>();
+  for (const failure of failures) {
+    const list = byWorkspace.get(failure.workspaceCwd) ?? [];
+    list.push(failure);
+    byWorkspace.set(failure.workspaceCwd, list);
+  }
+  for (const [workspaceCwd, list] of byWorkspace) {
+    // Bounded the way the sibling surface bounds the same class of data: a
+    // `serve.channels` list is not length-limited, and this message is
+    // returned on every status poll.
+    const shown = list.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    const omitted = list.length - shown.length;
+    issues.push({
+      code: 'channel_restore_failed',
+      severity: 'warning',
+      message:
+        `serve.channels for workspace ${workspaceCwd} were not restored: ` +
+        `${shown
+          .map(
+            (failure) =>
+              `${failure.channel.slice(
+                0,
+                MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+              )} (${failure.message})`,
+          )
+          .join('; ')}` +
+        `${omitted > 0 ? `; and ${omitted} more` : ''}.`,
+    });
   }
 }
 

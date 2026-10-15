@@ -291,6 +291,19 @@ export const importConfigCommand: SlashCommand = {
       };
     }
 
+    if (
+      parsed.scope === 'project' &&
+      context.executionPolicy?.allowWorkspaceSettingsWrite === false
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'Project configuration imports are not available in this session.',
+        ),
+      };
+    }
+
     try {
       const importSource = resolveImportSourceForScope(
         parsed.source,

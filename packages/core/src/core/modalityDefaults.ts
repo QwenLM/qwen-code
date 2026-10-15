@@ -6,6 +6,8 @@
 
 import type { InputModalities } from './contentGenerator.js';
 import { normalize } from './tokenLimits.js';
+import { lookupModelCatalog } from '../models/model-catalog.js';
+import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
 const FULL_MULTIMODAL: InputModalities = {
   image: true,
@@ -40,11 +42,18 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Alibaba / Qwen
   // -------------------
+  // Qwen Omni models: full multimodal (image + audio + video) — the omni
+  // harness targets these. Must precede the qwen3.x-plus/qwen fallbacks:
+  // "qwen3.5-omni-plus" would otherwise match /^qwen/ and be text-only.
+  [/^qwen\d*\.?\d*-omni/, FULL_MULTIMODAL],
+  [/^qwen-omni/, FULL_MULTIMODAL],
   // Qwen Plus models: image + video support
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
   [/^qwen3\.7-plus/, { image: true, video: true }],
-  // Qwen Max models (3.8+): image support
+  // Qwen 3.8 series: flash/plus support image + video; max supports image only
+  [/^qwen3\.8-flash/, { image: true, video: true }],
+  [/^qwen3\.8-plus/, { image: true, video: true }],
   [/^qwen3\.8-max/, { image: true }],
   [/^coder-model$/, { image: true, video: true }],
 
@@ -59,14 +68,19 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen/, {}],
 
   // -------------------
-  // DeepSeek — text-only
+  // DeepSeek — text-only, except explicit vision variants
+  // (QwenLM/qwen-code#10270)
   // -------------------
+  [/^deepseek-.*vision/, { image: true }],
   [/^deepseek/, {}],
 
   // -------------------
-  // Zhipu GLM
+  // Zhipu GLM — v-suffix ids are vision models; others are text-only
+  // (QwenLM/qwen-code#10270)
   // -------------------
-  [/^glm-4\.5v/, { image: true }],
+  [/^glm-[0-9.]+v/, { image: true }],
+  // glm-5.3-flash natively integrates vision input (no v suffix)
+  [/^glm-5\.3-flash/, { image: true }],
   [/^glm-5(?:-|$)/, {}],
   [/^glm-/, {}],
 
@@ -99,18 +113,22 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
 /**
  * Return the default input modalities for a model based on its name.
  *
- * Uses the same normalize-then-regex pattern as {@link tokenLimit}.
- * Unknown models default to text-only (empty object) to avoid sending
- * unsupported media types that would cause unrecoverable API errors.
+ * Uses the same normalize-then-regex pattern as {@link tokenLimit}, merged
+ * with the models.dev catalog entry. PDF stays explicit because it selects a
+ * different file-reading path; other catalog modalities can extend a known
+ * family. A model neither source knows stays text-only (empty object) to avoid
+ * sending unsupported media types that would cause unrecoverable API errors.
  */
 export function defaultModalities(model: string): InputModalities {
   const norm = normalize(model);
+  const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
+  delete fromCatalog.pdf;
   for (const [regex, modalities] of MODALITY_PATTERNS) {
     if (regex.test(norm)) {
-      return { ...modalities };
+      return { ...fromCatalog, ...modalities };
     }
   }
-  return {};
+  return fromCatalog;
 }
 
 /**
@@ -131,15 +149,23 @@ export function isQwenFamilyWireModel(model: string | undefined): boolean {
 }
 
 /**
- * True for the qwen3.8-max wire model family — the only family that
- * reads the tiered `reasoning_effort` field directly. Prefix-matched so
- * dated snapshots and `-latest` aliases are covered, consistent with the
- * family pattern in MODALITY_PATTERNS above. Older qwen hybrids expose
- * only the on/off `enable_thinking` switch instead.
+ * A configured Qwen reasoning protocol takes precedence over the legacy
+ * qwen3.8-max family fallback. Other providers use independent wire rules.
  */
-export function isTieredEffortWireModel(model: string | undefined): boolean {
+export function isTieredEffortWireModel(
+  model: string | undefined,
+  configuredReasoning?: unknown,
+): boolean {
   if (!model) {
     return false;
+  }
+  const reasoning = parseModelReasoningCapabilities(configuredReasoning);
+  if (reasoning) {
+    return (
+      isQwenFamilyWireModel(model) &&
+      !reasoning.toggleOnly &&
+      reasoning.disableField === 'reasoning_effort'
+    );
   }
   return model.toLowerCase().startsWith('qwen3.8-max');
 }

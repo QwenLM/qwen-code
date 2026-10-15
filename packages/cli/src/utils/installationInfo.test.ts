@@ -7,11 +7,13 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   formatUpdateInstructions,
+  getHomebrewLatestVersion,
   getInstallationInfo,
   getNpmCliPath,
   PackageManager,
   resolveUpdateCommand,
 } from './installationInfo.js';
+import { setLanguageAsync, t } from '../i18n/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -210,6 +212,24 @@ describe('getInstallationInfo', () => {
     expect(info.updateCommand).toBeUndefined();
     expect(info.updateMessage).toContain('Standalone install detected');
     expect(info.updateMessage).not.toContain('npm install');
+    expect(info.updateMessage).not.toContain(
+      'Please rerun the standalone installer to update',
+    );
+
+    const disabledInfo = getInstallationInfo(projectRoot, false);
+
+    expect(disabledInfo.updateMessage).toBe(
+      'Standalone install detected. Please rerun the standalone installer to update: ' +
+        'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+    );
+
+    // Compose the real detector output with the real formatter: the guidance
+    // must survive as a standalone translatable line, not just as fixtures
+    // transcribed by hand.
+    expect(formatUpdateInstructions(disabledInfo, '1.2.3')).toEqual([
+      'Standalone install detected. Please rerun the standalone installer to update:',
+      ' curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+    ]);
   });
 
   it('should detect Windows standalone installs and avoid npm auto-update', () => {
@@ -255,6 +275,16 @@ describe('getInstallationInfo', () => {
     expect(info.updateCommand).toBeUndefined();
     expect(info.updateMessage).toContain('Standalone install detected');
     expect(info.updateMessage).not.toContain('npm install');
+
+    const winDisabled = getInstallationInfo(projectRoot, false);
+
+    expect(winDisabled.updateMessage).toContain(
+      'Please rerun the standalone installer to update',
+    );
+    expect(winDisabled.updateMessage).toContain('install-qwen-standalone.ps1');
+    expect(winDisabled.updateMessage).not.toContain(
+      'Attempting to automatically update now',
+    );
   });
 
   it('should detect macOS standalone installs and avoid npm auto-update', () => {
@@ -695,6 +725,16 @@ describe('resolveUpdateCommand', () => {
 });
 
 describe('formatUpdateInstructions', () => {
+  const standaloneDisabledInfo = {
+    packageManager: PackageManager.STANDALONE,
+    isGlobal: true,
+    isStandalone: true,
+    standaloneDir: '/Users/test/.local/lib/qwen-code',
+    updateMessage:
+      'Standalone install detected. Please rerun the standalone installer to update: ' +
+      'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+  };
+
   it('formats package-manager update commands', () => {
     expect(
       formatUpdateInstructions(
@@ -739,6 +779,21 @@ describe('formatUpdateInstructions', () => {
         '1.2.3',
       ),
     ).toEqual(['Running via npx, update not applicable.']);
+  });
+
+  it('splits standalone guidance into a translatable prefix line and the installer command', () => {
+    expect(formatUpdateInstructions(standaloneDisabledInfo, '1.2.3')).toEqual([
+      'Standalone install detected. Please rerun the standalone installer to update:',
+      ' curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+    ]);
+  });
+
+  it('translates the standalone prefix line in zh', async () => {
+    const lines = formatUpdateInstructions(standaloneDisabledInfo, '1.2.3');
+
+    await setLanguageAsync('zh');
+    expect(t(lines[0]!)).toBe('检测到独立安装。请重新运行独立安装程序以更新：');
+    await setLanguageAsync('en');
   });
 });
 
@@ -799,5 +854,69 @@ describe('getNpmCliPath', () => {
       'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
     );
     expect(mockedRealPathSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('getHomebrewLatestVersion', () => {
+  const brewInfoOutput = (stable: unknown) =>
+    JSON.stringify({
+      formulae: [{ name: 'qwen-code', versions: { stable } }],
+      casks: [],
+    });
+
+  it('returns the stable version from brew info --json=v2', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: brewInfoOutput('0.21.13'),
+      stderr: '',
+    });
+
+    await expect(getHomebrewLatestVersion(undefined, run)).resolves.toBe(
+      '0.21.13',
+    );
+    expect(run).toHaveBeenCalledWith(
+      'brew',
+      ['info', '--json=v2', '--formula', 'qwen-code'],
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
+  });
+
+  it('returns null when brew fails (missing brew, timeout, non-zero exit)', async () => {
+    const run = vi.fn().mockRejectedValue(new Error('command not found'));
+
+    await expect(
+      getHomebrewLatestVersion('qwen-code', run),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the output is not valid JSON', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
+
+    await expect(
+      getHomebrewLatestVersion('qwen-code', run),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the formula is not in the output', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ formulae: [], casks: [] }),
+      stderr: '',
+    });
+
+    await expect(
+      getHomebrewLatestVersion('qwen-code', run),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when stable is not a non-empty string', async () => {
+    for (const stable of [undefined, null, 42, '']) {
+      const run = vi.fn().mockResolvedValue({
+        stdout: brewInfoOutput(stable),
+        stderr: '',
+      });
+
+      await expect(
+        getHomebrewLatestVersion('qwen-code', run),
+      ).resolves.toBeNull();
+    }
   });
 });
