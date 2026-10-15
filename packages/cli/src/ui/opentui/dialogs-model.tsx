@@ -36,6 +36,8 @@ import {
   type DialogListItem,
 } from './dialogs-shared.js';
 import { useDialogFrameKeys } from './dialogs-shared.js';
+import { SettingScope } from '../../config/settings.js';
+import { isCleanPublicProviderBaseUrl } from '../../utils/aux-model-selector.js';
 
 export const MAX_MODEL_ITEMS_TO_SHOW = 10;
 
@@ -171,9 +173,27 @@ export function encodeAuxModelSelector(selected: string): string {
   return selected;
 }
 
-/** Keep the existing vision/image export while sharing aux-selector encoding. */
-export function encodeVisionModelSelector(selected: string): string {
-  return encodeAuxModelSelector(selected);
+/**
+ * Parity of `encodeVisionModelSelector` in ModelDialog.tsx: keep the selected
+ * row's baseUrl when present (so same-provider same-id endpoints stay
+ * distinct), otherwise fall back to the aux encoding.
+ */
+export function encodeVisionModelSelector(
+  selected: string,
+  scope?: SettingScope,
+): string {
+  if (!selected.includes('::')) {
+    return encodeAuxModelSelector(selected);
+  }
+  const parsed = parseModelSelectionKey(selected);
+  const selector = `${parsed.authType}:${parsed.modelId}`;
+  if (!parsed.baseUrl) return selector;
+  if (scope === SettingScope.Workspace) {
+    return isCleanPublicProviderBaseUrl(parsed.baseUrl)
+      ? `${selector}\0${parsed.baseUrl}`
+      : selector;
+  }
+  return `${selector}\0${parsed.baseUrl}`;
 }
 
 /** Parity of the ModelDialog title line. */

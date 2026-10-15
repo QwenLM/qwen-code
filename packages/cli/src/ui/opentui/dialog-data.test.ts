@@ -477,6 +477,81 @@ describe('applyModelSelection', () => {
       ).toBe(true);
     });
 
+    it('writes an empty-string tombstone for model.baseUrl at workspace scope when baseUrl carries credentials', async () => {
+      const switchModel = vi.fn(async () => {});
+      const credentialUrl = 'https://u:sk@h.example/v1';
+      const config = resolvedConfig({
+        switchModel: switchModel as Config['switchModel'],
+        getContentGeneratorConfig: (() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'm2',
+          baseUrl: credentialUrl,
+          apiKey: 'sk-1234567',
+        })) as Config['getContentGeneratorConfig'],
+      });
+      const trusted = createFakeSettings({ isTrusted: true });
+      const entries = [modelRow({ id: 'm2', baseUrl: credentialUrl })];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings: trusted.settings,
+        entries,
+        mode: 'primary',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(trusted.written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'model.name',
+        value: 'm2',
+      });
+      expect(trusted.written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'model.baseUrl',
+        value: '',
+      });
+    });
+
+    it('persists clean model.baseUrl with query parameters at workspace scope without tombstoning', async () => {
+      const switchModel = vi.fn(async () => {});
+      const cleanUrlWithQuery =
+        'https://corp.example/openai?api-version=2024-01-01';
+      const config = resolvedConfig({
+        switchModel: switchModel as Config['switchModel'],
+        getContentGeneratorConfig: (() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'm2',
+          baseUrl: cleanUrlWithQuery,
+          apiKey: 'sk-1234567',
+        })) as Config['getContentGeneratorConfig'],
+      });
+      const trusted = createFakeSettings({ isTrusted: true });
+      const entries = [modelRow({ id: 'm2', baseUrl: cleanUrlWithQuery })];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings: trusted.settings,
+        entries,
+        mode: 'primary',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(trusted.written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'model.name',
+        value: 'm2',
+      });
+      expect(trusted.written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'model.baseUrl',
+        value: cleanUrlWithQuery,
+      });
+    });
+
     it('blocks discontinued qwen-oauth selections without switching', async () => {
       const switchModel = vi.fn(async () => {});
       const config = resolvedConfig({

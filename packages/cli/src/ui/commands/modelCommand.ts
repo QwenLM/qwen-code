@@ -29,7 +29,10 @@ import {
   parseAcpModelOption,
   resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
-import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
+import {
+  formatAuxModelSelectorForDisplay,
+  isCleanPublicProviderBaseUrl,
+} from '../../utils/aux-model-selector.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   formatUnsupportedVoiceModelMessage,
@@ -653,11 +656,11 @@ export const modelCommand: SlashCommand = {
           // A hand-edited settings.json can hold a non-string value (the
           // workspace-models routes test that shape) — report "not set"
           // instead of throwing on `.split`.
-          const rawFastModel = context.services.settings?.merged?.fastModel;
-          const fastModel =
-            (typeof rawFastModel === 'string'
-              ? rawFastModel.trim().split('\0', 1)[0]
-              : '') || 'not set';
+          const fastModel = context.services.settings?.merged?.fastModel
+            ? formatAuxModelSelectorForDisplay(
+                context.services.settings.merged.fastModel,
+              )
+            : 'not set';
           return {
             type: 'message',
             messageType: 'info',
@@ -847,12 +850,16 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const scope = resolveScope(settings, scopeOverride);
       const qualifiedModelName = `${
         selector.authType ?? matched.authType
       }:${selector.modelId}`;
-      const visionModel = matched.baseUrl
-        ? `${qualifiedModelName}\0${matched.baseUrl}`
-        : qualifiedModelName;
+      const visionModel =
+        matched.baseUrl &&
+        (scope !== SettingScope.Workspace ||
+          isCleanPublicProviderBaseUrl(matched.baseUrl))
+          ? `${qualifiedModelName}\0${matched.baseUrl}`
+          : qualifiedModelName;
       persistSetting(settings, 'visionModel', visionModel, scopeOverride);
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
@@ -891,15 +898,11 @@ export const modelCommand: SlashCommand = {
           };
         }
         if (context.executionMode !== 'interactive') {
-          // The picker persists `authType:id\0<baseUrl>`; report the selector.
-          // A hand-edited settings.json can hold a non-string value — report
-          // "not set" instead of throwing on `.trim`.
-          const rawCompactionModel =
-            context.services.settings?.merged?.compactionModel;
-          const compactionModel =
-            (typeof rawCompactionModel === 'string'
-              ? rawCompactionModel.trim().split('\0', 1)[0]
-              : '') || t('not set (falls back to the main model)');
+          const rawCompaction =
+            context.services.settings?.merged?.compactionModel?.trim();
+          const compactionModel = rawCompaction
+            ? formatAuxModelSelectorForDisplay(rawCompaction)
+            : t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',
@@ -1072,12 +1075,16 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const scope = resolveScope(settings, scopeOverride);
       const qualifiedModelName = `${
         selector.authType ?? matched.authType
       }:${selector.modelId}`;
-      const imageModel = matched.baseUrl
-        ? `${qualifiedModelName}\0${matched.baseUrl}`
-        : qualifiedModelName;
+      const imageModel =
+        matched.baseUrl &&
+        (scope !== SettingScope.Workspace ||
+          isCleanPublicProviderBaseUrl(matched.baseUrl))
+          ? `${qualifiedModelName}\0${matched.baseUrl}`
+          : qualifiedModelName;
       if (!config.resolveImageGenerationModel(imageModel)) {
         return {
           type: 'message',

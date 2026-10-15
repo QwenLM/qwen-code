@@ -2442,7 +2442,7 @@ describe('modelCommand', () => {
       });
     });
 
-    it('strips the endpoint disambiguator from a pinned compaction model (#12760)', async () => {
+    it('should format compactionModel setting through formatAuxModelSelectorForDisplay in non-interactive readback', async () => {
       mockContext = createMockCommandContext({
         executionMode: 'non_interactive',
         invocation: { args: '--compaction' },
@@ -2453,8 +2453,7 @@ describe('modelCommand', () => {
           }),
           settings: {
             merged: {
-              compactionModel:
-                'openai:shared-compact\0https://free-quota.example.com/v1',
+              compactionModel: 'openai:c\0https://u:sk@h.example/v1',
             } as Record<string, unknown>,
           },
         },
@@ -2465,11 +2464,11 @@ describe('modelCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringMatching(
-          /^Current compaction model: openai:shared-compact\n/,
-        ),
+        content: expect.stringContaining('openai:c (https://h.example/v1)'),
       });
-      expect((result as { content: string }).content).not.toContain('\0');
+      const content = (result as { content: string }).content;
+      expect(content).not.toContain('sk@');
+      expect(content).not.toContain('\0');
     });
 
     it('reports a non-string compactionModel setting as not set instead of throwing (#12760)', async () => {
@@ -2657,7 +2656,7 @@ describe('modelCommand', () => {
       });
     });
 
-    it('strips the endpoint disambiguator from a pinned fast model (#12760)', async () => {
+    it('should format fastModel setting through formatAuxModelSelectorForDisplay in non-interactive readback', async () => {
       mockContext = createMockCommandContext({
         executionMode: 'non_interactive',
         invocation: { args: '--fast' },
@@ -2665,15 +2664,13 @@ describe('modelCommand', () => {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
               model: 'qwen-max',
-              authType: AuthType.QWEN_OAUTH,
+              authType: AuthType.USE_OPENAI,
             }),
             getModel: vi.fn().mockReturnValue('qwen-max'),
           },
           settings: {
             merged: {
-              // What the picker persists for a same-id endpoint pin.
-              fastModel:
-                'openai:shared-fast\0https://free-quota.example.com/v1',
+              fastModel: 'openai:m\0https://u:sk@h.example/v1',
             } as Record<string, unknown>,
           },
         },
@@ -2684,11 +2681,11 @@ describe('modelCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringMatching(
-          /^Current fast model: openai:shared-fast\n/,
-        ),
+        content: expect.stringContaining('openai:m (https://h.example/v1)'),
       });
-      expect((result as { content: string }).content).not.toContain('\0');
+      const content = (result as { content: string }).content;
+      expect(content).not.toContain('sk@');
+      expect(content).not.toContain('\0');
     });
 
     it('reports a non-string fastModel setting as not set instead of throwing (#12760)', async () => {

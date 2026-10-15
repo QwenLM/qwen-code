@@ -9,8 +9,11 @@ import {
   AUX_MODEL_SELECTOR_SETTING_KEYS,
   formatAuxModelSelectorForDisplay,
   formatSettingRowValue,
+  hasBaseUrlCredentials,
   isAuxModelSelectorSettingKey,
+  isCleanPublicProviderBaseUrl,
   publicAuxModelSelectorValue,
+  splitAuxModelSelector,
 } from './aux-model-selector.js';
 
 describe('AUX_MODEL_SELECTOR_SETTING_KEYS', () => {
@@ -243,5 +246,177 @@ describe('formatSettingRowValue', () => {
     // An aux key with a non-string value is not a selector, so the suffix
     // branch must not fire; a plain number still renders as before.
     expect(formatSettingRowValue('fastModel', 42)).toBe('42');
+  });
+});
+
+describe('isCleanPublicProviderBaseUrl', () => {
+  it('returns true for clean http/https URLs without credentials', () => {
+    expect(isCleanPublicProviderBaseUrl('https://api.example.com/v1')).toBe(
+      true,
+    );
+  });
+
+  it('returns false for URLs containing query parameters or hash fragments', () => {
+    expect(
+      isCleanPublicProviderBaseUrl('https://api.example.com/v1?api-version=1'),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl('https://gw.internal/v1?api-key=sk-secret'),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl('https://gw.internal/v1#token=sk-secret'),
+    ).toBe(false);
+  });
+
+  it('returns false for URLs containing credentials', () => {
+    expect(
+      isCleanPublicProviderBaseUrl('https://user:sk-secret@api.example.com/v1'),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl('https://user@api.example.com/v1'),
+    ).toBe(false);
+  });
+
+  it('returns false for URLs containing control or invisible characters', () => {
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://api.example.com/v1\0https://evil.com',
+      ),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://api.example.com/v1\u009fhttps://evil.com',
+      ),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://gw.example/v1\u200bhttps://user:sk-secret@o.e/v1',
+      ),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://gw.example/v1\u202ehttps://user:sk-secret@other.example/v1',
+      ),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://gw.example/v1\ufeffhttps://user:sk-secret@other.example/v1',
+      ),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://gw.example/v1\u2028https://user:sk-secret@other.example/v1',
+      ),
+    ).toBe(false);
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://gw.example/v1\u2029https://user:sk-secret@other.example/v1',
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false for non-http(s) schemes or invalid URLs', () => {
+    expect(isCleanPublicProviderBaseUrl('ftp://api.example.com/v1')).toBe(
+      false,
+    );
+    expect(isCleanPublicProviderBaseUrl('not a url')).toBe(false);
+    expect(isCleanPublicProviderBaseUrl('')).toBe(false);
+  });
+
+  it('returns false for ASCII-space smuggled credentials', () => {
+    expect(
+      isCleanPublicProviderBaseUrl(
+        'https://gw.example/v1 https://user:sk-secret@o.e/v1',
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects credential-bearing endpoints to enforce workspace tombstones', () => {
+    const credentialEndpoints = [
+      'https://team:sk-live-abc123@corp.example/v1',
+      'https://gw.internal/v1?key=sk-secret',
+      'https://gw.internal/v1#token=sk-secret',
+      'https://gw.example/v1\u200bhttps://user:sk-secret@other.example/v1',
+      'https://gw.example/v1 https://user:sk-secret@o.e/v1',
+    ];
+    for (const endpoint of credentialEndpoints) {
+      expect(isCleanPublicProviderBaseUrl(endpoint)).toBe(false);
+    }
+    expect(
+      isCleanPublicProviderBaseUrl('https://clean.provider.example/v1'),
+    ).toBe(true);
+  });
+});
+
+describe('splitAuxModelSelector', () => {
+  it('returns undefined registryBaseUrl when no NUL delimiter is present', () => {
+    expect(splitAuxModelSelector('openai:gpt-4o')).toEqual({
+      modelSelector: 'openai:gpt-4o',
+      registryBaseUrl: undefined,
+    });
+  });
+
+  it('returns null registryBaseUrl when trailing NUL has an empty suffix', () => {
+    expect(splitAuxModelSelector('openai:gpt-4o\0')).toEqual({
+      modelSelector: 'openai:gpt-4o',
+      registryBaseUrl: null,
+    });
+  });
+
+  it('preserves exact raw suffix for availability matching while formatAuxModelSelectorForDisplay scrubs userinfo', () => {
+    const raw = 'openai:adv\0https://user:sk-secret@gw.example/v1';
+    expect(splitAuxModelSelector(raw)).toEqual({
+      modelSelector: 'openai:adv',
+      registryBaseUrl: 'https://user:sk-secret@gw.example/v1',
+    });
+    expect(formatAuxModelSelectorForDisplay(raw)).toBe(
+      'openai:adv (https://gw.example/v1)',
+    );
+  });
+});
+
+describe('hasBaseUrlCredentials', () => {
+  it('detects userinfo credentials', () => {
+    expect(
+      hasBaseUrlCredentials('https://user:sk-secret@api.example.com/v1'),
+    ).toBe(true);
+    expect(hasBaseUrlCredentials('https://user@api.example.com/v1')).toBe(true);
+  });
+
+  it('detects control characters and smuggled credentials', () => {
+    expect(
+      hasBaseUrlCredentials('https://api.example.com/v1\0https://evil.com'),
+    ).toBe(true);
+    expect(
+      hasBaseUrlCredentials(
+        'https://gw.example/v1\u200bhttps://user:sk-secret@o.e/v1',
+      ),
+    ).toBe(true);
+  });
+
+  it('detects whitespace and space-smuggled credentials', () => {
+    expect(
+      hasBaseUrlCredentials(
+        'https://gw.example/v1 https://user:sk-secret@o.e/v1',
+      ),
+    ).toBe(true);
+    expect(hasBaseUrlCredentials('https://api.example.com/v1 ')).toBe(true);
+  });
+
+  it('detects mid-string @ characters', () => {
+    expect(
+      hasBaseUrlCredentials('https://gw.example/v1@other.example/v1'),
+    ).toBe(true);
+  });
+
+  it('returns false for clean URLs including query parameters', () => {
+    expect(hasBaseUrlCredentials('https://api.example.com/v1')).toBe(false);
+    expect(
+      hasBaseUrlCredentials(
+        'https://corp.example/openai?api-version=2024-01-01',
+      ),
+    ).toBe(false);
+    expect(hasBaseUrlCredentials('localhost:11434')).toBe(false);
+    expect(hasBaseUrlCredentials('')).toBe(false);
   });
 });

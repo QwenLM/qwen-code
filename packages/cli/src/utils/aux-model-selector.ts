@@ -176,3 +176,65 @@ export function formatSettingRowValue(key: string, value: unknown): string {
     ? formatAuxModelSelectorForDisplay(value)
     : String(value);
 }
+
+/**
+ * Checks whether a baseUrl carries embedded credentials or formatting that
+ * requires tombstoning on workspace-scope persistence.
+ */
+export function hasBaseUrlCredentials(baseUrl: string): boolean {
+  if (!baseUrl) return false;
+  if (hasFoldedCharacter(baseUrl)) return true;
+  if (baseUrl.includes('@')) return true;
+  if (/^https?:\/\//i.test(baseUrl)) {
+    try {
+      const url = new URL(baseUrl);
+      if (url.username || url.password) return true;
+      if (/:\/\//.test(url.pathname)) return true;
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Workspace Tombstone helper: determines whether a baseUrl can safely be
+ * written to a shareable workspace settings file. Returns true only if the
+ * baseUrl has no control characters, is a valid HTTP(S) URL, carries no
+ * userinfo, query, or hash, and contains no folded or whitespace characters.
+ */
+export function isCleanPublicProviderBaseUrl(baseUrl: string): boolean {
+  if (!baseUrl) return false;
+  if (hasFoldedCharacter(baseUrl)) return false;
+  if (!/^https?:\/\//i.test(baseUrl)) return false;
+  if (baseUrl.includes('@')) return false;
+  try {
+    const url = new URL(baseUrl);
+    if (/:\/\//.test(url.pathname)) return false;
+    return !url.username && !url.password && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Splits a raw `authType:id\0baseUrl` aux-model selector into its model
+ * selector prefix and optional registry baseUrl suffix (`undefined` when no
+ * NUL delimiter is present, `null` when a trailing NUL delimiter has an empty
+ * suffix), preserving exact raw suffix semantics for internal availability and
+ * provider lookup callers.
+ */
+export function splitAuxModelSelector(modelName: string): {
+  modelSelector: string;
+  registryBaseUrl: string | null | undefined;
+} {
+  const endpointIndex = modelName.indexOf('\0');
+  if (endpointIndex < 0) {
+    return { modelSelector: modelName, registryBaseUrl: undefined };
+  }
+  return {
+    modelSelector: modelName.slice(0, endpointIndex),
+    registryBaseUrl: modelName.slice(endpointIndex + 1) || null,
+  };
+}

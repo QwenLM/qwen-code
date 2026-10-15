@@ -93,6 +93,7 @@ import type {
   McpToolInfo,
 } from './dialogs-mcp.js';
 import type { ExtensionRow } from './dialogs-extensions.js';
+import { hasBaseUrlCredentials } from '../../utils/aux-model-selector.js';
 
 function advisorSelector(
   model: NonNullable<OpenTuiModelEntry['model']>,
@@ -491,7 +492,8 @@ export async function applyModelSelection(
   }
 
   if (mode === 'vision') {
-    const visionModel = encodeVisionModelSelector(selectionKey);
+    const scope = resolveModelPersistScope(settings, persistScope);
+    const visionModel = encodeVisionModelSelector(selectionKey, scope);
     const visionModelDisplay =
       parseVisionModelSetting(visionModel)?.selector ?? visionModel;
     // Pinning the primary itself is ignored by the bridge at runtime, so
@@ -510,7 +512,6 @@ export async function applyModelSelection(
     }
     // Sync runtime Config so the vision bridge picks it up without a restart.
     config?.setVisionModel?.(visionModel);
-    const scope = resolveModelPersistScope(settings, persistScope);
     settings.setValue(scope, 'visionModel', visionModel);
     // Honor the pin even if the model isn't image-capable, but warn — the
     // bridge will send images to it.
@@ -550,7 +551,8 @@ export async function applyModelSelection(
     if (!selectedEntry || !config) {
       return { ok: false, error: t('Selected image model is unavailable.') };
     }
-    const imageModel = encodeVisionModelSelector(selectionKey);
+    const scope = resolveModelPersistScope(settings, persistScope);
+    const imageModel = encodeVisionModelSelector(selectionKey, scope);
     const imageModelDisplay =
       parseVisionModelSetting(imageModel)?.selector ?? imageModel;
     if (!config.resolveImageGenerationModel?.(imageModel)) {
@@ -563,7 +565,6 @@ export async function applyModelSelection(
       };
     }
     await config.setImageModel(imageModel);
-    const scope = resolveModelPersistScope(settings, persistScope);
     settings.setValue(scope, 'imageModel', imageModel);
     return {
       ok: true,
@@ -652,7 +653,13 @@ export async function applyModelSelection(
   // Persist only after the runtime switch succeeded.
   const scope = resolveModelPersistScope(settings, persistScope);
   settings.setValue(scope, 'model.name', effectiveModelId);
-  settings.setValue(scope, 'model.baseUrl', effectiveBaseUrl ?? '');
+  const persistedBaseUrl =
+    scope === SettingScope.Workspace &&
+    effectiveBaseUrl &&
+    hasBaseUrlCredentials(effectiveBaseUrl)
+      ? ''
+      : (effectiveBaseUrl ?? '');
+  settings.setValue(scope, 'model.baseUrl', persistedBaseUrl);
   if (effectiveAuthType) {
     settings.setValue(scope, 'security.auth.selectedType', effectiveAuthType);
   }
