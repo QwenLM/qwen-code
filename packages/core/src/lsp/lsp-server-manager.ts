@@ -659,6 +659,7 @@ export class LspServerManager {
           `LSP server ${name} exited but restartOnCrash is disabled`,
         );
         handle.error = exitCause();
+        handle.diagnosticPull = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -669,6 +670,7 @@ export class LspServerManager {
           `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
         );
         handle.error = exitCause();
+        handle.diagnosticPull = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -679,6 +681,7 @@ export class LspServerManager {
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.error = exitCause();
+        handle.diagnosticPull = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;

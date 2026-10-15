@@ -987,6 +987,7 @@ describe('LspServerManager', () => {
 
     const handle = manager.getHandles().get('clangd');
     expect(handle?.status).toBe('FAILED');
+    expect(handle?.diagnosticPull).toBeUndefined();
     expect(handle?.error?.message).toBe(
       'server process exited (code unknown, signal SIGKILL)',
     );
@@ -1023,7 +1024,9 @@ describe('LspServerManager', () => {
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
       'LSP server clangd exited but maxRestarts is 0',
     );
-    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.diagnosticPull).toBeUndefined();
   });
 
   it('retries the same config after crash restart attempts are exhausted', async () => {
@@ -1038,6 +1041,7 @@ describe('LspServerManager', () => {
     handle!.restartAttempts = 1;
 
     crash.exit?.(1);
+    expect(handle!.diagnosticPull).toBeUndefined();
     const result = await manager.reconcileServerConfigs([config]);
 
     expect(result.restarted).toEqual(['clangd']);
