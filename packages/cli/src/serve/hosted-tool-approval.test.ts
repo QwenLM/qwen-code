@@ -228,3 +228,17 @@ describe('Hosted approval waiters', () => {
     waiters.notify('a');
   });
 });
+
+it.each(['default', 'auto-edit'] as const)(
+  'preapproves only native search-profile tools in %s mode',
+  (mode) => {
+    for (const name of ['glob', 'grep_search', 'list_directory']) {
+      expect(hostedApprovalAsks({ mode, timeoutMs: 1000 }, name, true)).toBe(
+        false,
+      );
+      expect(hostedApprovalAsks({ mode, timeoutMs: 1000 }, name, false)).toBe(
+        true,
+      );
+    }
+  },
+);

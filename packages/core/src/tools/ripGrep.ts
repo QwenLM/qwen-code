@@ -17,7 +17,11 @@ import {
 } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { runRipgrep, type RipgrepRunResult } from '../utils/ripgrepUtils.js';
+import {
+  runBoundedRipgrep,
+  runRipgrep,
+  type RipgrepRunResult,
+} from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.js';
@@ -28,8 +32,17 @@ import {
   QwenIgnoreParser,
 } from '../utils/qwenIgnoreParser.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
+import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
+import {
+  type BoundedSearchOptions,
+  boundedSearchError,
+  boundSearchResult,
+  resolveContainedSearchPath,
+  validateContainedSearchPath,
+} from './bounded-search.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -174,6 +187,7 @@ class GrepToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: RipGrepToolParams,
+    private readonly options: BoundedSearchOptions = {},
   ) {
     super(params);
   }
@@ -202,8 +216,18 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Determine which paths to search
       const searchPaths: string[] = [];
       let searchDirDisplay: string;
+      const contained =
+        this.options.containmentRoot === undefined
+          ? undefined
+          : resolveContainedSearchPath(
+              this.options.containmentRoot,
+              this.params.path,
+            );
 
-      if (this.params.path) {
+      if (contained) {
+        searchPaths.push(contained.searchPath);
+        searchDirDisplay = this.params.path ?? '.';
+      } else if (this.params.path) {
         // User specified a path — search only that path
         const searchDirAbs = resolveAndValidatePath(
           this.config,
@@ -255,7 +279,11 @@ class GrepToolInvocation extends BaseToolInvocation<
           };
         }
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const result = {
+          llmContent: noMatchMsg,
+          returnDisplay: `No matches found`,
+        };
+        return contained ? boundSearchResult(result) : result;
       }
 
       const resolvedPathCache = new Map<string, string>();
@@ -313,7 +341,30 @@ class GrepToolInvocation extends BaseToolInvocation<
         });
 
       const filteringOptions = this.getFileFilteringOptions();
-      if (filteringOptions.respectQwenIgnore) {
+      if (contained) {
+        const discovery = new FileDiscoveryService(
+          contained.root,
+          filteringOptions.customIgnoreFiles,
+        );
+        allLines = allLines
+          .filter((line) => {
+            const fullPath = path.resolve(contained.root, line.filePath);
+            const realPath = fs.realpathSync(fullPath);
+            if (!isPathWithinRoot(realPath, contained.root)) {
+              throw new Error(
+                'A search result resolves outside the Session directory.',
+              );
+            }
+            const relative = path.relative(contained.root, fullPath);
+            return !discovery.shouldIgnoreFile(relative, filteringOptions);
+          })
+          .map((line) => ({
+            ...line,
+            rawLine:
+              path.relative(contained.root, line.filePath) +
+              line.rawLine.slice(line.filePath.length),
+          }));
+      } else if (filteringOptions.respectQwenIgnore) {
         allLines = this.filterQwenIgnoredMatches(
           allLines,
           searchPaths,
@@ -334,6 +385,18 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       const totalMatches = allLines.length;
+      const collectedFilePaths = contained
+        ? Array.from(
+            new Set(
+              allLines.map((line) =>
+                path.resolve(
+                  this.options.containmentRoot!,
+                  path.relative(contained.root, line.filePath),
+                ),
+              ),
+            ),
+          )
+        : undefined;
       if (totalMatches === 0) {
         if (searchResult.incomplete) {
           const incompleteMsg = this.buildIncompleteSearchMessage(
@@ -347,7 +410,11 @@ class GrepToolInvocation extends BaseToolInvocation<
           };
         }
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const result = {
+          llmContent: noMatchMsg,
+          returnDisplay: `No matches found`,
+        };
+        return contained ? boundSearchResult(result) : result;
       }
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
@@ -357,7 +424,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const charLimit = this.config.getTruncateToolOutputThreshold();
       const lineLimit = Math.min(
         this.config.getTruncateToolOutputLines(),
-        this.params.limit ?? Number.POSITIVE_INFINITY,
+        this.params.limit ?? (contained ? 200 : Number.POSITIVE_INFINITY),
       );
 
       // Apply line limit first (if specified)
@@ -431,20 +498,37 @@ class GrepToolInvocation extends BaseToolInvocation<
       const resultFilePaths = Array.from(
         new Set(
           visibleLines.map((line) =>
-            toAbsoluteResultPath(line.filePath, searchPaths, resolvedPathCache),
+            contained
+              ? path.resolve(
+                  this.options.containmentRoot!,
+                  path.relative(contained.root, line.filePath),
+                )
+              : toAbsoluteResultPath(
+                  line.filePath,
+                  searchPaths,
+                  resolvedPathCache,
+                ),
           ),
         ),
       );
-      await recordGrepResultFileReads(this.config, resultFilePaths);
+      if (!contained)
+        await recordGrepResultFileReads(this.config, resultFilePaths);
 
-      return {
-        llmContent: llmContent.trim(),
+      const result: ToolResult = {
+        llmContent: contained ? llmContent : llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        ...(collectedFilePaths ? { collectedFilePaths } : {}),
       };
+      return contained ? boundSearchResult(result) : result;
     } catch (error) {
       debugLogger.error('Error during ripgrep search operation:', error);
       const errorMessage = getErrorMessage(error);
+      if (this.options.containmentRoot !== undefined) {
+        return boundedSearchError(
+          `Error during grep search operation: ${errorMessage}`,
+        );
+      }
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
@@ -558,11 +642,18 @@ class GrepToolInvocation extends BaseToolInvocation<
     // Pass all search paths to ripgrep (it supports multiple paths natively)
     rgArgs.push(...paths);
 
-    const result = await runRipgrep(
-      rgArgs,
-      options.signal,
-      this.config.getUseBuiltinRipgrep(),
-    );
+    const result =
+      this.options.containmentRoot === undefined
+        ? await runRipgrep(
+            rgArgs,
+            options.signal,
+            this.config.getUseBuiltinRipgrep(),
+          )
+        : await runBoundedRipgrep(
+            ['--no-config', '--no-follow', ...rgArgs],
+            options.signal,
+            this.options.executionTimeoutMs ?? 5_000,
+          );
     this.logRipgrepRuntimeRecovery(result);
     if (result.error && !result.stdout.trim()) {
       throw result.error;
@@ -615,6 +706,10 @@ class GrepToolInvocation extends BaseToolInvocation<
 
   private getIgnoreRootForSearchPath(searchPath: string): string | undefined {
     const resolvedSearchPath = path.resolve(searchPath);
+    if (this.options.containmentRoot !== undefined) {
+      const root = fs.realpathSync(this.options.containmentRoot);
+      return isPathWithinRoot(resolvedSearchPath, root) ? root : undefined;
+    }
     for (const workspaceDir of this.config
       .getWorkspaceContext()
       .getDirectories()) {
@@ -681,7 +776,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
     return 20_000;
   }
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly options: BoundedSearchOptions = {},
+  ) {
     super(
       RipGrepTool.Name,
       'Grep',
@@ -707,6 +805,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
           limit: {
             type: 'integer',
             minimum: 1,
+            ...(options.containmentRoot !== undefined ? { maximum: 1000 } : {}),
             description:
               'Limit output to first N lines/entries. Must be a positive integer. Optional - shows all matches if not specified.',
           },
@@ -731,6 +830,14 @@ export class RipGrepTool extends BaseDeclarativeTool<
     );
     if (errors) {
       return errors;
+    }
+    if (this.options.containmentRoot !== undefined) {
+      try {
+        validateContainedSearchPath(params.path);
+      } catch (error) {
+        return getErrorMessage(error);
+      }
+      return null;
     }
 
     if (
@@ -766,6 +873,6 @@ export class RipGrepTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: RipGrepToolParams,
   ): ToolInvocation<RipGrepToolParams, ToolResult> {
-    return new GrepToolInvocation(this.config, params);
+    return new GrepToolInvocation(this.config, params, this.options);
   }
 }

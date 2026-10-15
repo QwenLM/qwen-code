@@ -29,9 +29,16 @@ import {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceSearchV3Profile,
+  isHostedWorkspaceFileLifecycleProfile,
+  HOSTED_WORKSPACE_SEARCH_TOOL_NAMES,
+  HOSTED_WORKSPACE_NATIVE_FILE_TOOL_NAMES,
+  HOSTED_WORKSPACE_READ_TOOL_NAMES,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
@@ -196,6 +203,8 @@ export {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
@@ -565,6 +574,54 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   HOSTED_GLOB_TOOL,
 ];
 
+const HOSTED_SEARCH_TOOLS: FunctionDeclaration[] = [
+  {
+    name: 'grep_search',
+    description:
+      'Search file contents in the saved Workspace directory using ripgrep regular expressions. Returns relative file paths and matching lines; narrow the path, glob or pattern when results are truncated. Search hits do not replace reading a file before editing it.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', minLength: 1 },
+        path: {
+          type: 'string',
+          description:
+            'File or directory relative to the saved Session directory.',
+        },
+        glob: { type: 'string', description: 'Optional ripgrep file filter.' },
+        limit: { type: 'integer', minimum: 1, maximum: 1000, default: 200 },
+      },
+      required: ['pattern'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_directory',
+    description:
+      'List direct children of a directory in the saved Workspace. Returns at most 100 entries, directories first, and explicitly reports incomplete listings. Symlink targets are not inspected.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description:
+            'Directory relative to the saved Session directory; omit for its root.',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+export const HOSTED_WORKSPACE_FILE_TOOLS_V3: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS_V2,
+  ...HOSTED_SEARCH_TOOLS,
+];
+export const HOSTED_WORKSPACE_SHELL_TOOLS_V3: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_SHELL_TOOLS_V2,
+  ...HOSTED_SEARCH_TOOLS,
+];
+
 // Native tools whose Action carries the captured input, so the approval card
 // shows the arguments of the call being answered. This is a cross-service
 // contract: it must stay byte-identical to the Java reader's closed
@@ -595,8 +652,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
  * already has, plus its message to the leader.
  */
 const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
-  'read_file',
-  'glob',
+  ...HOSTED_WORKSPACE_READ_TOOL_NAMES,
   'task_list',
   'send_message',
 ]);
@@ -606,7 +662,7 @@ const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
  * (decision 5): it says the run may only read and never names it.
  */
 function hostedPlanModeRefusal(): string {
-  return `This run is in plan mode until the leader approves its plan: only read_file, glob, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
+  return `This run is in plan mode until the leader approves its plan: only read_file, glob, grep_search, list_directory, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
 }
 
 export const HOSTED_MEMBER_PLAN_TOOL: FunctionDeclaration = {
@@ -1633,17 +1689,22 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
+    const searchV3 = isHostedWorkspaceSearchV3Profile(this.profile);
     // b3c: a member's widened send_message rides the same gate as its
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     this.advertised = [
       ...(this.publication || this.shell
-        ? search
-          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
-          : HOSTED_WORKSPACE_SHELL_TOOLS
-        : search
-          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
-          : HOSTED_WORKSPACE_FILE_TOOLS
+        ? searchV3
+          ? HOSTED_WORKSPACE_SHELL_TOOLS_V3
+          : search
+            ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+            : HOSTED_WORKSPACE_SHELL_TOOLS
+        : searchV3
+          ? HOSTED_WORKSPACE_FILE_TOOLS_V3
+          : search
+            ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+            : HOSTED_WORKSPACE_FILE_TOOLS
       ).map((tool) =>
         ['write_file', 'edit'].includes(tool.name ?? '')
           ? {
@@ -1995,7 +2056,7 @@ export class HostedWorkspaceToolTurn {
       !saved?.pendingUndo &&
       !this.hooks &&
       !this.mcp &&
-      this.profile === HOSTED_WORKSPACE_FILE_PROFILE
+      isHostedWorkspaceFileLifecycleProfile(this.profile)
     ) {
       this.uncertain = true;
       try {
@@ -2014,13 +2075,11 @@ export class HostedWorkspaceToolTurn {
           items.every(
             (item) =>
               item.state === 'settled' &&
-              ['read_file', 'write_file', 'edit', 'glob'].includes(
-                item.toolName,
-              ),
+              HOSTED_WORKSPACE_NATIVE_FILE_TOOL_NAMES.includes(item.toolName),
           ) &&
           (saved ||
             items.every((item) =>
-              ['read_file', 'glob'].includes(item.toolName),
+              HOSTED_WORKSPACE_READ_TOOL_NAMES.includes(item.toolName),
             )) &&
           (await canSettleHostedFileHistory(this.session, {
             pendingUndo: null,
@@ -2576,7 +2635,7 @@ export class HostedWorkspaceToolTurn {
       this.mcp ||
       batch.requests.some(
         (request) =>
-          !['read_file', 'write_file', 'edit', 'glob'].includes(
+          !HOSTED_WORKSPACE_NATIVE_FILE_TOOL_NAMES.includes(
             request.call.name,
           ) ||
           // A call refused at the canonical-digest ceiling (#13803 D1) has
@@ -2944,6 +3003,54 @@ export class HostedWorkspaceToolTurn {
                 if (!(cause instanceof InvalidWorkspaceRelativePathError))
                   throw cause;
                 validationError = globError;
+              }
+            }
+          }
+        } else if (['grep_search', 'list_directory'].includes(call.name)) {
+          const args = call.args;
+          const allowed =
+            call.name === 'grep_search'
+              ? ['pattern', 'path', 'glob', 'limit']
+              : ['path'];
+          input = { ...args };
+          if (Object.keys(args).some((key) => !allowed.includes(key))) {
+            validationError = 'Hosted search received an unsupported argument.';
+          } else if (
+            call.name === 'grep_search' &&
+            (typeof args['pattern'] !== 'string' ||
+              args['pattern'].length === 0 ||
+              Buffer.byteLength(args['pattern']) > 4096 ||
+              (args['glob'] !== undefined &&
+                (typeof args['glob'] !== 'string' ||
+                  Buffer.byteLength(args['glob']) > 4096)) ||
+              (args['limit'] !== undefined &&
+                (!Number.isSafeInteger(args['limit']) ||
+                  (args['limit'] as number) < 1 ||
+                  (args['limit'] as number) > 1000)))
+          ) {
+            validationError =
+              'Hosted grep requires a nonempty pattern, an optional file filter, and a limit from 1 to 1000. Patterns and filters may not exceed 4096 bytes.';
+          }
+          const requestedPath = args['path'];
+          if (!validationError && requestedPath !== undefined) {
+            if (
+              requestedPath === null ||
+              (typeof requestedPath === 'string' && requestedPath.trim() === '')
+            ) {
+              delete input['path'];
+            } else if (typeof requestedPath !== 'string') {
+              validationError =
+                'Hosted search path must be relative to the saved Session directory.';
+            } else {
+              try {
+                input['path'] = normalizeWorkspaceRelativePath(
+                  requestedPath.trim(),
+                );
+              } catch (cause) {
+                if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                  throw cause;
+                validationError =
+                  'Hosted search path must stay within the saved Session directory.';
               }
             }
           }
@@ -4376,15 +4483,14 @@ export class HostedWorkspaceToolTurn {
             HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
           !this.messageFitsInline('tool_result', converted, model)
         ) {
-          // A glob result is a path list: keep the prefix that fits rather
-          // than omitting the whole result, so the model can narrow and retry.
-          if (request.call.name === 'glob') {
+          // Keep a useful search-result prefix so the model can narrow and retry.
+          if (HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(request.call.name)) {
             const fits = (candidate: Part[]) =>
               Buffer.byteLength(
                 JSON.stringify({ executionCallId, ...candidate[0] }),
               ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
               this.messageFitsInline('tool_result', candidate, model);
-            const truncated = truncateHostedGlobResponse(converted, fits);
+            const truncated = truncateHostedSearchResponse(converted, fits);
             if (truncated) {
               converted = truncated;
               outcome = Buffer.from(
@@ -6934,15 +7040,15 @@ export class HostedWorkspaceToolTurn {
   async close(): Promise<void> {}
 }
 
-const HOSTED_GLOB_TRUNCATION_HINT =
+const HOSTED_SEARCH_TRUNCATION_HINT =
   '\n---\n[Result truncated to fit the durable Session limit. Narrow the pattern or path.]';
 
 /**
- * Keeps the longest whole-line prefix of a glob result that fits, followed by
+ * Keeps the longest whole-line prefix of a search result that fits, followed by
  * a narrowing hint. Returns undefined when the response has no text output to
  * truncate or even the empty list does not fit.
  */
-export function truncateHostedGlobResponse(
+export function truncateHostedSearchResponse(
   parts: Part[],
   fits: (candidate: Part[]) => boolean,
 ): Part[] | undefined {
@@ -6961,7 +7067,7 @@ export function truncateHostedGlobResponse(
           ...functionResponse,
           response: {
             ...response,
-            output: lines.join('\n') + HOSTED_GLOB_TRUNCATION_HINT,
+            output: lines.join('\n') + HOSTED_SEARCH_TRUNCATION_HINT,
             outputTruncated: true,
           },
         },

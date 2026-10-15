@@ -418,7 +418,7 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
-    async (sessionId, realPath, ownDirectory) => {
+    async (sessionId, realPath, ownDirectory, includeDescendants) => {
       // A stale binding still owns its missing or symlinked location, but
       // must not veto targets in unrelated shared directories.
       const contains = (directory: string, target: string): boolean => {
@@ -457,6 +457,13 @@ export function registerManagedContextRoutes(
         // caller still owns its whole subtree, including what spills past
         // the caller's directory.
         if (root !== undefined && directory === root) continue;
+        if (
+          includeDescendants &&
+          directory !== ownDirectory &&
+          contains(ownDirectory, directory) &&
+          contains(realPath, directory)
+        )
+          return true;
         if (!contains(directory, realPath)) continue;
         // Ownership runs in both directions. Inside the caller's own estate
         // only a Session installed strictly below it owns the target: one at

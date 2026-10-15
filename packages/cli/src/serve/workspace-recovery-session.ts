@@ -63,6 +63,7 @@ import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js'
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
 import {
   isHostedWorkspaceProfile,
+  isHostedWorkspaceFileLifecycleProfile,
   isHostedWorkspaceShellProfile,
 } from './hosted-workspace-profiles.js';
 
@@ -822,7 +823,7 @@ export async function verifyRecoverySession(
       );
       if (purpose === 'migration') {
         requireValue(
-          definition['toolProfile'] === 'hosted-workspace-files/1' &&
+          isHostedWorkspaceFileLifecycleProfile(definition['toolProfile']) &&
             definition['hookCatalog'] === undefined &&
             definition['mcpServers'] === undefined &&
             definition['captureBytes'] === undefined,

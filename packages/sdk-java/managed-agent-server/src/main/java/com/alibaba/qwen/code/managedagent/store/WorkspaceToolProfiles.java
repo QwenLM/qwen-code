@@ -2,15 +2,18 @@ package com.alibaba.qwen.code.managedagent.store;
 
 public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
+    public static final String FILES_SEARCH = "hosted-workspace-files/3";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
+    public static final String SHELL_SEARCH = "hosted-workspace-shell/3";
     public static final String INTERNAL_TEAM_LEAD = "hosted-workspace-team-lead/1";
 
     private WorkspaceToolProfiles() {
     }
 
     public static boolean isPublicShell(String profile) {
-        return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile);
+        return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile)
+                || SHELL_SEARCH.equals(profile);
     }
 
     public static boolean isShellOrMcp(String profile) {
@@ -19,7 +22,7 @@ public final class WorkspaceToolProfiles {
     }
 
     public static int lifecycleProtocol(String profile) {
-        if (FILES.equals(profile)) {
+        if (FILES.equals(profile) || FILES_SEARCH.equals(profile)) {
             return 1;
         }
         if (SHELL.equals(profile) || MCP.equals(profile)) {

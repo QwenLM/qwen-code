@@ -241,11 +241,13 @@ import {
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
-import { hostedShellLaneAttachesChildAgents } from './hosted-workspace-profiles.js';
+import {
+  hostedShellLaneAttachesChildAgents,
+  isHostedWorkspaceFileLifecycleProfile,
+} from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
-  HOSTED_WORKSPACE_FILE_PROFILE,
   HostedToolRecoveryRequiredError,
   hostedRuntimeSessionId,
   HostedWorkspaceToolTurn,
@@ -3390,7 +3392,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       lifecycle &&
       (lifecycleProtocolVersion === 1
-        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+        ? !isHostedWorkspaceFileLifecycleProfile(toolProfile)
         : typeof toolProfile !== 'string' ||
           !contract.lifecycleV2Profiles?.includes(toolProfile))
     ) {
@@ -5495,7 +5497,7 @@ export function registerHostedHarnessSessionRoutes(
         session.managed.authority.sessionHeader.sessionKey,
       ) ||
       (protocolVersion === 1 &&
-        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE)
+        !isHostedWorkspaceFileLifecycleProfile(session.toolProfile))
     )
       return error(res, 400, 'invalid_hosted_lifecycle_request');
     if (

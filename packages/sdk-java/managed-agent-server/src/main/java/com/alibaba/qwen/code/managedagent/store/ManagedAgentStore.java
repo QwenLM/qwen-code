@@ -126,6 +126,7 @@ public class ManagedAgentStore implements AgentStateStore {
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
+    private final boolean workspaceSearchEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private static final String SESSION_WITH_STREAM =
             "SELECT ma_session.*, es.last_sequence AS list_last_sequence, es.replay_floor_sequence"
@@ -285,6 +286,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.definitionModels = properties.getDefinitionModels();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
+        this.workspaceSearchEnabled = properties.getHarness().isWorkspaceSearchEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         if (agentRevision == null || agentRevision.isBlank()
                 || agentRevision.length() > 128) {
@@ -826,10 +828,13 @@ public class ManagedAgentStore implements AgentStateStore {
                         "unsupported_feature",
                         "Only the current agent revision can be selected.");
             }
-            String toolProfile = workspaceBound
-                    ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
-                            : WorkspaceToolProfiles.FILES)
-                    : null;
+            String toolProfile = null;
+            if (workspaceBound) {
+                toolProfile = workspaceShellEnabled ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES;
+                if (workspaceSearchEnabled) {
+                    toolProfile = workspaceShellEnabled ? WorkspaceToolProfiles.SHELL_SEARCH : WorkspaceToolProfiles.FILES_SEARCH;
+                }
+            }
             return new AgentPin(agentRevision, null, approvalMode, toolProfile);
         }
         if (definitions == null) {

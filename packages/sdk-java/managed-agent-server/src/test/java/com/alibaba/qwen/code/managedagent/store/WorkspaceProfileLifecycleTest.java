@@ -210,12 +210,12 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "wrong_digest", "wrong_runtime", "wrong_harness",
+    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "grep_search", "list_directory", "wrong_digest", "wrong_runtime", "wrong_harness",
             "shell", "v3", "publication", "unreferenced", "corrupt", "unsettled"})
     void shellProfileNativeFileInputsRequireOriginalIdentityAndKnownSettlement(String mode) throws Exception {
         var f = fixture();
         var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
-        String tool = java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode) ? mode
+        String tool = java.util.List.of("read_file", "write_file", "edit", "glob", "grep_search", "list_directory").contains(mode) ? mode
                 : "shell".equals(mode) ? "run_shell_command" : "read_file";
         String payload = f.json.writeValueAsString(Map.of("toolName", tool, "input", Map.of("file_path", "proof.txt")));
         String requestDigest = "sha256:" + ("wrong_digest".equals(mode) ? "a".repeat(64)

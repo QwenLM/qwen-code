@@ -86,6 +86,12 @@ export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 
 Before admitting file, Shell, or child Git work, complete the native storage registration and mount-identity verification described under “Verified physical Workspace recovery” in `docs/server-reference.md`. An unregistered or ambiguous mount must remain unavailable. Public Shell and v2 capability advertisement stay disabled until their separate qualification completes.
 
+## Enable Workspace search tools
+
+After upgrading Java, Harness and every worker and draining older workers, set `QWEN_MANAGED_AGENT_WORKSPACE_SEARCH_ENABLED=true` to select the `/3` search profile for new built-in `qwen-code` Workspace Sessions. It adds `glob`, `grep_search` and `list_directory`. The existing Shell opt-in chooses `shell/3` rather than `files/3`; Workspace execution and Shell approval gates still apply. The default is `false`.
+
+Existing Sessions keep their saved profile, including after the switch is disabled. AgentDefinitions retain their explicitly selected profile and require `/3` in `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES`. Verify bundled rg and all three tools through public API and WebShell probes before admitting traffic; the existing worker capability digest cannot prove search support. Web Fetch and Web Search are not included. See the [search-tool design](../design/2026-10-15-managed-workspace-search-tools.md) for limits and recovery behavior.
+
 ## Upgrade
 
 1. Download and verify the new archive and read both manifests. Confirm the new Qwen Code/Harness, Java, protocol, and database requirements before touching the running deployment.

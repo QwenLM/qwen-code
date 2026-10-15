@@ -746,6 +746,20 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void searchProfileSelectionIsDefaultOffAndBindsItsDeploymentFlag() throws Exception {
+        String key = "qwen.managed-agent.harness.workspace-search-enabled";
+        assertThat(applicationYmlValues()).containsEntry(key,
+                "${QWEN_MANAGED_AGENT_WORKSPACE_SEARCH_ENABLED:false}");
+        assertThat(new ManagedAgentProperties().getHarness().isWorkspaceSearchEnabled()).isFalse();
+        new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues(key + "=true")
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(started.getBean(ManagedAgentProperties.class).getHarness().isWorkspaceSearchEnabled()).isTrue();
+                });
+    }
+
+    @Test
     void shellAdmissionIsDefaultOffAndRequiresAnAskingModeAndFiles() throws Exception {
         String key = "qwen.managed-agent.harness.workspace-shell-enabled";
         assertThat(applicationYmlValues()).containsEntry(key,

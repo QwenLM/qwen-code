@@ -26,6 +26,9 @@ import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
+import { RipGrepTool } from '@qwen-code/qwen-code-core/tools/ripGrep.js';
+import { LSTool } from '@qwen-code/qwen-code-core/tools/ls.js';
+import { HOSTED_WORKSPACE_SEARCH_TOOL_NAMES } from './hosted-workspace-profiles.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
@@ -241,6 +244,8 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  RipGrepTool.Name,
+  LSTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -711,11 +716,14 @@ export class ManagedToolExecutor {
      * bound exactly at the mount root delimits no private area and never
      * vets, while a caller bound there holds none either, so its targets —
      * however spelled — are judged against every non-root sibling.
+     * Search roots also include descendants, so a recursive scan is refused
+     * before it can inspect a nested Session's content, matched or not.
      */
     private readonly ownsAnotherSessionDir?: (
       sessionId: string,
       realPath: string,
       ownDirectory: string,
+      includeDescendants?: boolean,
     ) => Promise<boolean>,
     private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
     backgroundRegistry?: ManagedBackgroundShellRegistry,
@@ -1956,7 +1964,7 @@ export class ManagedToolExecutor {
         // every call it sees — must not refuse the search: the tool never reads
         // it, and glob's own pattern/output containment below covers every path
         // it does consume.
-        entry.toolName !== GlobTool.Name &&
+        !HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(entry.toolName) &&
         typeof params['file_path'] === 'string'
       ) {
         // Only a relative input needs resolving, and `path.resolve` hands an
@@ -2035,7 +2043,7 @@ export class ManagedToolExecutor {
         }
         if (buildError !== undefined) throw buildError;
       }
-      if (entry.toolName === GlobTool.Name) {
+      if (HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(entry.toolName)) {
         // Glob's own validation admits external paths, so the executor pins
         // the search to the Session's installed context: the workspace-wide
         // includeDirectories would otherwise reach sibling Sessions' files.
@@ -2050,7 +2058,10 @@ export class ManagedToolExecutor {
         // them. The walk is contained regardless (`containmentRoot`).
         const pattern =
           typeof params['pattern'] === 'string' ? params['pattern'] : '';
-        const check = checkHostedGlobPattern(pattern);
+        const check =
+          entry.toolName === GlobTool.Name
+            ? checkHostedGlobPattern(pattern)
+            : undefined;
         if (check === 'too-complex') throw new Error(HOSTED_GLOB_TOO_COMPLEX);
         if (check === 'escapes') {
           throw new Error(
@@ -2063,6 +2074,19 @@ export class ManagedToolExecutor {
         // above does. Re-normalizing here instead would judge one string and
         // search another. A build failure is held for the same reason the
         // file arm holds one.
+        if (entry.toolName !== GlobTool.Name && params['path'] !== undefined) {
+          const requestedPath = params['path'];
+          if (
+            typeof requestedPath !== 'string' ||
+            path.isAbsolute(requestedPath) ||
+            path.win32.isAbsolute(requestedPath) ||
+            requestedPath.split(/[\\/]/).includes('..')
+          ) {
+            throw new Error(
+              'Search path must stay within the Session working directory.',
+            );
+          }
+        }
         let globBuildError: unknown;
         try {
           fileInvocation = sessionIdContext.run(sessionId, () =>
@@ -2093,6 +2117,7 @@ export class ManagedToolExecutor {
             tools.sessionId,
             realResolved,
             realRoot,
+            true,
           ))
         ) {
           throw new Error(
@@ -2100,7 +2125,7 @@ export class ManagedToolExecutor {
           );
         }
         if (globBuildError !== undefined) throw globBuildError;
-        params['path'] = resolved;
+        if (entry.toolName === GlobTool.Name) params['path'] = resolved;
       }
       if (
         entry.toolName === ShellTool.Name &&
@@ -2204,7 +2229,7 @@ export class ManagedToolExecutor {
       } else {
         result = await invoke();
       }
-      if (entry.toolName === GlobTool.Name) {
+      if (HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(entry.toolName)) {
         const root = tools.directory;
         if (root === undefined)
           throw new ManagedToolUnavailableError(
@@ -2243,12 +2268,17 @@ export class ManagedToolExecutor {
               // no hit, and a root-bound caller's effective boundary excludes
               // sibling estates even though they sit inside its own root.
               throw new Error(
-                'Glob results must stay within the Session working directory.',
+                'Search results must stay within the Session working directory.',
               );
             }
           }
         }
-        result = relativizeGlobResult(result, root);
+        if (entry.toolName === GlobTool.Name || result.error) {
+          result = relativizeGlobResult(result, root);
+          const canonicalRoot = await realpathDeepestExisting(root);
+          if (canonicalRoot !== root)
+            result = relativizeGlobResult(result, canonicalRoot);
+        }
       }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
@@ -2267,11 +2297,15 @@ export class ManagedToolExecutor {
           // A refused or failed glob reaches the model and the durable record
           // the same way its results do, so it is rewritten the same way.
           message:
-            entry.toolName === GlobTool.Name && tools.directory !== undefined
+            HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(entry.toolName) &&
+            tools.directory !== undefined
               ? relativizeGlobText(message, tools.directory)
               : message,
         },
       };
+    }
+    if (HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(entry.toolName)) {
+      payload = boundSearchPayload(payload);
     }
     if (
       entry.version === 2 &&
@@ -2482,6 +2516,14 @@ export function createManagedToolSet(
         new EditTool(config),
         // The walk never leaves the Session, whatever the pattern spells.
         new GlobTool(config, {
+          containmentRoot: directory,
+          executionTimeoutMs: 5_000,
+        }),
+        new RipGrepTool(config, {
+          containmentRoot: directory,
+          executionTimeoutMs: 5_000,
+        }),
+        new LSTool(config, {
           containmentRoot: directory,
           executionTimeoutMs: 5_000,
         }),
@@ -2698,4 +2740,50 @@ function toPayload(
     };
   }
   return { executionStatus: 'success', responseParts };
+}
+
+function boundSearchPayload(
+  payload: ManagedToolResultPayload,
+): ManagedToolResultPayload {
+  const fits = (candidate: ManagedToolResultPayload) =>
+    Buffer.byteLength(JSON.stringify(candidate)) <= 48 * 1024;
+  if (fits(payload)) return payload;
+  const text = payload.responseParts
+    .map((part) =>
+      typeof part === 'object' &&
+      part !== null &&
+      'text' in part &&
+      typeof part.text === 'string'
+        ? part.text
+        : '',
+    )
+    .join('\n');
+  const hint = '\n[Output truncated. Narrow the path or pattern.]';
+  let low = 0;
+  let high = text.length;
+  let bounded = { ...payload, responseParts: [{ text: hint }] };
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const end =
+      middle > 0 && /[\uD800-\uDBFF]/.test(text[middle - 1])
+        ? middle - 1
+        : middle;
+    const candidate = {
+      ...payload,
+      responseParts: [{ text: text.slice(0, end) + hint }],
+    };
+    if (fits(candidate)) {
+      bounded = candidate;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  if (fits(bounded)) return bounded;
+  return {
+    executionStatus: payload.executionStatus,
+    responseParts: [],
+    error: {
+      message:
+        'Search output exceeded the result budget. Narrow the path or pattern.',
+    },
+  };
 }

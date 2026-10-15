@@ -5,7 +5,11 @@
  */
 
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import {
@@ -23,6 +27,17 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
+import { resolveBundleDir } from '../utils/bundlePaths.js';
+import {
+  type BoundedSearchOptions,
+  boundedSearchError,
+  boundSearchResult,
+  validateContainedSearchPath,
+} from './bounded-search.js';
+import type {
+  LSDirectoryReply,
+  LSDirectorySearch,
+} from './ls-search-worker.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -35,7 +50,7 @@ export interface LSToolParams {
   /**
    * The absolute path to the directory to list
    */
-  path: string;
+  path?: string;
 
   /**
    * Array of glob patterns to ignore (optional)
@@ -85,6 +100,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
   constructor(
     private readonly config: Config,
     params: LSToolParams,
+    private readonly options: BoundedSearchOptions = {},
   ) {
     super(params);
   }
@@ -119,7 +135,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
    */
   getDescription(): string {
     const relativePath = makeRelative(
-      this.params.path,
+      this.params.path ?? '.',
       this.config.getTargetDir(),
     );
     return shortenPath(relativePath);
@@ -130,7 +146,8 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
    * so that external directory listings require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const dirPath = path.resolve(this.params.path);
+    if (this.options.containmentRoot !== undefined) return 'allow';
+    const dirPath = path.resolve(this.params.path!);
     const workspaceContext = this.config.getWorkspaceContext();
     const userSkillsDirs = this.config.storage.getUserSkillsDirs();
     const userExtensionsDir = Storage.getUserExtensionsDir();
@@ -168,8 +185,11 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
    * @returns Result of the LS operation
    */
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    if (this.options.containmentRoot !== undefined) {
+      return this.executeBounded(_signal);
+    }
     try {
-      const stats = await fs.stat(this.params.path);
+      const stats = await fs.stat(this.params.path!);
       if (!stats) {
         // fs.statSync throws on non-existence, so this check might be redundant
         // but keeping for clarity. Error message adjusted.
@@ -187,7 +207,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         );
       }
 
-      const files = await fs.readdir(this.params.path);
+      const files = await fs.readdir(this.params.path!);
       if (files.length === 0) {
         // Changed error message to be more neutral for LLM
         return {
@@ -199,7 +219,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       const relativePaths = files.map((file) =>
         path.relative(
           this.config.getTargetDir(),
-          path.join(this.params.path, file),
+          path.join(this.params.path!, file),
         ),
       );
 
@@ -300,6 +320,86 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       );
     }
   }
+
+  private async executeBounded(signal: AbortSignal): Promise<ToolResult> {
+    let worker: Worker | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort = () => {};
+    try {
+      signal.throwIfAborted();
+      const workerFile = path.join(
+        resolveBundleDir(import.meta.url),
+        'ls-search-worker.js',
+      );
+      const workerEntry =
+        import.meta.url.endsWith('.ts') && !existsSync(workerFile)
+          ? new URL(
+              `data:text/javascript,${encodeURIComponent(
+                `import { register } from ${JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm/api')).href)}; register(); await import(${JSON.stringify(new URL('./ls-search-worker.ts', import.meta.url).href)});`,
+              )}`,
+            )
+          : workerFile;
+      const filtering = this.config.getFileFilteringOptions();
+      const workerOptions: LSDirectorySearch = {
+        containmentRoot: this.options.containmentRoot!,
+        path: this.params.path,
+        fileFilteringOptions: {
+          ...DEFAULT_FILE_FILTERING_OPTIONS,
+          ...filtering,
+        },
+      };
+      worker = new Worker(workerEntry, { workerData: workerOptions });
+      const activeWorker = worker;
+      const timeoutMs = this.options.executionTimeoutMs ?? 5_000;
+      const reply = await new Promise<LSDirectoryReply>((resolve, reject) => {
+        onAbort = () => reject(new Error('Directory listing was cancelled.'));
+        activeWorker.once('message', resolve);
+        activeWorker.once('error', reject);
+        activeWorker.once('exit', () =>
+          reject(new Error('Directory search worker exited before a result.')),
+        );
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Directory listing exceeded ${timeoutMs / 1000} seconds. Narrow the path and retry.`,
+              ),
+            ),
+          timeoutMs,
+        );
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+      const visible = reply.entries.slice(
+        0,
+        Math.min(MAX_ENTRY_COUNT, this.config.getTruncateToolOutputLines()),
+      );
+      const truncated = reply.hitLimit || visible.length < reply.entries.length;
+      let body = `Listed ${reply.entries.length} item(s) in ${this.params.path ?? '.'}:\n---\n`;
+      body += visible
+        .map(
+          (entry) =>
+            `${entry.isDirectory ? '[DIR] ' : entry.isSymbolicLink ? '[LINK] ' : ''}${entry.name}`,
+        )
+        .join('\n');
+      if (truncated)
+        body += '\n---\n[Directory listing truncated; results are incomplete.]';
+      return boundSearchResult({
+        llmContent: body,
+        returnDisplay: `Listed ${reply.entries.length} item(s)${truncated ? ' (truncated)' : ''}`,
+        resultFilePaths: visible.map((entry) => entry.path),
+        collectedFilePaths: reply.entries.map((entry) => entry.path),
+      });
+    } catch (error) {
+      return boundedSearchError(
+        `Error listing directory: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      await worker?.terminate();
+    }
+  }
 }
 
 /**
@@ -308,7 +408,10 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
 export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   static readonly Name = ToolNames.LS;
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private readonly options: BoundedSearchOptions = {},
+  ) {
     super(
       LSTool.Name,
       ToolDisplayNames.LS,
@@ -346,7 +449,7 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
             },
           },
         },
-        required: ['path'],
+        required: options.containmentRoot === undefined ? ['path'] : [],
         type: 'object',
       },
     );
@@ -360,6 +463,15 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
+    if (this.options.containmentRoot !== undefined) {
+      try {
+        validateContainedSearchPath(params.path);
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (params.path === undefined) return 'Path is required.';
     params.path = unescapePath(params.path.trim());
 
     if (!path.isAbsolute(params.path)) {
@@ -372,6 +484,6 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected createInvocation(
     params: LSToolParams,
   ): ToolInvocation<LSToolParams, ToolResult> {
-    return new LSToolInvocation(this.config, params);
+    return new LSToolInvocation(this.config, params, this.options);
   }
 }

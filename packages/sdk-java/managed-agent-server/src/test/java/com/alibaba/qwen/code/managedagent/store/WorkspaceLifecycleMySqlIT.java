@@ -81,7 +81,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                         Fixture fixture() {
                             return fixture;
                         }
-                    }.hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind.DELETE, true);
+                    }.hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind.DELETE, true,
+                            WorkspaceToolProfiles.FILES);
                     entered.countDown();
                     if (!release.await(10, TimeUnit.SECONDS)) {
                         throw new AssertionError("Lifecycle hold was not released");

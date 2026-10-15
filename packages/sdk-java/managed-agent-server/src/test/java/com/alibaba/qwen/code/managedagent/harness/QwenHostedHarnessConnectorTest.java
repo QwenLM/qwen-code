@@ -94,8 +94,9 @@ class QwenHostedHarnessConnectorTest {
         verify(client, never()).updateSessionTitle(any(), any(), anyLong());
     }
 
-    @Test
-    void lifecycleCapabilityFailsClosedWhenTheCachedClientWasClosed() {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/3"})
+    void lifecycleCapabilityFailsClosedWhenTheCachedClientWasClosed(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities unsupported = mock(HostedHarnessCapabilities.class);
         HostedHarnessCapabilities supported = mock(HostedHarnessCapabilities.class);
@@ -110,9 +111,9 @@ class QwenHostedHarnessConnectorTest {
                 new QwenHostedHarnessConnector(properties, sessions, execution);
         ReflectionTestUtils.setField(connector, "client", client);
 
-        assertThat(connector.supportsLifecycle()).isFalse();
-        assertThat(connector.supportsLifecycle()).isTrue();
-        assertThat(connector.supportsLifecycle()).isFalse();
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
+        assertThat(connector.supportsLifecycle(profile)).isTrue();
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
         verify(client, times(3)).capabilities();
         verifyNoInteractions(sessions, execution);
     }
@@ -251,8 +252,10 @@ class QwenHostedHarnessConnectorTest {
     @ParameterizedTest
     @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
             "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
+            "hosted-workspace-files/3,false", "hosted-workspace-files/3,true",
             "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
             "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
+            "hosted-workspace-shell/3,false", "hosted-workspace-shell/3,true",
             "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
             "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {

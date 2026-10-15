@@ -86,6 +86,12 @@ export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 
 在准入文件、Shell 或 child Git 工作前，必须完成 `docs/server-reference.md` 中 “Verified physical Workspace recovery” 所述的原生 storage 注册与 mount identity 校验。未注册或有歧义的 mount 必须保持不可用。Public Shell 与 v2 capability advertisement 在各自独立资格验收完成前继续关闭。
 
+## 开启 Workspace 搜索工具
+
+升级 Java、Harness 和全部 worker，并排空旧 worker 后，设置 `QWEN_MANAGED_AGENT_WORKSPACE_SEARCH_ENABLED=true`，为内置 `qwen-code` 新建 Workspace Session 选择 `/3` 搜索 profile，新增 `glob`、`grep_search` 和 `list_directory`。原 Shell 开关决定选择 `shell/3` 或 `files/3`；Workspace 执行与 Shell 审批准入仍然生效。此开关默认为 `false`。
+
+已有 Session 保留保存的 profile，关闭开关也不改变它们。AgentDefinition 保留显式选择的 profile，并要求 `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 包含对应 `/3`。准入流量前，验证随包 rg，并通过公开 API 和 WebShell 探针执行全部三个工具；现有 worker capability digest 无法证明搜索支持。此扩展不包含 Web Fetch 或 Web Search。限制和恢复行为见[搜索工具设计](../design/2026-10-15-managed-workspace-search-tools.zh-CN.md)。
+
 ## 升级
 
 1. 下载并校验新压缩包，读取新旧两个 manifest。在改动运行中部署前，确认新的 Qwen Code/Harness、Java、协议与数据库要求。

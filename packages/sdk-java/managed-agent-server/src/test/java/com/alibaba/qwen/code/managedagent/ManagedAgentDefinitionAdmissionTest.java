@@ -81,19 +81,24 @@ class ManagedAgentDefinitionAdmissionTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
-            "false, default", "false, yolo", "true, default", "true, yolo"
+            "false,default,false,hosted-workspace-files/1", "false,yolo,false,hosted-workspace-files/1",
+            "true,default,false,hosted-workspace-files/1", "true,yolo,false,hosted-workspace-files/1",
+            "false,default,true,hosted-workspace-files/1", "true,default,true,hosted-workspace-files/1",
+            "false,yolo,false,hosted-workspace-files/3", "true,default,false,hosted-workspace-files/3"
     })
     void shellOptInSelectsOnlyTheBuiltInProfile(boolean shellEnabled,
-            String definitionApproval) throws Exception {
+            String definitionApproval, boolean searchEnabled, String profile) throws Exception {
         String tenant = tenant();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor", true);
         JsonNode definition = define(tenant, "definition",
                 FILES_DEFINITION.replace("\"default\"",
-                        "\"" + definitionApproval + "\""));
+                        "\"" + definitionApproval + "\"").replace("hosted-workspace-files/1", profile));
         var properties = new ManagedAgentProperties();
+        properties.setDefinitionToolProfiles(List.of(profile));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(shellEnabled);
+        properties.getHarness().setWorkspaceSearchEnabled(searchEnabled);
         properties.getHarness().setApprovalMode("default");
         var selected = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
                 ignored -> {}, registry, properties);
@@ -109,10 +114,9 @@ class ManagedAgentDefinitionAdmissionTest {
                         "custom", "custom-digest", definition.get("id").asText(),
                         null, null, List.of(), null, workspace).sessionId());
         assertThat(selected.requireSession(tenant, builtin).toolProfile())
-                .isEqualTo(shellEnabled ? "hosted-workspace-shell/1"
-                        : "hosted-workspace-files/1");
+                .isEqualTo("hosted-workspace-" + (shellEnabled ? "shell" : "files") + (searchEnabled ? "/3" : "/1"));
         var pinned = selected.requireSession(tenant, custom);
-        assertThat(pinned.toolProfile()).isEqualTo("hosted-workspace-files/1");
+        assertThat(pinned.toolProfile()).isEqualTo(profile);
         assertThat(pinned.agentDefinitionDigest())
                 .isEqualTo(definition.get("digest").asText());
         assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_session"
@@ -121,19 +125,20 @@ class ManagedAgentDefinitionAdmissionTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"default", "auto-edit"})
+    @org.junit.jupiter.params.provider.CsvSource({"default,hosted-workspace-shell/1", "auto-edit,hosted-workspace-shell/1",
+            "default,hosted-workspace-shell/3", "auto-edit,hosted-workspace-shell/3"})
     void customShellInitialInputRequiresOptInButEmptyCreationAndReplayDoNot(
-            String mode) throws Exception {
+            String mode, String profile) throws Exception {
         String tenant = tenant();
         register(tenant, "ws-a", "storage-a", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor", true);
         JsonNode definition = define(tenant, "definition", FILES_DEFINITION
-                .replace("hosted-workspace-files/1", "hosted-workspace-shell/1")
+                .replace("hosted-workspace-files/1", profile)
                 .replace("\"default\"", "\"" + mode + "\""));
         String agentId = definition.get("id").asText();
         var properties = new ManagedAgentProperties();
-        properties.setDefinitionToolProfiles(List.of("hosted-workspace-shell/1"));
+        properties.setDefinitionToolProfiles(List.of(profile));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -161,7 +166,7 @@ class ManagedAgentDefinitionAdmissionTest {
                 null, List.of(), null, workspace));
         assertThat(empty.turnId()).isNull();
         assertThat(disabled.requireSession(tenant, empty.sessionId()).toolProfile())
-                .isEqualTo("hosted-workspace-shell/1");
+                .isEqualTo(profile);
         assertThat(transaction.execute(status -> disabled.insertWorkspaceSessionCommand(
                 tenant, "actor", "initial", "initial-digest", agentId, null,
                 null, input, "payload-digest", workspace)).sessionId())

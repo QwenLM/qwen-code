@@ -41,7 +41,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
-    // hosted-workspace-files/2 joins only after the #13166 glob rollout.
+    // New profiles require all Harnesses and workers to be upgraded first.
     private List<String> definitionToolProfiles =
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
@@ -357,6 +357,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean enabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
+        private boolean workspaceSearchEnabled;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
@@ -413,6 +414,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setWorkspaceShellEnabled(boolean workspaceShellEnabled) {
             this.workspaceShellEnabled = workspaceShellEnabled;
+        }
+
+        public boolean isWorkspaceSearchEnabled() {
+            return workspaceSearchEnabled;
+        }
+
+        public void setWorkspaceSearchEnabled(boolean workspaceSearchEnabled) {
+            this.workspaceSearchEnabled = workspaceSearchEnabled;
         }
 
         public String getBaseUrl() {
