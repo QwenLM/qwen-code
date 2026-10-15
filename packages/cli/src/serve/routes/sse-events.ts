@@ -38,6 +38,7 @@ import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
 import { redactWorkflowsFromAvailableCommandsEvent } from '../workflow-session-gate.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
+import type { ResolveSubagentSessionRuntime } from './session.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
@@ -124,6 +125,7 @@ interface RegisterSseEventsRoutesDeps {
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
+  resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
@@ -362,13 +364,19 @@ export function registerSseEventsRoutes(
     const abort = new AbortController();
     try {
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
-      const runtime = requireSessionRuntime({
-        sessionId: virtualKey?.parentSessionId ?? sessionId,
-        route: 'GET /session/:id/events',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
+      const runtime = virtualKey
+        ? await deps.resolveSubagentSessionRuntime(
+            res,
+            'GET /session/:id/events',
+            virtualKey.parentSessionId,
+          )
+        : requireSessionRuntime({
+            sessionId,
+            route: 'GET /session/:id/events',
+            res,
+            workspaceRegistry,
+            daemonLog,
+          });
       if (!runtime) return;
       workspaceTrusted = runtime.trusted;
       const snapshot = req.query['snapshot'] === '1';

@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -9,6 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.net.ProxySelector;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -25,8 +26,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class HostedProviderControlProbe implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -111,8 +112,12 @@ final class HostedProviderControlProbe implements AutoCloseable {
                 : request.path("sessionId").asText(request.path("reference").path("sessionId").asText());
         String kind = provider ? request.path("operation").path("kind").asText() : "";
         boolean release = kind.equals("release");
-        if (kind.equals("execute") || path.endsWith("/v2/execute")) executions.merge(runtimeId, 1, Integer::sum);
-        if (release) releases.merge(runtimeId, 1, Integer::sum);
+        if (kind.equals("execute") || path.endsWith("/v2/execute")) {
+            executions.merge(runtimeId, 1, Integer::sum);
+        }
+        if (release) {
+            releases.merge(runtimeId, 1, Integer::sum);
+        }
         if (path.endsWith("/v3/activation") && request.path("operation").asText().equals("release")) {
             assertThat(releases.getOrDefault(runtimeId, 0)).as("closure before deactivation").isPositive();
             deactivations.merge(runtimeId, 1, Integer::sum);
@@ -210,8 +215,11 @@ final class HostedProviderControlProbe implements AutoCloseable {
         assertThat(((Number) row.get("dispatch_generation")).longValue()).isEqualTo(prepared ? 0 : 1);
         assertThat(executions.getOrDefault(runtimeId, 0)).as("physical worker dispatches").isEqualTo(prepared ? 0 : 1);
         assertThat(Files.readString(Path.of(session.get("directory").toString()).resolve("proof.txt"))).isEqualTo(prepared ? "x" : "xx");
-        if (prepared) assertThat(row.get("execution_status")).isNull();
-        else assertThat(row.get("execution_status")).isEqualTo("success");
+        if (prepared) {
+            assertThat(row.get("execution_status")).isNull();
+        } else {
+            assertThat(row.get("execution_status")).isEqualTo("success");
+        }
         boolean released = phase.equals("released");
         if (released) {
             assertThat(releases.getOrDefault(runtimeId, 0)).as("worker closures forwarded")
@@ -229,7 +237,9 @@ final class HostedProviderControlProbe implements AutoCloseable {
             assertThat(session.get("fault")).isEqualTo("release-reply");
             assertThat(dropped).isPositive();
         }
-        if (phase.equals("resume")) loseReleaseReply = false;
+        if (phase.equals("resume")) {
+            loseReleaseReply = false;
+        }
     }
 
     void assertReport(Map<String, Object> session, JsonNode report) throws Exception {
@@ -238,7 +248,9 @@ final class HostedProviderControlProbe implements AutoCloseable {
         var row = execution(session);
         assertThat(row.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
         JsonNode expected = report.path("reference").deepCopy();
-        if (session.get("fault").equals("raw-contract")) ((ObjectNode) expected).put("dispatchMode", "deferred");
+        if (session.get("fault").equals("raw-contract")) {
+            ((ObjectNode) expected).put("dispatchMode", "deferred");
+        }
         assertThat(JSON.readTree(row.get("reference_json").toString())).isEqualTo(expected);
         assertThat(row.get("idempotency_key")).isEqualTo(report.path("reservation").path("idempotencyKey").asText());
         System.out.println("FG6F_PROVIDER_LEDGER " + session.get("fault") + " original=" + row.get("execution_call_id")
@@ -252,7 +264,9 @@ final class HostedProviderControlProbe implements AutoCloseable {
         captureProcesses();
         processes.forEach(ProcessHandle::destroyForcibly);
         for (ProcessHandle process : processes) {
-            if (process.isAlive()) process.onExit().get(10, TimeUnit.SECONDS);
+            if (process.isAlive()) {
+                process.onExit().get(10, TimeUnit.SECONDS);
+            }
             assertThat(process.isAlive()).as("provider worker cleanup %s", process.pid()).isFalse();
         }
     }

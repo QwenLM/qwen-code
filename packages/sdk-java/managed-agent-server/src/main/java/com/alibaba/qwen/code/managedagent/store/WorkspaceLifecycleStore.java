@@ -7,17 +7,16 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 @Repository
 public class WorkspaceLifecycleStore {
@@ -450,9 +449,9 @@ public class WorkspaceLifecycleStore {
 
     private String occurrence(String event, String operationId) {
         try {
-            return "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
-                    OCCURRENCE_JSON.writeValueAsBytes(List.of(event, operationId))));
-        } catch (java.io.IOException | NoSuchAlgorithmException error) {
+            return "hook-plan-" + DigestUtils.sha256Hex(
+                    OCCURRENCE_JSON.writeValueAsBytes(List.of(event, operationId)));
+        } catch (java.io.IOException | IllegalArgumentException error) {
             throw new IllegalStateException(error);
         }
     }
