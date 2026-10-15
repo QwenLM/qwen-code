@@ -92,13 +92,10 @@ export function SessionRecoveryBanner({
     >
       <div>
         {recovery && recovery.kind !== 'clean' && (
-          <p>
-            {t(
-              recovery.cancellationConfirmationId
-                ? 'session.recovery.unknownCancellation'
-                : `session.recovery.${recovery.kind}`,
-            )}
-          </p>
+          <p>{t(`session.recovery.${recovery.kind}`)}</p>
+        )}
+        {recovery?.cancellationConfirmationId && (
+          <p>{t('session.recovery.unknownCancellation')}</p>
         )}
         {failed && <p role="alert">{t('session.recovery.failed')}</p>}
       </div>

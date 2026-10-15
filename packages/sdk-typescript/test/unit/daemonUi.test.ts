@@ -8819,6 +8819,7 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     after = reduceDaemonTranscriptEvents(after, [provisional, ...timing]);
     expect(before.blocks).toHaveLength(1);
     expect(before.blocks[0]).not.toHaveProperty('elapsedMs');
+    expect(before.blocks[0]).not.toHaveProperty('reason');
     expect(after.blocks).toEqual([
       expect.objectContaining({
         id: before.blocks[0].id,
@@ -8835,6 +8836,7 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     expect(enriched.blocks[0]).toMatchObject({
       serverTimestamp: 12000,
       elapsedMs: 11000,
+      reason: 'interrupted',
     });
     expect(after.blocks[0]).toMatchObject({ elapsedMs: 10999 });
     after = reduceDaemonTranscriptEvents(after, [

@@ -119,34 +119,41 @@ describe('createTranscriptReplayMachine', () => {
     expect(payload).not.toHaveProperty('cancelledAt');
   });
 
-  it('preserves the explicit cancellation time when the terminal record ends later', () => {
-    const projected = updates(
-      createTranscriptReplayMachine(),
-      record('user-cancel-result', 'system', {
-        subtype: 'turn_result',
-        systemPayload: {
-          promptId: 'prompt-1',
-          state: 'cancelled',
-          startedAt: 1000,
-          cancelledAt: 2200,
-          endedAt: 2500,
-        },
-      }),
-    );
-
-    expect(projected).toEqual([
-      expect.objectContaining({
-        _meta: expect.objectContaining({
-          promptCancelled: {
+  it.each([
+    [undefined, 'unknown'],
+    ['forward_failed', 'interrupted'],
+  ])(
+    'preserves the cancellation time with provenance %s',
+    (cancelReason, reason) => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-cancel-result', 'system', {
+          subtype: 'turn_result',
+          systemPayload: {
             promptId: 'prompt-1',
+            state: 'cancelled',
+            startedAt: 1000,
             cancelledAt: 2200,
-            elapsedMs: 1200,
-            reason: 'interrupted',
+            ...(cancelReason === undefined ? {} : { cancelReason }),
+            endedAt: 2500,
           },
         }),
-      }),
-    ]);
-  });
+      );
+
+      expect(projected).toEqual([
+        expect.objectContaining({
+          _meta: expect.objectContaining({
+            promptCancelled: {
+              promptId: 'prompt-1',
+              cancelledAt: 2200,
+              elapsedMs: 1200,
+              reason,
+            },
+          }),
+        }),
+      ]);
+    },
+  );
 
   it('labels a persisted user cancel as user provenance', () => {
     const projected = updates(

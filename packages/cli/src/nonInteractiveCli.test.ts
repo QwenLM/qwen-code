@@ -3039,10 +3039,21 @@ describe('runNonInteractive', () => {
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
       }));
 
-      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c3', {
-        continueInterrupted: true,
-      });
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c3',
+        {
+          continueInterrupted: true,
+        },
+      );
 
+      expect(exitCode).toBe(0);
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No interrupted turn to continue.'),
+      );
+      expect(processStderrSpy).not.toHaveBeenCalled();
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
 

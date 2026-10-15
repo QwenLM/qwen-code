@@ -600,7 +600,8 @@ class Session {
     ) {
       return {
         accepted: false,
-        interruption: cancellation?.confirmationId ? interruption : 'none',
+        interruption:
+          cancellation && !cancellation.confirmationId ? 'none' : interruption,
         ...(cancellation?.confirmationId && {
           cancellationConfirmationId: cancellation.confirmationId,
         }),

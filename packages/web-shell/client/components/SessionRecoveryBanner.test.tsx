@@ -95,11 +95,13 @@ describe('SessionRecoveryBanner', () => {
   });
 
   it('asks before continuing a legacy cancellation and carries only its current identity', async () => {
+    state.connection.context!.recovery!.kind = 'interrupted_turn';
     state.connection.context!.recovery!.cancellationConfirmationId =
       'legacy-daemon';
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     render();
     expect(container.textContent).toContain('reason was not recorded');
+    expect(container.textContent).toContain('Some tool results were not saved');
     expect(container.querySelector('button')?.textContent).toBe(
       'Confirm and continue',
     );
@@ -135,10 +137,12 @@ describe('SessionRecoveryBanner', () => {
     state.connection.context!.recovery = {
       kind: 'interrupted_turn',
       canContinue: true,
+      cancellationConfirmationId: 'legacy-daemon',
     };
     render(false, 'zh-CN');
     expect(container.textContent).toContain('部分工具结果未保存');
-    expect(container.querySelector('button')?.textContent).toBe('继续执行');
+    expect(container.textContent).toContain('未记录来源');
+    expect(container.querySelector('button')?.textContent).toBe('确认并继续');
     state.connection.context!.recovery = {
       kind: 'degraded_history',
       canContinue: false,

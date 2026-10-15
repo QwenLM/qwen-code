@@ -1512,7 +1512,11 @@ function broadcastTurnComplete(
             cancelledAt: rawPromptCancelled['cancelledAt'],
             elapsedMs: rawPromptCancelled['elapsedMs'],
             reason:
-              rawPromptCancelled['reason'] === 'user' ? 'user' : 'interrupted',
+              rawPromptCancelled['reason'] === 'user'
+                ? 'user'
+                : rawPromptCancelled['reason'] === undefined
+                  ? 'unknown'
+                  : 'interrupted',
           }
         : undefined;
     const published = entry.events.publish({

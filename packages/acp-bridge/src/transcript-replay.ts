@@ -1764,11 +1764,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           ? payload?.['endedAt']
           : payload?.['cancelledAt'],
       );
-      // Only an explicit user cancel persists `cancelReason: 'user'`. Every
-      // other cancelled terminal — including the `endedAt` fallback above — is
-      // an interruption, and the notice must not claim user intent.
+      // Older cancellation timestamps did not distinguish user intent from
+      // interruption. Keep that ambiguity in the projected notice.
       const reason =
-        payload?.['cancelReason'] === 'user' ? 'user' : 'interrupted';
+        payload?.['cancelReason'] === 'user'
+          ? 'user'
+          : payload?.['cancelReason'] === undefined &&
+              payload?.['cancelledAt'] !== undefined
+            ? 'unknown'
+            : 'interrupted';
       const startedAt = finiteNumber(payload?.['startedAt']);
       const promptId = payload?.['promptId'];
       if (

@@ -640,7 +640,7 @@ describe('runNonInteractiveStreamJson', () => {
     };
     await runNonInteractiveStreamJson(config, '');
     expect(continueResults).toEqual([
-      { accepted: false, interruption: 'none' },
+      { accepted: false, interruption: 'interrupted_prompt' },
     ]);
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });

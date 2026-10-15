@@ -3709,6 +3709,8 @@ const EN: Messages = {
   },
   'turn.stopped': 'You cancelled this request',
   'turn.interrupted': 'This request was interrupted',
+  'turn.unknownCancellation':
+    'This request was cancelled, but the reason was not recorded.',
   'turn.stoppedAfter': (v) => {
     const seconds = v?.seconds ?? 0;
     return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
@@ -5342,7 +5344,7 @@ const ZH: Messages = {
   'session.recovery.unknownCancellation':
     '此旧会话已取消，但未记录来源。继续前需要你确认。',
   'session.recovery.confirmCancellation':
-    '此轮任务可能是你主动停止的。确定要继续执行吗？',
+    '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -7842,6 +7844,7 @@ const ZH: Messages = {
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
   'turn.interrupted': '本次请求已中断',
+  'turn.unknownCancellation': '本次请求已取消，但未记录原因。',
   'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',

@@ -6675,7 +6675,7 @@ describe('Session', () => {
         for (let attempt = 0; attempt < 2; attempt++) {
           expect(await session.continueLastTurn()).toEqual({
             accepted: canContinue,
-            interruption: reason !== 'user' ? 'interrupted_prompt' : 'none',
+            interruption: 'interrupted_prompt',
             ...(reason === 'unknown'
               ? { cancellationConfirmationId: 'result' }
               : {}),
@@ -6698,13 +6698,75 @@ describe('Session', () => {
           }
         }
         const clientStatus = await session.getRecoveryStatusForClient();
+        expect(clientStatus.kind).toBe('interrupted_prompt');
         expect(clientStatus.canContinue).toBe(reason !== 'user');
         expect(clientStatus.cancellationConfirmationId).toBe(
           reason === 'unknown' ? 'result' : undefined,
         );
+        if (reason === 'unknown') {
+          const statusWhileLoading = session.getRecoveryStatusForClient();
+          const internals = session as unknown as {
+            pendingPrompt: AbortController | null;
+          };
+          internals.pendingPrompt = new AbortController();
+          try {
+            await expect(statusWhileLoading).resolves.toEqual({
+              kind: 'interrupted_prompt',
+              canContinue: false,
+            });
+          } finally {
+            internals.pendingPrompt = null;
+          }
+        }
         expect((await session.continueLastTurn('stale')).accepted).toBe(false);
         expect((await session.continueLastTurn('result')).accepted).toBe(
           reason === 'unknown',
+        );
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordTurnAttempt,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['disabled', 'read-failure'] as const)(
+      'keeps recovery status readable and continuation blocked when recording is %s',
+      async (recording) => {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'unfinished task' }] },
+        ]);
+        if (recording === 'disabled') {
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+            undefined,
+          );
+        } else {
+          mockChatRecordingService.readActiveTranscriptChain.mockRejectedValue(
+            new Error('sticky transcript write failure'),
+          );
+        }
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(session.getRecoveryStatusForClient()).resolves.toEqual({
+            kind: 'interrupted_prompt',
+            canContinue: false,
+          });
+          await expect(session.continueLastTurn()).resolves.toEqual({
+            accepted: false,
+            interruption: 'interrupted_prompt',
+          });
+        }
+        await expect(
+          session.prompt({
+            sessionId: session.sessionId,
+            prompt: [],
+            _meta: { 'qwen.daemon.continueLastTurn': true },
+          }),
+        ).rejects.toThrow(
+          recording === 'disabled'
+            ? 'Recovery requires a session transcript'
+            : 'sticky transcript write failure',
         );
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(
@@ -6732,6 +6794,15 @@ describe('Session', () => {
         kind: 'clean',
         canContinue: false,
       });
+      const classify = vi.spyOn(session, 'getRecoveryStatus');
+      await expect(session.getRecoveryStatusForClient()).resolves.toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      expect(classify).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.readActiveTranscriptChain,
+      ).not.toHaveBeenCalled();
       expect(promptSpy).not.toHaveBeenCalled();
     });
 
@@ -52092,7 +52163,16 @@ describe('Session', () => {
       session.dispose();
       aborting.abort('Error');
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toEqual({
+        stopReason: 'cancelled',
+        _meta: {
+          'qwen.promptCancelled': {
+            cancelledAt: expect.any(Number),
+            elapsedMs: expect.any(Number),
+            reason: 'interrupted',
+          },
+        },
+      });
       const internals = session as unknown as {
         todoStopGuard: {
           isHardSuspended: boolean;
@@ -55859,7 +55939,16 @@ describe('Session', () => {
       releaseSecondSend();
 
       const [firstResult] = await Promise.all([firstPrompt, secondPrompt]);
-      expect(firstResult).toEqual({ stopReason: 'cancelled' });
+      expect(firstResult).toEqual({
+        stopReason: 'cancelled',
+        _meta: {
+          'qwen.promptCancelled': {
+            cancelledAt: expect.any(Number),
+            elapsedMs: expect.any(Number),
+            reason: 'interrupted',
+          },
+        },
+      });
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(5);
     });
 

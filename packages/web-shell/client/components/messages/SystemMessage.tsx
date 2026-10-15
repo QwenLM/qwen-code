@@ -283,22 +283,24 @@ export const SystemMessage = memo(function SystemMessage({
       data && typeof data === 'object' && 'elapsedMs' in data
         ? data.elapsedMs
         : undefined;
-    const interrupted =
+    const reason =
       data && typeof data === 'object' && 'reason' in data
-        ? data.reason === 'interrupted'
-        : false;
+        ? data.reason
+        : undefined;
     return (
       <div className={styles.cancelled} role="status">
         <span>
-          {interrupted
-            ? t('turn.interrupted')
-            : typeof elapsedMs === 'number' &&
-                Number.isFinite(elapsedMs) &&
-                elapsedMs >= 0
-              ? t('turn.stoppedAfter', {
-                  seconds: Math.ceil(elapsedMs / 1000),
-                })
-              : t('turn.stopped')}
+          {reason === 'unknown'
+            ? t('turn.unknownCancellation')
+            : reason === 'interrupted'
+              ? t('turn.interrupted')
+              : typeof elapsedMs === 'number' &&
+                  Number.isFinite(elapsedMs) &&
+                  elapsedMs >= 0
+                ? t('turn.stoppedAfter', {
+                    seconds: Math.ceil(elapsedMs / 1000),
+                  })
+                : t('turn.stopped')}
         </span>
       </div>
     );

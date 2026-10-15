@@ -259,7 +259,18 @@ export function TrajectoryInspector({
             ],
           ];
         case 'prompt_cancelled':
-          return [[t('trajectory.inspector.reason'), block.reason]];
+          return [
+            [
+              t('trajectory.inspector.reason'),
+              block.reason === 'user'
+                ? t('trajectory.cancelled')
+                : block.reason === 'interrupted'
+                  ? t('turn.interrupted')
+                  : block.reason === 'unknown'
+                    ? t('turn.unknownCancellation')
+                    : block.reason,
+            ],
+          ];
         default:
           return [];
       }

@@ -19778,19 +19778,29 @@ describe('createAcpSessionBridge', () => {
 
   describe('turn_complete promptCancelled', () => {
     it.each([
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, 'unknown'],
       [
         'cancelled',
         { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'user' },
-        true,
+        'user',
       ],
-      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
-      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, false],
+      [
+        'cancelled',
+        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'interrupted' },
+        'interrupted',
+      ],
+      [
+        'cancelled',
+        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'forward_failed' },
+        'interrupted',
+      ],
+      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, undefined],
+      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, undefined],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, undefined],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, undefined],
     ])(
       'validates %s cancellation metadata %j',
-      async (stopReason, metadata, valid) => {
+      async (stopReason, metadata, expectedReason) => {
         const events: BridgeEvent[] = [];
         const handle = makeChannel({
           promptImpl: () =>
@@ -19819,13 +19829,10 @@ describe('createAcpSessionBridge', () => {
           ),
         );
         const terminal = events.find((event) => event.type === 'turn_complete');
-        if (valid) {
+        if (expectedReason !== undefined) {
           expect(terminal?.data).toHaveProperty('promptCancelled', {
             ...metadata,
-            reason:
-              'reason' in metadata && metadata.reason === 'user'
-                ? 'user'
-                : 'interrupted',
+            reason: expectedReason,
           });
         } else {
           expect(terminal?.data).not.toHaveProperty('promptCancelled');

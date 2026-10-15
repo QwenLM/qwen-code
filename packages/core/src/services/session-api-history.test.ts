@@ -756,8 +756,17 @@ describe('cancelled prompt identity with automatic tails', () => {
         promptId: 'different-daemon',
       };
     }
-    if (kind === 'duplicate-uuid')
-      records.unshift({ ...input, uuid: legacy.uuid });
+    if (kind === 'duplicate-uuid') {
+      records.push({
+        ...legacy,
+        promptId: 'other-client',
+        systemPayload: {
+          promptId: 'daemon-1',
+          state: 'completed',
+          endedAt: 3,
+        },
+      });
+    }
     const history = buildApiHistoryFromConversation({ messages: [input] });
     expect(
       getLastApiPromptCancellation(history, records)?.confirmationId,

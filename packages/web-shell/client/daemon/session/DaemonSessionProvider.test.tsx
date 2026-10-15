@@ -20523,6 +20523,7 @@ describe('DaemonSessionProvider', () => {
                 promptId,
                 cancelledAt: 12000,
                 elapsedMs: 11000,
+                reason: 'unknown',
               },
             },
           },
@@ -20586,6 +20587,7 @@ describe('DaemonSessionProvider', () => {
         ...(timed ? { elapsedMs: 11000 } : {}),
       });
       if (!timed) expect(live).not.toHaveProperty('elapsedMs');
+      expect(live).not.toHaveProperty('reason');
       await act(async () => {
         await history?.loadMore();
         await flushPromises();
@@ -20602,6 +20604,7 @@ describe('DaemonSessionProvider', () => {
         elapsedMs: 11000,
         serverTimestamp: 12000,
         sourceRecordIds: ['current-record'],
+        reason: 'unknown',
       });
       expect(retainedBytes).toBe(
         blocks.reduce(
@@ -23820,6 +23823,7 @@ describe('DaemonSessionProvider', () => {
       let ownerGuard: ReturnType<typeof useDaemonSessionOwnerGuard> | undefined;
       let captureSpy: { mockRestore(): void } | undefined;
       let catchObserved = false;
+      let startReleased = false;
       let admissionRejected = false;
       let connection: DaemonConnectionState | undefined;
       let streaming: ReturnType<typeof useDaemonStreamingState> | undefined;
@@ -23853,7 +23857,10 @@ describe('DaemonSessionProvider', () => {
                   const current = owner.isCurrent();
                   if (admissionRejected && !catchObserved) {
                     catchObserved = true;
-                    queueMicrotask(() => start.resolve());
+                    queueMicrotask(() => {
+                      startReleased = true;
+                      start.resolve();
+                    });
                   }
                   return current;
                 },
@@ -23863,7 +23870,7 @@ describe('DaemonSessionProvider', () => {
             container!.querySelector('button')!.click();
             await flushPromises();
           });
-          expect(catchObserved).toBe(false);
+          expect(startReleased).toBe(false);
         }
         const commitsBeforeFailure = committedStreaming.length;
         await act(async () => {
@@ -23884,6 +23891,7 @@ describe('DaemonSessionProvider', () => {
           );
         } else {
           expect(catchObserved).toBe(true);
+          expect(startReleased).toBe(true);
           expect(
             new Set(committedStreaming.slice(commitsBeforeFailure)),
           ).toEqual(new Set(['idle']));

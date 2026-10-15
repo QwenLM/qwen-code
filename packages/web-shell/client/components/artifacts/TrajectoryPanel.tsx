@@ -294,7 +294,14 @@ function otherLabel(
       return {
         badge: t('trajectory.badge.cancelled'),
         badgeTone: styles.toneMuted,
-        text: block.reason ?? t('trajectory.cancelled'),
+        text:
+          block.reason === 'user'
+            ? t('trajectory.cancelled')
+            : block.reason === 'interrupted'
+              ? t('turn.interrupted')
+              : block.reason === 'unknown'
+                ? t('turn.unknownCancellation')
+                : (block.reason ?? t('trajectory.cancelled')),
         faint: true,
       };
     default:

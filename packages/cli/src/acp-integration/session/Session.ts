@@ -208,7 +208,6 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
-  GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   applyPendingGoalProposal,
   formatProposeGoalRecoveryFailed,
@@ -3024,14 +3023,13 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
-              ? GOAL_PAUSE_REASON_USER_INTERRUPT
-              : turn.controller.signal.reason ===
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+                turn.controller.signal.reason ===
                   INTERRUPTED_PROMPT_ABORT_REASON
-                ? GOAL_PAUSE_REASON_PROMPT_INTERRUPTED
-                : managedSessionBlock
-                  ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
-                  : undefined;
+              ? GOAL_PAUSE_REASON_USER_INTERRUPT
+              : managedSessionBlock
+                ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
+                : undefined;
         if (
           pauseReason !== undefined &&
           runtime.getSnapshot().goal?.status === 'active'
@@ -3093,16 +3091,11 @@ export class Session implements SessionContext {
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
       // arm -- mislabelling the stop in the journal, the `_meta.goalState`
-      // update and the card, with no test able to see it. The two cancels in
-      // that list pause alike but do not read alike: the interrupted abort
-      // reason means the client or host cancelled the prompt, so only a user
-      // cancel may name the user.
+      // update and the card, with no test able to see it.
       const pauseReason = supersededByNewPrompt
         ? undefined
         : cancelledTurn
-          ? turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON
-            ? GOAL_PAUSE_REASON_PROMPT_INTERRUPTED
-            : GOAL_PAUSE_REASON_USER_INTERRUPT
+          ? GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
@@ -6003,18 +5996,23 @@ export class Session implements SessionContext {
   async getRecoveryStatusForClient(): Promise<
     NonNullable<ServeSessionContextStatus['recovery']>
   > {
-    if (!this.getRecoveryStatus().canContinue) return this.getRecoveryStatus();
-    const cancellation = await this.#getTurnCancellation();
-    const status = this.getRecoveryStatus();
-    if (cancellation && !cancellation.confirmationId) {
-      return { kind: 'clean', canContinue: false };
+    const initial = this.getRecoveryStatus();
+    if (!initial.canContinue) return initial;
+    try {
+      const cancellation = await this.#getTurnCancellation();
+      const status = this.getRecoveryStatus();
+      if (cancellation && !cancellation.confirmationId) {
+        return { ...status, canContinue: false };
+      }
+      return {
+        ...status,
+        ...(status.canContinue && cancellation?.confirmationId
+          ? { cancellationConfirmationId: cancellation.confirmationId }
+          : {}),
+      };
+    } catch {
+      return { kind: this.getRecoveryStatus().kind, canContinue: false };
     }
-    return {
-      ...status,
-      ...(status.canContinue && cancellation?.confirmationId
-        ? { cancellationConfirmationId: cancellation.confirmationId }
-        : {}),
-    };
   }
 
   /**

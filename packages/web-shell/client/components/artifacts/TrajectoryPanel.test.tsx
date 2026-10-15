@@ -1309,6 +1309,17 @@ describe('TrajectoryPanel', () => {
             _meta: { 'qwen.session.recordId': 'rec-2' },
           },
         } as unknown as DaemonEvent,
+        ...['user', 'interrupted', 'unknown'].map(
+          (reason): DaemonEvent => ({
+            v: 1,
+            type: 'turn_complete',
+            promptId: `cancelled-${reason}`,
+            data: {
+              stopReason: 'cancelled',
+              promptCancelled: { elapsedMs: 1000, cancelledAt: 2000, reason },
+            },
+          }),
+        ),
       ]),
     );
 
@@ -1316,6 +1327,11 @@ describe('TrajectoryPanel', () => {
     // tells the reader nothing the row itself could have said.
     expect(container.textContent).toContain('build finished in 4s');
     expect(container.textContent).not.toContain('shell_output');
+    expect(container.textContent).toContain('Turn cancelled');
+    expect(container.textContent).toContain('This request was interrupted');
+    expect(container.textContent).toContain(
+      'This request was cancelled, but the reason was not recorded.',
+    );
   });
 
   it('explains a missing history cursor outside the scrolled rows', async () => {
