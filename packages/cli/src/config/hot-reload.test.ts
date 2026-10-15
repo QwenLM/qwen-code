@@ -558,6 +558,50 @@ describe('registerMcpHotReload', () => {
     }
   });
 
+  it('does NOT emit McpPendingApprovalChanged for a gated server a --disable-mcp-server glob matches', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { excluded: ['g*'] },
+      bootExcluded: ['g*'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.McpPendingApprovalChanged, spy);
+    try {
+      merged.mcpServers = { gx: { command: 'gx', scope: 'workspace' } };
+      await listener([]);
+
+      expect(fc.setPendingMcpServers).toHaveBeenCalledWith(['gx']);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
+    }
+  });
+
+  it('does NOT emit McpPendingApprovalChanged for a gated server only mcp.excluded (not the flag) matches', async () => {
+    // The filter reads the effective list, not just the launch flag: here the
+    // flag excludes an unrelated name and settings carry the glob.
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { excluded: ['other'] },
+      bootExcluded: ['other'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.McpPendingApprovalChanged, spy);
+    try {
+      merged.mcpServers = { gx: { command: 'gx', scope: 'workspace' } };
+      merged.mcp = { excluded: ['g*'] };
+      await listener([]);
+
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
+    }
+  });
+
   it('still emits McpPendingApprovalChanged for a gated server the flag does not exclude', async () => {
     const fc = makeFakeConfig(cwd, {
       settingsMcp: {},

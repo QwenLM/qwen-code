@@ -241,7 +241,8 @@ export function registerMcpHotReload(
 > **Admission stance decision (deliberate)**: hot-reload makes **current settings win _within_ the
 > startup `--allowed-mcp-server-names` bound** — a runtime edit to `mcp.allowed` / `mcp.excluded` in
 > `settings.json` takes effect immediately, but **only narrows admission, never widens it beyond the
-> launch flag** (see Part F for the upper-bound rule and the `mcp.allowed: []` semantics). If no
+> launch flag** (see Part F for the upper-bound rule and the `mcp.allowed: []` semantics). Names passed
+> via `--disable-mcp-server` stay excluded across every reload. If no
 > `--allowed-mcp-server-names` flag was passed, settings fully drive admission. **The pending-approval
 > gate (#4615) never yields** regardless: a gated server must always be approved first (Part A item 4).
 >
@@ -494,6 +495,13 @@ allow-list to it:
 So a runtime edit can only ever narrow MCP admission below the launch flag, never widen past it.
 `mcp.excluded` still narrows further at discovery time, consistent with "only stricter, never looser".
 
+The `--disable-mcp-server` names are the deny-side counterpart: captured on `Config`
+(`cliExcludedMcpServerNames` → `getCliExcludedMcpServerNames()`) and unioned into the settings-derived
+`mcp.excluded` by `recomputeMcpGating` on every runtime recompute (settings hot-reload and ACP
+`workspaceMcpReload`; bare/safe mode via `bareSafeMcpGating`). A settings edit can exclude more servers
+but never re-enable a flag-disabled one, and a gated server the effective exclusion list already rules out
+is not offered for approval.
+
 #### H — `mcp.allowed: []` is deny-all, consistently across boot and hot-reload
 
 Boot treats an empty allow-list as deny-all (`getMcpServers()` filters whenever `allowedMcpServers`
@@ -509,13 +517,13 @@ compare equal and never reconcile. `excluded` / `pending` keep `undefined ≡ []
 configured". With admission gating it now classifies the owning server via a single core API,
 `Config.getMcpServerUnavailableReason(name)`, covering every gate:
 
-| reason             | meaning                                       | recovery the message suggests                     |
-| ------------------ | --------------------------------------------- | ------------------------------------------------- |
-| `removed`          | deleted from the merged config this session   | re-add it to settings                             |
-| `not_allowed`      | filtered out by `mcp.allowed` / the CLI bound | add it to `mcp.allowed`                           |
-| `excluded`         | listed in `mcp.excluded`                      | remove it from `mcp.excluded`                     |
-| `pending_approval` | gated server awaiting approval (#4615)        | approve it (run `/mcp`)                           |
-| _(none)_           | configured & admitted                         | genuine "tool not found" (disconnected / renamed) |
+| reason             | meaning                                           | recovery the message suggests                                   |
+| ------------------ | ------------------------------------------------- | --------------------------------------------------------------- |
+| `removed`          | deleted from the merged config this session       | re-add it to settings                                           |
+| `not_allowed`      | filtered out by `mcp.allowed` / the CLI bound     | add it to `mcp.allowed`                                         |
+| `excluded`         | listed in `mcp.excluded` / `--disable-mcp-server` | remove it from `mcp.excluded`; a flag exclusion needs a restart |
+| `pending_approval` | gated server awaiting approval (#4615)            | approve it (run `/mcp`)                                         |
+| _(none)_           | configured & admitted                             | genuine "tool not found" (disconnected / renamed)               |
 
 Two supporting changes: a private `getMergedMcpServers()` (the merge **without** the allow-list
 filter) so "configured" can be told apart from "filtered out"; and removal tracking now diffs that

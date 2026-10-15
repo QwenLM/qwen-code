@@ -261,7 +261,7 @@ import {
 } from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
-import { recomputeMcpGating } from '../config/hot-reload.js';
+import { bareSafeMcpGating, recomputeMcpGating } from '../config/hot-reload.js';
 import {
   REDACTED_MCP_SECRET,
   redactMcpServerSecrets,
@@ -4536,10 +4536,7 @@ class QwenAgent implements Agent {
           const bootAllowed = config.getCliAllowedMcpServerNames();
           const bootExcluded = config.getCliExcludedMcpServerNames();
           const gating = isBareOrSafe
-            ? {
-                allowed: bootAllowed ? [...bootAllowed] : undefined,
-                excluded: bootExcluded ? [...bootExcluded] : undefined,
-              }
+            ? bareSafeMcpGating(bootAllowed, bootExcluded)
             : recomputeMcpGating(
                 settings,
                 mcpServers,

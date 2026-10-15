@@ -122,6 +122,22 @@ export function recomputeMcpGating(
 }
 
 /**
+ * Admission lists for a bare/safe-mode Config: only the explicit, per-invocation
+ * CLI bounds (`--allowed-mcp-server-names`, `--disable-mcp-server`) apply; no
+ * settings-derived list and no `pending` (only never-gated top-tier servers can
+ * be present).
+ */
+export function bareSafeMcpGating(
+  bootAllowed: readonly string[] | undefined,
+  bootExcluded: readonly string[] | undefined,
+): McpGating {
+  return {
+    allowed: bootAllowed ? [...bootAllowed] : undefined,
+    excluded: bootExcluded ? [...bootExcluded] : undefined,
+  };
+}
+
+/**
  * Subscribe the running {@link Config} to settings changes so MCP servers
  * reconnect / disconnect / restart without a session restart (issue #3696
  * sub-task 3). Called once at startup, after `settingsWatcher.startWatching()`;
@@ -182,10 +198,7 @@ export function registerMcpHotReload(
     const bootExcluded = config.getCliExcludedMcpServerNames();
     const nextGating: McpGating =
       config.getBareMode() || config.isSafeMode()
-        ? {
-            allowed: bootAllowed ? [...bootAllowed] : undefined,
-            excluded: bootExcluded ? [...bootExcluded] : undefined,
-          }
+        ? bareSafeMcpGating(bootAllowed, bootExcluded)
         : recomputeMcpGating(
             settings,
             next,
