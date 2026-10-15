@@ -2719,6 +2719,7 @@ describe('useLlmStream', () => {
       });
       releaseRefresh?.();
       await roundTwo;
+      expect(result.current.turnCancellationRevision).toBe(1);
 
       // The preempted round never submitted: still only the failed round 1
       // attempt reached the client.
@@ -4498,7 +4499,7 @@ describe('useLlmStream', () => {
       } as unknown as AnyToolInvocation,
     } as unknown as TrackedCompletedToolCall;
     const client = new MockedLlmClientClass(mockConfig);
-    const { completeToolRound } = renderTestHook(
+    const { completeToolRound, result } = renderTestHook(
       [],
       client,
       undefined,
@@ -4509,6 +4510,7 @@ describe('useLlmStream', () => {
     );
 
     await completeToolRound([completedTool]);
+    expect(result.current.turnCancellationRevision).toBe(0);
 
     expect(client.addHistory).toHaveBeenCalledWith({
       role: 'user',
@@ -6052,6 +6054,7 @@ describe('useLlmStream', () => {
     ]);
     // The only second model call is the explicit Steer; the cancelled batch
     // itself never reached the model.
+    expect(result.current.turnCancellationRevision).toBe(2);
     expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
   });
 
@@ -6202,230 +6205,245 @@ describe('useLlmStream', () => {
     },
   );
 
-  it('records the Goal finalization error on the owning interaction', async () => {
-    const permit: GoalTurnPermit = {
-      goalId: 'goal-finish-error',
-      revision: 1,
-      turnId: 'turn-finish-error',
-    };
-    const finishTurn = vi
-      .fn()
-      .mockRejectedValue(
-        new Error('goal journal is unavailable: token=secret'),
-      );
-    const runtime = {
-      permitForTurn: vi.fn(() => permit),
-      finishTurn,
-      getSnapshot: vi.fn(() => ({
-        v: 2 as const,
-        activity: 'running' as const,
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'finish with diagnostics',
-          status: 'active' as const,
-          evidenceCursor: { recordId: 'record-finish-error' },
-          turnCount: 1,
-          activeTimeMs: 20,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      })),
-      dispatch: vi.fn().mockResolvedValue(undefined),
-    } as unknown as ReturnType<Config['getGoalRuntime']>;
-    mockConfig.getGoalRuntime = vi.fn(() => runtime);
-    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
-    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
-      flush: vi.fn().mockResolvedValue(undefined),
-    });
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
-    const client = new MockedLlmClientClass(mockConfig);
-    mockSendMessageStream.mockReturnValueOnce(
-      (async function* () {
-        yield {
-          type: ServerLlmEventType.ToolCallRequest,
-          value: {
-            callId: 'update-goal-error',
-            name: 'update_goal',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-goal-finish-error',
-            goalContext: permit,
+  it.each([true, false])(
+    'records the Goal finalization error with telemetry=%s',
+    async (telemetry) => {
+      if (!telemetry) mockGetActiveInteractionSpan.mockReturnValue(undefined);
+      const permit: GoalTurnPermit = {
+        goalId: 'goal-finish-error',
+        revision: 1,
+        turnId: 'turn-finish-error',
+      };
+      const finishTurn = vi
+        .fn()
+        .mockRejectedValue(
+          new Error('goal journal is unavailable: token=secret'),
+        );
+      const runtime = {
+        permitForTurn: vi.fn(() => permit),
+        finishTurn,
+        getSnapshot: vi.fn(() => ({
+          v: 2 as const,
+          activity: 'running' as const,
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'finish with diagnostics',
+            status: 'active' as const,
+            evidenceCursor: { recordId: 'record-finish-error' },
+            turnCount: 1,
+            activeTimeMs: 20,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 2,
           },
-        };
-      })(),
-    );
-    const { result } = renderHook(() =>
-      useLlmStream(
-        client,
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-      ),
-    );
-    await act(async () => {
-      await result.current.submitQuery(
-        'finish the Goal',
-        SendMessageType.UserQuery,
-        'prompt-goal-finish-error',
+        })),
+        dispatch: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      mockConfig.getGoalRuntime = vi.fn(() => runtime);
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+      const client = new MockedLlmClientClass(mockConfig);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'update-goal-error',
+              name: 'update_goal',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-goal-finish-error',
+              goalContext: permit,
+            },
+          };
+        })(),
       );
-    });
-    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+      const { result } = renderHook(() =>
+        useLlmStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'finish the Goal',
+          SendMessageType.UserQuery,
+          'prompt-goal-finish-error',
+        );
+      });
+      await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
 
-    await act(async () => {
-      await capturedOnComplete?.([
-        {
-          request: {
-            callId: 'update-goal-error',
-            name: 'update_goal',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-goal-finish-error',
-            goalContext: permit,
-          },
-          status: 'success',
-          responseSubmittedToLlm: false,
-          response: {
-            callId: 'update-goal-error',
-            responseParts: [
-              {
-                functionResponse: {
-                  id: 'update-goal-error',
-                  name: 'update_goal',
-                  response: { output: 'proposal recorded' },
+      await act(async () => {
+        await capturedOnComplete?.([
+          {
+            request: {
+              callId: 'update-goal-error',
+              name: 'update_goal',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-goal-finish-error',
+              goalContext: permit,
+            },
+            status: 'success',
+            responseSubmittedToLlm: false,
+            response: {
+              callId: 'update-goal-error',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'update-goal-error',
+                    name: 'update_goal',
+                    response: { output: 'proposal recorded' },
+                  },
                 },
-              },
-            ],
-            errorType: undefined,
-            terminateTurn: true,
-          },
-          tool: { displayName: 'UpdateGoal' },
-          invocation: {
-            getDescription: () => 'complete Goal',
-          } as unknown as AnyToolInvocation,
-        } as TrackedCompletedToolCall,
-      ]);
-    });
+              ],
+              errorType: undefined,
+              terminateTurn: true,
+            },
+            tool: { displayName: 'UpdateGoal' },
+            invocation: {
+              getDescription: () => 'complete Goal',
+            } as unknown as AnyToolInvocation,
+          } as TrackedCompletedToolCall,
+        ]);
+      });
 
-    expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
-      promptId: 'prompt-goal-finish-error',
-      errorMessage: 'Goal tool continuation could not finish',
-      errorType: 'continuation_goal_finish_failed',
-    });
-    expect(mockSendMessageStream).toHaveBeenCalledOnce();
-  });
+      expect(result.current.turnHasError).toBe(true);
+      if (telemetry)
+        expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
+          promptId: 'prompt-goal-finish-error',
+          errorMessage: 'Goal tool continuation could not finish',
+          errorType: 'continuation_goal_finish_failed',
+        });
+      if (!telemetry) expect(mockEndInteractionSpan).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+    },
+  );
 
-  it('does not let an old tool batch end a replacement interaction', async () => {
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
-    const originalOwner = {};
-    const replacementOwner = {};
-    mockGetActiveInteractionSpan.mockReturnValue(originalOwner);
-    const client = new MockedLlmClientClass(mockConfig);
-    const { result } = renderHook(() =>
-      useLlmStream(
-        client,
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-      ),
-    );
-    mockSendMessageStream.mockReturnValueOnce(
-      (async function* () {
-        yield {
-          type: ServerLlmEventType.ToolCallRequest,
-          value: {
-            callId: 'replacement-tool',
-            name: 'testTool',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-replaced',
-          },
-        };
-      })(),
-    );
-
-    await act(async () => {
-      await result.current.submitQuery(
-        'run the tool',
-        SendMessageType.UserQuery,
-        'prompt-replaced',
+  it.each(['cancelled', 'error'] as const)(
+    'does not let an old %s tool batch affect a replacement interaction',
+    async (status) => {
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+      const originalOwner = {};
+      const replacementOwner = {};
+      mockGetActiveInteractionSpan.mockReturnValue(originalOwner);
+      const client = new MockedLlmClientClass(mockConfig);
+      const { result } = renderHook(() =>
+        useLlmStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
       );
-    });
-    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
-    mockGetActiveInteractionSpan.mockReturnValue(replacementOwner);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'replacement-tool',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-replaced',
+            },
+          };
+        })(),
+      );
 
-    await act(async () => {
-      await capturedOnComplete?.([
-        {
-          request: {
-            callId: 'replacement-tool',
-            name: 'testTool',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-replaced',
-          },
-          status: 'cancelled',
-          responseSubmittedToLlm: false,
-          response: {
-            callId: 'replacement-tool',
-            responseParts: [{ text: 'cancelled' }],
-            errorType: undefined,
-          },
-          tool: { displayName: 'TestTool' },
-          invocation: {
-            getDescription: () => 'replacement test',
-          } as unknown as AnyToolInvocation,
-        } as TrackedCancelledToolCall,
-      ]);
-    });
+      await act(async () => {
+        await result.current.submitQuery(
+          'run the tool',
+          SendMessageType.UserQuery,
+          'prompt-replaced',
+        );
+      });
+      await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+      mockGetActiveInteractionSpan.mockReturnValue(replacementOwner);
 
-    expect(mockEndInteractionSpan).not.toHaveBeenCalledWith('cancelled', {
-      promptId: 'prompt-replaced',
-    });
-  });
+      if (status === 'error')
+        client.getHistoryFunctionResponseIds = vi.fn(
+          () => new Set(['replacement-tool']),
+        );
+      await act(async () => {
+        await capturedOnComplete?.([
+          {
+            request: {
+              callId: 'replacement-tool',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-replaced',
+            },
+            status,
+            responseSubmittedToLlm: false,
+            response: {
+              callId: 'replacement-tool',
+              responseParts: [{ text: 'cancelled' }],
+              errorType: undefined,
+            },
+            tool: { displayName: 'TestTool' },
+            invocation: {
+              getDescription: () => 'replacement test',
+            } as unknown as AnyToolInvocation,
+          } as unknown as TrackedToolCall,
+        ]);
+      });
+
+      expect(result.current.turnHasError).toBe(false);
+      expect(mockEndInteractionSpan).not.toHaveBeenCalledWith(status, {
+        promptId: 'prompt-replaced',
+      });
+    },
+  );
 
   it('records tool results with goalContext during a Goal turn', async () => {
     const recordToolResult = vi.fn();
@@ -8569,6 +8587,36 @@ describe('useLlmStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it('resets a terminal API error for the next successful model turn', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Error,
+            value: { error: { message: 'API failed', status: 500 } },
+          };
+        })(),
+      );
+      const { result } = renderStatusStream();
+      await act(async () => {
+        await result.current.submitQuery('first', SendMessageType.UserQuery);
+      });
+      expect(result.current.turnHasError).toBe(true);
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'success' };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      await act(async () => {
+        await result.current.submitQuery('second', SendMessageType.UserQuery);
+      });
+      expect(result.current.turnHasError).toBe(false);
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
     it('does not carry a terminal API error into a successful shell command', async () => {
       let onExec: ((done: Promise<void>) => Promise<void>) | undefined;
       vi.mocked(useShellCommandProcessor).mockImplementation(
@@ -9799,7 +9847,7 @@ describe('useLlmStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
 
-    renderHook(() =>
+    const { result } = renderHook(() =>
       useLlmStream(
         client,
         [],
@@ -9837,6 +9885,7 @@ describe('useLlmStream', () => {
     });
 
     // Telemetry NOT incremented — the cancelled filter held.
+    expect(result.current.turnCancellationRevision).toBe(1);
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 

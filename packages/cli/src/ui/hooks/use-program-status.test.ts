@@ -18,11 +18,6 @@ import {
 } from './use-program-status.js';
 import type { ProgramStatusBlockKind } from './use-program-status.js';
 
-vi.mock('../../utils/osc.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../../utils/osc.js')>();
-  return { ...original, wrapForMultiplexer: (sequence: string) => sequence };
-});
-
 const report = (state: string, kind = '') =>
   `\x1b]7501;state=${state}${kind ? `:kind=${kind}` : ''}:app=qwen-code\x07`;
 const clear = '\x1b]7501;state=clear\x07';
@@ -317,6 +312,16 @@ describe('useProgramStatus', () => {
     }
   });
 
+  it('wraps reports and handoff clears for tmux passthrough', () => {
+    vi.stubEnv('TMUX', '/tmp/tmux-1000/default,12345,0');
+    mount();
+    expect(write).toHaveBeenLastCalledWith(
+      '\x1bPtmux;\x1b' + report('idle') + '\x1b\\',
+    );
+    appEvents.emit(AppEvent.TerminalReleased);
+    expect(write).toHaveBeenLastCalledWith('\x1bPtmux;\x1b' + clear + '\x1b\\');
+  });
+
   it('clears on handoff and restores on return, then clears on unmount', () => {
     const { unmount, rerender } = mount();
     rerender({
@@ -361,6 +366,63 @@ describe('useProgramStatus', () => {
     expect(write).toHaveBeenLastCalledWith(clear);
     unmount();
     expect(process.listeners('exit')).toEqual(before);
+  });
+
+  it.each([false, true])(
+    'preserves a completed result on exit and unmount (error=%s)',
+    (error) => {
+      const before = process.listeners('exit');
+      const { rerender, unmount } = mount();
+      rerender({
+        state: StreamingState.Responding,
+        kind: undefined,
+        error: false,
+        cancellation: 0,
+      });
+      rerender({
+        state: StreamingState.Idle,
+        kind: undefined,
+        error,
+        cancellation: 0,
+      });
+      expect(write).toHaveBeenLastCalledWith(report(error ? 'error' : 'done'));
+      const listener = process
+        .listeners('exit')
+        .find((entry) => !before.includes(entry));
+      write.mockClear();
+      listener!(0);
+      unmount();
+      expect(write).not.toHaveBeenCalled();
+      expect(process.listeners('exit')).toEqual(before);
+    },
+  );
+
+  it('clears a dialog overriding a completed result on exit', () => {
+    const before = process.listeners('exit');
+    const { rerender } = mount();
+    rerender({
+      state: StreamingState.Responding,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    rerender({
+      state: StreamingState.Idle,
+      kind: undefined,
+      error: false,
+      cancellation: 0,
+    });
+    rerender({
+      state: StreamingState.Idle,
+      kind: 'question',
+      error: false,
+      cancellation: 0,
+    });
+    const listener = process
+      .listeners('exit')
+      .find((entry) => !before.includes(entry));
+    listener!(0);
+    expect(write).toHaveBeenLastCalledWith(clear);
   });
 
   it('emits no status or cleanup when stdout is not a TTY', () => {

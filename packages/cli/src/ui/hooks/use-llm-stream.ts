@@ -5072,6 +5072,9 @@ export const useLlmStream = (
         completedAndReadyToSubmitTools.find(
           (toolCall) => !toolCall.request.isClientInitiated,
         );
+      const recordedInteractionOwner = ownerToolCall
+        ? ownerForToolCall(ownerToolCall)
+        : undefined;
       const interactionOwner = ownerToolCall
         ? liveOwnerForToolCall(ownerToolCall)
         : undefined;
@@ -5166,13 +5169,22 @@ export const useLlmStream = (
           abortControllerRef.current = null;
         }
         if (
+          status === 'error' &&
+          (!activeInteractionPromptIdRef.current ||
+            promptId === activeInteractionPromptIdRef.current) &&
+          (!recordedInteractionOwner ||
+            (promptId &&
+              getActiveInteractionSpan(promptId) === recordedInteractionOwner))
+        ) {
+          setTurnHasError(true);
+        }
+        if (
           !promptId ||
           !interactionOwner ||
           getActiveInteractionSpan(promptId) !== interactionOwner
         ) {
           return;
         }
-        if (status === 'error') setTurnHasError(true);
         endInteractionSpan(status, {
           promptId,
           ...(errorMessage ? { errorMessage } : {}),

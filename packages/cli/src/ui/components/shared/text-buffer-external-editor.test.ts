@@ -5,7 +5,15 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
 const { mockSpawnSync, mockGetExternalEditorCommand } = vi.hoisted(() => ({
@@ -67,6 +75,8 @@ const expectedTmpFile = pathMod.join('/tmp/qwen-edit-mock', 'buffer.txt');
 describe('openInExternalEditor', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.stubEnv('VISUAL', undefined);
+    vi.stubEnv('EDITOR', 'vim');
     (fs.mkdtempSync as Mock).mockReturnValue('/tmp/qwen-edit-mock');
     (fs.writeFileSync as Mock).mockImplementation(() => {});
     (fs.readFileSync as Mock).mockReturnValue('edited text');
@@ -75,9 +85,17 @@ describe('openInExternalEditor', () => {
     mockGetExternalEditorCommand.mockReturnValue(null);
   });
 
-  it.each([0, 1])(
-    'releases the terminal before spawn and reacquires after status %s',
-    async (status) => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([
+    ['vim', 0],
+    ['vim', 1],
+    ['kak', 0],
+    ['nvim.cmd', 0],
+  ] as const)(
+    'releases the terminal for %s and reacquires after status %s',
+    async (editor, status) => {
+      vi.stubEnv('EDITOR', editor);
       const events: string[] = [];
       const release = () => events.push('release');
       const acquire = () => events.push('acquire');

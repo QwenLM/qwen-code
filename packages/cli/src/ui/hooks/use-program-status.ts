@@ -33,6 +33,7 @@ export function useProgramStatus(
   const cancelled = useRef(false);
   const previousCancellation = useRef(cancellationRevision);
   const result = useRef<'idle' | 'done' | 'error'>('idle');
+  const reportedState = useRef('idle');
   const lastReport = useRef('');
   const lastWritten = useRef('');
   const released = useRef(false);
@@ -73,6 +74,7 @@ export function useProgramStatus(
     const report = wrapForMultiplexer(
       osc(OSC.PROGRAM_STATUS, `state=${state}${kind}:app=qwen-code`),
     );
+    reportedState.current = state;
     lastReport.current = report;
     if (!released.current && report !== lastWritten.current) {
       // Bypass Ink's rendering pipeline, which can corrupt OSC/DCS bytes.
@@ -89,6 +91,14 @@ export function useProgramStatus(
       );
       process.stdout.write(sequence);
       lastWritten.current = sequence;
+    };
+    const clearUnlessResult = () => {
+      if (
+        reportedState.current !== 'done' &&
+        reportedState.current !== 'error'
+      ) {
+        clear();
+      }
     };
     const restore = () => {
       if (!released.current && lastReport.current) {
@@ -107,13 +117,13 @@ export function useProgramStatus(
     appEvents.on(AppEvent.TerminalReleased, release);
     appEvents.on(AppEvent.TerminalAcquired, acquire);
     process.on('SIGCONT', restore);
-    process.on('exit', clear);
+    process.on('exit', clearUnlessResult);
     return () => {
       appEvents.removeListener(AppEvent.TerminalReleased, release);
       appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
       process.removeListener('SIGCONT', restore);
-      process.removeListener('exit', clear);
-      clear();
+      process.removeListener('exit', clearUnlessResult);
+      clearUnlessResult();
     };
   }, []);
 }

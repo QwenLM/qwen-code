@@ -4075,6 +4075,7 @@ export const AppContainer = (props: AppContainerProps) => {
       streamingState === StreamingState.WaitingForConfirmation ||
       isMcpApprovalDialogOpen ||
       isFolderTrustDialogOpen ||
+      isTrustDialogOpen ||
       !!shellConfirmationRequest ||
       !!confirmationRequest ||
       !!loopDetectionConfirmationRequest,

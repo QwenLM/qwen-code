@@ -450,8 +450,8 @@ describe('runNonInteractive', () => {
     const stdout = processStdoutSpy.mock.calls
       .map((call) => String(call[0]))
       .join('');
-    expect(stdout).not.toContain('\x1b]7501;');
     vi.restoreAllMocks();
+    expect(stdout).not.toContain('\x1b]7501;');
   });
 
   /**

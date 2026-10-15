@@ -4,10 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { basename } from 'node:path';
+import { basename, win32 } from 'node:path';
 
 export function isTerminalEditorCommand(command: string): boolean {
-  return /^(vi|vim|nvim|neovim|emacs|nano|pico|micro|hx|helix)(\.exe)?$/i.test(
-    basename(command),
+  if (!command.trim()) return false;
+  if (/[/\\]Zed\.app[/\\]Contents[/\\]MacOS[/\\]cli$/i.test(command))
+    return false;
+  const executable = win32.basename(basename(command));
+  return !/^(code|codium|windsurf|cursor|trae|zed|zeditor|notepad|open)(\.(exe|cmd|bat))?$/i.test(
+    executable,
   );
 }

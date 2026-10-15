@@ -68,6 +68,7 @@ import {
   afterAll,
   type Mock,
 } from 'vitest';
+import * as mcpApproval from './hooks/useMcpApproval.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -706,6 +707,25 @@ describe('AppContainer State Management', () => {
     }
   });
 
+  function captureProgramStatus() {
+    for (const key of [
+      'TERM_PROGRAM',
+      'TERM',
+      'TMUX',
+      'STY',
+      'KITTY_WINDOW_ID',
+    ])
+      vi.stubEnv(key, '');
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    return {
+      write,
+      reports: () =>
+        write.mock.calls
+          .map((call) => String(call[0]))
+          .filter((value) => value.startsWith('\x1b]7501;')),
+    };
+  }
+
   it.each([
     [
       'question tool',
@@ -769,15 +789,7 @@ describe('AppContainer State Management', () => {
           isAuthenticating: authenticating,
         },
       });
-      for (const key of [
-        'TERM_PROGRAM',
-        'TERM',
-        'TMUX',
-        'STY',
-        'KITTY_WINDOW_ID',
-      ])
-        vi.stubEnv(key, '');
-      const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+      const { write, reports } = captureProgramStatus();
       const harness = render(
         <AppContainer
           config={mockConfig}
@@ -788,10 +800,7 @@ describe('AppContainer State Management', () => {
       );
       try {
         await act(async () => {});
-        const reports = write.mock.calls
-          .map((call) => String(call[0]))
-          .filter((value) => value.startsWith('\x1b]7501;'));
-        expect(reports.at(-1)).toBe(
+        expect(reports().at(-1)).toBe(
           `\x1b]7501;state=blocked:kind=${kind}:app=qwen-code\x07`,
         );
       } finally {
@@ -801,25 +810,82 @@ describe('AppContainer State Management', () => {
     },
   );
 
-  it('reports feedback input as blocked and restores the completed turn', async () => {
-    const tty = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
-    Object.defineProperty(process.stdout, 'isTTY', {
-      value: true,
-      configurable: true,
+  it.each([
+    'MCP approval',
+    'folder trust',
+    'shell confirmation',
+    'confirmation',
+    'loop detection',
+    'trust dialog',
+  ] as const)('reports idle %s as blocked permission', async (source) => {
+    const stream = mockedUseLlmStream.getMockImplementation()!();
+    mockedUseLlmStream.mockReturnValue({
+      ...stream,
+      streamingState: 'idle',
+      loopDetectionConfirmationRequest:
+        source === 'loop detection'
+          ? { prompt: 'Continue?', onConfirm: vi.fn() }
+          : undefined,
     });
-    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
-    for (const key of [
-      'TERM_PROGRAM',
-      'TERM',
-      'TMUX',
-      'STY',
-      'KITTY_WINDOW_ID',
-    ])
-      vi.stubEnv(key, '');
-    const reports = () =>
-      write.mock.calls
-        .map((call) => String(call[0]))
-        .filter((value) => value.startsWith('\x1b]7501;'));
+    const slash = mockedUseSlashCommandProcessor.getMockImplementation()!();
+    mockedUseSlashCommandProcessor.mockReturnValue({
+      ...slash,
+      shellConfirmationRequest:
+        source === 'shell confirmation'
+          ? { command: 'echo test', onConfirm: vi.fn() }
+          : null,
+      confirmationRequest:
+        source === 'confirmation'
+          ? { prompt: 'Continue?', onConfirm: vi.fn() }
+          : null,
+    });
+    if (source === 'folder trust')
+      mockedUseFolderTrust.mockReturnValue({
+        isFolderTrustDialogOpen: true,
+        handleFolderTrustSelect: vi.fn(),
+        isRestarting: false,
+      });
+    const mcp = vi.spyOn(mcpApproval, 'useMcpApproval').mockReturnValue({
+      isMcpApprovalDialogOpen: source === 'MCP approval',
+      currentMcpApproval: {
+        name: 'test',
+        config: { command: 'test' },
+        summary: 'test',
+        source: '.mcp.json',
+      },
+      pendingMcpApprovals: [],
+      mcpApprovalRemaining: 0,
+      handleMcpApprovalSelect: vi.fn(),
+    });
+    const { write, reports } = captureProgramStatus();
+    const harness = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    try {
+      await act(async () => {});
+      if (source === 'trust dialog')
+        await act(async () => {
+          mockedUseSlashCommandProcessor.mock.calls
+            .at(-1)![12]
+            .openTrustDialog();
+        });
+      expect(reports().at(-1)).toBe(
+        '\x1b]7501;state=blocked:kind=permission:app=qwen-code\x07',
+      );
+    } finally {
+      harness.unmount();
+      write.mockRestore();
+      mcp.mockRestore();
+    }
+  });
+
+  it('reports feedback input as blocked and restores the completed turn', async () => {
+    const { write, reports } = captureProgramStatus();
     const tree = () => (
       <AppContainer
         config={mockConfig}
@@ -865,9 +931,6 @@ describe('AppContainer State Management', () => {
     } finally {
       harness.unmount();
       write.mockRestore();
-      vi.unstubAllEnvs();
-      if (tty) Object.defineProperty(process.stdout, 'isTTY', tty);
-      else Reflect.deleteProperty(process.stdout, 'isTTY');
     }
   });
 
