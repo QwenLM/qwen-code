@@ -282,7 +282,11 @@ describe('SubAgentPanel sub-tool timestamps', () => {
 });
 
 describe('SubAgentPanel agent path', () => {
-  it('shows a nested path in the header, where the type name alone is ambiguous', () => {
+  it('keeps the path on the name title without rendering it as a chip', () => {
+    // Nothing in the projection can produce a path deeper than `/root/<name>`
+    // today: the nested sub-content fallback was unreachable, so a visible
+    // nested-path chip claimed a capability the wire never delivers. The path
+    // stays available on hover, where it is accurate at any depth.
     const container = renderPanel(
       {
         callId: 'agent-1',
@@ -293,7 +297,10 @@ describe('SubAgentPanel agent path', () => {
       },
       { hideHeader: false },
     );
-    expect(container.textContent).toContain('/root/security/deps');
+    expect(container.textContent).not.toContain('/root/security/deps');
+    expect(
+      container.querySelector('[title="/root/security/deps"]'),
+    ).not.toBeNull();
   });
 
   it('keeps a depth-1 path off the visible header but on the name title', () => {

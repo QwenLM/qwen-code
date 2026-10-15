@@ -566,10 +566,27 @@ export function transcriptBlocksToDaemonMessages(
     ),
   );
   const completedTaskIds = new Set<string>();
-  // Teammate identity by background task id, filled from the display frames
-  // (which carry `_meta.agent`) so the later turn-started marker — which
-  // carries no identity of its own — can still name its author.
+  // Teammate identity by background task id, built over the whole block list
+  // before any row is projected: on the live wire the turn-started marker can
+  // arrive before the display frame carrying the identity, so filling this
+  // inside the loop leaves the marker row — the row the user actually sees —
+  // anonymous.
   const teammateByTask = new Map<string, { name: string }>();
+  for (const scan of blocks) {
+    const scanTeammate = teammateOfAgent(
+      'agent' in scan ? scan.agent : undefined,
+    );
+    if (!scanTeammate) continue;
+    const scanTaskId = getString(
+      getRecord(
+        scan.kind === 'status'
+          ? scan.data
+          : getRecord((scan as { meta?: unknown }).meta)?.['backgroundTask'],
+      ),
+      'taskId',
+    );
+    if (scanTaskId) teammateByTask.set(scanTaskId, scanTeammate);
+  }
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -599,15 +616,6 @@ export function transcriptBlocksToDaemonMessages(
         sourceBlockIds: [block.id],
       });
       continue;
-    }
-    const blockTaskId = getString(
-      getRecord(
-        block.kind === 'status' ? block.data : blockMeta?.['backgroundTask'],
-      ),
-      'taskId',
-    );
-    if (blockTaskId && blockTeammate) {
-      teammateByTask.set(blockTaskId, blockTeammate);
     }
     const promptId = backgroundTurn?.turnId ?? block.promptId;
     if (
@@ -914,12 +922,7 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(
-            parentSubAgent,
-            textBlock.text,
-            block.id,
-            textBlock.agent?.agentName,
-          );
+          appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
 
@@ -1064,12 +1067,7 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(
-            parentSubAgent,
-            textBlock.text,
-            block.id,
-            textBlock.agent?.agentName,
-          );
+          appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
         const target =
@@ -1556,13 +1554,9 @@ function appendSubContent(
   parent: DaemonMessageToolCall,
   text: string,
   blockId: string,
-  agentName?: string,
 ): void {
   parent.subContent = (parent.subContent || '') + text;
   parent.sourceBlockIds = unionMessageIds(parent.sourceBlockIds, blockId);
-  // Adopt the first identity and never rewrite it: the path is stable for one
-  // subagent run, and a later frame must not relabel a card already on screen.
-  if (!parent.agentPath && agentName) parent.agentPath = agentName;
 }
 
 function appendToolCallMessage(

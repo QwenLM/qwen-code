@@ -4822,6 +4822,29 @@ export class Session implements SessionContext {
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
     this.hardSuspendTodoStopGuard();
+    // A teammate report is consumed from the on-disk mailbox (marked read)
+    // before it is durable anywhere else, and this queue is its only carrier:
+    // land the model-visible copy so a resumed session still receives it.
+    const teardownRecording = this.config.getChatRecordingService();
+    if (teardownRecording) {
+      for (const item of this.notificationQueue) {
+        if (item.kind !== 'peer' || item.persisted) continue;
+        teardownRecording.recordNotification(
+          [{ text: item.modelText }],
+          item.displayText,
+          {
+            taskId: item.taskId,
+            sourceTurnId: item.sourceTurnId,
+            status: item.status,
+            kind: item.kind,
+            ...(item.agent
+              ? { agent: persistedNotificationAgent(item.agent) }
+              : {}),
+            ...item.structured,
+          },
+        );
+      }
+    }
     this.notificationQueue = [];
     this.droppedNotifications.clear();
     this.cronQueue = [];
