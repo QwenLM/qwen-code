@@ -411,7 +411,7 @@ class WorkspaceSessionRetentionTest {
         jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json, phase, tenant_id, session_id, operation_id, operation_kind,"
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
-                + " session_status_before, available_at, created_at, updated_at)"
+                + " session_status_before, available_at, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'SESSION', ?, ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
                 + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
         web("archive", tenant, session, "owner", "fresh").andExpect(status().isConflict())

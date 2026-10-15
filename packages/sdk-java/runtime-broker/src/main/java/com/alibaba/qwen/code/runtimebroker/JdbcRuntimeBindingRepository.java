@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -741,12 +743,7 @@ public final class JdbcRuntimeBindingRepository
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, tenantId);
             try (PreparedStatement statement = connection.prepareStatement(
-                                    "INSERT INTO ma_session_head (tenant_key, harness_key,"
-                                        + " tenant_id, harness_session_id, session_id, head_kind,"
-                                        + " phase, created_at, updated_at) VALUES (?, ?, ?, ?, ?,"
-                                        + " 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6),"
-                                        + " CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE phase ="
-                                        + " 'DRAINING', claim_lease_until = NULL")) {
+                                    "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'DRAINING' OR claim_lease_until IS NOT NULL THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'DRAINING', claim_lease_until = NULL")) {
                 statement.setString(1, harnessDrainKey(tenantId));
                 statement.setString(2, harnessDrainKey(harnessSessionId));
                 JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
@@ -962,12 +959,7 @@ public final class JdbcRuntimeBindingRepository
     public static void beginHarnessLifecycle(Connection connection, String tenantId, String sessionId, String operationId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                        "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
-                            + " harness_session_id, session_id, head_kind, phase, operation_id,"
-                            + " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'HARNESS',"
-                            + " 'LIFECYCLE_ONLY', ?, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)) ON"
-                            + " DUPLICATE KEY UPDATE phase = 'LIFECYCLE_ONLY', operation_id ="
-                            + " VALUES(operation_id)")) {
+                        "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'LIFECYCLE_ONLY', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'LIFECYCLE_ONLY' OR operation_id IS NULL OR operation_id <> VALUES(operation_id) THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'LIFECYCLE_ONLY', operation_id = VALUES(operation_id)")) {
             statement.setString(1, harnessDrainKey(tenantId));
             statement.setString(2, harnessDrainKey(sessionId));
             JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
@@ -995,8 +987,9 @@ public final class JdbcRuntimeBindingRepository
                     try (PreparedStatement statement =
                             connection.prepareStatement(
                                     "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                                        + " tenant_id, storage_id, fence_operation_id) VALUES (?,"
-                                        + " ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE"
+                                        + " tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified) VALUES (?,"
+                                        + " ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+                                        + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                                         + " fence_operation_id = COALESCE(fence_operation_id,"
                                         + " VALUES(fence_operation_id))")) {
                         statement.setString(1, storageAliasKey(tenantId, storageId));

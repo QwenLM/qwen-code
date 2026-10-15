@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -125,12 +127,7 @@ public class ManagedToolResultStore {
                         createdAt, createdAt});
             }
             jdbc.batchUpdate(
-                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
-                        + " operation_kind, operation_id, tenant_id, workspace_id, session_id,"
-                        + " target_kind, target_key, execution_key, request_json, request_digest,"
-                        + " phase, state, created_at, updated_at) VALUES (?, ?, ?,"
-                        + " 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?,"
-                        + " 'PROJECTING', 'PENDING', ?, ?)", rows);
+                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
     }
 
@@ -227,7 +224,7 @@ public class ManagedToolResultStore {
                                     require(after == through, "Backfill journal is incomplete");
                                 }
                                 jdbc.update(
-                                        "UPDATE ma_session_head SET o3_backfill_revision = ?,"
+                                        "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_revision = ?,"
                                             + " o3_backfill_through = ?, o3_backfill_pending = ?"
                                             + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key"
                                             + " = ? AND harness_key = ? AND tenant_id = ? AND"
@@ -257,7 +254,7 @@ public class ManagedToolResultStore {
                                             tenant, (String) failed.get("workspace_id"), session);
                             if (failed.equals(current)) {
                                 jdbc.update(
-                                        "UPDATE ma_session_head SET o3_backfill_error ="
+                                        "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", o3_backfill_error ="
                                             + " 'invalid_journal', o3_backfill_pending = FALSE"
                                             + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key"
                                             + " = ? AND harness_key = ? AND tenant_id = ? AND"
@@ -301,14 +298,13 @@ public class ManagedToolResultStore {
                                         "LEASED".equals(state) ? "claim_until" : "available_at";
                                 String epoch =
                                         "LEASED".equals(state)
-                                                ? "CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20,"
-                                                        + " 3)) * 1000"
+                                                ? "claim_until"
                                                 : due;
                                 String bound =
-                                        "LEASED".equals(state) ? "FROM_UNIXTIME(? / 1000.0)" : "?";
+                                        "LEASED".equals(state) ? "?" : "?";
                                 rows.addAll(
                                         jdbc.query(
-                                                "SELECT *, "
+                                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", "
                                                         + epoch
                                                         + " AS due_at FROM ma_operation WHERE"
                                                         + " operation_kind ="
@@ -350,11 +346,7 @@ public class ManagedToolResultStore {
                                 ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
                                 var current =
                                         jdbc.queryForList(
-                                                "SELECT *, CAST(UNIX_TIMESTAMP(claim_until) AS"
-                                                    + " DECIMAL(20, 3)) * 1000 AS claim_until_epoch"
-                                                    + " FROM ma_operation WHERE operation_key = ?"
-                                                    + " AND operation_kind ="
-                                                    + " 'TOOL_RESULT_PROJECTION' FOR UPDATE",
+                                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'TOOL_RESULT_PROJECTION' FOR UPDATE",
                                                 candidate.get("operation_key"));
                                 if (current.size() != 1) {
                                     continue;
@@ -387,10 +379,7 @@ public class ManagedToolResultStore {
                                 long generation =
                                         ((Number) row.get("claim_generation")).longValue() + 1;
                                 jdbc.update(
-                                        "UPDATE ma_operation SET state = 'LEASED', claim_generation"
-                                                + " = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
-                                                + " attempt_count = attempt_count + 1 WHERE"
-                                                + " operation_key = ?",
+                                        "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'LEASED', claim_generation = ?, claim_until = ?, attempt_count = attempt_count + 1 WHERE operation_key = ?",
                                         generation,
                                         now + 60_000,
                                         row.get("operation_key"));
@@ -407,7 +396,7 @@ public class ManagedToolResultStore {
                 status -> {
                     if (admitsLegacyProjection(claim)) {
                         jdbc.update(
-                                "UPDATE ma_operation SET state = ?, failure_code = ?, claim_until ="
+                                "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = ?, failure_code = ?, claim_until ="
                                     + " NULL, available_at = CAST(? AS DECIMAL(20, 0)) +"
                                     + " LEAST(300000, attempt_count * 5000) WHERE operation_kind ="
                                     + " 'TOOL_RESULT_PROJECTION' AND operation_id = ? AND tenant_id"
@@ -437,8 +426,7 @@ public class ManagedToolResultStore {
                         status -> {
                             var rows =
                                     jdbc.queryForList(
-                                            "SELECT * FROM ma_operation WHERE operation_kind ="
-                                                + " 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
+                                            "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
                                             claim.source().id());
                             if (rows.size() != 1) {
                                 return false;
@@ -452,9 +440,7 @@ public class ManagedToolResultStore {
                             ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
                             var row =
                                     jdbc.queryForMap(
-                                            "SELECT * FROM ma_operation WHERE operation_kind ="
-                                                + " 'TOOL_RESULT_PROJECTION' AND operation_id = ?"
-                                                + " FOR UPDATE",
+                                            "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE",
                                             claim.source().id());
                             if (!"LEASED".equals(row.get("state"))
                                     || ((Number) row.get("claim_generation")).longValue()
@@ -560,12 +546,7 @@ public class ManagedToolResultStore {
                                             source.sessionId());
                             var rows =
                                     jdbc.query(
-                                            "SELECT state, claim_generation,"
-                                                + " CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20,"
-                                                + " 3)) * 1000 AS claim_until_epoch, request_digest"
-                                                + " FROM ma_operation WHERE operation_kind ="
-                                                + " 'TOOL_RESULT_PROJECTION' AND operation_id = ?"
-                                                + " FOR UPDATE",
+                                            "SELECT state, claim_generation, claim_until AS claim_until_epoch, request_digest FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE",
                                             (schemaRow, schemaIndex) ->
                                                     ManagedSchemaRows.read(schemaRow),
                                             source.id());
@@ -632,16 +613,7 @@ public class ManagedToolResultStore {
                                         sequence);
                                 String sessionScope = scope(source.tenantId(), source.sessionId());
                                 jdbc.update(
-                                        "INSERT INTO ma_resource_ref (session_scope_key,"
-                                            + " owner_kind, owner_key, owner_revision,"
-                                            + " resource_key, tenant_id, workspace_id, session_id,"
-                                            + " resource_id, created_at) SELECT session_scope_key,"
-                                            + " 'ARTIFACT', ?, 1, resource_key, tenant_id,"
-                                            + " workspace_id, session_id, resource_id,"
-                                            + " CURRENT_TIMESTAMP(6) FROM ma_resource WHERE"
-                                            + " scope_key = ? AND publication_id = ? AND"
-                                            + " capture_state = 'VERIFIED' AND"
-                                            + " deletion_operation_key IS NULL",
+                                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) SELECT session_scope_key, 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id, session_id, resource_id, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED' AND deletion_operation_key IS NULL",
                                         ManagedSchemaKeys.key(
                                                 sessionScope,
                                                 artifact.descriptor().path("id").asText()),
@@ -675,7 +647,7 @@ public class ManagedToolResultStore {
                                     false,
                                     "tool-result:" + source.id() + ":1");
                             jdbc.update(
-                                    "UPDATE ma_operation SET state = 'READY', claim_until = NULL,"
+                                    "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'READY', claim_until = NULL,"
                                             + " failure_code = NULL, item_id = ?, result_json = ?,"
                                             + " policy_version = ? WHERE operation_kind ="
                                             + " 'TOOL_RESULT_PROJECTION' AND operation_id = ?",
@@ -740,10 +712,7 @@ public class ManagedToolResultStore {
     public Optional<Artifact> findArtifact(String tenant, String session, String artifactId) {
         return jdbc
                 .query(
-                        "SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r ON"
-                            + " r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id ="
-                            + " a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND"
-                            + " r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
+                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
                         this::artifact,
                         scope(tenant, session),
                         tenant,
@@ -780,10 +749,7 @@ public class ManagedToolResultStore {
         args.add(limit + 1);
         List<Artifact> rows =
                 jdbc.query(
-                        "SELECT a.*, r.request_json FROM ma_artifact a JOIN ma_operation r ON"
-                            + " r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id ="
-                            + " a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND"
-                            + " r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
+                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_key = ? AND r.tenant_id = ? AND r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
                                 + cursor
                                 + " ORDER BY a.creation_sequence DESC, a.artifact_id DESC LIMIT ?",
                         this::artifact,

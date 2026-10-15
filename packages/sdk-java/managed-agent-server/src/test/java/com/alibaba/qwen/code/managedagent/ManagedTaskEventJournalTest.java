@@ -388,8 +388,8 @@ class ManagedTaskEventJournalTest {
             // The binding reader verifies the descriptor digest over the
             // persisted config and policy references.
             jdbc.update("INSERT INTO ma_session (tenant_id,"
-                            + " session_id, agent_id, status, created_at,"
-                            + " updated_at, workspace_id,"
+                            + " session_id, agent_id, status, gmt_create,"
+                            + " gmt_modified, workspace_id,"
                             + " workspace_generation, workspace_storage_id,"
                             + " cwd_relative, context_config_ref,"
                             + " context_revision, workspace_config_ref,"
@@ -402,8 +402,8 @@ class ManagedTaskEventJournalTest {
                             "config\u0000policy"));
         } else {
             jdbc.update("INSERT INTO ma_session (tenant_id,"
-                            + " session_id, agent_id, status, created_at,"
-                            + " updated_at) VALUES"
+                            + " session_id, agent_id, status, gmt_create,"
+                            + " gmt_modified) VALUES"
                             + " (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                     TENANT, sessionId);
         }

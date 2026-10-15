@@ -8,9 +8,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Base64;
 import java.util.List;
-import java.util.Map;
 
 final class ManagedReceipts {
+    record Receipt(String tenantId, String scopeId, String idempotencyKey,
+            String requestDigest, String sessionId, String turnId, String state,
+            String sessionStatusBefore, byte[] actorKey, Boolean workspaceBound, long createdAt,
+            long updatedAt) {
+    }
+
     private ManagedReceipts() {}
 
     static String actorScope(byte[] actor) {
@@ -21,7 +26,7 @@ final class ManagedReceipts {
         return ManagedSchemaKeys.key(tenant, scopeId);
     }
 
-    static Map<String, Object> find(
+    static Receipt find(
             JdbcTemplate jdbc,
             ReceiptNamespace namespace,
             String tenant,
@@ -29,12 +34,25 @@ final class ManagedReceipts {
             String scopeId,
             String idempotencyKey,
             boolean lock) {
-        List<Map<String, Object>> rows =
+        List<Receipt> rows =
                 jdbc.query(
-                        "SELECT * FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
+                        "SELECT tenant_id, scope_id, idempotency_key, request_digest, session_id,"
+                            + " turn_id, state, session_status_before, actor_id, workspace_bound, gmt_create,"
+                            + " gmt_modified FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
                             + " AND tenant_key = ? AND scope_key = ?"
                                 + (lock ? " FOR UPDATE" : ""),
-                        (row, index) -> ManagedSchemaRows.read(row),
+                        (row, index) -> new Receipt(
+                                ManagedSchemaRows.identity(row, "tenant_id"),
+                                ManagedSchemaRows.identity(row, "scope_id"),
+                                ManagedSchemaRows.identity(row, "idempotency_key"),
+                                row.getString("request_digest"),
+                                ManagedSchemaRows.identity(row, "session_id"),
+                                ManagedSchemaRows.identity(row, "turn_id"),
+                                row.getString("state"),
+                                row.getString("session_status_before"),
+                                row.getBytes("actor_id"),
+                                row.getObject("workspace_bound", Boolean.class),
+                                row.getLong("gmt_create"), row.getLong("gmt_modified")),
                         ManagedSchemaKeys.receiptKey(
                                 namespace, tenant, scopeKind, scopeId, idempotencyKey),
                         namespace.name(),
@@ -43,10 +61,10 @@ final class ManagedReceipts {
         if (rows.isEmpty()) {
             return null;
         }
-        Map<String, Object> row = rows.getFirst();
-        if (!tenant.equals(row.get("tenant_id"))
-                || !scopeId.equals(row.get("scope_id"))
-                || !idempotencyKey.equals(row.get("idempotency_key"))) {
+        Receipt row = rows.getFirst();
+        if (!tenant.equals(row.tenantId())
+                || !scopeId.equals(row.scopeId())
+                || !idempotencyKey.equals(row.idempotencyKey())) {
             throw new IllegalStateException("Request identity digest collision.");
         }
         return row;
@@ -72,7 +90,7 @@ final class ManagedReceipts {
                 "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
                     + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest,"
                     + " request_digest, operation, actor_id, session_id, turn_id, state,"
-                    + " session_status_before, workspace_bound, created_at, updated_at) VALUES (?,"
+                    + " session_status_before, workspace_bound, gmt_create, gmt_modified) VALUES (?,"
                     + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ManagedSchemaKeys.receiptKey(namespace, tenant, scopeKind, scopeId, key),
                 namespace.name(),
@@ -155,7 +173,7 @@ final class ManagedReceipts {
                 now);
     }
 
-    static Map<String, Object> command(
+    static Receipt command(
             JdbcTemplate jdbc, String tenant, String operation, String key, boolean lock) {
         return find(
                 jdbc,
@@ -194,7 +212,7 @@ final class ManagedReceipts {
                 now);
     }
 
-    static Map<String, Object> creation(
+    static Receipt creation(
             JdbcTemplate jdbc, String tenant, byte[] actor, String key) {
         return find(
                 jdbc,
