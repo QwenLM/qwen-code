@@ -65,22 +65,36 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // OpenAI says "maximum context length is N tokens ... requested M tokens";
+  // SGLang says "maximum context length of N tokens. You requested a total of
+  // M tokens: K tokens from the input messages and ...". SGLang's total also
+  // counts the completion budget, so its input count is the better anchor.
   const openAiMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?[\s\S]*?(?:resulted in|requested|used)\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?[\s\S]*?(?:resulted in|requested(?: a total of)?|used)\s*(\d[\d,]*)\s*tokens?/i,
   );
   if (openAiMatch) {
+    const inputMessagesMatch = text.match(
+      /(\d[\d,]*)\s*tokens? from the input messages/i,
+    );
     return {
-      actualTokens: parseInteger(openAiMatch[2]!),
+      actualTokens: parseInteger(inputMessagesMatch?.[1] ?? openAiMatch[2]!),
       limitTokens: parseInteger(openAiMatch[1]!),
       limitKind: 'total',
     };
   }
 
   const maxContextLimitMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?/i,
   );
-  // SGLang words the same limit two ways: an input already past the window,
-  // and input plus max_new_tokens past it. Both carry the real token counts.
+  if (maxContextLimitMatch) {
+    return {
+      limitTokens: parseInteger(maxContextLimitMatch[1]!),
+      limitKind: 'total',
+    };
+  }
+
+  // SGLang: "The input (40000 tokens) is longer than the model's context
+  // length (32768 tokens)."
   const sglangMatch = text.match(
     /input \(\s*(\d[\d,]*)\s*tokens?\s*\) is longer than the model's context length \(\s*(\d[\d,]*)\s*tokens?\s*\)/i,
   );
@@ -88,23 +102,6 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(sglangMatch[1]!),
       limitTokens: parseInteger(sglangMatch[2]!),
-      limitKind: 'total',
-    };
-  }
-  const sglangTotalMatch = text.match(
-    /maximum context length of\s*(\d[\d,]*)\s*tokens?\.\s*You requested a total of\s*(\d[\d,]*)\s*tokens?/i,
-  );
-  if (sglangTotalMatch) {
-    return {
-      actualTokens: parseInteger(sglangTotalMatch[2]!),
-      limitTokens: parseInteger(sglangTotalMatch[1]!),
-      limitKind: 'total',
-    };
-  }
-
-  if (maxContextLimitMatch) {
-    return {
-      limitTokens: parseInteger(maxContextLimitMatch[1]!),
       limitKind: 'total',
     };
   }
