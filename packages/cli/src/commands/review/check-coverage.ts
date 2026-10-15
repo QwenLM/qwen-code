@@ -36,6 +36,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
@@ -77,6 +78,19 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       process.exitCode = 3;
       return;
     }
+    if (err instanceof ChunkPartitionError) {
+      // Neither the plan nor the environment: the coverage walk contradicted
+      // itself. Refuse for that reason, in those words — nothing the
+      // operator re-captures or relaunches repairs a defect in this CLI.
+      writeStderrLine(
+        `ERROR: the chunk outcomes do not partition the plan — ` +
+          `${err.message}. This is a defect in the coverage check itself, ` +
+          `not a finding about the agents or the plan. Coverage cannot be ` +
+          `shown, so the review must not certify the diff.`,
+      );
+      process.exitCode = 3;
+      return;
+    }
     throw err;
   }
 
@@ -84,10 +98,10 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   writeFileSync(args.out, JSON.stringify(report, null, 2));
   writeStdoutLine(`Wrote coverage report to ${args.out}`);
 
-  const totalChunks =
-    report.coveredChunks.length +
-    report.missingChunks.length +
-    report.uncoverableChunks.length;
+  // The plan's count, not the sum of the three outcome lists: a sum agrees
+  // with itself whatever the lists do. `assertChunkPartition` is what makes
+  // the two the same number.
+  const totalChunks = report.plannedChunks.length;
   const worked =
     report.agents - report.blindAgents.length - report.idleAgents.length;
   writeStderrLine(
@@ -104,6 +118,18 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         ? `, ${report.idleAgents.length} made no tool call`
         : ''),
   );
+
+  // Before anything the chunk ids are used for below, because it qualifies all
+  // of it: a plan that stopped describing its diff still matches every id. A
+  // NOTE, not an ERROR, and the exit code does not read it — the check has
+  // never fired on a real run, so it reports and nothing more.
+  if (report.selectionDrift !== null) {
+    writeStderrLine(
+      `NOTE: ${report.selectionDrift}. The chunk coverage in this report — ` +
+        `the summary line above and every line below — is against the plan ` +
+        `as written.`,
+    );
+  }
 
   // The defect that actually happened, named as itself.
   if (report.blindAgents.length > 0) {
@@ -210,9 +236,14 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     writeStderrLine(
       'NOTE: a chunk counts as read when an agent was pointed at its lines AND ' +
         'the harness recorded that agent opening the diff. An agent handed the ' +
-        'diff with no line ranges covers nothing. Build every whole-diff ' +
-        'agent\'s prompt with `"${QWEN_CODE_CLI:-qwen}" review agent-prompt ' +
-        `--plan ${shellQuotePath(args.plan)} --whole-diff\` and paste it verbatim ahead of its brief.`,
+        "diff with no line ranges covers nothing. Every rostered agent's " +
+        'launch block — its diff reads included — comes from ' +
+        `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${shellQuotePath(args.plan)} --roster\` ` +
+        '(or `--role <r>` for one, `--chunk <id>` for a chunk agent — the ' +
+        'usual reader of a missing chunk, which `--role` cannot rebuild); ' +
+        'pass each verbatim. `--whole-diff` builds ' +
+        'the reading block for an Agent 8 specialist alone — prepending it to ' +
+        'a rostered brief double-budgets the agent.',
     );
   }
   if (report.idleAgents.length > 0) {
@@ -223,10 +254,30 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `that made no call still returned confident, specific text.`,
     );
   }
-  if (report.uncoverableChunks.length > 0) {
+  // One failure, whichever list holds it: an agent declared a line no read
+  // can reach. A declarer whose chunk id this plan does not carry is named as
+  // an agent rather than listed as a chunk — the plan has no such chunk —
+  // and owes the same ruling.
+  if (
+    report.uncoverableChunks.length > 0 ||
+    report.unplannedDeclarations.length > 0
+  ) {
+    const declared: string[] = [];
+    if (report.uncoverableChunks.length > 0) {
+      declared.push(
+        `${report.uncoverableChunks.length} chunk(s) were declared ` +
+          `uncoverable — ${report.uncoverableChunks.join(', ')}`,
+      );
+    }
+    if (report.unplannedDeclarations.length > 0) {
+      declared.push(
+        `agents launched for ${report.unplannedDeclarations.length} chunk(s) ` +
+          `this plan does not carry declared a line uncoverable — ` +
+          report.unplannedDeclarations.join(', '),
+      );
+    }
     writeStderrLine(
-      `ERROR: ${report.uncoverableChunks.length} chunk(s) were declared ` +
-        `uncoverable — ${report.uncoverableChunks.join(', ')}. A diff with a ` +
+      `ERROR: ${declared.join('; ')}. A diff with a ` +
         `line no read can reach was not reviewed; the verdict may not approve on ` +
         `its strength. Report them to the user as an unreviewed gap.`,
     );
@@ -236,6 +287,27 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
         `${report.missingChunks.join(', ')}. Nobody read those lines. Do not ` +
         `aggregate findings over a diff that was not read.`,
+    );
+  }
+  // A NOTE, never an error, and never a relaunch: a disclosed gap is the soft
+  // tool budget working as designed, and failing the gate on it would teach
+  // agents not to disclose. The ruling belongs to the orchestrator — a gap
+  // naming an incomplete REQUIRED trace joins unreviewedDimensions; optional
+  // depth goes to the report's "Not reviewed" section.
+  if (report.budgetGaps.length > 0) {
+    const total = report.budgetGaps.reduce((n, g) => n + g.gaps.length, 0);
+    // The directives come FIRST: everything after the dash is agent-authored
+    // text (parser-sanitized and length-capped, but still the agents'), and
+    // instructions that follow quoted material can be impersonated by it.
+    writeStderrLine(
+      `NOTE: ${total} budget-gap disclosure(s) from ` +
+        `${report.budgetGaps.length} agent(s). Do not relaunch over these; ` +
+        `rule on each: a gap naming an incomplete required trace goes in ` +
+        `unreviewedDimensions, optional depth is disclosed in the report's ` +
+        `"Not reviewed" section. The disclosures — ` +
+        report.budgetGaps
+          .map((g) => `${g.agent}: ${g.gaps.join('; ')}`)
+          .join(' | '),
     );
   }
 

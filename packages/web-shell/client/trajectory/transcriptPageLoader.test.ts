@@ -1,0 +1,90 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createTrajectoryPageLoader,
+  trajectoryLoaderIdentity,
+} from './transcriptPageLoader';
+import type { TrajectoryTranscriptClient } from './transcriptPageLoader';
+
+function stubClient() {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const client: TrajectoryTranscriptClient = {
+    getSessionTranscriptPage: vi.fn(async (sessionId, opts) => {
+      calls.push([sessionId, opts as Record<string, unknown>]);
+      return { events: [], hasMore: false };
+    }),
+  };
+  return { client, calls };
+}
+
+describe('createTrajectoryPageLoader', () => {
+  it('isolates cached loader identity by workspace scope', () => {
+    const { client } = stubClient();
+    const first = createTrajectoryPageLoader(client, 's', 'workspace:a');
+    expect(createTrajectoryPageLoader(client, 's', 'workspace:a')).toBe(first);
+    expect(createTrajectoryPageLoader(client, 's', 'workspace:b')).not.toBe(
+      first,
+    );
+    expect(trajectoryLoaderIdentity(first)).toEqual({
+      sessionId: 's',
+      scope: 'workspace:a',
+    });
+    expect(
+      trajectoryLoaderIdentity(createTrajectoryPageLoader(client, 's'))?.scope,
+    ).toBeUndefined();
+  });
+
+  it('reads the newest page first', async () => {
+    const { client, calls } = stubClient();
+
+    await createTrajectoryPageLoader(client, 's-1')({ limit: 100 });
+
+    expect(calls).toEqual([['s-1', { direction: 'backward', limit: 100 }]]);
+  });
+
+  it('walks back by the cursor a previous page handed out', async () => {
+    const { client, calls } = stubClient();
+
+    await createTrajectoryPageLoader(
+      client,
+      's-1',
+    )({
+      limit: 100,
+      cursor: 'older-1',
+    });
+
+    // The cursor carries the direction; the daemon rejects both together.
+    expect(calls).toEqual([['s-1', { cursor: 'older-1', limit: 100 }]]);
+  });
+
+  it('never asks for the summary projection', async () => {
+    const { client, calls } = stubClient();
+
+    await createTrajectoryPageLoader(client, 's-1')({ limit: 100 });
+
+    // Summary rewrites the event stream that the timing frames sit in.
+    expect(calls[0]![1]).not.toHaveProperty('compactedReplayMode');
+  });
+
+  it('returns one loader per session so the window hook does not refetch', () => {
+    const { client } = stubClient();
+
+    const first = createTrajectoryPageLoader(client, 's-1');
+    expect(createTrajectoryPageLoader(client, 's-1')).toBe(first);
+    expect(createTrajectoryPageLoader(client, 's-2')).not.toBe(first);
+  });
+
+  it('keeps loaders of different clients apart', () => {
+    const a = stubClient().client;
+    const b = stubClient().client;
+
+    expect(createTrajectoryPageLoader(a, 's-1')).not.toBe(
+      createTrajectoryPageLoader(b, 's-1'),
+    );
+  });
+});

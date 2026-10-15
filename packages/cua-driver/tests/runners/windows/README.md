@@ -1,6 +1,7 @@
-# Windows Rust Runner
+# Windows Rust runner
 
-Canonical Windows Rust harness runner for an interactive user desktop.
+This directory contains the Windows Rust harness runner for an interactive user
+desktop, including the Azure RDP/scheduled-task validation environment.
 
 Run from `packages/cua-driver` in an RDP or console session:
 
@@ -10,5 +11,6 @@ Run from `packages/cua-driver` in an RDP or console session:
 ```
 
 The runner builds repo-local Windows fixtures and runs the Rust unit and typed
-harness matrix. It intentionally skips optional external-app suites such as
-LibreOffice because those require extra software on the VM image.
+harness matrix.
+It intentionally skips optional external-app suites such as LibreOffice because
+those require extra software on the environment image.

@@ -28,7 +28,10 @@ describe('/hooks command', () => {
     });
 
     // Wait for CLI to be ready
-    const isReady = await rig.waitForText('Type your message', 15000);
+    const isReady = await rig.waitForText(
+      'Type your message',
+      rig.getDefaultTimeout(),
+    );
     expect(isReady, 'CLI did not start up in interactive mode correctly').toBe(
       true,
     );
@@ -39,13 +42,19 @@ describe('/hooks command', () => {
     // Wait a bit for the command to be typed
     await new Promise((resolve) => setTimeout(resolve, 500));
 
+    // The typed `/hooks` echo and the completion popup already contain
+    // "hooks", so only output emitted after the submit witnesses the dialog.
+    output = '';
+
     // Press Enter to execute the command
     ptyProcess.write('\r');
 
-    // Wait for hooks dialog to appear
+    // Wait for hooks dialog to appear. Both renderers title the dialog
+    // "Hooks"; the Ink list step renders "No hook events found." when the
+    // event list is empty.
     const showedHooksDialog = await rig.poll(
-      () => output.includes('Hooks') || output.includes('hooks'),
-      5000,
+      () => output.includes('Hooks') || output.includes('No hook events found'),
+      rig.getDefaultTimeout(),
       200,
     );
 

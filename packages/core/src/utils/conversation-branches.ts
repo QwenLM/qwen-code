@@ -5,17 +5,28 @@
  */
 
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { projectUserTranscriptForDisplay } from './transcript-records.js';
 
 const SUMMARY_TEXT_LIMIT = 200;
 const SYNTHETIC_USER_SUBTYPES = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records: their `message` is the model envelope, not
+  // text the user typed as a prompt to the main model.
+  // TODO(multi-agent): an `agent_mention` IS user-typed; consider labelling
+  // branches with its `systemPayload.displayText` instead of skipping it.
+  'agent_mention',
+  'agent_message',
 ]);
 const NEUTRAL_TAIL_SUBTYPES = new Set([
   'custom_title',
   'session_artifact_event',
   'session_artifact_snapshot',
+  'session_sources_snapshot',
+  'turn_result',
+  'turn_attempt',
+  'goal_turn_end',
 ]);
 
 export type ConversationBranchClassification =
@@ -437,7 +448,13 @@ function extractText(
         record.type === type &&
         (type !== 'user' || !isSyntheticUserRecord(record)),
     )
-    .flatMap((record) => record.message?.parts ?? [])
+    .flatMap((record) => {
+      if (type !== 'user') return record.message?.parts ?? [];
+      const projection = projectUserTranscriptForDisplay(record);
+      return projection.displayText !== undefined
+        ? [{ text: projection.displayText }]
+        : projection.parts;
+    })
     .map((part) => {
       const textPart = part as { text?: unknown; thought?: unknown };
       return typeof textPart.text === 'string' && textPart.thought !== true

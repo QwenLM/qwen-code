@@ -15,6 +15,7 @@ function makeConfig(approvalMode: ApprovalMode, sandbox: unknown) {
   return {
     getApprovalMode: () => approvalMode,
     getSandbox: () => sandbox,
+    getShellExecutionSandbox: () => undefined,
   };
 }
 
@@ -36,6 +37,17 @@ describe('getHeadlessYoloSafetyWarning', () => {
       command: 'docker',
       image: 'qwen-code-sandbox',
     });
+    expect(getHeadlessYoloSafetyWarning(cfg, {})).toBeNull();
+  });
+
+  it('does not warn when the runtime uses a tool execution sandbox', () => {
+    const cfg = {
+      ...makeConfig(ApprovalMode.YOLO, undefined),
+      getShellExecutionSandbox: () => ({
+        filesystem: 'workspace-write',
+        network: 'closed',
+      }),
+    };
     expect(getHeadlessYoloSafetyWarning(cfg, {})).toBeNull();
   });
 

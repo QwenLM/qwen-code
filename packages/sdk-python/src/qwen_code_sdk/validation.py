@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import get_args
 from uuid import RFC_4122, UUID
 
 from .errors import ValidationError
 from .types import (
+    AuthType,
+    Effort,
+    PermissionMode,
     QueryOptions,
     _validate_can_use_tool_callable,
     _validate_stderr_callable,
 )
 
-_VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "yolo"}
-_VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
-_VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+_VALID_PERMISSION_MODES = set(get_args(PermissionMode))
+_VALID_AUTH_TYPES = set(get_args(AuthType))
+_VALID_EFFORTS = set(get_args(Effort))
 
 
 _RESERVED_CLI_FLAGS = frozenset(
@@ -87,19 +91,19 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError(
             f"Invalid permission_mode: {options.permission_mode!r}. "
-            "Expected one of: default, plan, auto-edit, yolo."
+            f"Expected one of: {', '.join(get_args(PermissionMode))}."
         )
 
     if options.auth_type and options.auth_type not in _VALID_AUTH_TYPES:
         raise ValidationError(
             f"Invalid auth_type: {options.auth_type!r}. "
-            "Expected one of: openai, anthropic, qwen-oauth, gemini, vertex-ai."
+            f"Expected one of: {', '.join(get_args(AuthType))}."
         )
 
     if options.effort and options.effort not in _VALID_EFFORTS:
         raise ValidationError(
             f"Invalid effort: {options.effort!r}. "
-            "Expected one of: low, medium, high, xhigh, max."
+            f"Expected one of: {', '.join(get_args(Effort))}."
         )
 
     _validate_optional_callable(options.can_use_tool, _validate_can_use_tool_callable)

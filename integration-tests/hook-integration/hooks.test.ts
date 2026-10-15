@@ -1427,11 +1427,8 @@ describe('Hooks System Integration', () => {
         });
 
         // When Stop hooks block, agent continues execution normally (with max turns to prevent infinite loop)
-        const _result = await rig.run(
-          'Say all block',
-          '--max-session-turns',
-          '3',
-        );
+        // The run is the subject of the assertions below; its output is not.
+        await rig.run('Say all block', '--max-session-turns', '3');
 
         // Verify Stop hook was invoked multiple times (indicating multiple rounds)
         const hookInvokeCount = rig

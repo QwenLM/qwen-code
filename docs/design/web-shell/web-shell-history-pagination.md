@@ -63,7 +63,11 @@ present, so older servers retain their bulk-load behavior.
 When the option is absent, load is unchanged. When present, the ACP agent keeps
 the complete resumed conversation in core but converts only the latest record
 suffix for the UI replay envelope. The suffix begins at a normal user-turn
-boundary. The envelope reports whether older active-chain records exist.
+boundary when one is reachable within one extra window of expansion;
+otherwise it keeps the requested window and may start mid-turn (extending to
+the owning assistant record when the window would otherwise start mid tool
+call/result pair), with older records paged backward. The envelope reports
+whether older active-chain records exist.
 
 The bridge seeds only that page into the session EventBus. Its response still
 contains the replay events and the EventBus `lastEventId` from one load
@@ -79,12 +83,30 @@ backward and freezes file identity, active leaf, byte size, position, and replay
 direction.
 
 Backward pages are returned in chronological display order. Each selected page
-starts at a normal user-turn boundary. The record limit is therefore a soft page
-target: a long turn is returned intact even when it exceeds the requested record
-count, so scrolling never reveals only the tail of the previous turn. The
-workspace route retains its hard source-byte limit: if a complete turn exceeds
-that limit, it returns `transcript_page_too_large` rather than returning a
-partial turn. Forward cursors and responses remain byte-for-byte compatible.
+starts at a normal user-turn boundary when one is reachable within one extra
+window (`limit` records) of expansion and the expanded page still fits one
+extra page byte budget (a bounded multiple of the soft page budget, clamped
+to the hard page ceiling): a small turn rides over the soft page budget
+whole, while a byte-heavy turn that would exceed that budget keeps the
+bounded selection so the route can always serialize the page. Inside a
+single long turn no boundary is reachable within that budget, so pages stay
+the requested window (`limit` records) near the anchor, may start mid-turn,
+and chain until the turn start surfaces. A page boundary avoids landing
+between a tool call and its persisted result: when the selection starts
+mid-pair the page extends to the owning assistant record if that owner is
+reachable within one further window (`limit` records) below the selection
+and the added records fit the same extra byte budget, so independently
+replayed backward pages do not split the pair; an owner beyond either
+budget keeps the bounded selection and the page starts mid-pair. Worst
+case a page holds three windows (`3 * limit` records). The workspace route
+caps serialized responses at twice the core page ceiling — a chosen cap
+with headroom for the response envelope, not a derived guarantee, since one
+oversized aggregated record can exceed any page budget; a page that still
+exceeds it returns `transcript_page_too_large`. Backward page replay
+carries no state across records beyond tool call/result pairing and
+per-page goal-state reseeding — assistant text and thought parts are
+self-contained within a record — so mid-turn boundaries break nothing
+else. Forward cursors and responses remain byte-for-byte compatible.
 
 ### WebUI transcript state
 

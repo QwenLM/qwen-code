@@ -36,6 +36,22 @@ export const getAsciiArtWidth = (asciiArt: string): number => {
 const codePointsCache = new Map<string, string[]>();
 const MAX_STRING_LENGTH_TO_CACHE = 1000;
 
+/** Max entries in each text cache before eviction */
+export const TEXT_CACHE_MAX_ENTRIES = 500;
+
+/**
+ * Evict oldest entry if a cache reaches the soft cap.
+ * Map iteration order is insertion order, so the first key is the oldest.
+ */
+function evictOldestTextCacheEntry<K, V>(cache: Map<K, V>): void {
+  if (cache.size >= TEXT_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) {
+      cache.delete(firstKey);
+    }
+  }
+}
+
 export function toCodePoints(str: string): string[] {
   // ASCII fast path - check if all chars are ASCII (0-127)
   let isAscii = true;
@@ -59,8 +75,9 @@ export function toCodePoints(str: string): string[] {
 
   const result = Array.from(str);
 
-  // Cache result (unlimited like Ink)
+  // Cache result (bounded; oldest entry evicted at the cap)
   if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    evictOldestTextCacheEntry(codePointsCache);
     codePointsCache.set(str, result);
   }
 
@@ -127,8 +144,9 @@ export function stripUnsafeCharacters(str: string): string {
 const stringWidthCache = new Map<string, number>();
 
 /**
- * Cached version of stringWidth function for better performance
- * Follows Ink's approach with unlimited cache (no eviction)
+ * Cached version of stringWidth function for better performance.
+ * Bounded with oldest-entry eviction so long sessions cannot grow it
+ * without limit.
  */
 export const getCachedStringWidth = (str: string): number => {
   // ASCII printable chars have width 1
@@ -136,11 +154,16 @@ export const getCachedStringWidth = (str: string): number => {
     return str.length;
   }
 
+  if (str.length > MAX_STRING_LENGTH_TO_CACHE) {
+    return stringWidth(str);
+  }
+
   if (stringWidthCache.has(str)) {
     return stringWidthCache.get(str)!;
   }
 
   const width = stringWidth(str);
+  evictOldestTextCacheEntry(stringWidthCache);
   stringWidthCache.set(str, width);
 
   return width;
@@ -151,9 +174,36 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, {
 });
 
 /**
+ * The first `maxWidth` display columns of `text`, with no ellipsis.
+ * Grapheme- and width-aware (via `getCachedStringWidth`) so CJK text — two
+ * cells per character — is bounded correctly, and a double-width cell that
+ * would straddle the budget is dropped whole. For the case where the clipped
+ * text is followed by something that owns the next column.
+ */
+export function clipToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return result;
+}
+
+/**
  * Truncate text to a display width (terminal cells), appending an ellipsis
- * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
- * text — two cells per character — is bounded correctly. Returns an empty
+ * when clipped. The clip is `clipToWidth` against the budget the ellipsis
+ * leaves, so the boundary rule lives in exactly one place. Returns an empty
  * string when even the ellipsis would overflow the budget.
  */
 export function truncateToWidth(text: string, maxWidth: number): string {
@@ -165,17 +215,7 @@ export function truncateToWidth(text: string, maxWidth: number): string {
   }
   const ellipsis = '…';
   const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
-  let width = 0;
-  let result = '';
-  for (const { segment } of graphemeSegmenter.segment(text)) {
-    const segmentWidth = getCachedStringWidth(segment);
-    if (width + segmentWidth > budget) {
-      break;
-    }
-    result += segment;
-    width += segmentWidth;
-  }
-  return `${result}${ellipsis}`;
+  return `${clipToWidth(text, budget)}${ellipsis}`;
 }
 
 export interface VisualHeightSlice {
@@ -282,6 +322,18 @@ export const clearStringWidthCache = (): void => {
   stringWidthCache.clear();
 };
 
+/**
+ * Report current sizes of the module-level text caches.
+ * @internal — only used in tests to verify cache bounds.
+ */
+export const __getTextUtilsCacheSizes = (): {
+  codePoints: number;
+  stringWidth: number;
+} => ({
+  codePoints: codePointsCache.size,
+  stringWidth: stringWidthCache.size,
+});
+
 const regex = ansiRegex();
 
 // Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
@@ -307,6 +359,19 @@ export function sanitizeTerminalText(value: string): string {
   return escapeAnsiCtrlCodes(value)
     .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
     .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
+
+/**
+ * `stripUnsafeCharacters` for a run that must paint as one physical row (a
+ * completion hint or badge): the same ANSI/VT/C0/C1 strip, then the bidi
+ * override/isolate range (Trojan Source) goes too, and the TAB/CR/LF that
+ * sanitizer keeps for pasted data flatten to single spaces — a surviving
+ * newline paints a second row the caller's width budget never charged.
+ */
+export function sanitizeTerminalLine(value: string): string {
+  return stripUnsafeCharacters(value)
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '')
+    .replace(/[\t\r\n]+/g, ' ');
 }
 
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
@@ -337,6 +402,16 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
   }
 
   if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+
+  const record = obj as Record<string, unknown>;
+  if (
+    !Array.isArray(obj) &&
+    typeof record['data'] === 'string' &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].toLowerCase().startsWith('image/')
+  ) {
     return obj;
   }
 

@@ -8,7 +8,7 @@ import type { SettingsMigration } from '../types.js';
 import {
   getNestedProperty,
   setNestedPropertySafe,
-} from '../../../utils/settingsUtils.js';
+} from '../../settingsUtils.js';
 
 const GIT_CO_AUTHOR_PATH = 'general.gitCoAuthor';
 

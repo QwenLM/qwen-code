@@ -37,8 +37,13 @@
 // This module never takes a path from the model. The session id and project dir
 // come from the environment the CLI itself exported.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  ToolNames,
+  sanitizeFilenameComponent,
+} from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
+import { priorSessionEntries } from './run-ledger.js';
 
 /** One subagent, as the harness recorded it. */
 export interface AgentRecord {
@@ -77,13 +82,54 @@ export interface AgentRecord {
    * the harness wrote down, not a hope.
    */
   successfulCallArgs: string[];
+  /**
+   * The arguments of the successful `read_file` calls, serialized — a subset of
+   * `successfulCallArgs` for the checks where NAMING a path is not OPENING it.
+   * A `search_file_content` or a `list_directory` over the record dir carries
+   * the same stringified path in its args without reading a line; the
+   * findings-file floor asks whether the list was read, and only a read is a
+   * read.
+   */
+  successfulReadFileArgs: string[];
+  /**
+   * The session the harness stamped on the records, when it stamped one.
+   * Compared against the directory that supplied the file: a transcript
+   * COPIED into another session's directory is not that session's evidence,
+   * and on the resume path a copy could otherwise earn recovered coverage
+   * for an attempt that never ran it.
+   */
+  recordedSession: string;
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
+  /**
+   * True when `finalText` is a RETURN rather than progress: no tool activity
+   * follows it in the transcript. `parseTranscript` keeps the last non-empty
+   * assistant text, which includes narration emitted between tool calls — so
+   * an agent that opened its inputs, said "reading the diff now…" and died
+   * (or is still running) carries non-empty finalText that certifies
+   * nothing. The harness appends records in order and writes the final
+   * message last, so text with tool traffic after it is progress by
+   * construction.
+   */
+  returned: boolean;
   /** When the transcript was last written. */
   mtimeMs: number;
+  /**
+   * True when this record came from an EARLIER attempt's session directory —
+   * a resumed run reading the interrupted attempt's evidence. Absent on
+   * records from the current session, so existing readers are unchanged.
+   */
+  fromPriorSession?: boolean;
 }
 
-/** Why no transcripts could be read. Never conflated with "the agents idled". */
+/**
+ * Why no transcripts could be read. Never conflated with "the agents idled".
+ *
+ * Carries the underlying readdir failure as `cause` where one exists, so a
+ * caller can distinguish "the directory does not exist yet" (ENOENT — the
+ * legitimate pre-launch state of a resumed run's own session) from a real
+ * infrastructure fault, which must never be absorbed.
+ */
 export class TranscriptsUnavailableError extends Error {}
 
 /**
@@ -114,7 +160,12 @@ export function transcriptPaths(env: NodeJS.ProcessEnv = process.env): {
   return {
     projectDir,
     sessionId,
-    dir: join(projectDir, 'subagents', sessionId),
+    // The harness writes the directory under the SANITIZED id
+    // (`getSubagentSessionDir` maps everything outside [A-Za-z0-9_-] to '_'),
+    // so the lookup must apply the same mapping: joined raw, any id carrying
+    // a dot reaches a path that does not exist, and every reader silently
+    // sees nothing while the harness's records sit one underscore away.
+    dir: join(projectDir, 'subagents', sanitizeFilenameComponent(sessionId)),
   };
 }
 
@@ -128,6 +179,24 @@ export function textOf(rec: Record<string, unknown>): string {
   const msg = rec['message'] as { parts?: unknown } | undefined;
   const parts = Array.isArray(msg?.parts) ? msg.parts : [];
   return parts
+    .map((p) => (p as { text?: unknown }).text)
+    .filter((t): t is string => typeof t === 'string')
+    .join('');
+}
+
+/**
+ * The record's RETURN text: text parts minus thinking. The runtime emits
+ * ROUND_TEXT carrying `{text, thought: true}` parts BEFORE the round's tool
+ * calls, so a thinking-mode agent killed between the two leaves a complete
+ * thought-only record as its last line — and counting thoughts made that
+ * internal reasoning the agent's `finalText` with `returned: true`. The
+ * runtime's own final-text extraction excludes thoughts; this mirrors it.
+ */
+function returnTextOf(rec: Record<string, unknown>): string {
+  const msg = rec['message'] as { parts?: unknown } | undefined;
+  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+  return parts
+    .filter((p) => (p as { thought?: unknown }).thought !== true)
     .map((p) => (p as { text?: unknown }).text)
     .filter((t): t is string => typeof t === 'string')
     .join('');
@@ -184,6 +253,31 @@ function rangeOf(args: Record<string, unknown>): [number, number] | null {
 }
 
 /**
+ * Do these serialized tool-call args name the EXACT `path`?
+ *
+ * The comparison is against the whole JSON string value — `JSON.stringify`
+ * carries the closing quote — so a `${path}.bak`, or any longer path holding
+ * this one as a prefix, is NOT credited. Every certification atom that asks
+ * "did the agent name this file" routes here: the diff-read half in
+ * `parseTranscript` below, and the brief / findings atoms in
+ * `certification.ts`. One copy, so a fix to the match semantics
+ * (normalisation, escaping, a stricter compare) reaches the whole bar at once
+ * rather than half of it.
+ *
+ * NOT `namesPath` in `findings.ts`: that one matches a path mentioned in
+ * PROSE on a name boundary, so it credits `rm /plan/chunk-3.brief.md` for
+ * naming the brief. Crediting an agent for deleting a file it never opened is
+ * precisely what this predicate must not do, which is why the two keep
+ * separate names.
+ */
+export function serializedArgsNamePath(
+  serializedArgs: string,
+  path: string,
+): boolean {
+  return serializedArgs.includes(JSON.stringify(path));
+}
+
+/**
  * Parse one transcript. Returns null for a file that is not one.
  *
  * `diffPath` is what makes a call "a read of the diff" rather than "a call". Pass
@@ -201,8 +295,11 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
 
   let agentId = '';
   let agentName = '';
+  let recordedSession = '';
+  let sessionConflict = false;
   let launchPrompt = '';
   let finalText = '';
+  let toolTrafficAfterText = true;
   let successfulToolCalls = 0;
   let diffToolCalls = 0;
 
@@ -213,11 +310,13 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   // attributed by a stack.
   interface Pending {
     namedTheDiff: boolean;
+    readFile: boolean;
     range: [number, number] | null;
     args: string;
   }
   const diffReads: Array<[number, number]> = [];
   const successfulCallArgs: string[] = [];
+  const successfulReadFileArgs: string[] = [];
   const byId = new Map<string, Pending>();
   const anonymous: Pending[] = [];
 
@@ -232,6 +331,20 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       agentId = rec['agentId'];
     if (!agentName && typeof rec['agentName'] === 'string') {
       agentName = rec['agentName'];
+    }
+    if (typeof rec['sessionId'] === 'string' && rec['sessionId'] !== '') {
+      if (!recordedSession) {
+        recordedSession = rec['sessionId'];
+      } else if (rec['sessionId'] !== recordedSession) {
+        // A transcript whose head is stamped with one session and whose tail
+        // carries another is a GRAFT: a forged head (the launch prompt is
+        // deterministic per plan) spliced onto another session's genuine
+        // records would otherwise pass the ownership check, which keys on
+        // the first stamp. One file, one session — a conflict rejects the
+        // whole record. Unstamped lines stay accepted for older harness
+        // writes.
+        sessionConflict = true;
+      }
     }
 
     const type = rec['type'];
@@ -254,13 +367,12 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       // to open; a tool *result* that quotes it (a grep over `.qwen/tmp`, this
       // file in a diff) says nothing about what the agent opened.
       const args = (fc.args ?? {}) as Record<string, unknown>;
-      // Match the path as a whole JSON string value, quotes included: a bare
-      // substring credits `…/diff.txt.bak` for `…/diff.txt`.
       const namedTheDiff = diffPath
-        ? JSON.stringify(args).includes(JSON.stringify(diffPath))
+        ? serializedArgsNamePath(JSON.stringify(args), diffPath)
         : false;
       const pending: Pending = {
         namedTheDiff,
+        readFile: fc.name === ToolNames.READ_FILE,
         range: namedTheDiff ? rangeOf(args) : null,
         args: JSON.stringify(args),
       };
@@ -286,6 +398,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       if (!isErrorPart(part as FunctionResponsePart)) {
         successfulToolCalls++;
         successfulCallArgs.push(pending.args);
+        if (pending.readFile) successfulReadFileArgs.push(pending.args);
         if (pending.namedTheDiff) {
           diffToolCalls++;
           if (pending.range) diffReads.push(pending.range);
@@ -294,12 +407,28 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     }
 
     if (type === 'assistant') {
-      const t = textOf(rec);
-      if (t) finalText = t;
+      // Thoughts excluded: a thought-only round is not a return, and its
+      // reasoning must never be handed downstream as the agent's verdict.
+      const t = returnTextOf(rec);
+      if (t) {
+        finalText = t;
+        toolTrafficAfterText = false;
+      }
     }
+    // Any function call or response AFTER the text marks it as progress —
+    // the agent went on working, so that text was narration, not a return.
+    if (parts.some((p) => (p as FunctionCallPart).functionCall !== undefined))
+      toolTrafficAfterText = true;
+    if (
+      parts.some(
+        (p) => (p as FunctionResponsePart).functionResponse !== undefined,
+      )
+    )
+      toolTrafficAfterText = true;
   }
 
   if (!agentId) return null;
+  if (sessionConflict) return null;
 
   let mtimeMs = 0;
   try {
@@ -311,14 +440,44 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   return {
     agentId,
     agentName,
+    recordedSession,
     launchPrompt,
     successfulToolCalls,
     diffToolCalls,
     diffReads,
     successfulCallArgs,
+    successfulReadFileArgs,
     finalText,
+    returned:
+      finalText.trim() !== '' && !toolTrafficAfterText && !diedPerSidecar(file),
     mtimeMs,
   };
+}
+
+/**
+ * Does the harness's own lifecycle record say this agent never finished?
+ *
+ * The transcript alone cannot: the harness appends ROUND_TEXT before the
+ * round's tool calls and writes NO terminal record on completion, so an
+ * agent killed after a text flush and before its next record ends
+ * IDENTICALLY to a completed one. The `agent-<id>.meta.json` sidecar is the
+ * authoritative signal — a killed agent's persisted status stays 'running'.
+ * Any persisted status other than 'completed' (running, paused, failed,
+ * cancelled) means the final text is where the agent WAS, not what it
+ * concluded. A missing or unreadable sidecar proves nothing and changes
+ * nothing: content inference stands, so older harness writes and fixtures
+ * without sidecars keep their meaning.
+ */
+function diedPerSidecar(transcriptFile: string): boolean {
+  const metaPath = transcriptFile.replace(/\.jsonl$/, '.meta.json');
+  try {
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as {
+      status?: unknown;
+    };
+    return typeof meta.status === 'string' && meta.status !== 'completed';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -362,15 +521,198 @@ export function readTranscripts(
       `no subagent transcripts at ${dir} (${(err as Error).message}). The ` +
         'harness writes one per agent; if there are none, either no agents ran ' +
         'or the harness could not write them.',
+      // The original errno travels with it: a caller that tolerates "the dir
+      // does not exist yet" must be able to tell that apart from EACCES/EIO,
+      // and the flattened message string cannot say which it was.
+      { cause: err },
     );
   }
 
+  // The same ownership check the prior directories get. A record stamped
+  // with a DIFFERENT session was copied here — `since` cannot catch it (a
+  // copy gets a fresh mtime) and the launch-prompt pairing passes (prompts
+  // are deterministic per plan) — and a copy is not evidence of THIS
+  // session's work any more than it was of the attempt it was planted in.
+  return recordsIn(dir, names, since, diffPath, {
+    sessionId: transcriptPaths(env).sessionId,
+  });
+}
+
+/**
+ * The files-to-records pipeline, in ONE place.
+ *
+ * Both readers below walk it — the current session's directory and each
+ * prior session's — so a record-level filter or validation added here cannot
+ * apply to live evidence while silently bypassing recovered evidence, which
+ * is precisely the evidence a fabrication concern is about. The callers keep
+ * only the policy that genuinely differs between them: throw versus skip on
+ * an unreadable directory.
+ */
+function recordsIn(
+  dir: string,
+  names: string[],
+  since: number | undefined,
+  diffPath: string | undefined,
+  opts: { sessionId?: string; until?: number } = {},
+): AgentRecord[] {
   const out: AgentRecord[] = [];
   for (const name of names) {
     const rec = parseTranscript(join(dir, name), diffPath);
     if (!rec) continue;
     if (since !== undefined && rec.mtimeMs < since) continue;
+    // Each attempt's window closes when the next one opened: a session that
+    // kept running after the resume took over is no longer this review's,
+    // and its later transcripts must not be credited to it.
+    if (opts.until !== undefined && rec.mtimeMs >= opts.until) continue;
+    // The record must belong to the directory that supplied it. The harness
+    // stamps the session on its records; a file that names a DIFFERENT one
+    // was copied there, and a copy is not evidence of the attempt whose
+    // directory it sits in. A record with no stamp is accepted — older
+    // harness writes carry none — but a mismatch is refused.
+    if (
+      opts.sessionId !== undefined &&
+      rec.recordedSession !== '' &&
+      rec.recordedSession.toLowerCase() !== opts.sessionId.toLowerCase()
+    ) {
+      continue;
+    }
     out.push(rec);
+  }
+  return out;
+}
+
+/**
+ * The EARLIER sessions of this run, as directories that are actually inside
+ * the harness's own tree.
+ *
+ * The ledger's charset gate keeps an id from traversing out with `..` or a
+ * separator, but `subagents/<id>` can itself BE a symlink — and `readdirSync`
+ * and `readFileSync` follow one. That would defeat the containment this
+ * feature's threat model rests on ("a fabricated id can at most point a
+ * reader at a directory inside the harness's own subagents tree"), so a
+ * symlinked (or unstattable) prior directory is skipped: invisible evidence
+ * re-owes the work, which is the failure direction every reader here takes.
+ *
+ * Shared by every prior-session consumer — the transcript union and the cost
+ * ledger both assemble their paths from this, so the guard cannot be
+ * bypassed by a call site that builds its own `join`.
+ */
+export function priorSessionDirs(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Array<{
+  sessionId: string;
+  dir: string;
+  chatFile: string;
+  /** When the NEXT attempt began — this one's upper window. */
+  endsAtMs: number | null;
+}> {
+  const { projectDir } = transcriptPaths(env);
+  const out: Array<{
+    sessionId: string;
+    dir: string;
+    chatFile: string;
+    endsAtMs: number | null;
+  }> = [];
+  for (const { sessionId, endsAtMs } of priorSessionEntries(planPath, env)) {
+    const dir = join(
+      projectDir,
+      'subagents',
+      sanitizeFilenameComponent(sessionId),
+    );
+    try {
+      if (lstatSync(dir).isSymbolicLink()) continue;
+    } catch {
+      // Absent (the attempt died before launching any agent) or unstattable:
+      // either way there is nothing here this run may read.
+      continue;
+    }
+    out.push({
+      sessionId,
+      dir,
+      chatFile: join(projectDir, 'chats', `${sessionId}.jsonl`),
+      endsAtMs,
+    });
+  }
+  return out;
+}
+
+/**
+ * Every subagent THIS RUN launched, across all of the run's sessions.
+ *
+ * The single-session `readTranscripts` contract is preserved exactly for the
+ * current session: an unreadable current directory is an infrastructure fact
+ * and throws. A prior session's directory that cannot be read is different —
+ * its absence only means the earlier attempt's evidence is invisible, and the
+ * failure direction of invisible evidence is "require the work again", which
+ * every downstream gate already implements. So prior directories are skipped
+ * silently, never fabricated and never fatal.
+ *
+ * `since` stays the plan's mtime: a resumed run deliberately does not rewrite
+ * the plan, which is what keeps the first attempt's records inside the fence.
+ *
+ * `currentDirOptional` exists for exactly one caller shape: a resumed run
+ * reading the PREVIOUS attempt's evidence before this session has launched
+ * any agent — the harness creates `subagents/<session>` on the first launch,
+ * so at that moment the current directory legitimately does not exist. It is
+ * deliberately narrow on both axes: only ENOENT is absorbed (a permission or
+ * I/O fault on an existing directory is a live infrastructure fault), and
+ * only when this run actually has prior-session evidence to read instead —
+ * a run with no ledger and no directory has shown nothing, which is the
+ * infrastructure fact this module has always refused to certify past. A
+ * missing ENVIRONMENT (no session id, no project dir) still throws.
+ */
+export function readRunTranscripts(
+  planPath: string,
+  since?: number,
+  env: NodeJS.ProcessEnv = process.env,
+  diffPath?: string,
+  opts: { currentDirOptional?: boolean } = {},
+): AgentRecord[] {
+  // Validates the env first, so the optional-dir branch below can only ever
+  // be absorbing "no directory yet", never "no environment".
+  transcriptPaths(env);
+  const priors = priorSessionDirs(planPath, env);
+  let out: AgentRecord[];
+  try {
+    out = readTranscripts(since, env, diffPath);
+  } catch (err) {
+    const code = (
+      (err as { cause?: NodeJS.ErrnoException } | undefined)?.cause as
+        | NodeJS.ErrnoException
+        | undefined
+    )?.code;
+    if (
+      !(err instanceof TranscriptsUnavailableError) ||
+      opts.currentDirOptional !== true ||
+      // ONLY the not-created-yet case. EACCES/EIO/ENOTDIR on an existing
+      // directory is a live infrastructure fault: absorbing it would let a
+      // run certify on prior-session evidence alone while the current
+      // session's records are unreadable and nothing says so.
+      code !== 'ENOENT' ||
+      // ...and only when there IS prior evidence to read instead. With no
+      // ledgered session this is a run that has shown nothing, which every
+      // reader here must keep refusing to certify past.
+      priors.length === 0
+    ) {
+      throw err;
+    }
+    out = [];
+  }
+  for (const prior of priors) {
+    let names: string[];
+    try {
+      names = listAgentTranscriptFiles(prior.dir);
+    } catch {
+      continue; // Earlier attempt's evidence invisible → its work is re-owed.
+    }
+    for (const rec of recordsIn(prior.dir, names, since, diffPath, {
+      sessionId: prior.sessionId,
+      until: prior.endsAtMs ?? undefined,
+    })) {
+      rec.fromPriorSession = true;
+      out.push(rec);
+    }
   }
   return out;
 }

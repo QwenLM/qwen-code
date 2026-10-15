@@ -24,6 +24,7 @@ export {
   buildProviderTemplate,
   computeModelListVersion,
   findExistingProviderModels,
+  getModelsForProviderProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   providerMatchesCredentials,
@@ -33,6 +34,8 @@ export {
   resolveOwnsModel,
   shouldShowStep,
 } from './provider-config.js';
+
+export { discoverProviderModels } from './model-discovery.js';
 
 // Provider registry
 export {
@@ -51,6 +54,7 @@ export {
   idealabProvider,
   minimaxProvider,
   modelscopeProvider,
+  moonshotProvider,
   openRouterProvider,
   requestyProvider,
   THIRD_PARTY_PROVIDERS,
@@ -84,3 +88,5 @@ export {
   type ApplyProviderInstallPlanOptions,
   type ApplyProviderInstallPlanResult,
 } from './install.js';
+
+export { preserveModelProviderPlaceholders } from './model-config-serialization.js';

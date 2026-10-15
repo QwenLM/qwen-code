@@ -131,6 +131,10 @@ impl ElementCache {
             .with_snapshot(&CacheKey { pid, window_id }, |s| s.elements.len())
             .unwrap_or(0)
     }
+
+    pub fn clear_target(&self, pid: i32, window_id: u32) {
+        self.core.remove(&CacheKey { pid, window_id });
+    }
 }
 
 impl Default for ElementCache {
@@ -156,9 +160,15 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: Vec::new(),
             element_ptr: ptr,
+            identity: None,
             depth: 0,
             parent_element_index: None,
             frame: None,
@@ -169,6 +179,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   DaemonTranscriptBlock,
   DaemonTranscriptState,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { extractPendingPermission } from './transcriptAdapter';
 
 function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
@@ -26,6 +26,128 @@ function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {
 }
 
 describe('extractPendingPermission', () => {
+  const genericPermission = (
+    toolCall: Record<string, unknown>,
+  ): DaemonTranscriptBlock => ({
+    id: 'permission-input',
+    kind: 'permission',
+    requestId: 'request-input',
+    sessionId: 'session-input',
+    title: '{}',
+    options: [],
+    toolCall,
+    preview: { kind: 'generic' },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  it.each(['rawInput', 'input', 'args'])(
+    'shows complete literal %s when a generic tool has no content',
+    (field) => {
+      const input = {
+        content:
+          '  ' + '😀'.repeat(3980) + '\n"quote"\u202e\u0085\u{e0001} END  ',
+      };
+      const permission = extractPendingPermission([
+        genericPermission({ [field]: input }),
+      ]);
+      expect(permission?.contentIsInput).toBe(true);
+      const block = permission?.content[0];
+      expect(block?.type).toBe('text');
+      const text = block?.type === 'text' ? block.text! : '';
+      expect(JSON.parse(text)).toEqual(input);
+      expect(text).not.toMatch(/[\u0085\p{Cf}]/u);
+      expect(text).toContain('END  ');
+      expect(permission?.rawInput).toBe(input);
+    },
+  );
+
+  it('does not surface an empty parameter object as the approval body', () => {
+    const permission = extractPendingPermission([
+      genericPermission({ rawInput: {} }),
+    ]);
+    expect(permission?.content).toEqual([{ type: 'text', text: '{}' }]);
+    expect(permission?.contentIsInput).toBeUndefined();
+  });
+
+  it('does not hide a parameter preview identical to the title', () => {
+    const input = { key: 'value' };
+    const text = JSON.stringify(input, null, 2);
+    expect(
+      extractPendingPermission([
+        { ...genericPermission({ rawInput: input }), title: text },
+      ]),
+    ).toMatchObject({
+      title: text,
+      content: [{ type: 'text', text }],
+      contentIsInput: true,
+    });
+  });
+
+  it('preserves explicit content and diff previews', () => {
+    for (const content of [
+      [
+        {
+          type: 'content',
+          content: { type: 'text', text: 'Explicit explanation' },
+        },
+      ],
+      [{ type: 'diff', path: 'file.ts', oldText: '', newText: 'new content' }],
+    ]) {
+      const permission = extractPendingPermission([
+        genericPermission({
+          rawInput: { privateParameter: 'not a preview' },
+          content,
+        }),
+      ]);
+      expect(permission?.contentIsInput).toBeUndefined();
+      expect(permission?.content).toEqual(
+        content[0].type === 'diff'
+          ? content
+          : [{ type: 'text', text: 'Explicit explanation' }],
+      );
+      expect(JSON.stringify(permission?.content)).not.toContain(
+        'privateParameter',
+      );
+    }
+  });
+
+  it('escapes control characters in diff previews', () => {
+    const permission = extractPendingPermission([
+      genericPermission({
+        content: [
+          {
+            type: 'diff',
+            path: 'safe\u202e.txt',
+            oldText: 'old\u202e',
+            newText: 'new\u202e',
+          },
+        ],
+      }),
+    ]);
+
+    expect(permission?.content).toEqual([
+      {
+        type: 'diff',
+        path: 'safe\\u202e.txt',
+        oldText: 'old\\u202e',
+        newText: 'new\\u202e',
+      },
+    ]);
+  });
+
+  it('does not turn toolCall metadata into a parameter preview', () => {
+    const permission = extractPendingPermission([
+      genericPermission({
+        toolCallId: 'call',
+        status: 'pending',
+        _meta: { toolName: 'mcp__sample__write' },
+      }),
+    ]);
+    expect(permission?.content).toEqual([{ type: 'text', text: '{}' }]);
+    expect(permission?.contentIsInput).toBeUndefined();
+  });
+
   it('extracts pending AskUserQuestion options and raw input', () => {
     const permission = {
       id: 'perm-1',

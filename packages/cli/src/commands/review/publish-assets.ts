@@ -37,8 +37,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { gh, ghWithInputRetried, setGhHost } from './lib/gh.js';
+import { gh, ghWithInputRetried, resolveGhHost, setGhHost } from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import {
   ASSET_HEADER_BYTES,
   assetsBranch,
@@ -62,6 +63,8 @@ interface PublishAssetsArgs {
   host: string | undefined;
   userAuthorized: boolean;
   skillArgs: string | undefined;
+  /** The standing `review.comment` setting, for the shared authorisation gate. */
+  defaultComment?: boolean;
 }
 
 /** The Contents-API dance for one file: create, or update when it exists. */
@@ -234,20 +237,34 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   const repo = repoResult.repo;
 
   // ONE effective host, resolved BEFORE the gate: the gate must bind the
-  // host the write will actually route at — --host, else an operator-exported
-  // GH_HOST, else github.com — not merely the flag. Binding args.host while
-  // routing at effectiveHost let a GH_HOST-driven Enterprise write pass a
-  // github.com authorisation; caught by this skill's own review.
-  // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
-  // `??`, being non-nullish) must read as "no host".
-  const effectiveHost =
-    args.host ?? (process.env['GH_HOST']?.trim() || undefined);
+  // host the write will actually route at, not merely the flag. Binding
+  // args.host while routing at effectiveHost let a GH_HOST-driven Enterprise
+  // write pass a github.com authorisation; caught by this skill's own review.
+  //
+  // Validate the RAW flag first: a non-empty all-whitespace `--host` must
+  // throw setGhHost's documented TypeError here (it resolves to '' / falsy,
+  // which would skip the routing setGhHost below and silently retarget the
+  // Contents-API write at the env/default host). `setGhHost('')` legitimately
+  // resets; `setGhHost(' ')` throws — so guard on presence, not on trim-non-empty.
+  if (args.host !== undefined) {
+    try {
+      setGhHost(args.host);
+    } catch (err) {
+      refuse(
+        `${err instanceof Error ? err.message : String(err)} (from --host)`,
+      );
+      return;
+    }
+    setGhHost(undefined); // restore default; effectiveHost routing re-applies
+  }
+  const effectiveHost = resolveGhHost(args.host);
 
   // ── Gate 2: an authorised run — the same gate as `submit` ─────────────────
   // The PR identity used for authorisation binding is the PR the evidence is
   // FOR (the one under review), regardless of which repo hosts the images.
   const auth = reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
+    defaultComment: args.defaultComment,
     skillArgs: args.skillArgs,
     pr: args.pr,
     // Bind the REVIEWED repo when the caller names it, never the assets repo:
@@ -544,6 +561,10 @@ export const publishAssetsCommand: CommandModule = {
       host: argv['host'] as string | undefined,
       userAuthorized: Boolean(argv['user-authorized']),
       skillArgs: argv['skill-args'] as string | undefined,
+      // The same operator-scope resolution as `submit`: the two callers of
+      // the shared gate must agree on what authorises a run, or a run that
+      // posts the review still refuses to publish its evidence images.
+      defaultComment: operatorReviewSettings().comment,
     });
   },
 };

@@ -8,6 +8,7 @@ import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
+import { promisify } from 'node:util';
 
 export enum PackageManager {
   NPM = 'npm',
@@ -74,6 +75,12 @@ const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
+// Both the detector message and the formatter's split read this one constant.
+// The sentence must stay byte-identical to the i18n catalogue key in
+// locales/*.js; the trailing space separates the interpolated command and is
+// trimmed from the line handed to t().
+const STANDALONE_UPDATE_PREFIX =
+  'Standalone install detected. Please rerun the standalone installer to update: ';
 
 function getStandaloneInstallerUrl(): string {
   return process.platform === 'win32'
@@ -131,6 +138,13 @@ function formatUpdateMessage(
     ];
   }
 
+  if (message.startsWith(STANDALONE_UPDATE_PREFIX)) {
+    return [
+      STANDALONE_UPDATE_PREFIX.trimEnd(),
+      ` ${message.slice(STANDALONE_UPDATE_PREFIX.length)}`,
+    ];
+  }
+
   return [message];
 }
 
@@ -141,6 +155,44 @@ export interface InstallationInfo {
   standaloneDir?: string;
   updateCommand?: string;
   updateMessage?: string;
+}
+
+const execFileAsync = promisify(childProcess.execFile);
+
+// Slow hosts must not hang startup on this lookup.
+const HOMEBREW_INFO_TIMEOUT_MS = 5000;
+
+/**
+ * Best-effort lookup of the newest formula version visible in local Homebrew
+ * metadata. While the homebrew-core formula lags the npm `latest` tag,
+ * `brew upgrade` is a no-op, and an npm-based "update available"
+ * notification would repeat on every startup with no way to clear it
+ * (#9493). Callers use this to decide whether a Homebrew install can
+ * actually be updated before notifying.
+ *
+ * Returns null when the version cannot be determined (brew missing,
+ * timeout, unexpected output); callers keep the legacy notify behavior in
+ * that case rather than silently hiding a real update.
+ */
+export async function getHomebrewLatestVersion(
+  formula = 'qwen-code',
+  run: typeof execFileAsync = execFileAsync,
+): Promise<string | null> {
+  try {
+    const { stdout } = await run(
+      'brew',
+      ['info', '--json=v2', '--formula', formula],
+      { encoding: 'utf8', timeout: HOMEBREW_INFO_TIMEOUT_MS },
+    );
+    const parsed = JSON.parse(String(stdout)) as {
+      formulae?: Array<{ versions?: { stable?: unknown } }>;
+    };
+    const stable = parsed.formulae?.[0]?.versions?.stable;
+    return typeof stable === 'string' && stable.length > 0 ? stable : null;
+  } catch (error) {
+    debugLogger.warn('Failed to query Homebrew formula version:', error);
+    return null;
+  }
 }
 
 export function getInstallationInfo(
@@ -361,7 +413,7 @@ function getStandaloneInstallInfo(
     standaloneDir: installDir,
     updateMessage: isAutoUpdateEnabled
       ? 'Standalone install detected. Attempting to automatically update now...'
-      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
+      : `${STANDALONE_UPDATE_PREFIX}${updateCommand}`,
   };
 }
 

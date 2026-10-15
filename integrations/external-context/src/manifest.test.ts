@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { loadConfig } from './config.js';
+import { createProvider } from './providers.js';
 
 describe('extension manifest', () => {
   it('exposes only the retrieval tool', async () => {
@@ -20,6 +24,59 @@ describe('extension manifest', () => {
       'context_search',
     ]);
     expect(manifest.hooks).toBeUndefined();
+  });
+
+  it('keeps the remote provider Extension OAuth-only and retrieval-only', async () => {
+    const manifest = await readJson(
+      '../examples/provider-extension-remote/qwen-extension.json',
+    );
+    const server = manifest.mcpServers?.['provider-context-remote-example'];
+
+    expect(Object.keys(manifest.mcpServers ?? {})).toEqual([
+      'provider-context-remote-example',
+    ]);
+    expect(server).toEqual({
+      httpUrl: 'https://context.example.com/mcp',
+      timeout: 8000,
+      includeTools: ['context_search'],
+      oauth: {
+        enabled: true,
+        scopes: ['context.read'],
+        audiences: ['https://context.example.com/mcp'],
+      },
+    });
+    expect(JSON.stringify(manifest)).not.toMatch(
+      /authorization|token|secret|api.?key|trust/i,
+    );
+  });
+
+  it('keeps the local provider Extension self-contained and retrieval-only', async () => {
+    const manifest = await readJson(
+      '../examples/provider-extension-local/qwen-extension.json',
+    );
+    const server = manifest.mcpServers?.['provider-context-local-example'];
+    const packageJson = await readJson(
+      '../examples/provider-extension-local/package.json',
+    );
+
+    expect(Object.keys(manifest.mcpServers ?? {})).toEqual([
+      'provider-context-local-example',
+    ]);
+    expect(server).toEqual({
+      command: 'node',
+      args: ['${extensionPath}${/}dist${/}main.js'],
+      cwd: '${extensionPath}',
+      env: {
+        PROVIDER_CONTEXT_BASE_URL: '${PROVIDER_CONTEXT_BASE_URL}',
+        PROVIDER_CONTEXT_TOKEN: '${PROVIDER_CONTEXT_TOKEN}',
+      },
+      timeout: 8000,
+      includeTools: ['context_search'],
+    });
+    expect(manifest.settings).toBeUndefined();
+    expect(server?.trust).toBeUndefined();
+    expect(packageJson.scripts?.build).toContain('--bundle');
+    expect(packageJson.dependencies).toBeUndefined();
   });
 
   it.each([
@@ -57,7 +114,7 @@ describe('extension manifest', () => {
         type: 'command',
         command,
         ...(shell === undefined ? {} : { shell }),
-        timeout: 8000,
+        timeout: 8,
         name: 'external-context-auto-recall',
         statusMessage: 'Retrieving external context',
       });
@@ -97,6 +154,231 @@ describe('extension manifest', () => {
         enableAutoSkill: false,
       },
       tools: { approvalMode: 'default', autoAccept: false },
+      privacy: { usageStatisticsEnabled: false },
+      telemetry: {
+        enabled: false,
+        logPrompts: false,
+        includeSensitiveSpanAttributes: false,
+      },
+    });
+    expect(settings.slashCommands?.disabled).toEqual(
+      expect.arrayContaining(['memory', 'remember', 'forget', 'dream', 'cd']),
+    );
+    expect(settings.hooks).toBeUndefined();
+  });
+
+  it.each([
+    {
+      platform: 'posix',
+      command:
+        "exec '/absolute/path/to/node' '/administrator/path/to/qwen-code/integrations/external-context/dist/write-confirmation.js'",
+      shell: undefined,
+    },
+    {
+      platform: 'windows',
+      command:
+        "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\administrator\\qwen-code\\integrations\\external-context\\dist\\write-confirmation.js'",
+      shell: 'powershell',
+    },
+  ])(
+    'pins the managed Mem0 write $platform confirmation Hook',
+    async ({ platform, command, shell }) => {
+      const settings = await readJson(
+        `../examples/managed-mem0-write-user-settings-${platform}.json`,
+      );
+      const events = Object.keys(settings.hooks ?? {});
+      const groups = settings.hooks?.PreToolUse ?? [];
+      const group = groups[0];
+      const hooks = group?.hooks ?? [];
+      const hook = hooks[0];
+
+      expect(settings.$version).toBe(4);
+      expect(events).toEqual(['PreToolUse']);
+      expect(groups).toHaveLength(1);
+      expect(group?.matcher).toBe('mcp__external-context__context_remember');
+      expect(hooks).toHaveLength(1);
+      expect(hook).toEqual({
+        type: 'command',
+        command,
+        ...(shell === undefined ? {} : { shell }),
+        timeout: 8,
+        name: 'external-context-memory-write-confirmation',
+        statusMessage: 'Confirming external memory write',
+      });
+    },
+  );
+
+  it('keeps the managed Mem0 write MCP surface narrow', async () => {
+    const mcp = await readJson('../examples/managed-mem0-write-mcp.json');
+    const server = mcp.mcpServers?.['external-context'];
+
+    expect(Object.keys(mcp.mcpServers ?? {})).toEqual(['external-context']);
+    expect(server).toEqual({
+      command: '/absolute/path/to/node',
+      args: [
+        '/administrator/path/to/qwen-code/integrations/external-context/dist/main.js',
+      ],
+      cwd: '/administrator/path/to/qwen-code/integrations/external-context',
+      includeTools: ['context_search', 'context_remember'],
+    });
+  });
+
+  it('uses strict v1 Mem0 configuration for managed writes', async () => {
+    const config = await readJson('../examples/mem0-write.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      write: { enabled: true },
+      provider: {
+        type: 'mem0-platform-v3',
+        apiKeyEnv: 'MEM0_API_KEY',
+        appId: 'repository-memory',
+      },
+    });
+  });
+  it('keeps the PolarDB Mem0 example loadable after placeholder substitution', async () => {
+    const config = await readJson('../examples/polardb-mem0.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      provider: {
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        endpoint: {
+          origin: 'https://<your-polardb-mem0-endpoint>',
+          basePath: '',
+        },
+        credentialEnv: 'MEM0_API_KEY',
+        scope: {
+          userId: '<your-user-id>',
+          agentId: 'qwen-code',
+        },
+      },
+    });
+
+    const substituted = JSON.parse(
+      JSON.stringify(config)
+        .replaceAll('<your-polardb-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        scope: { userId: 'example-user', agentId: 'qwen-code' },
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // The console hands out a plain-HTTP address and port, which the URL policy
+  // rejects. This example is the one path that needs no policy opt-in: the
+  // relay carries the credential and the memories, and loopback HTTP loads
+  // without enabling non-loopback insecure HTTP.
+  it('keeps the PolarDB loopback example loadable with no policy opt-in', async () => {
+    const config = await readJson('../examples/polardb-mem0-loopback.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      provider: {
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        endpoint: { origin: 'http://127.0.0.1:8080', basePath: '' },
+        credentialEnv: 'MEM0_API_KEY',
+        scope: { userId: '<your-user-id>', agentId: 'qwen-code' },
+      },
+    });
+
+    const substituted = JSON.parse(
+      JSON.stringify(config).replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        endpoint: { origin: 'http://127.0.0.1:8080' },
+        scope: { userId: 'example-user', agentId: 'qwen-code' },
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the stock Mem0 REST example loadable', async () => {
+    const config = await readJson('../examples/mem0-oss.json');
+    const substituted = JSON.parse(
+      JSON.stringify(config)
+        .replaceAll('<your-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        preset: 'mem0-oss-rest-2026-08',
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('pins write confirmation and disables local persistence', async () => {
+    const settings = await readJson(
+      '../examples/managed-mem0-write-system-settings.json',
+    );
+
+    expect(settings).toMatchObject({
+      $version: 4,
+      disableAllHooks: false,
+      general: { chatRecording: false },
+      ui: { enableSpeculation: false },
+      memory: {
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
+        enableAutoSkill: false,
+      },
+      tools: { approvalMode: 'default', autoAccept: false },
+      permissions: {
+        allow: ['mcp__external-context__context_search'],
+        ask: ['mcp__external-context__context_remember'],
+      },
       privacy: { usageStatisticsEnabled: false },
       telemetry: {
         enabled: false,

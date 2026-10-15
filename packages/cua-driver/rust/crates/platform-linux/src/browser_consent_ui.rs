@@ -319,12 +319,14 @@ mod tests {
             checked: None,
             enabled: None,
             selected: None,
+            focused: None,
             description: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
             element_key: 0,
             depth: 0,
             parent_element_index: None,
             in_web_content: false,
+            identity: None,
         }
     }
 

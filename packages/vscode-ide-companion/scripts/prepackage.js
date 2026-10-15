@@ -189,10 +189,10 @@ function main() {
   console.log('[prepackage] Preparing root dist/ package metadata...');
   run(npm, ['--prefix', repoRoot, 'run', 'prepare:package'], { cwd: repoRoot });
 
-  console.log('[prepackage] Preparing webui dist/ package metadata...');
+  console.log('[prepackage] Preparing web-shell dist/ package metadata...');
   run(
     npm,
-    ['--prefix', path.join(repoRoot, 'packages', 'webui'), 'run', 'build'],
+    ['--prefix', path.join(repoRoot, 'packages', 'web-shell'), 'run', 'build'],
     { cwd: repoRoot },
   );
 

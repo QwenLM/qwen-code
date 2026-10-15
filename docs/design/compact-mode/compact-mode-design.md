@@ -1,5 +1,8 @@
 # Compact Mode Design: Competitive Analysis & Optimization
 
+> Historical design. The current Web Shell behavior is documented in
+> [Web Shell compact mode and tool progress](../web-shell-thinking-and-tool-progress.md).
+
 > Ctrl+O compact/verbose mode toggle — competitive analysis with Claude Code, current implementation review, and optimization recommendations.
 >
 > User documentation: [Settings — ui.compactMode](../../users/configuration/settings.md).

@@ -8,11 +8,13 @@ public final class CreateSessionRequest {
     private final String workspaceCwd;
     private final String approvalMode;
     private final String sessionScope;
+    private final String sessionId;
 
     private CreateSessionRequest(Builder builder) {
         this.workspaceCwd = builder.workspaceCwd;
         this.approvalMode = builder.approvalMode;
         this.sessionScope = builder.sessionScope;
+        this.sessionId = builder.sessionId;
     }
 
     public static Builder builder() {
@@ -31,14 +33,22 @@ public final class CreateSessionRequest {
         if (approvalMode != null) {
             result.put("approvalMode", approvalMode);
         }
+        if (sessionId != null) {
+            result.put("sessionId", sessionId);
+        }
         result.put("sessionScope", sessionScope);
         return result;
+    }
+
+    String getSessionId() {
+        return sessionId;
     }
 
     public static final class Builder {
         private String workspaceCwd;
         private String approvalMode;
         private String sessionScope = "thread";
+        private String sessionId;
 
         private Builder() {
         }
@@ -66,6 +76,11 @@ public final class CreateSessionRequest {
                 throw new IllegalArgumentException("sessionScope must be thread or single");
             }
             this.sessionScope = sessionScope;
+            return this;
+        }
+
+        public Builder sessionId(String sessionId) {
+            this.sessionId = requireNonBlank(sessionId, "sessionId");
             return this;
         }
 

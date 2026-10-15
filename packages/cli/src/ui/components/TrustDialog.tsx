@@ -88,10 +88,8 @@ export function TrustDialog({
           </Text>
           {isInheritedTrustFromParent && (
             <Text color={theme.text.secondary}>
-              Note: This folder behaves as a trusted folder because one of the
-              parent folders is trusted. It will remain trusted even if you set
-              a different trust level here. To change this, you need to modify
-              the trust setting in the parent folder.
+              Note: This folder currently inherits trust from a parent folder. A
+              more-specific trust rule here can override that decision.
             </Text>
           )}
           {isInheritedTrustFromIde && (

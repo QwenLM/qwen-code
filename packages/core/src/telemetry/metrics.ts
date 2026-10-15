@@ -9,16 +9,21 @@ import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
+import type { GoalLimitKind, GoalStatus } from '../goals/goal-protocol.js';
 import type {
+  GoalStateEvent,
+  GoalStateEventCause,
   ModelSlashCommandEvent,
   MemoryRecallDeliveryPhase,
   MemoryRecallDeliveryPoint,
   MemoryRecallDiscardReason,
+  MemoryRecallStrategy,
 } from './types.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_EXECUTION_COUNT = `${SERVICE_NAME}.tool.execution.count`;
+export const REPEATED_TOOL_FAILURE_GUARD_COUNT = `${SERVICE_NAME}.repeated_tool_failure_guard.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
 const API_REQUEST_COUNT = `${SERVICE_NAME}.api.request.count`;
 const API_REQUEST_LATENCY = `${SERVICE_NAME}.api.request.latency`;
@@ -33,6 +38,24 @@ const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.
 const API_RETRY_COUNT = `${SERVICE_NAME}.api.retry.count`;
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
+
+// Goal Metrics
+const GOAL_TRANSITION_COUNT = `${SERVICE_NAME}.goal.transition.count`;
+const GOAL_TOKENS_USED = `${SERVICE_NAME}.goal.tokens_used`;
+const GOAL_TURN_COUNT = `${SERVICE_NAME}.goal.turn_count`;
+
+/** The Goal stops a user reads as the end of a run. */
+type GoalOutcomeCause = Extract<
+  GoalStateEventCause,
+  'complete' | 'blocked' | 'usage_limited'
+>;
+function isGoalOutcomeCause(
+  cause: GoalStateEventCause,
+): cause is GoalOutcomeCause {
+  return (
+    cause === 'complete' || cause === 'blocked' || cause === 'usage_limited'
+  );
+}
 
 // Arena Metrics
 const ARENA_SESSION_COUNT = `${SERVICE_NAME}.arena.session.count`;
@@ -105,6 +128,42 @@ const COUNTER_DEFINITIONS = {
     attributes: {} as {
       execution_status: ToolExecutionStatus | 'unknown';
       tool_type: 'native' | 'mcp';
+    },
+  },
+  [REPEATED_TOOL_FAILURE_GUARD_COUNT]: {
+    description:
+      'Counts privacy-safe repeated tool execution failure guard transitions.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (repeatedToolFailureGuardCounter = c),
+    attributes: {} as {
+      route: 'acp_foreground';
+      mode: 'shadow' | 'warn' | 'enforce';
+      phase_before: 'idle' | 'tracking' | 'warned' | 'latched';
+      phase_after: 'idle' | 'tracking' | 'warned' | 'latched';
+      decision:
+        | 'reset'
+        | 'tracked'
+        | 'would_warn'
+        | 'warned'
+        | 'would_stop'
+        | 'stopped';
+      failure_count_bucket: '0' | '1-2' | '3-4' | '5-7' | '8+';
+      batch_count_bucket: '0' | '1' | '2' | '3+';
+      reset_reason?:
+        | 'success'
+        | 'cancelled'
+        | 'not_started'
+        | 'post_execution_failure'
+        | 'unknown'
+        | 'mixed'
+        | 'incomplete'
+        | 'external_input'
+        | 'queued_prompt'
+        | 'unreliable_input'
+        | 'contract_violation';
+      terminal_status?: 'error';
+      execution_status?: 'error';
+      tool_type?: 'native' | 'mcp';
     },
   },
   [API_REQUEST_COUNT]: {
@@ -188,6 +247,17 @@ const COUNTER_DEFINITIONS = {
       tokens_after: number;
     },
   },
+  [GOAL_TRANSITION_COUNT]: {
+    description:
+      'Counts Goal state transitions, tagged by cause, resulting status, and limit kind.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (goalTransitionCounter = c),
+    attributes: {} as {
+      cause: GoalStateEventCause;
+      status?: GoalStatus;
+      limit_kind?: GoalLimitKind;
+    },
+  },
 } as const;
 
 const HISTOGRAM_DEFINITIONS = {
@@ -207,6 +277,39 @@ const HISTOGRAM_DEFINITIONS = {
     assign: (h: Histogram) => (apiRequestLatencyHistogram = h),
     attributes: {} as {
       model: string;
+    },
+  },
+  [GOAL_TOKENS_USED]: {
+    description:
+      'Tokens a Goal had spent when it completed, was blocked, or reached a usage limit.',
+    unit: '{token}',
+    valueType: ValueType.INT,
+    advice: {
+      explicitBucketBoundaries: [
+        1_000, 10_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000,
+        30_000_000, 100_000_000, 300_000_000, 600_000_000,
+      ] as number[],
+    },
+    assign: (h: Histogram) => (goalTokensUsedHistogram = h),
+    attributes: {} as {
+      cause: GoalOutcomeCause;
+      limit_kind?: GoalLimitKind;
+    },
+  },
+  [GOAL_TURN_COUNT]: {
+    description:
+      'Turns a Goal had finished when it completed, was blocked, or reached a usage limit.',
+    unit: '{turn}',
+    valueType: ValueType.INT,
+    advice: {
+      explicitBucketBoundaries: [
+        1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000, 10_000, 25_000, 50_000,
+      ] as number[],
+    },
+    assign: (h: Histogram) => (goalTurnCountHistogram = h),
+    attributes: {} as {
+      cause: GoalOutcomeCause;
+      limit_kind?: GoalLimitKind;
     },
   },
 } as const;
@@ -383,6 +486,7 @@ export enum ApiRequestPhase {
 let cliMeter: Meter | undefined;
 let toolCallCounter: Counter | undefined;
 let toolExecutionCounter: Counter | undefined;
+let repeatedToolFailureGuardCounter: Counter | undefined;
 let toolCallLatencyHistogram: Histogram | undefined;
 let apiRequestCounter: Counter | undefined;
 let apiRequestLatencyHistogram: Histogram | undefined;
@@ -395,6 +499,9 @@ let contentRetryCounter: Counter | undefined;
 let contentRetryFailureCounter: Counter | undefined;
 let apiRetryCounter: Counter | undefined;
 let subagentExecutionCounter: Counter | undefined;
+let goalTransitionCounter: Counter | undefined;
+let goalTokensUsedHistogram: Histogram | undefined;
+let goalTurnCountHistogram: Histogram | undefined;
 let modelSlashCommandCallCounter: Counter | undefined;
 
 // Performance Monitoring Metrics
@@ -489,11 +596,17 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
     valueType: ValueType.INT,
   });
 
-  Object.entries(HISTOGRAM_DEFINITIONS).forEach(
-    ([name, { description, unit, valueType, assign }]) => {
-      assign(meter.createHistogram(name, { description, unit, valueType }));
-    },
-  );
+  Object.entries(HISTOGRAM_DEFINITIONS).forEach(([name, definition]) => {
+    const { description, unit, valueType, assign } = definition;
+    assign(
+      meter.createHistogram(name, {
+        description,
+        unit,
+        valueType,
+        ...('advice' in definition ? { advice: definition.advice } : {}),
+      }),
+    );
+  });
 
   // Increment session counter after all metrics are initialized
   sessionCounter?.add(1, baseMetricDefinition.getCommonAttributes(config));
@@ -583,6 +696,37 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
   isMetricsInitialized = true;
 }
 
+/**
+ * Counts a Goal transition and, on the three outcomes a user reads as the end
+ * of a run, records what the Goal had spent getting there.
+ *
+ * The Goal id and revision stay on the log record: every Goal is a new value,
+ * the same unbounded time-series fan-out the opt-in `session.id` guards
+ * against.
+ */
+export function recordGoalStateMetrics(
+  config: Config,
+  event: GoalStateEvent,
+): void {
+  if (!goalTransitionCounter || !isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  const limitKind = event.limit_kind ? { limit_kind: event.limit_kind } : {};
+  goalTransitionCounter.add(1, {
+    ...common,
+    cause: event.cause,
+    ...(event.status ? { status: event.status } : {}),
+    ...limitKind,
+  });
+  if (!isGoalOutcomeCause(event.cause)) return;
+  const outcome = { ...common, cause: event.cause, ...limitKind };
+  if (event.tokens_used !== undefined) {
+    goalTokensUsedHistogram?.record(event.tokens_used, outcome);
+  }
+  if (event.turn_count !== undefined) {
+    goalTurnCountHistogram?.record(event.turn_count, outcome);
+  }
+}
+
 export function recordChatCompressionMetrics(
   config: Config,
   attributes: MetricDefinitions[typeof EVENT_CHAT_COMPRESSION]['attributes'],
@@ -623,6 +767,13 @@ export function recordToolExecutionMetrics(
     ...baseMetricDefinition.getCommonAttributes(config),
     ...attributes,
   });
+}
+
+export function recordRepeatedToolFailureGuardMetrics(
+  attributes: MetricDefinitions[typeof REPEATED_TOOL_FAILURE_GUARD_COUNT]['attributes'],
+): void {
+  if (!repeatedToolFailureGuardCounter || !isMetricsInitialized) return;
+  repeatedToolFailureGuardCounter.add(1, attributes);
 }
 
 export function recordTokenUsageMetrics(
@@ -1086,6 +1237,7 @@ export function recordMemoryDreamMetrics(
   durationMs: number,
   attrs: {
     trigger: 'auto' | 'manual';
+    scope?: 'project' | 'user';
     status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
   },
@@ -1095,11 +1247,13 @@ export function recordMemoryDreamMetrics(
   memoryDreamCounter?.add(1, {
     ...common,
     trigger: attrs.trigger,
+    scope: attrs.scope ?? 'project',
     status: attrs.status,
   });
   memoryDreamDurationHistogram?.record(durationMs, {
     ...common,
     trigger: attrs.trigger,
+    scope: attrs.scope ?? 'project',
     status: attrs.status,
   });
 }
@@ -1107,14 +1261,34 @@ export function recordMemoryDreamMetrics(
 export function recordMemoryRecallMetrics(
   config: Config,
   durationMs: number,
-  attrs: { strategy: 'none' | 'heuristic' | 'model'; docs_selected: number },
+  attrs: {
+    strategy: MemoryRecallStrategy;
+    docs_selected: number;
+    /**
+     * Attached only when defined: the `selector_skipped` dimension belongs to
+     * the #13003 skip-selector experiment, so callers pass it solely while
+     * that experiment is enabled. An existing series must not gain the
+     * dimension — not even as a constant `false` — on deployments where the
+     * experiment is off, or every deployment would split the time series.
+     */
+    selector_skipped?: boolean;
+  },
 ): void {
   if (!isMetricsInitialized) return;
   const common = baseMetricDefinition.getCommonAttributes(config);
-  memoryRecallCounter?.add(1, { ...common, strategy: attrs.strategy });
+  const selectorSkippedAttr =
+    attrs.selector_skipped === undefined
+      ? {}
+      : { selector_skipped: attrs.selector_skipped };
+  memoryRecallCounter?.add(1, {
+    ...common,
+    strategy: attrs.strategy,
+    ...selectorSkippedAttr,
+  });
   memoryRecallDurationHistogram?.record(durationMs, {
     ...common,
     strategy: attrs.strategy,
+    ...selectorSkippedAttr,
   });
 }
 

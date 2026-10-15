@@ -11,7 +11,7 @@
 // glob patterns. This keeps the model's tool description small in large
 // monorepos where most skills are irrelevant to the current task.
 //
-// Mirrors the design of ConditionalRulesRegistry in utils/rulesDiscovery.ts
+// Mirrors the design of ConditionalRulesRegistry in config/rulesDiscovery.ts
 // but returns skill names (not content), because the activation affects which
 // skills are advertised in SkillTool's description rather than injecting text.
 

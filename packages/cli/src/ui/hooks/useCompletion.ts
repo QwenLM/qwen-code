@@ -49,6 +49,8 @@ export interface UseCompletionReturn {
   activeCategory: SuggestionCategory | 'all';
   /** Tabs available for the current suggestion set (always includes 'all'). */
   availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Select an exact category tab; a category change resets active/scroll index. */
+  selectCategory: (category: SuggestionCategory | 'all') => void;
   /** Cycle the active category tab; resets active/scroll index. */
   switchCategory: (direction: 1 | -1) => void;
 }
@@ -98,14 +100,21 @@ export function useCompletion(
     [rawSuggestions, activeCategory],
   );
 
+  const changeCategory = useCallback(
+    (nextCategory: React.SetStateAction<SuggestionCategory | 'all'>): void => {
+      setActiveCategory(nextCategory);
+      setActiveSuggestionIndex(0);
+      setVisibleStartIndex(0);
+    },
+    [],
+  );
+
   // If the active tab disappears (suggestion set changed), fall back to 'all'.
   useEffect(() => {
     if (!availableCategories.includes(activeCategory)) {
-      setActiveCategory('all');
-      setActiveSuggestionIndex(0);
-      setVisibleStartIndex(0);
+      changeCategory('all');
     }
-  }, [availableCategories, activeCategory]);
+  }, [availableCategories, activeCategory, changeCategory]);
 
   // Clamp the active index when the filtered suggestion list shrinks within
   // a still-existing category (e.g. async search returns fewer items).
@@ -122,9 +131,22 @@ export function useCompletion(
     );
   }, [suggestions.length]);
 
+  const selectCategory = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      if (
+        category === activeCategory ||
+        !availableCategories.includes(category)
+      ) {
+        return;
+      }
+      changeCategory(category);
+    },
+    [activeCategory, availableCategories, changeCategory],
+  );
+
   const switchCategory = useCallback(
     (direction: 1 | -1) => {
-      setActiveCategory((cur) => {
+      changeCategory((cur) => {
         const idx = availableCategories.indexOf(cur);
         if (idx === -1) return 'all';
         const next =
@@ -132,10 +154,8 @@ export function useCompletion(
           availableCategories.length;
         return availableCategories[next];
       });
-      setActiveSuggestionIndex(0);
-      setVisibleStartIndex(0);
     },
-    [availableCategories],
+    [availableCategories, changeCategory],
   );
 
   const resetCompletionState = useCallback(() => {
@@ -251,6 +271,7 @@ export function useCompletion(
     navigateDown,
     activeCategory,
     availableCategories,
+    selectCategory,
     switchCategory,
   };
 }

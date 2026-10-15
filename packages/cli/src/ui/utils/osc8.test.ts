@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  BARE_URL_PATTERN,
   HYPERLINK_ENV_KEYS,
   isSafeOscScheme,
   labelMayDeceive,
@@ -291,6 +292,46 @@ describe('osc8 helpers', () => {
       expect(trimTrailingUrlPunctuation('https://example.com/x')).toBe(
         'https://example.com/x',
       );
+    });
+  });
+
+  describe('BARE_URL_PATTERN', () => {
+    it.each([
+      'https://ja.wikipedia.org/wiki/人々',
+      'https://ja.wikipedia.org/wiki/〆切',
+      'https://example.com/二〇二六年報',
+      'https://ja.example.com/〼道と〻次',
+      'https://example.com/〱〢',
+      'https://example.com/a︳b︴c',
+      'https://zh.wikipedia.org/wiki/北京',
+    ])('keeps word-forming CJK characters in %s', (url) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
+    });
+
+    it.each([
+      'https://en.wikipedia.org/wiki/Mexico–United_States_border',
+      'https://example.com/it’s',
+      'https://example.com/thing…',
+    ])('keeps typographic punctuation inside %s', (url) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
+    });
+
+    it.each([
+      ['https://example.com/page。下一步', 'https://example.com/page'],
+      ['https://example.com/page、続き', 'https://example.com/page'],
+      ['https://example.com/page：説明', 'https://example.com/page'],
+      ['https://example.com/page？質問', 'https://example.com/page'],
+      ['https://example.com/page！注意', 'https://example.com/page'],
+    ])('stops before CJK punctuation in %s', (input, expected) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(input)?.[0]).toBe(expected);
+    });
+
+    it.each([
+      ['https://example.com/x﹙備註﹚', 'https://example.com/x'],
+      ['https://example.com/a︒後続', 'https://example.com/a'],
+      ['https://example.com/p﹖説明', 'https://example.com/p'],
+    ])('stops before CJK compat/vertical forms in %s', (input, expected) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(input)?.[0]).toBe(expected);
     });
   });
 

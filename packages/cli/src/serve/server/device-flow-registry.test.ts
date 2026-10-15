@@ -11,7 +11,7 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowProviderId,
 } from '../auth/device-flow.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { WorkspaceEventPublisher } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
@@ -38,13 +38,11 @@ function fakeProvider(): DeviceFlowProvider {
   };
 }
 
-function fakeBridge(): AcpSessionBridge & {
+function fakeBridge(): WorkspaceEventPublisher & {
   publishWorkspaceEvent: ReturnType<typeof vi.fn>;
 } {
   return {
     publishWorkspaceEvent: vi.fn(),
-  } as unknown as AcpSessionBridge & {
-    publishWorkspaceEvent: ReturnType<typeof vi.fn>;
   };
 }
 

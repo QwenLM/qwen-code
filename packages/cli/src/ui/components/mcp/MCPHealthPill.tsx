@@ -39,8 +39,15 @@ export const MCPHealthPill: React.FC = () => {
   if (!label) return null;
   return (
     <>
-      <Text color={theme.text.secondary}> · </Text>
-      <Text color={theme.status.warning}>{label}</Text>
+      {/* Truncate every node: the pill shares the footer's shrinkable hint
+          row, where a default-wrap child grows the footer mid-turn once the
+          queued-count badge squeezes the row (#8667). */}
+      <Text color={theme.text.secondary} wrap="truncate">
+        {' · '}
+      </Text>
+      <Text color={theme.status.warning} wrap="truncate">
+        {label}
+      </Text>
     </>
   );
 };

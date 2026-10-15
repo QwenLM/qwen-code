@@ -28,6 +28,7 @@ describe('voice-command', () => {
   it('has the expected metadata', () => {
     expect(voiceCommand.name).toBe('voice');
     expect(voiceCommand.argumentHint).toBe('[hold|tap|off|status]');
+    expect(voiceCommand.canRunDuringStreaming).toBe(true);
   });
 
   it('prompts for a voice model before enabling', async () => {

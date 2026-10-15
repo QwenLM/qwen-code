@@ -1,0 +1,161 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// `review run` pins the artifacts it captures by exact filename, and those
+// names are the bundled skill's to choose: the skill writes
+// `--out .qwen/tmp/qwen-review-{target}-composed.json` in Step 6 and the
+// report stems in Step 8. `composedNameFor`/`reportPatternFor` are therefore
+// a SECOND copy of a template that lives in prose — and when the two drift,
+// every affected `review run` completes (and, with --comment, posts) while
+// the parent reports "no composed verdict was produced" and exits 1: the
+// exact live defect the pinning exists to end.
+//
+// So the skill is the oracle here, not a hand-typed literal: this reads the
+// templates out of SKILL.md and renders them for each target class. A skill
+// edit that changes a template fails HERE, next to the code that must follow
+// it, instead of silently in a review months later.
+
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { composedNameFor, reportPatternFor } from './run.js';
+
+const repoRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  '..',
+  '..',
+);
+
+const SKILL_DIR = join(repoRoot, 'packages/core/src/skills/bundled/review');
+
+/** The `{target}` token, rendered per class exactly as the skill defines it. */
+const TARGETS = {
+  pr: { cls: { kind: 'pr', number: '9014' } as const, token: 'pr-9014' },
+  file: { cls: { kind: 'file', base: 'foo.ts' } as const, token: 'foo.ts' },
+  // A nested target: the token is the flattened repo-relative path, and this
+  // is the shape where the pre-PR `<filename>` stem and the pin disagreed.
+  fileNested: {
+    cls: { kind: 'file', base: 'src_foo.ts' } as const,
+    token: 'src_foo.ts',
+  },
+  // A markdown target: the pin deliberately does NOT double the `.md`, and
+  // the Step 8 template carries the matching no-doubling rule — the shape
+  // where every file review of a `.md` path used to lose its `Report:` line.
+  fileMd: {
+    cls: { kind: 'file', base: 'docs_guide.md' } as const,
+    token: 'docs_guide.md',
+  },
+  local: { cls: { kind: 'local' } as const, token: 'local' },
+};
+
+describe('run pins match the bundled skill templates', () => {
+  // The skill is a corpus since #9787, and each oracle reads only the
+  // files the owning step is GUARANTEED to see: the composed-name template
+  // lives in the core SKILL.md (injected on every run), the report stems in
+  // references/persistence.md (the one reference loaded before Step 8 on
+  // every run that has a Step 8). Accepting a template from ANY corpus file
+  // would stay green on a move into a verdict-gated file that many runs
+  // never load, while those runs improvise artifact names.
+  const coreSkill = existsSync(join(SKILL_DIR, 'SKILL.md'))
+    ? readFileSync(join(SKILL_DIR, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n')
+    : null;
+  const step8Corpus = (() => {
+    if (coreSkill === null) return null;
+    const persistence = join(SKILL_DIR, 'references', 'persistence.md');
+    return existsSync(persistence)
+      ? `${coreSkill}\n${readFileSync(persistence, 'utf8').replace(/\r\n/g, '\n')}`
+      : null;
+  })();
+
+  // A sparse or partial checkout has no skill to read; the pins are still
+  // covered by run.test.ts's own cases. Failing here would report a checkout
+  // shape as a contract drift.
+  const itWithSkill = coreSkill === null ? it.skip : it;
+  // The stems oracle additionally reads references/persistence.md, so a
+  // checkout that has SKILL.md but not that file must skip it too.
+  const itWithStep8 = step8Corpus === null ? it.skip : it;
+
+  itWithSkill('composedNameFor renders Step 6’s --out template', () => {
+    // The template as the skill writes it, e.g.
+    //   --out .qwen/tmp/qwen-review-{target}-composed.json
+    // The filename must END the token: an unanchored capture matches a skill
+    // edit that APPENDS to the artifact name (`…composed.json.tmp` for an
+    // atomic write-then-rename, `…json-v2` for a rename) as a prefix,
+    // leaving this oracle green while the pin drifts — one direction of the
+    // drift it exists to catch. Whitespace-or-end, not a rejected character
+    // class, so no future suffix character has to be foreseen.
+    const m =
+      /--out\s+\.qwen\/tmp\/(qwen-review-\{target\}-composed\.json)(?=\s|$)/.exec(
+        coreSkill as string,
+      );
+    // A null here means SKILL.md no longer writes that `--out` line: update
+    // composedNameFor and this oracle together to the new template.
+    expect(m).not.toBeNull();
+
+    const template = (m as RegExpExecArray)[1];
+    for (const { cls, token } of Object.values(TARGETS)) {
+      expect(composedNameFor(cls)).toBe(template.replace('{target}', token));
+    }
+  });
+
+  itWithStep8('reportPatternFor accepts Step 8’s report stems', () => {
+    // The stems as the skill lists them, e.g.
+    //   `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-pr-<number>.md`
+    const stems = [
+      ...(step8Corpus as string).matchAll(
+        /`\.qwen\/reviews\/<YYYY-MM-DD>-<HHMMSS>-([^`]+)\.md`/g,
+      ),
+    ].map((s) => s[1]);
+    // A miss here means Step 8 no longer lists those stems: update
+    // reportPatternFor and this oracle together to the new template.
+    expect(stems).toEqual(
+      expect.arrayContaining(['local', 'pr-<number>', '<target>']),
+    );
+
+    const render = (stem: string, token: string): string =>
+      `2026-08-13-101010-${stem}.md`
+        .replace('pr-<number>', 'pr-9014')
+        .replace('<target>', token);
+
+    expect(
+      reportPatternFor(TARGETS.pr.cls).test(render('pr-<number>', '')),
+    ).toBe(true);
+    // The file stem renders from the capture's token — for a root file and
+    // for a nested one alike, since the pin builds from the same derivation.
+    for (const { cls, token } of [TARGETS.file, TARGETS.fileNested]) {
+      expect(reportPatternFor(cls).test(render('<target>', token))).toBe(true);
+    }
+    // A token that already ends in `.md`: the template ends the name at the
+    // token — the prose rule beside it, pinned here so a template edit that
+    // drops the rule fails next to the pin it must agree with.
+    expect(step8Corpus as string).toContain('do not double the extension');
+    const mdName = `2026-08-13-101010-${TARGETS.fileMd.token}`;
+    expect(reportPatternFor(TARGETS.fileMd.cls).test(mdName)).toBe(true);
+    // …and the DOUBLED rendering — what a template without the rule writes —
+    // must not match, or the run's `Report:` line is silently lost again.
+    expect(reportPatternFor(TARGETS.fileMd.cls).test(`${mdName}.md`)).toBe(
+      false,
+    );
+    expect(reportPatternFor(TARGETS.local.cls).test(render('local', ''))).toBe(
+      true,
+    );
+    // And each class refuses the neighbouring classes' rendered stems — the
+    // cross-capture this pinning exists to prevent.
+    expect(reportPatternFor(TARGETS.pr.cls).test(render('local', ''))).toBe(
+      false,
+    );
+    expect(
+      reportPatternFor(TARGETS.local.cls).test(render('pr-<number>', '')),
+    ).toBe(false);
+    expect(reportPatternFor(TARGETS.file.cls).test(render('local', ''))).toBe(
+      false,
+    );
+  });
+});

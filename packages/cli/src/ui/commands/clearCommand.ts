@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import process from 'node:process';
@@ -44,16 +45,19 @@ export const clearCommand: SlashCommand = {
 
     if (config) {
       if (hasBlockingBackgroundWork(config)) {
-        const content =
+        const baseMessage =
           "Stop the current session's running background tasks before starting a new session.";
-        context.ui.setDebugMessage(content);
+        // Name the blocking entries so the user can act without first
+        // discovering /tasks exists (issue #8741). The transient debug
+        // line stays one line; the returned error carries the list.
+        context.ui.setDebugMessage(baseMessage);
         // Return the error in every mode. Interactive mode used to bail
         // with only the transient debug line above, so a blocked /clear
         // looked like the command silently did nothing (issue #5949).
         return {
           type: 'message' as const,
           messageType: 'error' as const,
-          content,
+          content: buildBackgroundWorkBlockedMessage(config, baseMessage),
         };
       }
 
@@ -112,14 +116,14 @@ export const clearCommand: SlashCommand = {
       // Clear UI first for immediate responsiveness
       context.ui.clear();
 
-      const geminiClient = config.getGeminiClient();
-      if (geminiClient) {
+      const llmClient = config.getLlmClient();
+      if (llmClient) {
         context.ui.setDebugMessage(
           t('Starting a new session, resetting chat, and clearing terminal.'),
         );
         // If resetChat fails, the exception will propagate and halt the command,
         // which is the correct behavior to signal a failure to the user.
-        await geminiClient.resetChat();
+        await llmClient.resetChat();
       } else {
         context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       }

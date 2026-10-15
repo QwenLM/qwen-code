@@ -5,10 +5,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { createReadStream } from 'node:fs';
 import readline from 'node:readline';
 import {
   getSubagentSessionDir,
+  isProcessRunning,
   parseLineTolerant,
   read as readJsonl,
   readAgentMeta,
@@ -17,18 +19,34 @@ import {
   type SessionTranscriptCursorState,
   type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
-import { EventBus, type BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import {
+  EventBus,
+  type BridgeEvent,
+  type EventBusSubscriberDiagnostic,
+} from '@qwen-code/acp-bridge/eventBus';
 import { createTranscriptMessageUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { replayTranscriptRecordPage } from '../acp-integration/session/history-replay-page.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const PREFIX = 'subagent.';
+export const MAX_VIRTUAL_SESSION_ID_PART_LENGTH = 500;
+const MAX_VIRTUAL_SESSION_ID_LENGTH = 2_000;
 const POLL_INTERVAL_MS = 250;
 const TARGET_RETENTION_MS = 60_000;
 
 interface VirtualSubagentSessionKey {
   parentSessionId: string;
   agentId: string;
+}
+
+interface VirtualSubagentSubscribeOptions {
+  signal: AbortSignal;
+  lastEventId?: number;
+  maxQueued?: number;
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
 }
 
 interface ResolvedAgentTask {
@@ -191,8 +209,24 @@ function decodePart(value: string): string | undefined {
   }
 }
 
-function isValidVirtualSessionPart(value: string): boolean {
-  return /^[a-zA-Z0-9_-]{1,500}$/.test(value);
+// Parent ids reach filesystem paths, so they keep the strict charset;
+// agent ids are comparison-only and may use the round-trippable space.
+function isValidVirtualParentSessionId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_VIRTUAL_SESSION_ID_PART_LENGTH &&
+    /^[a-zA-Z0-9_-]+$/.test(value)
+  );
+}
+
+function isValidVirtualAgentId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_VIRTUAL_SESSION_ID_PART_LENGTH &&
+    // Round-trip rejects lone surrogates: UTF-8 maps them to U+FFFD, so two
+    // distinct agent ids would otherwise encode to the same session id.
+    decodePart(encodePart(value)) === value
+  );
 }
 
 export function createVirtualSubagentSessionId(
@@ -200,29 +234,42 @@ export function createVirtualSubagentSessionId(
   agentId: string,
 ): string {
   if (
-    !isValidVirtualSessionPart(parentSessionId) ||
-    !isValidVirtualSessionPart(agentId)
+    !isValidVirtualParentSessionId(parentSessionId) ||
+    !isValidVirtualAgentId(agentId)
   ) {
     throw new Error('Virtual subagent session ids require valid id parts');
   }
-  return `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
+  const sessionId = `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
+  if (sessionId.length > MAX_VIRTUAL_SESSION_ID_LENGTH) {
+    throw new Error(
+      `Virtual subagent session id exceeds ${MAX_VIRTUAL_SESSION_ID_LENGTH} characters`,
+    );
+  }
+  return sessionId;
 }
 
 export function parseVirtualSubagentSessionId(
   sessionId: string,
 ): VirtualSubagentSessionKey | undefined {
-  if (!sessionId.startsWith(PREFIX) || sessionId.length > 2_000) {
+  if (
+    !sessionId.startsWith(PREFIX) ||
+    sessionId.length > MAX_VIRTUAL_SESSION_ID_LENGTH
+  ) {
     return undefined;
   }
   const parts = sessionId.slice(PREFIX.length).split('.');
   if (parts.length !== 2) return undefined;
-  const parentSessionId = decodePart(parts[0]!);
-  const agentId = decodePart(parts[1]!);
+  const parentPart = parts[0]!;
+  const agentPart = parts[1]!;
+  const parentSessionId = decodePart(parentPart);
+  const agentId = decodePart(agentPart);
   if (
     !parentSessionId ||
     !agentId ||
-    !isValidVirtualSessionPart(parentSessionId) ||
-    !isValidVirtualSessionPart(agentId)
+    !isValidVirtualParentSessionId(parentSessionId) ||
+    !isValidVirtualAgentId(agentId) ||
+    encodePart(parentSessionId) !== parentPart ||
+    encodePart(agentId) !== agentPart
   ) {
     return undefined;
   }
@@ -649,11 +696,9 @@ class VirtualSubagentTarget {
     };
   }
 
-  private async *iterate(opts: {
-    signal: AbortSignal;
-    lastEventId?: number;
-    maxQueued?: number;
-  }): AsyncIterableIterator<BridgeEvent> {
+  private async *iterate(
+    opts: VirtualSubagentSubscribeOptions,
+  ): AsyncIterableIterator<BridgeEvent> {
     if (this.retentionTimer) {
       clearTimeout(this.retentionTimer);
       this.retentionTimer = undefined;
@@ -682,11 +727,7 @@ class VirtualSubagentTarget {
     }
   }
 
-  subscribe(opts: {
-    signal: AbortSignal;
-    lastEventId?: number;
-    maxQueued?: number;
-  }): AsyncIterable<BridgeEvent> {
+  subscribe(opts: VirtualSubagentSubscribeOptions): AsyncIterable<BridgeEvent> {
     return {
       [Symbol.asyncIterator]: () => this.iterate(opts),
     };
@@ -712,8 +753,17 @@ export class VirtualSubagentSessions {
       toolUseId?: string;
     }) => boolean,
   ): Promise<ResolvedAgentTask | undefined> {
-    const status = await runtime.bridge.getSessionTasksStatus(parentSessionId);
-    const task = status.tasks.find(
+    const status = await runtime.bridge
+      .getSessionTasksStatus(parentSessionId)
+      .catch((error: unknown) => {
+        if (
+          error instanceof SessionNotFoundError &&
+          error.code === 'session_not_found'
+        )
+          return undefined;
+        throw error;
+      });
+    const task = status?.tasks.find(
       (candidate) =>
         candidate.kind === 'agent' &&
         typeof candidate.outputFile === 'string' &&
@@ -766,7 +816,13 @@ export class VirtualSubagentSessions {
         id: meta.agentId,
         title: meta.description || meta.agentType,
         outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
-        status: meta.status ?? 'completed',
+        status:
+          meta.status === 'running' &&
+          meta.isBackgrounded === false &&
+          meta.workflowOwner?.hostname === hostname() &&
+          !isProcessRunning(meta.workflowOwner.pid)
+            ? 'failed'
+            : (meta.status ?? 'completed'),
         startTime: Number.isFinite(Date.parse(meta.createdAt))
           ? Date.parse(meta.createdAt)
           : Date.now(),
@@ -970,7 +1026,7 @@ export class VirtualSubagentSessions {
   async subscribe(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    opts: { signal: AbortSignal; lastEventId?: number; maxQueued?: number },
+    opts: VirtualSubagentSubscribeOptions,
   ): Promise<AsyncIterable<BridgeEvent> | undefined> {
     return (await this.getTarget(runtime, sessionId))?.subscribe(opts);
   }

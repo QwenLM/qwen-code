@@ -21,7 +21,6 @@ import {
   type Mock,
 } from 'vitest';
 import * as fs from 'node:fs';
-import stripJsonComments from 'strip-json-comments';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import * as jsoncEditor from '../utils/jsonc-editor.js';
@@ -59,9 +58,6 @@ vi.mock('fs', async (importOriginal) => {
     mkdirSync: vi.fn(),
   };
 });
-vi.mock('strip-json-comments', () => ({
-  default: vi.fn((content) => content),
-}));
 vi.mock('../utils/jsonc-editor.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/jsonc-editor.js')>();
@@ -85,17 +81,12 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 
 describe('Trusted Folders Loading', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
-  let mockStripJsonComments: Mocked<typeof stripJsonComments>;
 
   beforeEach(() => {
     resetTrustedFoldersForTesting();
     vi.resetAllMocks();
     mockFsExistsSync = vi.mocked(fs.existsSync);
-    mockStripJsonComments = vi.mocked(stripJsonComments);
     vi.mocked(osActual.homedir).mockReturnValue('/mock/home/user');
-    (mockStripJsonComments as unknown as Mock).mockImplementation(
-      (jsonString: string) => jsonString,
-    );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}');
     (fs.lstatSync as Mock).mockReturnValue({
@@ -150,13 +141,23 @@ describe('Trusted Folders Loading', () => {
       expect(folders.isPathTrusted('/trustedparent/trustme')).toBe(true);
 
       // No explicit rule covers this file
-      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(
-        undefined,
-      );
-      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(
-        undefined,
-      );
+      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(false);
+      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(false);
       expect(folders.isPathTrusted('/user/someotherfolder')).toBe(undefined);
+    });
+
+    it('uses the deepest matching rule for both trust directions', () => {
+      const { folders } = setup({
+        config: {
+          '/projects': TrustLevel.DO_NOT_TRUST,
+          '/projects/good': TrustLevel.TRUST_FOLDER,
+          '/projects/good/private': TrustLevel.DO_NOT_TRUST,
+        },
+      });
+
+      expect(folders.isPathTrusted('/projects/evil/src')).toBe(false);
+      expect(folders.isPathTrusted('/projects/good/src')).toBe(true);
+      expect(folders.isPathTrusted('/projects/good/private/src')).toBe(false);
     });
   });
 
@@ -190,7 +191,7 @@ describe('Trusted Folders Loading', () => {
     expect(rules).toEqual([]);
     expect(errors.length).toBe(1);
     expect(errors[0].path).toBe(userPath);
-    expect(errors[0].message).toContain('Unexpected token');
+    expect(errors[0].message).toContain('InvalidSymbol');
   });
 
   it('should use QWEN_CODE_TRUSTED_FOLDERS_PATH env var if set', () => {
@@ -283,14 +284,10 @@ describe('Trusted Folders Loading', () => {
   // work repos
   "/existing/path": "TRUST_FOLDER"
 }`;
-    const strippedContent = JSON.stringify({
-      '/existing/path': TrustLevel.TRUST_FOLDER,
-    });
 
     (mockFsExistsSync as Mock).mockImplementation(
       (p) => p === userPath || p === dirPath,
     );
-    (mockStripJsonComments as unknown as Mock).mockReturnValue(strippedContent);
     (fs.readFileSync as Mock).mockImplementation((p) => {
       if (p === userPath) return originalContent;
       return '{}';
@@ -498,7 +495,7 @@ describe('isWorkspaceTrusted', () => {
     // This mock needs to be specific to this test to override the one in beforeEach
     vi.spyOn(fs, 'readFileSync').mockImplementation((p) => {
       if (p === getTrustedFoldersPath()) {
-        return '{"foo": "bar",}'; // Malformed JSON with trailing comma
+        return '{"foo":'; // Incomplete JSONC document
       }
       return '{}';
     });
@@ -558,10 +555,10 @@ describe('isWorkspaceTrusted', () => {
     });
   });
 
-  it('should return undefined for a child of an untrusted folder', () => {
+  it('should return false for a child of an untrusted folder', () => {
     mockCwd = '/home/user/untrusted/src';
     mockRules['/home/user/untrusted'] = TrustLevel.DO_NOT_TRUST;
-    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
+    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBe(false);
   });
 
   it('should return undefined when no rules match', () => {
@@ -571,12 +568,12 @@ describe('isWorkspaceTrusted', () => {
     expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
   });
 
-  it('should prioritize trust over distrust', () => {
+  it('should prioritize exact distrust over ancestor trust', () => {
     mockCwd = '/home/user/projectA/untrusted';
     mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
     mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
     expect(isWorkspaceTrusted(mockSettings)).toEqual({
-      isTrusted: true,
+      isTrusted: false,
       source: 'file',
     });
   });
@@ -701,6 +698,18 @@ describe('getWorkspaceTrustStatus', () => {
     ).toMatchObject({
       effective: { state: 'unknown', source: 'none' },
       explicitTrustLevel: null,
+    });
+  });
+
+  it('reports exact distrust over ancestor trust', () => {
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+    mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
+
+    expect(
+      getWorkspaceTrustStatus(mockSettings, '/home/user/projectA/untrusted'),
+    ).toMatchObject({
+      effective: { state: 'untrusted', source: 'file' },
+      explicitTrustLevel: TrustLevel.DO_NOT_TRUST,
     });
   });
 

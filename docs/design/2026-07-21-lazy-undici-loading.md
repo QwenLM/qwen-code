@@ -26,7 +26,7 @@ The metafile showed eight value-import sites (type-only imports are free):
 | cli     | `commands/channel/proxy.ts`    | `EnvHttpProxyAgent`, `setGlobalDispatcher` |
 | cli     | `utils/gitUtils.ts`            | `ProxyAgent`                               |
 | cli     | `services/setup-github.ts`     | `ProxyAgent`                               |
-| cli     | `utils/standalone-update.ts`   | `fetch`                                    |
+| cli     | `ui/standalone-update.ts`      | `fetch`                                    |
 
 ## Design
 

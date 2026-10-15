@@ -1,19 +1,20 @@
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
   getImageMimeTypeFromPath,
   readWorkspaceFileAsBlob,
 } from './artifactUtils';
 import styles from './CodeReviewArtifactDetail.module.css';
+import type { ArtifactWorkspaceActions } from './useArtifactWorkspaceTarget';
 
 // Hand-duplicated from the CLI's canonical lists in
 // packages/cli/src/commands/review/findings.ts. The parser below fails closed
 // on any value missing here, so when the CLI adds one, update this copy and
 // the contract fixture (__fixtures__/code-review-artifact-v1.json) with it.
-// The CLI-side vocabulary snapshot (packages/cli/src/commands/review/
-// findings.test.ts) turns red on that change and names this file.
+// The CLI-side vocabulary snapshot (packages/cli/src/commands/review/findings.test.ts)
+// turns red on that change and names this file.
 const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
 const CONFIDENCES = ['high', 'low'] as const;
 const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
@@ -38,6 +39,8 @@ interface ReviewFinding {
   summary: string;
   shortSummary: string;
   failureScenario: string;
+  /** The executed evidence that settled the verdict, or its `not run` line. */
+  witness?: string;
   suggestedFix?: string;
   category?: string;
   locations: FindingLocation[];
@@ -208,6 +211,9 @@ function parseFinding(value: unknown, index: number): ReviewFinding {
       source['failureScenario'],
       `${label}.failureScenario`,
     ),
+    ...(optionalString(source['witness'], `${label}.witness`)
+      ? { witness: source['witness'] as string }
+      : {}),
     ...(optionalString(source['suggestedFix'], `${label}.suggestedFix`)
       ? { suggestedFix: source['suggestedFix'] as string }
       : {}),
@@ -306,9 +312,10 @@ export function CodeReviewArtifactDetail({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [content, setContent] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [artifactTruncated, setArtifactTruncated] = useState(false);
@@ -588,6 +595,12 @@ export function CodeReviewArtifactDetail({
                 label={t('codeReview.failureScenario')}
                 value={finding.failureScenario}
               />
+              {finding.witness && (
+                <Detail
+                  label={t('codeReview.witness')}
+                  value={finding.witness}
+                />
+              )}
               {finding.suggestedFix && (
                 <Detail
                   label={t('codeReview.suggestedFix')}
@@ -634,6 +647,7 @@ export function CodeReviewArtifactDetail({
                             href={asset}
                             target="_blank"
                             rel="noopener noreferrer"
+                            onClick={(event) => openExternalLink(event, asset)}
                           >
                             {asset}
                           </a>
@@ -671,7 +685,7 @@ function EvidenceFile({
   workspaceActions,
 }: {
   path: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
 }) {
   const mimeType = getImageMimeTypeFromPath(path);
   const [src, setSrc] = useState<string | null>(null);

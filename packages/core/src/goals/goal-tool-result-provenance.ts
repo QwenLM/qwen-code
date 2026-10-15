@@ -1,0 +1,152 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Part } from '@google/genai';
+import { getToolResponseDisplayText } from '../utils/generateContentResponseUtilities.js';
+import type { RecordToolResultOptions } from '../services/chatRecordingService.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
+import type { GoalTurnPermit } from './goal-protocol.js';
+import { goalTurnContext } from './goal-turn-context.js';
+
+/** The slice of a tool-call request this reads. */
+export interface GoalToolResultRequest {
+  name: string;
+  args?: Record<string, unknown>;
+  goalContext?: GoalTurnPermit;
+}
+
+/**
+ * How a finished tool call should be recorded, so its result can become Goal
+ * evidence.
+ *
+ * The evidence catalog derives a record's provenance from the Goal permit
+ * stamped on it (`goal-evidence.ts`: no parsed goal context, no provenance,
+ * no catalog entry). A tool result recorded without the stamp is therefore
+ * invisible to the catalog -- and since `tool_result` is the only provenance
+ * that maps to `external_fact`, an unstamped host produces a Goal that can
+ * never prove anything about the world: completions citing only the model's
+ * own words are refused by the verifier, and the `infeasible` and `external`
+ * blockers, which require external evidence, are unreachable.
+ *
+ * `get_goal` and `update_goal` are stamped as `goal_runtime` instead: they are
+ * the Goal's own bookkeeping, and a catalog that cited its own reads as proof
+ * would be circular. Scripts and aggregate wrappers are `execution_output`:
+ * they can repeat model-authored claims, so only separately recorded original
+ * observations attest external facts.
+ *
+ * Every site that records tool results during a Goal turn routes through
+ * here -- the interactive scheduler, both TUI recording paths, headless, and
+ * ACP -- so the rule cannot drift between them.
+ */
+export function goalToolResultProvenance(
+  request: GoalToolResultRequest,
+  responseParts?: Part[],
+): RecordToolResultOptions | undefined {
+  const { goalContext } = request;
+  if (!goalContext) return undefined;
+  const requestName = canonicalToolName(request.name);
+  const bridgedName = request.args?.['name'];
+  const toolName =
+    requestName === ToolNames.TOOL_CALL && typeof bridgedName === 'string'
+      ? canonicalToolName(bridgedName)
+      : requestName;
+  // The bridge resolves target names case-insensitively (tool-call.ts), so a
+  // bridged "GET_GOAL" executes as get_goal; the exclusion must classify by
+  // the same identity or the Goal's own bookkeeping leaks into the evidence
+  // catalog as an ordinary external_fact. GET_GOAL / UPDATE_GOAL are already
+  // lowercase.
+  const lowerToolName =
+    typeof toolName === 'string' ? toolName.toLowerCase() : toolName;
+  if (
+    lowerToolName === ToolNames.GET_GOAL ||
+    lowerToolName === ToolNames.UPDATE_GOAL ||
+    (requestName === ToolNames.TOOL_SEARCH &&
+      discoversOnlyGoalTools(responseParts))
+  ) {
+    return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
+  }
+  if (
+    lowerToolName === ToolNames.EXEC ||
+    lowerToolName === ToolNames.AGENT ||
+    lowerToolName === ToolNames.ADVISOR ||
+    lowerToolName === ToolNames.WORKFLOW ||
+    // The thread tools are gone, but transcripts recorded before their removal
+    // still carry thread_read results, and those restate another participant's
+    // recorded text -- the wrapper class, not an original observation.
+    lowerToolName === 'thread_read'
+  ) {
+    return { goalContext: { ...goalContext }, provenance: 'execution_output' };
+  }
+  return { goalContext: { ...goalContext } };
+}
+
+function discoversOnlyGoalTools(responseParts: Part[] | undefined): boolean {
+  const output = getToolResponseDisplayText(responseParts);
+  // Only the complete schema block and Code Mode call hint are bookkeeping.
+  // Missing, unavailable or truncated capabilities remain external facts.
+  const schemas = output?.match(
+    /^<functions>\n([\s\S]+)\n<\/functions>(?:\n\nCall these tools through exec using tools\.<jsName>\(args\) and the required parameters above\.)?$/,
+  )?.[1];
+  if (!schemas) return false;
+  const goalTools = new Set<string>([
+    ToolNames.GET_GOAL,
+    ToolNames.UPDATE_GOAL,
+    ToolNames.PROPOSE_GOAL,
+  ]);
+  return schemas.split('\n').every((schema) => {
+    const match = schema.match(/^<function>(.*)<\/function>$/);
+    if (!match) return false;
+    try {
+      const { name } = JSON.parse(match[1]!) as Record<string, unknown>;
+      return typeof name === 'string' && goalTools.has(name);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * The same rule for a host that executes tools straight from the model's
+ * function calls and so has no `ToolCallRequestInfo` to read a permit from.
+ *
+ * The permit comes from the ambient Goal turn context, which the host enters
+ * around the whole turn -- including the tool calls it issues -- so a result
+ * recorded here belongs to the turn that asked for it.
+ */
+export function ambientGoalToolResultProvenance(
+  toolName: string,
+  args?: Record<string, unknown>,
+  responseParts?: Part[],
+): RecordToolResultOptions | undefined {
+  const goalContext = goalTurnContext.getStore();
+  return goalToolResultProvenance(
+    {
+      name: toolName,
+      ...(args ? { args } : {}),
+      ...(goalContext ? { goalContext } : {}),
+    },
+    responseParts,
+  );
+}
+
+/**
+ * The subtype stamp that marks a nested Code Mode tool result as an original
+ * record: the outer `exec` script can discard or rewrite nested output, so
+ * these separately recorded results -- not the aggregate `exec` response --
+ * are the ones the Goal evidence catalog reads as attested tool facts
+ * (`external_fact`). The aggregate is still catalogued, as `execution_output`,
+ * which cannot prove them. The replay projections deliberately skip them
+ * (`isInternalCodeModeToolResult`): internal calls have no model-emitted
+ * function-call partner.
+ *
+ * Both writer sites own a different carrier for the stamp (the scheduler
+ * merges it into `goalToolResultProvenance`'s options, the ACP session spreads
+ * it into a queued record), so only the literal and the "nested results are
+ * stamped" decision live here.
+ */
+export function codeModeToolResultStamp() {
+  return { subtype: 'code_mode_tool_result' as const };
+}

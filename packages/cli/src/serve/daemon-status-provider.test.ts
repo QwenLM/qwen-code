@@ -54,6 +54,10 @@ function makeWorkspaceServiceWithProvider(
     isChannelLive: opts.isChannelLive ?? (() => false),
     persistDisabledTools: async () => {},
     persistDisabledSkills: async () => ({ changed: false, disabled: [] }),
+    persistDisabledSkillsBatch: async () => ({
+      outcomes: [],
+      settingsChanges: [],
+    }),
     queryWorkspaceStatus: opts.queryWorkspaceStatus ?? noopQueryWorkspaceStatus,
     invokeWorkspaceCommand: async () => {
       throw new Error('not wired');

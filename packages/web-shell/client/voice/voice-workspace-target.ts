@@ -9,7 +9,6 @@ import type {
   DaemonClient,
   DaemonSettingUpdateResult,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspaceVoiceStatus,
 } from '@qwen-code/sdk/daemon';
@@ -144,6 +143,7 @@ export function resolveVoiceWorkspaceTarget({
     const matches = registered.filter((workspace) => workspace.cwd === cwd);
     if (matches.length !== 1) return undefined;
     const workspace = matches[0];
+    if (workspace.kind === 'live') return undefined;
     if (workspace.primary) return legacyTarget(workspace.cwd, sessionId);
     if (!workspace.trusted) return undefined;
 
@@ -227,22 +227,6 @@ export async function loadVoiceStatus(
   if (target.cwd && status.workspaceCwd !== target.cwd) {
     throw new Error(
       'Voice status workspace does not match the selected target.',
-    );
-  }
-  return status;
-}
-
-export async function loadVoiceProviders(
-  client: DaemonClient,
-  target: VoiceWorkspaceTarget,
-): Promise<DaemonWorkspaceProvidersStatus> {
-  const status =
-    target.route === 'legacy-primary'
-      ? await client.workspaceProviders()
-      : await qualifiedClient(client, target)!.workspaceProviders();
-  if (target.cwd && status.workspaceCwd !== target.cwd) {
-    throw new Error(
-      'Voice provider workspace does not match the selected target.',
     );
   }
   return status;

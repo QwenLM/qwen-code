@@ -32,8 +32,10 @@ let tmpDir: string;
 function makeConfig(overrides?: {
   arenaManager?: unknown;
   teamManager?: unknown;
+  agentExecutionBackend?: 'container';
 }) {
   return {
+    getAgentExecutionBackend: () => overrides?.agentExecutionBackend,
     getArenaManager: () => overrides?.arenaManager ?? null,
     getTeamManager: () => overrides?.teamManager ?? null,
     getSubagentManager: () => null,
@@ -59,6 +61,30 @@ describe('TeamCreateTool', () => {
     expect(tool.name).toBe('team_create');
   });
 
+  it('does not promise peer-DM summaries the idle notification never carries (#9283)', () => {
+    const description = new TeamCreateTool(makeConfig()).description;
+
+    // TeammateIdleEvent carries only {agentId, name, timestamp}, and
+    // nothing attaches a peer-message summary to it or to anything else
+    // the leader receives on idle — the automatic idle report is the
+    // teammate's OWN final answer. A description promising a peer-DM
+    // summary makes coordination look more observable than it is.
+    expect(description).not.toContain('Peer DM visibility');
+    expect(description).not.toContain('brief summary is included');
+    // And it states what the leader ACTUALLY receives on idle, so the
+    // gap cannot silently grow back in the other direction.
+    expect(description.replace(/\s+/g, ' ')).toContain(
+      "the runtime forwards that teammate's final text output of the turn to you automatically",
+    );
+    expect(description.replace(/\s+/g, ' ')).toContain(
+      'if they also called send_message earlier, that earlier report is delivered too',
+    );
+    expect(description).not.toContain('without an explicit report');
+    expect(description.replace(/\s+/g, ' ')).toContain(
+      'There is no summary of teammate-to-teammate messages',
+    );
+  });
+
   it('creates a team and sets manager on config', async () => {
     const config = makeConfig();
     const tool = new TeamCreateTool(config);
@@ -82,6 +108,57 @@ describe('TeamCreateTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('A dev team');
   });
+
+  it.each(['empty', 'orphan', 'stale'])(
+    'refuses required-container teams without changing %s state',
+    async (state) => {
+      const teamDir = path.join(tmpDir, 'teams', 'protected-team');
+      const files = new Map<string, string>();
+      if (state !== 'empty') {
+        files.set(
+          path.join(tmpDir, 'tasks', 'protected-team', '1.json'),
+          JSON.stringify({ id: '1', subject: 'Existing task' }),
+        );
+        files.set(
+          path.join(teamDir, 'inboxes', 'leader.json'),
+          JSON.stringify([{ text: 'Existing message' }]),
+        );
+      }
+      if (state === 'stale') {
+        const child = spawnSync(process.execPath, ['-e', '']);
+        files.set(
+          path.join(teamDir, 'config.json'),
+          JSON.stringify({
+            name: 'protected-team',
+            leadPid: child.pid,
+            members: [],
+          }),
+        );
+      }
+      for (const [file, content] of files) {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, content);
+      }
+      const before = (await fs.readdir(tmpDir, { recursive: true })).sort();
+      const config = makeConfig({ agentExecutionBackend: 'container' });
+      const result = await new TeamCreateTool(config)
+        .build({ team_name: 'protected-team' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.message).toContain(
+        'Container execution is required',
+      );
+      expect(result.llmContent).not.toContain('created');
+      expect(config.setTeamManager).not.toHaveBeenCalled();
+      expect(config.setTeamContext).not.toHaveBeenCalled();
+      expect((await fs.readdir(tmpDir, { recursive: true })).sort()).toEqual(
+        before,
+      );
+      for (const [file, content] of files) {
+        expect(await fs.readFile(file, 'utf-8')).toBe(content);
+      }
+    },
+  );
 
   it('returns error for empty team name', async () => {
     const tool = new TeamCreateTool(makeConfig());

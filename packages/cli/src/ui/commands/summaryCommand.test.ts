@@ -34,8 +34,9 @@ const makeContext = (projectRoot: string): CommandContext => {
   };
   const config = {
     getProjectRoot: () => projectRoot,
-    getGeminiClient: () => ({ getChat: () => chat }),
+    getLlmClient: () => ({ getChat: () => chat }),
     getModel: () => 'test-model',
+    getAutoMemoryContext: () => '',
   };
   return createMockCommandContext({
     executionMode: 'non_interactive',
@@ -99,6 +100,22 @@ describe('summaryCommand custom export path', () => {
       const stat = await fs.stat(path.dirname(fullPath));
       expect(stat.mode & 0o777).toBe(0o700);
     }
+  });
+
+  it('appends the memory catalog after the summary prompt', async () => {
+    const context = makeContext(projectRoot);
+    (
+      context.services.config as unknown as {
+        getAutoMemoryContext: () => string;
+      }
+    ).getAutoMemoryContext = () => 'CATALOG SENTINEL';
+    await summaryCommand.action?.(context, '');
+    const last = vi.mocked(runSideQuery).mock.calls[0][1].contents.at(-1);
+    expect(last?.role).toBe('user');
+    expect(last?.parts?.map((part) => part.text)).toEqual([
+      'summary prompt',
+      'CATALOG SENTINEL',
+    ]);
   });
 
   it('overwrites a hand-written file at the default path', async () => {
@@ -578,8 +595,9 @@ describe('summaryCommand custom export path', () => {
     };
     const config = {
       getProjectRoot: () => projectRoot,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getModel: () => 'test-model',
+      getAutoMemoryContext: () => '',
     };
     const context = createMockCommandContext({
       executionMode: 'interactive',

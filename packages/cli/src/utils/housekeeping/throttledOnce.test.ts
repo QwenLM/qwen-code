@@ -6,9 +6,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import type { FileHandle } from 'node:fs/promises';
 import { runThrottledOnce } from './throttledOnce.js';
+
+vi.mock('node:fs/promises', { spy: true });
 
 const MS_PER_HOUR = 60 * 60 * 1000;
 
@@ -24,6 +28,7 @@ describe('runThrottledOnce', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -33,7 +38,7 @@ describe('runThrottledOnce', () => {
       { name: 'test', markerPath, lockPath },
       task,
     );
-    expect(ran).toBe(true);
+    expect(ran).toEqual({ status: 'completed' });
     expect(task).toHaveBeenCalledOnce();
     expect(fs.existsSync(markerPath)).toBe(true);
     expect(fs.existsSync(lockPath)).toBe(false);
@@ -48,8 +53,31 @@ describe('runThrottledOnce', () => {
       task2,
     );
     expect(task1).toHaveBeenCalledOnce();
-    expect(ran2).toBe(false);
+    expect(ran2.status).toBe('fresh');
+    if (ran2.status === 'fresh') {
+      expect(ran2.retryAfterMs).toBeGreaterThan(23 * MS_PER_HOUR);
+      expect(ran2.retryAfterMs).toBeLessThanOrEqual(24 * MS_PER_HOUR + 1000);
+    }
     expect(task2).not.toHaveBeenCalled();
+  });
+
+  it('reports only the remaining freshness interval for an old marker', async () => {
+    fs.writeFileSync(markerPath, '');
+    const past = new Date(Date.now() - 23 * MS_PER_HOUR);
+    fs.utimesSync(markerPath, past, past);
+    const task = vi.fn(async () => {});
+
+    const result = await runThrottledOnce(
+      { name: 'test', markerPath, lockPath },
+      task,
+    );
+
+    expect(result.status).toBe('fresh');
+    if (result.status === 'fresh') {
+      expect(result.retryAfterMs).toBeGreaterThan(59 * 60 * 1000);
+      expect(result.retryAfterMs).toBeLessThanOrEqual(60 * 60 * 1000);
+    }
+    expect(task).not.toHaveBeenCalled();
   });
 
   it('runs again after marker mtime is older than interval', async () => {
@@ -64,7 +92,7 @@ describe('runThrottledOnce', () => {
       { name: 'test', markerPath, lockPath },
       task2,
     );
-    expect(ran2).toBe(true);
+    expect(ran2).toEqual({ status: 'completed' });
     expect(task2).toHaveBeenCalledOnce();
   });
 
@@ -77,7 +105,26 @@ describe('runThrottledOnce', () => {
       runThrottledOnce({ name: 'test', markerPath, lockPath }, task),
     ]);
     expect(task).toHaveBeenCalledOnce();
-    expect([a, b].filter(Boolean)).toHaveLength(1);
+    expect([a.status, b.status].sort()).toEqual(['completed', 'locked']);
+  });
+
+  it('rechecks marker freshness after acquiring the lock', async () => {
+    vi.mocked(fsPromises.open).mockImplementationOnce(async () => {
+      fs.writeFileSync(markerPath, 'completed elsewhere');
+      return {
+        close: vi.fn(async () => {}),
+      } as unknown as FileHandle;
+    });
+    const task = vi.fn(async () => {});
+
+    const result = await runThrottledOnce(
+      { name: 'test', markerPath, lockPath },
+      task,
+    );
+
+    expect(result.status).toBe('fresh');
+    expect(task).not.toHaveBeenCalled();
+    expect(fs.existsSync(lockPath)).toBe(false);
   });
 
   it('skips when a fresh lock exists (lock held by another process)', async () => {
@@ -88,7 +135,7 @@ describe('runThrottledOnce', () => {
       { name: 'test', markerPath, lockPath, staleLockMs: MS_PER_HOUR },
       task,
     );
-    expect(ran).toBe(false);
+    expect(ran).toEqual({ status: 'locked' });
     expect(task).not.toHaveBeenCalled();
     // We did not own the lock, so we must not remove it.
     expect(fs.existsSync(lockPath)).toBe(true);
@@ -105,9 +152,21 @@ describe('runThrottledOnce', () => {
       { name: 'test', markerPath, lockPath, staleLockMs: MS_PER_HOUR },
       task,
     );
-    expect(ran).toBe(true);
+    expect(ran).toEqual({ status: 'completed' });
     expect(task).toHaveBeenCalledOnce();
     expect(fs.existsSync(markerPath)).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('does not write marker when task reports incomplete, but releases lock', async () => {
+    const task = vi.fn(async () => false as const);
+    const result = await runThrottledOnce(
+      { name: 'test', markerPath, lockPath },
+      task,
+    );
+
+    expect(result).toEqual({ status: 'incomplete' });
+    expect(fs.existsSync(markerPath)).toBe(false);
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
@@ -120,5 +179,85 @@ describe('runThrottledOnce', () => {
     ).rejects.toThrow('boom');
     expect(fs.existsSync(markerPath)).toBe(false);
     expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('treats marker write failure as benign and still releases lock', async () => {
+    const task = vi.fn(async () => {
+      fs.mkdirSync(markerPath);
+    });
+
+    const result = await runThrottledOnce(
+      { name: 'test', markerPath, lockPath },
+      task,
+    );
+
+    expect(result).toEqual({ status: 'completed' });
+    expect(task).toHaveBeenCalledOnce();
+    expect(fs.statSync(markerPath).isDirectory()).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('creates the lock directory when it does not exist yet', async () => {
+    const qwenDir = path.join(tempDir, 'qwen-dir');
+    const task = vi.fn(async () => {});
+
+    const result = await runThrottledOnce(
+      {
+        name: 'test',
+        markerPath: path.join(qwenDir, '.marker'),
+        lockPath: path.join(qwenDir, '.marker.lock'),
+      },
+      task,
+    );
+
+    expect(result).toEqual({ status: 'completed' });
+    expect(task).toHaveBeenCalledOnce();
+    const stat = fs.statSync(qwenDir);
+    expect(stat.isDirectory()).toBe(true);
+    // No group/other access, per the ~/.qwen/ convention. Asserting the
+    // absence of those bits rather than an exact mode keeps this umask-proof.
+    // On Windows mkdir's mode is a no-op and libuv duplicates owner bits to
+    // group/other, so only POSIX platforms can pin the 0o700 convention.
+    if (process.platform !== 'win32') {
+      expect(stat.mode & 0o077).toBe(0);
+    }
+  });
+
+  // Regression: this mkdir used to pass `recursive: true`. On a bind mount
+  // whose source directory was deleted, the mountpoint still stats as a
+  // directory but rejects creates with ENOENT, and Node's recursive mkdir
+  // retries the parent forever without ever settling its promise — wedging the
+  // housekeeping chain and spinning a core per orphaned CI sandbox container.
+  it('never asks for a recursive mkdir', async () => {
+    const task = vi.fn(async () => {});
+
+    await runThrottledOnce({ name: 'test', markerPath, lockPath }, task);
+
+    expect(fsPromises.mkdir).toHaveBeenCalled();
+    for (const [, options] of vi.mocked(fsPromises.mkdir).mock.calls) {
+      expect(options).not.toMatchObject({ recursive: true });
+    }
+  });
+
+  // Effect-shaped companion to the option-shape regression above: pin what
+  // the deleted-mount state actually does. The non-recursive mkdir cannot
+  // create a directory whose own parent is missing, and the lock open must
+  // surface that ENOENT on the first attempt — not settle as 'locked'
+  // (misread as contention by the scheduler), and never bootstrap the parent.
+  it('surfaces ENOENT instead of bootstrapping a missing parent', async () => {
+    const missingDir = path.join(tempDir, 'nope', 'nested');
+    const task = vi.fn(async () => {});
+
+    await expect(
+      runThrottledOnce(
+        {
+          name: 'test',
+          markerPath: path.join(missingDir, '.marker'),
+          lockPath: path.join(missingDir, '.marker.lock'),
+        },
+        task,
+      ),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(task).not.toHaveBeenCalled();
   });
 });

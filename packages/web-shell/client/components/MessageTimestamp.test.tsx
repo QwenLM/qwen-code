@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MessageTimestamp, formatTimestamp } from './MessageTimestamp';
+import styles from './MessageTimestamp.module.css';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -65,7 +66,7 @@ describe('MessageTimestamp', () => {
     expect(container.textContent).toContain('body');
   });
 
-  it('renders children unchanged with no tooltip when timestamp is undefined', () => {
+  it('renders no wrapper when timestamp is undefined', () => {
     const container = render(
       <MessageTimestamp>
         <div data-testid="child">body</div>
@@ -73,10 +74,97 @@ describe('MessageTimestamp', () => {
     );
 
     expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
-    // No wrapper element is introduced: the child stays a direct child of the
-    // mount container, so message spacing/structure is untouched.
     const child = container.querySelector('[data-testid="child"]');
     expect(child).not.toBeNull();
     expect(child?.parentElement).toBe(container);
+  });
+
+  it('uses larger spacing only when requested for a tool group', () => {
+    const defaultRow = render(
+      <MessageTimestamp>
+        <div>default</div>
+      </MessageTimestamp>,
+    );
+    const toolRow = render(
+      <MessageTimestamp toolGroupSpacing>
+        <div>tool</div>
+      </MessageTimestamp>,
+    );
+
+    expect(defaultRow.firstElementChild?.classList).not.toContain(
+      styles.toolGroupSpacing,
+    );
+    expect(toolRow.firstElementChild?.classList).toContain(
+      styles.toolGroupSpacing,
+    );
+  });
+
+  it('renders the edit action after the copy action in the hover row', () => {
+    const onEdit = vi.fn();
+    const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
+    const container = render(
+      <MessageTimestamp
+        timestamp={ts}
+        chatMode
+        copyText="hello"
+        copyTitle="Copy"
+        onEdit={onEdit}
+        editTitle="Edit message"
+      >
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+
+    const actions = container.querySelectorAll(`.${styles.chatActions} button`);
+    expect(
+      [...actions].map((button) => button.getAttribute('aria-label')),
+    ).toEqual(['Copy', 'Edit message']);
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
+        ?.click();
+    });
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the wrench action to open tool calls between copy and edit', () => {
+    const onOpenTurnCalls = vi.fn();
+    const container = render(
+      <MessageTimestamp
+        timestamp={1}
+        chatMode
+        copyText="hello"
+        copyTitle="Copy"
+        onOpenTurnCalls={onOpenTurnCalls}
+        onEdit={vi.fn()}
+        editTitle="Edit message"
+      >
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    expect(
+      [...container.querySelectorAll(`.${styles.chatActions} button`)].map(
+        (button) => button.getAttribute('aria-label'),
+      ),
+    ).toEqual(['Copy', 'View tool calls', 'Edit message']);
+    const toolCalls = container.querySelector<HTMLButtonElement>(
+      '[aria-label="View tool calls"]',
+    )!;
+    expect(toolCalls.querySelector('.lucide-wrench')).not.toBeNull();
+    act(() => toolCalls.click());
+    expect(onOpenTurnCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the edit action when no handler is given', () => {
+    const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
+    const container = render(
+      <MessageTimestamp timestamp={ts} chatMode copyText="hello">
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+
+    expect(
+      container.querySelector('button[aria-label="Edit message"]'),
+    ).toBeNull();
   });
 });
