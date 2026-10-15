@@ -290,8 +290,13 @@ function filterToDialog(history: Content[]): Content[] {
       if (text.trim() === '') continue;
       textParts.push({ ...part, text });
     }
-    if (textParts.length === 0) continue;
-    out.push({ role: msg.role, parts: textParts });
+    // A trailing system reminder would otherwise prevent hook context detection.
+    const projectedParts =
+      msg.role === 'user'
+        ? [...stripTrailingUserPromptSubmitContextPart(textParts)]
+        : textParts;
+    if (projectedParts.length === 0) continue;
+    out.push({ role: msg.role, parts: projectedParts });
   }
   return out;
 }
