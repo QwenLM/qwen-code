@@ -39,6 +39,8 @@ import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -47,12 +49,9 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -512,13 +511,20 @@ public class ManagedChannelService {
         // The route's Session: created as the connection's owning actor
         // under its registered Workspace selection, idempotent by the
         // route's own key, so a lost answer replays — never a second
-        // Session (decision 4).
-        String title = instance.platform() + ": "
-                + (event.subject() == null || event.subject().isBlank()
-                        ? event.senderId() : event.subject());
-        if (title.length() > 256) {
-            title = title.substring(0, 256);
-        }
+        // Session (decision 4). The create route refuses C0 control
+        // characters and DEL in a title, and the producer chain sanitizes
+        // only [\r\n\0], so a TAB in a subject, in the senderId the
+        // title falls back to, or in the registered platform name would
+        // refuse the route's Session: fold them to spaces here, keeping
+        // the senderId fallback for a subject that folds to blank.
+        String subject = event.subject() == null ? null
+                : event.subject().replaceAll("[\\p{Cntrl}]", " ");
+        String title = instance.platform().replaceAll("[\\p{Cntrl}]", " ")
+                + ": "
+                + (subject == null || subject.isBlank()
+                        ? event.senderId().replaceAll("[\\p{Cntrl}]", " ")
+                        : subject);
+        title = StringUtils.truncate(title, 256);
         CommandAdmission created = sessions.createWorkspaceSession(tenantId,
                 instance.actorId(), creationKey(tenantId,
                         instance.channelId(), routeId), "qwen-code", null,
@@ -694,7 +700,7 @@ public class ManagedChannelService {
                         "invalid_request",
                         "An attachment is not base64.");
             }
-            digests.add("sha256:" + HexFormat.of().formatHex(sha256(bytes)));
+            digests.add("sha256:" + DigestUtils.sha256Hex(bytes));
         }
         return digests;
     }
@@ -846,28 +852,20 @@ public class ManagedChannelService {
     /** The route chain identity, exactly as the Harness derives it. */
     static String routeId(String channelId, String accountId, String kind,
             String senderId, String chatId, String threadId) {
-        return ROUTE_PREFIX + HexFormat.of().formatHex(sha256(String.join(
+        return ROUTE_PREFIX + DigestUtils.sha256Hex(String.join(
                 SEPARATOR, channelId, accountId, kind,
                 senderId == null ? "" : senderId,
                 chatId == null ? "" : chatId,
                 threadId == null ? "" : threadId)
-                .getBytes(StandardCharsets.UTF_8)));
+                .getBytes(StandardCharsets.UTF_8));
     }
 
     /** The Session creation key of a route: the Idempotency-Key it replays by. */
     static String creationKey(String tenantId, String channelId,
             String routeId) {
-        return CREATION_PREFIX + HexFormat.of().formatHex(sha256(String.join(
+        return CREATION_PREFIX + DigestUtils.sha256Hex(String.join(
                 SEPARATOR, tenantId, channelId, routeId)
-                .getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static byte[] sha256(byte[] bytes) {
-        try {
-            return MessageDigest.getInstance("SHA-256").digest(bytes);
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+                .getBytes(StandardCharsets.UTF_8));
     }
 
     /** For tests: the ledger row as stored. */

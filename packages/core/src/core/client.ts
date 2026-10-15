@@ -1978,6 +1978,7 @@ export class LlmClient {
     this.config.getMemoryManager().resetMemoryBodyStateForSession();
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
+    const gitStatus = this.getCachedGitStatus();
     this.getChat().addHistory({
       role: 'user',
       parts: [
@@ -1986,6 +1987,7 @@ export class LlmClient {
             `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
             `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
         },
+        ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
     });
     await this.addDirectoryContext();
@@ -2000,9 +2002,9 @@ export class LlmClient {
       return null;
     }
     if (this.cachedGitStatus === undefined) {
-      // Mirror claude-code: append git status (branch + recent commits) to the
-      // system prompt so the main agent treats version history as authoritative
-      // context, not background noise. Only injected when cwd is a git repo.
+      // Git status (branch + recent commits) for the main agent's startup
+      // prelude, so it treats version history as authoritative context.
+      // Only injected when cwd is a git repo.
       this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
     }
     return this.cachedGitStatus;
@@ -2020,18 +2022,20 @@ export class LlmClient {
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
-    // Record the stable → context layers (everything before the volatile
-    // gitStatus/autoMemory tail) as the cross-session-stable system prefix.
-    // The Anthropic converter splits the outgoing system prompt at this
-    // boundary and puts an early cache breakpoint on the stable part, so
-    // new sessions (different git status) and in-session memory saves
-    // don't re-bill it. Recorded on every rebuild so it tracks
-    // memory/model/mode changes; consumers match via `startsWith` and fail
-    // open when it goes stale.
+    // Record the stable → context layers (everything before the autoMemory
+    // tail) as the cross-session-stable system prefix. The Anthropic
+    // converter splits the outgoing system prompt at this boundary and puts
+    // an early cache breakpoint on the stable part. Recorded on every
+    // rebuild so it tracks memory/model/mode changes; consumers match via
+    // `startsWith` and fail open when it goes stale.
+    //
+    // The git snapshot is deliberately not a layer here: it changes whenever
+    // the repository does, and providers that only cache at the end of the
+    // system message (DashScope) would lose the whole system prompt across
+    // sessions. It is announced in the startup prelude instead.
     this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
     return assembleSystemPrompt({
       ...stableLayers,
-      gitStatus: this.getCachedGitStatus(),
       autoMemory: this.config.getAutoMemoryPrompt(),
     });
   }
@@ -2056,6 +2060,8 @@ export class LlmClient {
     const remaining = currentHistory.slice(startupLength);
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2094,6 +2100,8 @@ export class LlmClient {
 
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2776,7 +2784,10 @@ export class LlmClient {
       );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () =>
+          getInitialChatHistory(this.config, extraHistory, {
+            gitStatus: this.getCachedGitStatus(),
+          }),
       );
       this.config
         .getMemoryManager()

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
@@ -292,7 +293,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static Context requireLocalCapture(Context context) {
-        if (!"local-process".equals(context.runtime().getRequest().getProvisionerKind())) {
+        if (!LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return context;
