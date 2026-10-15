@@ -95,6 +95,7 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
   'glob-search-worker.js',
+  'ls-search-worker.js',
   'codeModeHost.js',
   'mod-worker.js',
   // Sandbox relays + confined file worker; esbuild emits them as

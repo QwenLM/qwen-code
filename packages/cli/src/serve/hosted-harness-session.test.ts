@@ -1351,10 +1351,15 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
-  it.each(['close', 'delete'] as const)(
-    'settles %s lifecycle Hooks once and retains the attachment until detach',
-    async (kind) => {
-      const { server, authorize, requests, release } = await hookApp();
+  it.each([
+    ['close', 'hosted-workspace-files/1'],
+    ['delete', 'hosted-workspace-files/1'],
+    ['close', 'hosted-workspace-files/3'],
+    ['delete', 'hosted-workspace-files/3'],
+  ] as const)(
+    'settles %s lifecycle Hooks once and retains the attachment until detach (%s)',
+    async (kind, profile) => {
+      const { server, authorize, requests, release } = await hookApp(profile);
       const operation = {
         kind,
         sessionKey: {
@@ -20819,7 +20824,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   }, 30_000);
 
-  it.each([FILE_PROFILE, 'hosted-workspace-files/2'])(
+  it.each([
+    FILE_PROFILE,
+    'hosted-workspace-files/2',
+    'hosted-workspace-files/3',
+  ])(
     'settles the parked execution on load and continues the turn (%s)',
     async (toolProfile) => {
       await parkToolTurn(false, toolProfile);
@@ -20896,7 +20905,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         'read_file',
         'write_file',
         'edit',
-        ...(toolProfile.endsWith('/2') ? ['glob'] : []),
+        ...(toolProfile.endsWith('/2') || toolProfile.endsWith('/3')
+          ? ['glob']
+          : []),
+        ...(toolProfile.endsWith('/3')
+          ? ['grep_search', 'list_directory']
+          : []),
       ]);
       // The takeover-built attachment starts with an undefined slot: the
       // recovered turn must have populated it before driving the model, or

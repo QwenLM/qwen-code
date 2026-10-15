@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { HOSTED_WORKSPACE_SEARCH_TOOL_NAMES } from './hosted-workspace-profiles.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   type ManagedSessionDurableRef,
@@ -56,11 +57,9 @@ const PREAPPROVED_TOOLS: Readonly<
   ],
 };
 
-// `glob` ships with the `/2` search profiles, so those pre-approve it and no
-// other profile does. A name-keyed allowance would also pre-approve an
-// MCP-declared tool that happens to be called `glob` — the MCP server picks
-// its own names — and dispatch it without ever asking the operator.
-const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
+// Search allowances are restricted to native search profiles. MCP servers
+// choose their own names and cannot inherit a native tool's preapproval.
+const SEARCH_PREAPPROVED_TOOLS = HOSTED_WORKSPACE_SEARCH_TOOL_NAMES;
 
 /**
  * Reads a tool profile's approval settings. `plan` needs its own planning
@@ -114,7 +113,7 @@ export function hostedApprovalDefinition(
 
 /**
  * Whether a call asks the operator. `searchProfile` is the Session's own
- * `/2` search profile, the only place `glob` is pre-approved.
+ * search profile, where native read-only search tools are pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,

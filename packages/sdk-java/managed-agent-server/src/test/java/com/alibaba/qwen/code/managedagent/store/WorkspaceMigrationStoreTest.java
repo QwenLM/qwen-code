@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -21,12 +22,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
+import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -115,6 +119,54 @@ class WorkspaceMigrationStoreTest {
         assertThat(Files.getPosixFilePermissions(directory)).isEqualTo(permissions);
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
         assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"hosted-workspace-files/1,true", "hosted-workspace-files/3,true",
+            "hosted-workspace-shell/3,false"})
+    void migrationVerifiesTheOriginalFrozenProfileBeforeFencing(String profile, boolean supported) throws Exception {
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage',"
+                + " 'Workspace', ?, ?, 'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
+        var transactions = new TransactionTemplate(manager);
+        var sessions = new ManagedAgentStore(jdbc, WorkspaceRecoveryStore.JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        String session = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
+                "create", "digest", "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", "."))).sessionId();
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE session_id = ?", profile, session);
+        var journal = new ManagedSessionStore(jdbc);
+        String token = "w".repeat(32);
+        var writer = transactions.execute(ignored -> journal.acquireWriter("tenant", session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        byte[] definition = ("{\"engine\":\"managed\",\"sessionId\":\"" + session
+                + "\",\"toolProfile\":\"" + profile + "\"}").getBytes(StandardCharsets.UTF_8);
+        var ref = WorkspaceRecoveryStore.JSON.createObjectNode().put("resourceId", "definition")
+                .put("kind", "managed-session-definition").put("schemaVersion", 1)
+                .put("byteLength", definition.length).put("digest", WorkspaceRecoveryStore.hash(definition));
+        var header = WorkspaceRecoveryStore.JSON.createObjectNode().put("subtype", "managed_session_header_v1");
+        header.putObject("managedSession").set("definitionRef", ref);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), WorkspaceRecoveryStore.hash(bytes),
+                List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
+                        definition.length, WorkspaceRecoveryStore.hash(definition), Base64.getEncoder().encodeToString(definition))));
+        transactions.execute(ignored -> journal.commit("tenant", session, token, commit));
+        transactions.executeWithoutResult(ignored -> journal.sealWriter("tenant", session, token,
+                new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration())));
+        if (supported) {
+            assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
+        } else {
+            assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_profile_unsupported");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'",
+                    Integer.class)).isZero();
+        }
+        assertThat(sessions.requireSession("tenant", session).toolProfile()).isEqualTo(profile);
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ?"
+                + " AND session_id = ? AND resource_id = ?", byte[].class, "tenant", session, "definition")).isEqualTo(definition);
     }
 
     @ParameterizedTest

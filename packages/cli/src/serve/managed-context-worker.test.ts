@@ -60,12 +60,19 @@ import {
 const globWorkerAssets = vi.hoisted(() => ({ directory: '' }));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/bundlePaths.js',
-  async (importOriginal) => ({
-    ...(await importOriginal<
-      typeof import('@qwen-code/qwen-code-core/utils/bundlePaths.js')
-    >()),
-    resolveBundleDir: () => globWorkerAssets.directory,
-  }),
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/bundlePaths.js')
+      >();
+    return {
+      ...actual,
+      resolveBundleDir: (url: string) =>
+        url.endsWith('/glob.ts')
+          ? globWorkerAssets.directory
+          : actual.resolveBundleDir(url),
+    };
+  },
 );
 
 // CLI tests alias Core to source; give each suite its own real JS worker asset.
@@ -2102,6 +2109,87 @@ describe('Managed context tool gate', () => {
     expect(unowned.result.executionStatus).not.toBe('error');
     expect(JSON.stringify(unowned)).toContain('note.txt');
   });
+
+  it.each(['.', 'services'])(
+    'refuses searches above a private Session before inspecting any content from %s',
+    async (cwd) => {
+      const root = workspace(['services/api/src', 'services/shared']);
+      fs.writeFileSync(
+        path.join(root, 'services/api/src/secret.txt'),
+        'secret-token-741',
+      );
+      fs.writeFileSync(
+        path.join(root, 'services/shared/note.txt'),
+        'shared needle',
+      );
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const own = workspaceInstallation('session-root', cwd);
+      await post(origin, CONTEXT, own);
+      await post(origin, ACTIVATION, workspaceActivation(own));
+      const privateSession = workspaceInstallation(
+        'session-private',
+        'services/api',
+      );
+      await post(origin, CONTEXT, privateSession);
+      await post(origin, ACTIVATION, workspaceActivation(privateSession));
+      const call = async (
+        sessionId: string,
+        callId: string,
+        toolName: string,
+        input: unknown,
+      ) =>
+        (
+          await post(origin, EXECUTE, {
+            ...shell(sessionId, callId, ''),
+            toolName,
+            input,
+          })
+        ).json();
+      for (const [i, input] of [
+        { pattern: 'secret-token-741' },
+        { pattern: 'secret-token-742' },
+        { pattern: 'secret-token-741', glob: '!api/**' },
+      ].entries()) {
+        const result = await call(
+          'session-root',
+          `grep-${i}`,
+          'grep_search',
+          input,
+        );
+        expect(result.result.executionStatus).toBe('error');
+        expect(result.result.error.message).toBe(
+          "Path '' is not within the Session working directory.",
+        );
+        expect(JSON.stringify(result)).not.toContain('secret-token');
+        expect(JSON.stringify(result)).not.toContain('No matches');
+      }
+      const glob = await call('session-root', 'glob-absent', 'glob', {
+        pattern: '**/absent-*',
+      });
+      expect(glob.result.executionStatus).toBe('error');
+      const listed = await call('session-root', 'list', 'list_directory', {});
+      expect(listed.result.executionStatus).toBe('error');
+
+      const shared = await call('session-root', 'shared', 'grep_search', {
+        pattern: 'shared needle',
+        path: cwd === '.' ? 'services/shared' : 'shared',
+      });
+      expect(shared.result.executionStatus).toBe('success');
+      expect(JSON.stringify(shared)).toContain('shared needle');
+      const privateRead = await call(
+        'session-private',
+        'private',
+        'grep_search',
+        { pattern: 'secret-token-741' },
+      );
+      expect(privateRead.result.executionStatus).toBe('success');
+      expect(JSON.stringify(privateRead)).toContain('secret-token-741');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'certifies the glob path spelling the walk consumes, escaped or not',

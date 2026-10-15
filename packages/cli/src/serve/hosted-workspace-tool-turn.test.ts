@@ -1000,7 +1000,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 Workspace profiles', async () => {
+it('keeps older vocabularies and offers all search tools only under /3 profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1034,9 +1034,21 @@ it('offers glob only under the /2 Workspace profiles', async () => {
     ...shellTools,
     'glob',
   ]);
+  await expect(advertised('hosted-workspace-files/3')).resolves.toEqual([
+    ...file,
+    'glob',
+    'grep_search',
+    'list_directory',
+  ]);
+  await expect(advertised('hosted-workspace-shell/3', true)).resolves.toEqual([
+    ...shellTools,
+    'glob',
+    'grep_search',
+    'list_directory',
+  ]);
 });
 
-function createSearchTurn() {
+function createSearchTurn(profile = 'hosted-workspace-files/2') {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -1047,7 +1059,7 @@ function createSearchTurn() {
     undefined,
     undefined,
     undefined,
-    { profile: 'hosted-workspace-files/2' },
+    { profile },
   );
 }
 
@@ -6244,3 +6256,76 @@ it('keeps the deliberate refusal while child_run stays disabled', async () => {
   expect(broker.executeV3).not.toHaveBeenCalled();
   expect(broker.prepareV3).not.toHaveBeenCalled();
 });
+
+it.each([
+  [
+    'grep_search',
+    { pattern: 'needle', path: 'src', glob: '!*.test.ts', limit: 7 },
+  ],
+  ['list_directory', { path: 'src' }],
+] as const)(
+  'dispatches /3 %s through the durable native path',
+  async (name, args) => {
+    turn = createSearchTurn('hosted-workspace-files/3');
+    const call = { ...calls[0], name, args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+      'success',
+    );
+    expect(JSON.parse(broker.execute.mock.calls[0][1])).toMatchObject({
+      toolName: name,
+      input: args,
+    });
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  ['grep_search', { pattern: 'needle', path: '../private' }],
+  ['grep_search', { pattern: '', path: '.' }],
+  ['grep_search', { pattern: 'needle', limit: 1001 }],
+  ['grep_search', { pattern: 'needle', extra: true }],
+  ['list_directory', { path: '/tmp' }],
+  ['list_directory', { path: 'a/../b' }],
+  ['list_directory', { ignore: ['*'] }],
+])(
+  'persists a correctable /3 %s argument error before Runtime acquisition',
+  async (name, args) => {
+    turn = createSearchTurn('hosted-workspace-files/3');
+    const call = { ...calls[0], name, args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain('error');
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['grep_search', 'list_directory'])(
+  'does not dispatch %s under an older profile',
+  async (name) => {
+    turn = createSearchTurn();
+    const args = name === 'grep_search' ? { pattern: 'needle' } : {};
+    const call = { ...calls[0], name, args };
+    await expect(
+      turn.execute(
+        [call],
+        [{ functionCall: { id: call.callId, name, args } }],
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('profile refused a tool call');
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);

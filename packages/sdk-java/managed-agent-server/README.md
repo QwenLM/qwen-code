@@ -582,6 +582,16 @@ no dispatched Shell is automatically replayed. Keep the opt-in off until the
 deployment passes #12904, #13010 and public FG6f physical failure gates. See
 [the complete design](../../../docs/design/public-hosted-shell-admission.md).
 
+### Workspace file search profiles
+
+`QWEN_MANAGED_AGENT_WORKSPACE_SEARCH_ENABLED=true` selects `hosted-workspace-files/3` for newly created built-in `qwen-code` Workspace Sessions, or `hosted-workspace-shell/3` when the existing Shell flag is also enabled. It defaults to `false`; both public REST and WebShell persist the selected profile at creation, including empty creation. The `/1` and `/2` tool sets are unchanged. The `/3` profiles add `glob`, `grep_search` and `list_directory`; neither web tool is included.
+
+Search is read-only and uses the Session's saved cwd as its boundary. `grep_search` accepts `pattern`, optional `path`, `glob` and `limit` (200 matches by default, at most 1000); `list_directory` accepts optional `path` and displays at most 100 direct children. Searches have a five-second execution deadline, bounded results and explicit incomplete-result errors or markers. Grep matches do not satisfy the existing read-before-write requirement.
+
+Upgrade the control plane, Harnesses and all workers, verify the packaged ripgrep binary and drain old workers before enabling this flag. Pass public REST and WebShell probes before admitting new `/3` Sessions. Turning the flag off changes only new built-in Sessions: creation retries, later Turns, cold load and recovery use the Session's original profile. Existing `/3` Sessions still require compatible Harnesses and workers. The existing Workspace files and Shell flags, approval rules and Shell lifecycle restrictions continue to apply; `files/3` follows the `files/1` close, retention and offline Workspace migration behavior.
+
+Stored AgentDefinitions may explicitly select either `/3` profile only after it is added to `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES`; the search flag does not override a definition's profile. Shell definitions still require `default` or `auto-edit` approval. No public request field or route is added.
+
 ### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
@@ -616,15 +626,15 @@ Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
 through `POST /v1/agents/sessions`. The server persists
 `hosted-workspace-shell/1` with mandatory `default`/`auto-edit` approval when the
 Shell deployment opt-in is enabled, otherwise `hosted-workspace-files/1` with the
-configured file approval mode. This also applies to empty bound creation. The
+configured file approval mode. Enabling the search flag selects the corresponding `/3` profile instead. This also applies to empty bound creation. The
 Session Store uses the persisted Workspace ID; public callers cannot choose the
-profile. W1c offline migration remains files/1-only and refuses persisted Shell
+profile. W1c offline migration accepts files/1 and files/3 and refuses persisted Shell
 definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
 `--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
 the original Session/Turn; changed input conflicts. Disabling the Workspace files
 opt-in refuses creation with input, including replays, while empty bound creation
-remains available. The Shell opt-in selects the persisted profile; it does not
+remains available. The Shell and search opt-ins select the persisted profile; they do not
 independently admit creation input. Upgrade the Harness before enabling the
 Shell flag: an older Harness ignores `suppressChildAgents` and would advertise
 the child agent tool. The directory mounted for a Workspace is trusted deployment data,
@@ -1315,4 +1325,4 @@ Sessions pin a stored AgentDefinition revision and digest at admission. `permiss
 
 Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in the Harness's deployment `modelProviders`; it defaults to empty. Each ID must resolve to one configured provider route with deployment credentials. An absent or ambiguous route or unresolved credentials fails the Turn with `model_unavailable` before inference. Credentials never belong in definitions. Enable and configure the Managed Session Store for stored-definition execution; instructions are delivered as digest-addressed resource references and verified on load.
 
-`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. The `/3` profiles require the coordinated control-plane, Harness and worker upgrade described above before adding them to this allowlist; the default allowlist is unchanged. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.

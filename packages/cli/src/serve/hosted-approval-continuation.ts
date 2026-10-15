@@ -25,7 +25,9 @@ import {
 
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
-const NATIVE_TOOLS = new Set(['read_file', 'write_file', 'edit', 'glob']);
+import { HOSTED_WORKSPACE_NATIVE_FILE_TOOL_NAMES } from './hosted-workspace-profiles.js';
+
+const NATIVE_TOOLS = new Set(HOSTED_WORKSPACE_NATIVE_FILE_TOOL_NAMES);
 
 export interface HostedNativePlannedCall {
   readonly call: ToolCallRequestInfo;

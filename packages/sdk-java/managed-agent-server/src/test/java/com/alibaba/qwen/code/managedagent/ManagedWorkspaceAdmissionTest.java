@@ -268,8 +268,8 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"default", "auto-edit"})
-    void shellFlagChangesPreserveCreationAndTurnReplayButBlockFreshWorkAndLifecycle(String mode) {
+    @CsvSource({"default,false", "auto-edit,false", "default,true", "auto-edit,true"})
+    void shellFlagChangesPreserveCreationAndTurnReplayButBlockFreshWorkAndLifecycle(String mode, boolean search) {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-shell", "storage-shell", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -279,6 +279,7 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode(mode);
+        properties.getHarness().setWorkspaceSearchEnabled(search);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-shell", "/workspace")));
         ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
@@ -295,7 +296,8 @@ class ManagedWorkspaceAdmissionTest {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                     + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
                     tenant, id, actorKey, actorKey)).isEqualTo(1);
-            assertThat(enabled.requireSession(tenant, id).toolProfile()).isEqualTo("hosted-workspace-shell/1");
+            assertThat(enabled.requireSession(tenant, id).toolProfile())
+                    .isEqualTo(search ? WorkspaceToolProfiles.SHELL_SEARCH : WorkspaceToolProfiles.SHELL);
             assertThat(enabled.requireSession(tenant, id).approvalMode()).isEqualTo(mode);
         }
         UnavailableHarnessConnector harness = new UnavailableHarnessConnector() {
@@ -356,7 +358,8 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                 + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
                 tenant, files, actorKey, actorKey)).isEqualTo(1);
-        assertThat(disabled.requireSession(tenant, files).toolProfile()).isEqualTo("hosted-workspace-files/1");
+        assertThat(disabled.requireSession(tenant, files).toolProfile())
+                .isEqualTo(search ? WorkspaceToolProfiles.FILES_SEARCH : WorkspaceToolProfiles.FILES);
         assertThat(stopped.getPublicSession(tenant, "actor-a", files).capabilities().foregroundShell()).isNull();
         var fileTurn = transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "files-turn", files, input));
         assertThat(fileTurn).isNotNull();
@@ -1195,6 +1198,45 @@ class ManagedWorkspaceAdmissionTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void searchFlagOnlySelectsNewBuiltInSessions(boolean initialSearch, boolean shell) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-search", "storage-search", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-search", "actor-a", true);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(shell);
+        properties.getHarness().setWorkspaceSearchEnabled(initialSearch);
+        properties.getHarness().setApprovalMode("default");
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-search", "/workspace")));
+        var original = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var transaction = new TransactionTemplate(transactionManager);
+        var selection = new WorkspaceSelection("ws-search", ".");
+        String digest = "sha256:" + "a".repeat(64);
+        var first = transaction.execute(status -> original.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "original", digest, "qwen-code", null, null, List.of(), null, selection));
+        String frozen = original.requireSession(tenant, first.sessionId()).toolProfile();
+        assertThat(frozen).isEqualTo("hosted-workspace-" + (shell ? "shell" : "files") + (initialSearch ? "/3" : "/1"));
+        properties.getHarness().setWorkspaceSearchEnabled(!initialSearch);
+        var restarted = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var replay = transaction.execute(status -> restarted.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "original", digest, "qwen-code", null, null, List.of(), null, selection));
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.sessionId()).isEqualTo(first.sessionId());
+        assertThat(restarted.requireSession(tenant, first.sessionId()).toolProfile()).isEqualTo(frozen);
+        var later = transaction.execute(status -> restarted.insertTurnCommand(tenant, "SUBMIT_TURN", "later",
+                digest, first.sessionId(), List.of(Map.of("type", "text", "text", "go")), digest));
+        assertThat(later.turnId()).isNotBlank();
+        assertThat(restarted.requireSession(tenant, first.sessionId()).toolProfile()).isEqualTo(frozen);
+        var fresh = transaction.execute(status -> restarted.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "fresh", digest, "qwen-code", null, null, List.of(), null, selection));
+        assertThat(restarted.requireSession(tenant, fresh.sessionId()).toolProfile())
+                .isEqualTo("hosted-workspace-" + (shell ? "shell" : "files") + (initialSearch ? "/1" : "/3"));
     }
 
     @Test

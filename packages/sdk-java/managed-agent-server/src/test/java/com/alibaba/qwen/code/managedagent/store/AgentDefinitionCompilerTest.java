@@ -59,33 +59,39 @@ class AgentDefinitionCompilerTest {
         assertThat(compiled.toolProfile()).isNull();
     }
 
-    @Test
-    void aNonDefaultProfileJoinsThroughTheDeploymentAllowlist() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"hosted-workspace-files/2", "hosted-workspace-files/3"})
+    void aNonDefaultProfileJoinsThroughTheDeploymentAllowlist(String profile) {
         AgentDefinitionCompiler.Compiled compiled =
                 AgentDefinitionCompiler.compile(definition(
-                        hostedProfile("hosted-workspace-files/2"), "{}"),
+                        hostedProfile(profile), "{}"),
                         true, "yolo", List.of("hosted-workspace-files/1",
-                                "hosted-workspace-files/2"));
+                                profile));
         assertThat(compiled.toolProfile())
-                .isEqualTo("hosted-workspace-files/2");
+                .isEqualTo(profile);
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(definition(
+                hostedProfile(profile), "{}"), true, "yolo", FILES_ONLY))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getDetails()).containsEntry("field", "tools"));
     }
 
-    @Test
-    void shellProfilesNeverPairWithYolo() {
-        List<String> allowlist = List.of("hosted-workspace-shell/1");
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"hosted-workspace-shell/1", "hosted-workspace-shell/3"})
+    void shellProfilesNeverPairWithYolo(String profile) {
+        List<String> allowlist = List.of(profile);
         assertThatThrownBy(() -> AgentDefinitionCompiler.compile(definition(
-                hostedProfile("hosted-workspace-shell/1"), "{}"), true,
+                hostedProfile(profile), "{}"), true,
                 "yolo", allowlist))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertThat(error.getDetails().get("field"))
                                 .isEqualTo("tools"));
         AgentDefinitionCompiler.Compiled compiled =
                 AgentDefinitionCompiler.compile(definition(
-                        hostedProfile("hosted-workspace-shell/1"),
+                        hostedProfile(profile),
                         "{\"approval_mode\":\"default\"}"), true, "yolo",
                         allowlist);
         assertThat(compiled.toolProfile())
-                .isEqualTo("hosted-workspace-shell/1");
+                .isEqualTo(profile);
     }
 
     @org.junit.jupiter.params.ParameterizedTest

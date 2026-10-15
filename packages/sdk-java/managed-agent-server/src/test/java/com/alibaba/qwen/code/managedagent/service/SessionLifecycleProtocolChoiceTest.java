@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -13,9 +15,10 @@ class SessionLifecycleProtocolChoiceTest {
                 toolProfile);
     }
 
-    @Test
-    void filesProfileActiveCloseAndDeleteUseTheLifecycleProtocol() {
-        SessionRecord files = session("ACTIVE", "hosted-workspace-files/1");
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/3"})
+    void filesProfileActiveCloseAndDeleteUseTheLifecycleProtocol(String profile) {
+        SessionRecord files = session("ACTIVE", profile);
         assertThat(SessionLifecycleService.usesLifecycleProtocol(files,
                 OperationKind.CLOSE)).isTrue();
         assertThat(SessionLifecycleService.usesLifecycleProtocol(files,
@@ -29,7 +32,8 @@ class SessionLifecycleProtocolChoiceTest {
             assertThat(SessionLifecycleService.usesLifecycleProtocol(active, OperationKind.CLOSE)).isTrue();
             assertThat(SessionLifecycleService.usesLifecycleProtocol(active, OperationKind.DELETE)).isTrue();
         }
-        for (String profile : java.util.List.of("hosted-workspace-shell/2", "hosted-workspace-mcp/2", "hosted-workspace-team-lead/1")) {
+        for (String profile : java.util.List.of("hosted-workspace-shell/2", "hosted-workspace-shell/3",
+                "hosted-workspace-mcp/2", "hosted-workspace-team-lead/1")) {
             assertThat(SessionLifecycleService.usesLifecycleProtocol(session("ACTIVE", profile), OperationKind.CLOSE)).isFalse();
         }
     }

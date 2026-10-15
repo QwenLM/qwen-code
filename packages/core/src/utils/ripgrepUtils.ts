@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 import { resolveBundleDir } from './bundlePaths.js';
@@ -679,4 +679,87 @@ export async function runRipgrep(
     firstAttempt,
     createRecoveryMetadata(selection, recoveryOptions),
   );
+}
+
+/** Managed searches must not fall back to a host command or outlive a turn. */
+export async function runBoundedRipgrep(
+  args: string[],
+  signal: AbortSignal,
+  executionTimeoutMs: number,
+): Promise<RipgrepRunResult> {
+  signal.throwIfAborted();
+  const command = getBuiltinRipgrep();
+  if (!command || !(await fileExists(command))) {
+    throw new Error('Bundled ripgrep is unavailable.');
+  }
+  await ensureBundledRipgrepExecutable(command);
+  signal.throwIfAborted();
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let failure: Error | undefined;
+    let failureKind: RipgrepFailureKind | undefined;
+    const stop = (error: Error, kind?: RipgrepFailureKind) => {
+      if (failure) return;
+      failure = error;
+      failureKind = kind;
+      child.kill('SIGKILL');
+    };
+    const collect = (chunks: Buffer[], chunk: Buffer) => {
+      outputBytes += chunk.length;
+      if (outputBytes > 1024 * 1024) {
+        stop(
+          new Error(
+            'Search output exceeded 1 MiB. Narrow the pattern or path and retry.',
+          ),
+          'max_buffer',
+        );
+      } else if (!failure) {
+        chunks.push(chunk);
+      }
+    };
+    child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk));
+    child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk));
+    child.once('error', () => {
+      failure ??= new Error('Bundled ripgrep failed to start.');
+      failureKind ??= 'spawn';
+    });
+    const onAbort = () => stop(new Error('Search was cancelled.'));
+    const timer = setTimeout(
+      () =>
+        stop(
+          new Error(
+            `Search exceeded ${executionTimeoutMs / 1000} seconds. Narrow the pattern or path and retry.`,
+          ),
+          'timeout',
+        ),
+      executionTimeoutMs,
+    );
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    // Waiting for close also waits for the process and its output streams.
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      if (!failure && code !== 0 && code !== 1) {
+        failure = new Error(
+          Buffer.concat(stderr).toString('utf8').trim() ||
+            'Bundled ripgrep search failed.',
+        );
+        failureKind = 'exit';
+      }
+      resolve({
+        stdout: failure ? '' : Buffer.concat(stdout).toString('utf8'),
+        incomplete: failure !== undefined,
+        ...(failure ? { error: failure } : {}),
+        recovery: {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          ...(failureKind ? { failureKind } : {}),
+        },
+      });
+    });
+  });
 }

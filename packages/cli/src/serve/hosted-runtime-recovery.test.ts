@@ -129,9 +129,11 @@ describe('recoverHostedRuntimeTurn', () => {
     const session = await open(
       'boot-1',
       true,
-      toolName === 'glob'
-        ? 'hosted-workspace-files/2'
-        : 'hosted-workspace-files/1',
+      ['grep_search', 'list_directory'].includes(toolName)
+        ? 'hosted-workspace-files/3'
+        : toolName === 'glob'
+          ? 'hosted-workspace-files/2'
+          : 'hosted-workspace-files/1',
     );
     const harness = createManagedHarnessHandle(session);
     const authority = session.authority;
@@ -179,9 +181,11 @@ describe('recoverHostedRuntimeTurn', () => {
           payloadJson: JSON.stringify({
             toolName,
             input:
-              toolName === 'glob'
-                ? { pattern: '**/*.ts' }
-                : { file_path: `${ordinal}.txt`, content: 'x' },
+              toolName === 'list_directory'
+                ? {}
+                : ['glob', 'grep_search'].includes(toolName)
+                  ? { pattern: '**/*.ts' }
+                  : { file_path: `${ordinal}.txt`, content: 'x' },
           }),
         }),
       );
@@ -2200,7 +2204,7 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each(['write_file', 'read_file', 'glob'])(
+  it.each(['write_file', 'read_file', 'glob', 'grep_search', 'list_directory'])(
     'bounds an oversized recovered %s output without replaying it again',
     async (toolName) => {
       await parkAtAwaitRuntime(toolName);
@@ -2254,7 +2258,7 @@ describe('recoverHostedRuntimeTurn', () => {
         expect(
           JSON.parse(outcome.toString('utf8')).functionResponse.response,
         ).toEqual(response);
-        if (toolName === 'glob') {
+        if (['glob', 'grep_search', 'list_directory'].includes(toolName)) {
           expect(response?.['outputTruncated']).toBe(true);
           expect(response?.['outputOmitted']).toBeUndefined();
           expect(response?.['output']).toContain(paths[0]);

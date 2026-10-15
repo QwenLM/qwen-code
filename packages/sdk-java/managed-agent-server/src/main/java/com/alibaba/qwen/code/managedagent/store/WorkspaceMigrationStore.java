@@ -323,7 +323,7 @@ public final class WorkspaceMigrationStore {
                         reader.resource(source, ref).path("bytesBase64").asText()));
                 check("managed".equals(definition.path("engine").asText())
                         && session.equals(definition.path("sessionId").asText())
-                        && "hosted-workspace-files/1".equals(definition.path("toolProfile").asText())
+                        && WorkspaceToolProfiles.lifecycleProtocol(definition.path("toolProfile").asText()) == 1
                         && !definition.has("mcpServers") && !definition.has("hookCatalog") && !definition.has("captureBytes"),
                         "migration_profile_unsupported");
                 after = session;

@@ -11,6 +11,7 @@ import {
   canUseRipgrep,
   getBuiltinRipgrep,
   resolveRipgrep,
+  runBoundedRipgrep,
   runRipgrep,
 } from './ripgrepUtils.js';
 import { fileExists } from './fileUtils.js';
@@ -19,10 +20,12 @@ import path from 'node:path';
 
 const childProcessMock = vi.hoisted(() => ({
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
   execFile: childProcessMock.execFile,
+  spawn: childProcessMock.spawn,
 }));
 
 const fsPromisesMock = vi.hoisted(() => ({
@@ -141,6 +144,7 @@ describe('ripgrepUtils', () => {
     vi.mocked(execCommand).mockReset();
     vi.mocked(isCommandAvailable).mockReset();
     execFile.mockReset();
+    childProcessMock.spawn.mockReset();
     fsPromisesMock.stat.mockReset();
     fsPromisesMock.chmod.mockReset();
     // Default to the source-tree state (0755) so tests that are not about the
@@ -271,6 +275,35 @@ describe('ripgrepUtils', () => {
 
       expect(fsPromisesMock.stat).toHaveBeenCalledWith(bundledPath);
       expect(fsPromisesMock.chmod).toHaveBeenCalledWith(bundledPath, 0o755);
+    });
+
+    it('restores the packaged exec bit before a bounded search without host fallback', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+      childProcessMock.spawn.mockImplementationOnce((command: string) => {
+        expect(command).toBe(getBuiltinRipgrep());
+        expect(fsPromisesMock.chmod).toHaveBeenCalledWith(command, 0o755);
+        const child = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+          kill: vi.fn(),
+        });
+        queueMicrotask(() => {
+          child.stdout.emit('data', Buffer.from('ripgrep 14.1.0\n'));
+          child.emit('close', 0);
+        });
+        return child;
+      });
+      const result = await runBoundedRipgrep(
+        ['--version'],
+        new AbortController().signal,
+        5000,
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.stdout).toContain('ripgrep');
+      expect(isCommandAvailable).not.toHaveBeenCalled();
+      expect(execCommand).not.toHaveBeenCalled();
     });
 
     it('leaves an already executable bundled binary alone', async () => {

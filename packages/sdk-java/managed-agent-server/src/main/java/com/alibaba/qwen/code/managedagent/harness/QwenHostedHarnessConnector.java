@@ -181,7 +181,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsLifecycle(String profile) {
         try {
-            return WorkspaceToolProfiles.FILES.equals(profile)
+            return WorkspaceToolProfiles.lifecycleProtocol(profile) == 1
                     ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
                     : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
                             && client().capabilities().getLifecycleV2Profiles().contains(profile);

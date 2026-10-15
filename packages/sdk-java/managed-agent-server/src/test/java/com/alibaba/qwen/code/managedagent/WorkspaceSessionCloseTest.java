@@ -17,6 +17,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -55,10 +57,12 @@ class WorkspaceSessionCloseTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired CloseRuntime runtime;
 
-    @Test
-    void bothSurfacesReplayOneCloseAndWaitForDurableCleanupAfterRevocation() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/3"})
+    void bothSurfacesReplayOneCloseAndWaitForDurableCleanupAfterRevocation(String profile) throws Exception {
         String tenant = "close-" + UUID.randomUUID();
         String session = create(tenant);
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, tenant, session);
         var close = runtime.results.computeIfAbsent(session, ignored -> new CompletableFuture<>());
         mvc.perform(get("/v1/agents/sessions/" + session).header(TenantContextFilter.HEADER, tenant)
                 .principal(actor(tenant, "owner"))).andExpect(jsonPath("$.capabilities.session_close").value(true))

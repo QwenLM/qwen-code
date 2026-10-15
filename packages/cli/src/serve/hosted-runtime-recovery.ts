@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { HOSTED_WORKSPACE_SEARCH_TOOL_NAMES } from './hosted-workspace-profiles.js';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -61,7 +62,7 @@ import {
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
   journaledToolResultIds,
-  truncateHostedGlobResponse,
+  truncateHostedSearchResponse,
 } from './hosted-workspace-tool-turn.js';
 import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import {
@@ -2007,8 +2008,11 @@ export async function recoverHostedRuntimeTurn(input: {
                 message: { role: 'user', parts: candidate },
               }),
             ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
-          if (item.toolName === 'glob' && !fits(parts)) {
-            const truncated = truncateHostedGlobResponse(parts, fits);
+          if (
+            HOSTED_WORKSPACE_SEARCH_TOOL_NAMES.includes(item.toolName) &&
+            !fits(parts)
+          ) {
+            const truncated = truncateHostedSearchResponse(parts, fits);
             if (truncated) {
               parts = truncated;
               outcome = outcomeBytes(item, parts);

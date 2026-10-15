@@ -268,13 +268,16 @@ class WorkspaceLifecycleStoreTest {
 
     @ParameterizedTest
     @MethodSource("hookReceiptPaths")
-    void hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind kind, boolean recover) throws Exception {
+    void hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind kind, boolean recover, String profile) throws Exception {
         var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", profile);
+        var profiles = org.mockito.Mockito.mock(WorkspaceProfileLifecycleVerifier.class);
+        fixture.lifecycle.setProfiles(profiles);
         fixture.json.enable(SerializationFeature.INDENT_OUTPUT);
         var journal = new ManagedSessionStore(fixture.jdbc);
         var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
                 "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
-        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\",\"hookCatalog\":{}}".getBytes(StandardCharsets.UTF_8);
+        byte[] definition = ("{\"toolProfile\":\"" + profile + "\",\"hookCatalog\":{}}").getBytes(StandardCharsets.UTF_8);
         String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(definition));
         var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
         header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
@@ -287,6 +290,7 @@ class WorkspaceLifecycleStoreTest {
                         definition.length, digest, Base64.getEncoder().encodeToString(definition))));
         fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
         var operation = fixture.admit(kind);
+        assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1);
         var receipt = fixture.json.createObjectNode().put("protocolVersion", 1).put("operationId", operation.operationId())
                 .put("kind", kind.name().toLowerCase(java.util.Locale.ROOT));
         receipt.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", fixture.session);
@@ -336,10 +340,13 @@ class WorkspaceLifecycleStoreTest {
                 new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration()),
                 WorkspaceLifecycleStore.authority(operation)));
         fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.verifyCompletion(operation));
+        org.mockito.Mockito.verifyNoInteractions(profiles);
     }
 
     static Stream<Arguments> hookReceiptPaths() {
-        return Stream.of(OperationKind.CLOSE, OperationKind.DELETE).flatMap(kind -> Stream.of(false, true).map(recover -> Arguments.of(kind, recover)));
+        return Stream.of(OperationKind.CLOSE, OperationKind.DELETE).flatMap(kind -> Stream.of(false, true)
+                .flatMap(recover -> Stream.of(WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.FILES_SEARCH)
+                        .map(profile -> Arguments.of(kind, recover, profile))));
     }
 
     @Test

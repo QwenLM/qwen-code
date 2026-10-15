@@ -78,7 +78,8 @@ class WorkspaceSessionRetentionTest {
 
     @ParameterizedTest
     @CsvSource({"ACTIVE, hosted-workspace-shell/1",
-            "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2"})
+            "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2",
+            "ACTIVE, hosted-workspace-shell/3", "CLOSED, hosted-workspace-shell/3", "ARCHIVED, hosted-workspace-shell/3"})
     void unsupportedShellLifecycleStaysDisabledDespiteCloseProof(String state, String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
@@ -173,7 +174,8 @@ class WorkspaceSessionRetentionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2", "hosted-workspace-shell/1", "hosted-workspace-mcp/1"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2", "hosted-workspace-files/3",
+            "hosted-workspace-shell/1", "hosted-workspace-mcp/1"})
     void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup(String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
