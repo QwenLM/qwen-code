@@ -194,6 +194,14 @@ async function main() {
     },
     define: {
       'import.meta.url': 'import_meta.url',
+      // VS Code >= 1.142 installs `navigator` on the extension-host global as
+      // a getter that throws PendingMigrationError (its Node 24 migration
+      // guard). zod is bundled, not external, and its JIT probe reads
+      // `typeof navigator`, so the extension logs the error twice on every
+      // activation. Defining both forms away at build time keeps the probe on
+      // the `new Function("")` path, so JIT stays enabled.
+      navigator: 'undefined',
+      'globalThis.navigator': 'undefined',
     },
     plugins: [
       publicCliExportPlugin,
