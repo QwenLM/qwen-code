@@ -244,6 +244,10 @@ describe('SDK Java contract version guard', () => {
     expect(step.if).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
+    expect(index).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    expect(
+      names.indexOf('Check Flyway migration versions are unique'),
+    ).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
     expect(index).toBeLessThan(
       parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
     );
@@ -262,6 +266,9 @@ describe('SDK Java contract version guard', () => {
     expect(step.run).toContain(CONTRACT_DOCUMENT);
     expect(parsed.permissions['pull-requests']).toBe('read');
     expect(step.run).toContain('--paginate');
+    expect(step.run).toContain(
+      "--jq '.[] | .filename, .previous_filename // empty'",
+    );
     expect(step.run).toContain(
       'grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"',
     );
