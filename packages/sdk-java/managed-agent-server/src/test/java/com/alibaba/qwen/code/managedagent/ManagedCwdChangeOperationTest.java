@@ -1724,6 +1724,8 @@ class ManagedCwdChangeOperationTest {
                             new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
                             warmer),
                     org.mockito.Mockito.mock(
+                            com.alibaba.qwen.code.managedagent.service.ManagedAgentService.class),
+                    org.mockito.Mockito.mock(
                             org.springframework.beans.factory.ObjectProvider.class),
                     new AbstractExecutorService() {
                         @Override
