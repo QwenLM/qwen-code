@@ -718,6 +718,14 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "toolDialect": {
+            "type": "string",
+            "enum": [
+              "native",
+              "claude"
+            ],
+            "description": "Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset."
+          },
           "options": {
             "type": "object",
             "additionalProperties": {
@@ -742,7 +750,7 @@
           }
         }
       },
-      "description": "Mod options keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes."
+      "description": "Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes."
     },
     "advisorModel": {
       "description": "Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.",

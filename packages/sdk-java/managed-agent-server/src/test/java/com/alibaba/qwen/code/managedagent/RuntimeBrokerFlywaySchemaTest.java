@@ -1,18 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBrokerSchema;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
-
 import org.assertj.core.api.SoftAssertions;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -24,7 +22,8 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
-import javax.sql.DataSource;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The embedded Broker writes through the runtime-broker repositories into the same canonical schema

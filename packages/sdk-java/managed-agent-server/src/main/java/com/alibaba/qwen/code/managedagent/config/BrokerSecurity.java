@@ -1,5 +1,11 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
+import org.springframework.stereotype.Component;
+
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
@@ -7,11 +13,6 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.web.ServerProperties;
-import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
-import org.springframework.stereotype.Component;
 
 /**
  * Resolves the broker authentication mode and refuses unsafe listen-address

@@ -1,21 +1,5 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
@@ -32,15 +16,24 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -51,13 +44,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
-import org.mockito.ArgumentCaptor;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullAndEmptySource;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class QwenHostedHarnessConnectorTest {
     private static final String SESSION_ID =
@@ -246,9 +249,13 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2",
-            "hosted-workspace-shell/1", "hosted-workspace-shell/2", "hosted-workspace-team-lead/1"})
-    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile) {
+    @CsvSource({"hosted-workspace-files/1,false", "hosted-workspace-files/1,true",
+            "hosted-workspace-files/2,false", "hosted-workspace-files/2,true",
+            "hosted-workspace-shell/1,false", "hosted-workspace-shell/1,true",
+            "hosted-workspace-shell/2,false", "hosted-workspace-shell/2,true",
+            "hosted-workspace-team-lead/1,false", "hosted-workspace-team-lead/1,true",
+            "hosted-workspace-mcp/1,false", "hosted-workspace-mcp/1,true"})
+    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile, boolean publication) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -268,6 +275,8 @@ class QwenHostedHarnessConnectorTest {
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getToolPublication().setEnabled(publication);
+        properties.getToolPublication().setExecutionBytes(1048576L);
         var actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         when(attached.getApprovalMode()).thenReturn(null, "yolo", "default");
@@ -290,6 +299,12 @@ class QwenHostedHarnessConnectorTest {
                     .doesNotContain("workspaceId=workspace-a");
         }
         Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
+        if (publication && (profile.startsWith("hosted-workspace-shell/")
+                || profile.equals("hosted-workspace-team-lead/1"))) {
+            assertThat(created).containsEntry("captureBytes", 1048576L);
+        } else {
+            assertThat(created).doesNotContainKey("captureBytes");
+        }
         assertThat(created)
                 .containsEntry("approvalMode", "default")
                 .containsEntry("approvalTimeoutMs", properties.getHarness().getApprovalTimeout().toMillis())
@@ -301,13 +316,15 @@ class QwenHostedHarnessConnectorTest {
             assertThat(created).doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
-                .doesNotContainKey("childWorkspaces");
+                .doesNotContainKeys("childWorkspaces", "captureBytes");
+        properties.getToolPublication().setExecutionBytes(2097152L);
         QwenHostedHarnessConnector restarted = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(restarted, "client", client);
         restarted.recoverManagedRuntime("tenant-a", SESSION_ID, false);
         verify(client, times(4)).loadSession(load.capture());
         Map<String, Object> recovered = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
-        assertThat(recovered).containsEntry("toolProfile", profile);
+        assertThat(recovered).containsEntry("toolProfile", profile)
+                .doesNotContainKey("captureBytes");
         if (profile.startsWith("hosted-workspace-shell/")) {
             assertThat(recovered).containsEntry("suppressChildAgents", true);
         } else {
@@ -321,7 +338,7 @@ class QwenHostedHarnessConnectorTest {
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
                 .containsEntry("toolProfile", profile)
                 .containsEntry("passiveManagedRuntimeRecovery", true)
-                .doesNotContainKey("driveRuntimeRecovery");
+                .doesNotContainKeys("driveRuntimeRecovery", "captureBytes");
         clearInvocations(execution);
         RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         doThrow(refusal).when(execution).authorize(session);
@@ -477,7 +494,7 @@ class QwenHostedHarnessConnectorTest {
 
     @ParameterizedTest
     @NullAndEmptySource
-    @ValueSource(strings = {" "})
+    @ValueSource(strings = " ")
     void missingBoundProfileNeverLetsTheHarnessInferItsTools(String profile) {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
@@ -623,7 +640,7 @@ class QwenHostedHarnessConnectorTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.NullSource
-    @ValueSource(strings = {"hosted-workspace-files/1"})
+    @ValueSource(strings = "hosted-workspace-files/1")
     void loadsAnExistingSessionWithoutCreatingIt(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =

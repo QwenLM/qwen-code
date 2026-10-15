@@ -490,6 +490,8 @@ import {
   LOAD_REPLAY_VERSION,
   MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
+  getPromptCancelAbortReason,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -4895,6 +4897,7 @@ class QwenAgent implements Agent {
        * unset and keep their force semantics.
        */
       onlyIfUnheld?: boolean;
+      cancelReason?: 'user';
     },
   ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
@@ -4910,7 +4913,9 @@ class QwenAgent implements Agent {
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
-      : session.beginClose();
+      : opts?.cancelReason === 'user'
+        ? session.beginClose('user')
+        : session.beginClose();
     const conditionalDrainDeadline = opts?.onlyIfUnheld
       ? Date.now() + drainTimeoutMs
       : undefined;
@@ -4942,9 +4947,15 @@ class QwenAgent implements Agent {
         }
       }
 
+      const abortReason = getPromptCancelAbortReason({
+        [PROMPT_CANCEL_REASON_META_KEY]: opts?.cancelReason ?? 'interrupted',
+      });
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        session.cancelPromptAdmission(call.controller, abortReason);
+      }
       for (const [requestId, generation] of this.generationControllers) {
         if (generation.sessionId !== sessionId) continue;
-        generation.controller.abort();
+        generation.controller.abort(abortReason);
         this.generationControllers.delete(requestId);
       }
       await waitForSessionDrain(
@@ -7174,8 +7185,9 @@ class QwenAgent implements Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
     await this.runInSessionContext(session, async () => {
+      const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt();
+        await session.cancelPendingPrompt(abortReason);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -7186,7 +7198,7 @@ class QwenAgent implements Agent {
       // cancelPendingPrompt cannot see them. Abort their controllers too, or a
       // cancelled prompt would run in full once admission frees.
       for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-        call.controller.abort();
+        session.cancelPromptAdmission(call.controller, abortReason);
       }
     });
   }
@@ -9766,7 +9778,10 @@ class QwenAgent implements Agent {
         if (targetedCalls.size === 0) {
           return { cancelled: false };
         }
-        targetedCalls.forEach((call) => call.controller.abort());
+        const abortReason = getPromptCancelAbortReason(params['_meta']);
+        targetedCalls.forEach((call) =>
+          session.cancelPromptAdmission(call.controller, abortReason),
+        );
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
       }
@@ -12103,7 +12118,15 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
+        const cancelReason = params['cancelReason'];
+        if (cancelReason !== undefined && cancelReason !== 'user') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid session close cancellation reason',
+          );
+        }
         const outcome = await this.closeStoredSession(sessionId, {
+          ...(cancelReason === 'user' ? { cancelReason } : {}),
           requireFlush: params['requireFlush'] === true,
           onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'

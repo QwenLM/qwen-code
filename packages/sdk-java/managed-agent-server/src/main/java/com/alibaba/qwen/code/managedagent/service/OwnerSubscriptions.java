@@ -3,15 +3,16 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.AttachedSession;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The owner-side half of the §11 routing decision (design
@@ -29,9 +30,10 @@ import org.slf4j.LoggerFactory;
  * not hidden: until the old owner's next tick (or its broker-side inactivity)
  * removes a stale subscription, dispatch may still pick it; the old owner
  * then does no wake (the fence says another writer holds the Session) and
- * acknowledges, and the new owner recovers that notice from SQL — never by
- * assuming the MQ delivered it. Subscription is fallible (a quota may refuse
- * it), so a refused call is retried on the next tick.
+ * acknowledges; the new owner never receives that notice, and needs no MQ
+ * delivery for it — its Harness runs the wake input from the journal.
+ * Subscription is fallible (a quota may refuse it), so a refused call is
+ * retried on the next tick.
  */
 public class OwnerSubscriptions {
     private static final Logger LOG = LoggerFactory.getLogger(

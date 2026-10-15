@@ -1642,6 +1642,12 @@ const SETTINGS_SCHEMA = {
       additionalProperties: {
         type: 'object',
         properties: {
+          toolDialect: {
+            type: 'string',
+            enum: ['native', 'claude'],
+            description:
+              'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
+          },
           options: {
             type: 'object',
             additionalProperties: {
@@ -1657,7 +1663,7 @@ const SETTINGS_SCHEMA = {
       },
     },
     description:
-      'Mod options keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
     showInDialog: false,
   },
 
