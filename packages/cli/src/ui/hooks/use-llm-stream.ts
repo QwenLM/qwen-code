@@ -110,7 +110,7 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   getEnclosingFenceInfo,
-} from '../utils/markdownUtilities.js';
+} from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -3831,7 +3831,10 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationTurn(queuedGoal),
+                    queryToSend: renderGoalContinuationTurn(
+                      queuedGoal,
+                      config.getToolRegistry?.(),
+                    ),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }

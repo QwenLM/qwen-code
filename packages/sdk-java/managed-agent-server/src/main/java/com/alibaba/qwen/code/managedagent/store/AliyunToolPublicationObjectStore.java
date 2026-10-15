@@ -12,6 +12,7 @@ import com.aliyun.oss.model.BucketVersioningConfiguration;
 import com.aliyun.oss.model.CannedAccessControlList;
 import com.aliyun.oss.model.ObjectMetadata;
 import com.aliyun.oss.model.PutObjectRequest;
+
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.Objects;

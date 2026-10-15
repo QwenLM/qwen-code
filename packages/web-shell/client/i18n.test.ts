@@ -12,6 +12,40 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('keeps task cancellation and elapsed-time copy available in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    expect(en('managed.tasks.title')).toBe('Child Agent tasks');
+    expect(zh('managed.tasks.title')).toBe('子 Agent 任务');
+    expect(en('managed.tasks.cancel.stopping')).toBe(
+      'Stop requested. Waiting for the task to end.',
+    );
+    expect(zh('managed.tasks.cancel.stopping')).toBe(
+      '停止请求已送达，等待任务结束。',
+    );
+    expect(en('managed.tasks.seconds', { seconds: 12 })).toBe('12 seconds');
+    expect(zh('managed.tasks.seconds', { seconds: 12 })).toBe('12 秒');
+  });
+
+  it('keeps filter translations available and pluralizes record counts', () => {
+    const en = getTranslator('en');
+    expect(en('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
+      '搜索已加载记录…',
+    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe(
+      '1 matching record',
+    );
+    expect(en('trajectory.filter.count', { count: 2 })).toBe(
+      '2 matching records',
+    );
+    expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
+      '(1 record)',
+    );
+    expect(en('trajectory.filter.truncated', { count: 2 })).toContain(
+      '(2 records)',
+    );
+  });
   it('keeps the follow-up suggestion setting copy overridden in EN', () => {
     const t = getTranslator('en');
     for (const key of FOLLOWUP_SETTING_KEYS) {

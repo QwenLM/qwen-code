@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import { AuthType } from '../utils/auth-type.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -193,6 +194,8 @@ describe('ChatRecordingService', () => {
         ),
       },
       getModel: returns('gemini-pro'),
+      getAuthType: returns(AuthType.USE_GEMINI),
+      getApprovalMode: returns(ApprovalMode.DEFAULT),
       getFastModel: returns(undefined),
       isInteractive: returns(false),
       getDebugMode: returns(false),
@@ -447,6 +450,68 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
       expect(record.promptId).toBe('prompt-1');
       expect(record.daemonPromptId).toBeUndefined();
+    });
+
+    it('snapshots each prompt before asynchronous writes and settings changes', async () => {
+      svc.recordUserMessage('first', undefined, undefined, 'prompt-1');
+      vi.mocked(mockConfig.getModel).mockReturnValue('qwen-plus');
+      vi.mocked(mockConfig.getAuthType).mockReturnValue(AuthType.USE_OPENAI);
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+      svc.recordUserMessage('second', undefined, undefined, 'prompt-2');
+      vi.mocked(mockConfig.getModel).mockReturnValue('next-model');
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+
+      const records = await flushedAll();
+      expect(records.map((record) => record.executionContext)).toEqual([
+        {
+          modelId: 'gemini-pro',
+          authType: 'gemini',
+          approvalMode: 'default',
+        },
+        {
+          modelId: 'qwen-plus',
+          authType: 'openai',
+          approvalMode: 'yolo',
+        },
+      ]);
+      expect(records.map((record) => record.promptId)).toEqual([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      expect(records.map((record) => record.message)).toEqual([
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ]);
+    });
+
+    it('snapshots mid-turn input when it reaches the recorder', async () => {
+      vi.mocked(mockConfig.getModel).mockReturnValue('mid-turn-model');
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+      svc.recordMidTurnUserMessage([{ text: 'follow-up' }], 'follow-up');
+      vi.mocked(mockConfig.getModel).mockReturnValue('later-model');
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+
+      const record = await flushed();
+      expect(record.subtype).toBe('mid_turn_user_message');
+      expect(record.executionContext).toEqual({
+        modelId: 'mid-turn-model',
+        authType: 'gemini',
+        approvalMode: 'auto-edit',
+      });
+    });
+
+    it('omits unavailable authentication from serialized command records', async () => {
+      vi.mocked(mockConfig.getAuthType).mockReturnValue(undefined);
+      svc.recordUserMessage('/help');
+      const record = JSON.parse(JSON.stringify(await flushed())) as ChatRecord;
+      expect(record.executionContext).toEqual({
+        modelId: 'gemini-pro',
+        approvalMode: 'default',
+      });
     });
 
     it('preserves prompt identities in compression checkpoints', async () => {
@@ -1133,6 +1198,112 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordExternalAgentRecordStrict', () => {
+    const mention = (recordKey = 'mention:client-1') => ({
+      kind: 'agent_mention' as const,
+      recordKey,
+      modelText: '<agent_mention>hi</agent_mention>',
+      payload: { displayText: '@claude hi', mentionedAgentIds: ['agent-1'] },
+    });
+    const persistedMention: ChatRecord = {
+      ...branchTestRecord('mention-0', null, 'user', [{ text: 'hi' }]),
+      subtype: 'agent_mention',
+      provenance: 'real_user',
+      externalRecordKey: 'mention:client-1',
+      systemPayload: { displayText: '@claude hi', mentionedAgentIds: [] },
+    };
+    const resumeWith = (messages: ChatRecord[]) => {
+      const loadSession = vi
+        .fn()
+        .mockResolvedValue({ conversation: { messages } });
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: { messages },
+        lastCompletedUuid: messages.at(-1)?.uuid ?? null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession,
+      } as unknown as ReturnType<Config['getSessionService']>);
+      return loadSession;
+    };
+
+    it('persists the key and returns the record uuid and timestamp', async () => {
+      const result = await svc.recordExternalAgentRecordStrict(mention());
+      expect(written()).toMatchObject({
+        type: 'user',
+        subtype: 'agent_mention',
+        externalRecordKey: 'mention:client-1',
+      });
+      expect(result).toEqual({
+        uuid: written().uuid,
+        timestamp: written().timestamp,
+        created: true,
+      });
+    });
+
+    it('returns the first record for a repeated key without writing', async () => {
+      const first = await svc.recordExternalAgentRecordStrict(mention());
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        svc.recordExternalAgentRecordStrict(mention()),
+      ).resolves.toEqual({ ...first, created: false });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('does not read a fresh transcript to build its index', async () => {
+      const loadSession = vi.fn();
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession,
+      } as unknown as ReturnType<Config['getSessionService']>);
+      await svc.recordExternalAgentRecordStrict(mention());
+      expect(loadSession).not.toHaveBeenCalled();
+    });
+
+    it('finds a key persisted before a restart', async () => {
+      const loadSession = resumeWith([persistedMention]);
+      const restarted = activateRecording(new ChatRecordingService(mockConfig));
+
+      await expect(
+        restarted.findExternalAgentRecord('mention:client-1'),
+      ).resolves.toEqual({
+        uuid: 'mention-0',
+        timestamp: persistedMention.timestamp,
+      });
+      await expect(
+        restarted.recordExternalAgentRecordStrict(mention()),
+      ).resolves.toEqual({
+        uuid: 'mention-0',
+        timestamp: persistedMention.timestamp,
+        created: false,
+      });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      // A new key is written and joins the index; the transcript is read once.
+      const other = await restarted.recordExternalAgentRecordStrict(
+        mention('mention:client-2'),
+      );
+      expect(other.created).toBe(true);
+      await expect(
+        restarted.findExternalAgentRecord('mention:client-2'),
+      ).resolves.toEqual({ uuid: other.uuid, timestamp: other.timestamp });
+      expect(loadSession).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed when the transcript cannot be read', async () => {
+      const loadSession = resumeWith([persistedMention]);
+      loadSession.mockRejectedValueOnce(new Error('EIO'));
+      const restarted = activateRecording(new ChatRecordingService(mockConfig));
+
+      await expect(
+        restarted.recordExternalAgentRecordStrict(mention()),
+      ).rejects.toThrow('EIO');
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      // The next attempt reads again and finds the record.
+      await expect(
+        restarted.recordExternalAgentRecordStrict(mention()),
+      ).resolves.toMatchObject({ uuid: 'mention-0', created: false });
+    });
+  });
+
   describe('recordNotificationStrict', () => {
     const workerTask = {
       taskId: 'worker-1',
@@ -1439,6 +1610,17 @@ describe('ChatRecordingService', () => {
       ).toBe(valid);
     });
 
+    it('requires a cancelled outcome and timestamp for explicit user intent', () => {
+      const cancelled = { state: 'cancelled', cancelledAt: 0 };
+      expect(isValid(cancelled)).toBe(true);
+      expect(isValid({ ...cancelled, cancelReason: 'user' })).toBe(true);
+      expect(isValid({ ...cancelled, cancelReason: 'interrupted' })).toBe(
+        false,
+      );
+      expect(isValid({ cancelReason: 'user', cancelledAt: 0 })).toBe(false);
+      expect(isValid({ state: 'cancelled', cancelReason: 'user' })).toBe(false);
+    });
+
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
       const oversized = 'x'.repeat(TURN_RESULT_IDENTIFIER_MAX_CHARS + 1);
       expect(isValid({ promptId: oversized })).toBe(false);
@@ -1480,6 +1662,42 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('turn_result');
       expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('persists client history identity beside the daemon terminal identity', async () => {
+      user('stop me', undefined, undefined, 'client-1', 'daemon-1');
+      svc.recordTurnResult(
+        {
+          promptId: 'daemon-1',
+          state: 'cancelled',
+          cancelledAt: 0,
+          cancelReason: 'user',
+          endedAt: 1,
+        },
+        'client-1',
+      );
+      const [original, terminal] = await flushedAll();
+      expect(terminal).toMatchObject({
+        promptId: original.promptId,
+        systemPayload: { promptId: original.daemonPromptId },
+      });
+    });
+
+    it('persists a resumed turn attempt without duplicating its user message', async () => {
+      user('retry me', undefined, undefined, 'client-1', 'daemon-1');
+      await svc.recordTurnAttempt('client-1', 'daemon-2');
+      const [original, attempt] = await flushedAll();
+      expect(attempt).toMatchObject({
+        type: 'system',
+        subtype: 'turn_attempt',
+        parentUuid: original.uuid,
+        promptId: 'client-1',
+        daemonPromptId: 'daemon-2',
+      });
+      expect(attempt.message).toBeUndefined();
+      expect(writes().filter((record) => record.type === 'user')).toHaveLength(
+        1,
+      );
     });
 
     it('refuses to append payloads the bounded contract rejects', async () => {

@@ -52,7 +52,10 @@ profile；MCP 回合跳过此读取。
 读取是 best-effort 的。文件不存在、传输失败或 Broker 拒绝都会让 Session 保持
 无上下文状态，回合不受影响；失败记录在 Harness 的 stderr。取消会立即停止等待读取，也不会锁定 slot，即使底层请求稍后才完成。
 slot 会记录一次已完成的读取——包括「Workspace 没有说明文件」——因此每个
-已接入的 Session 最多读取一次。
+已接入的 Session 只读取一次，直到 Harness 能看到的操作改动了说明文件：原生
+`write_file`/`edit` 批次指向 `QWEN.md` 或 `AGENTS.md`（在执行前失效，无论
+结果如何），或文件 rewind 的 `filesChanged` 包含其中之一。两者都会把 slot
+重置为 undefined，下一个原生工具回合重新读取（#13564）。
 
 ## 拼装
 
@@ -99,7 +102,8 @@ ContextBinding 契约带上 revision）由维护者决定；本切片建立的�
 
 锁存对目录无感：已提交的 `POST /v1/agents/sessions/{id}/cwd` 在不涉及
 Harness 与 worker 的情况下结算，因此该接入会继续注入上一个目录的规则，而它
-的工具已经在新目录中运行，新目录的指令文件永远不会被读取。要让它失效，需要
+的工具已经在新目录中运行，新目录的指令文件永远不会被读取。用 shell 命令写
+说明文件同样不可见：Harness 不知道一次 shell 调用改了哪些文件。要让这些情形失效，需要
 把解析后的目录或 ContextBinding 的 `contextRevision` 放到
 `workspace-context` 结果上，而该结果的 shape 是封闭的——与上面是同一个
 revision 问题，不是本地可完成的修补。

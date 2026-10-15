@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import type { RetainedFileHistoryStorage } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { promises as fs } from 'node:fs';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -41,6 +42,14 @@ import {
   registerSessionProjectDir,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import {
+  CLOSE_SWEEP_TIMEOUT_MS,
+  GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+  type ManagedRuntimeLedger,
+  type ProcessLiveness,
+  signalProcessGroup,
+} from './managed-runtime-ledger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { getShellContextEnvVars } from '@qwen-code/qwen-code-core/services/shellContextEnv.js';
 import type {
@@ -78,6 +87,8 @@ import {
 import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import { ManagedMonitorWatcher } from './managed-monitor-watcher.js';
+
+const debugLogger = createDebugLogger('MANAGED_TOOL_EXECUTOR');
 
 export class ManagedMcpToolUnknownError extends Error {}
 
@@ -177,6 +188,7 @@ export class ManagedToolConflictError extends Error {
     readonly code:
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
+      | 'managed_runtime_owner_hold_pending'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
@@ -192,6 +204,8 @@ export class ManagedToolUnavailableError extends Error {
 
 /** The admitted tools, keyed by name, over one configuration. */
 export interface ManagedToolSet {
+  readonly retainedFileHistory?: RetainedFileHistoryStorage;
+  readonly fileHistory?: ManagedRuntimeFileHistory;
   /**
    * The session the tools run as. A shell they start sees it as
    * QWEN_CODE_SESSION_ID, with that session's project directory.
@@ -288,7 +302,14 @@ export interface ManagedWorkerDrainObservation {
 export type ManagedShellCaptureSink = Pick<
   LocalShellResultCapture,
   keyof LocalShellResultCapture
->;
+> & {
+  /**
+   * Marks the capture's end as a platform-requested stop (#13856 A8): the
+   * finalize then carries `stopRequested`, and the record projects
+   * `cancelled`/`stop_requested` instead of a bare exit.
+   */
+  setStopRequested(): void;
+};
 
 export interface ManagedShellCapturePublisher {
   readonly hasInstalledPublication?: boolean;
@@ -500,7 +521,19 @@ export class ManagedToolExecutor {
         throw new ManagedToolUnavailableError(
           'File history Workspace is unavailable.',
         );
-      let history = this.fileHistories.get(sessionId);
+      const existingHistory = this.fileHistories.get(sessionId);
+      let history = tools.fileHistory ?? existingHistory;
+      if (tools.retainedFileHistory && !tools.fileHistory)
+        throw new ManagedToolConflictError(
+          'Retained file history requires its original composition.',
+        );
+      if (
+        tools.fileHistory &&
+        (tools.fileHistory.ownerSessionId !== ownerSessionId ||
+          tools.fileHistory.directory !== tools.directory ||
+          (existingHistory && existingHistory !== tools.fileHistory))
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
       if (operation.action === 'bind') {
         if (!history) {
           history = new ManagedRuntimeFileHistory(
@@ -533,6 +566,7 @@ export class ManagedToolExecutor {
         throw new ManagedToolConflictError(
           'File history is not bound to this Workspace.',
         );
+      this.fileHistories.set(sessionId, history);
       if (operation.action === 'prepare') {
         mutationStarted = true;
         await history.prepare(operation.promptId, operation.paths);
@@ -686,6 +720,14 @@ export class ManagedToolExecutor {
     private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
     backgroundRegistry?: ManagedBackgroundShellRegistry,
     monitorRegistry?: ManagedMonitorRegistry,
+    private readonly options: {
+      /**
+       * The worker's ledger of its Shell process groups. Present only in a
+       * Managed session's Runtime worker (boot v1), never in a Hosted one.
+       */
+      readonly ledger?: ManagedRuntimeLedger;
+      readonly groupEvidenceTimeoutMs?: number;
+    } = {},
   ) {
     this.backgroundRegistry =
       backgroundRegistry ?? new ManagedBackgroundShellRegistry();
@@ -695,10 +737,27 @@ export class ManagedToolExecutor {
       : undefined;
   }
 
-  static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
+  static forWorkspace(
+    workspaceCwd: string,
+    runtimeInstanceId: string,
+    options?: {
+      readonly ledger?: ManagedRuntimeLedger;
+      readonly groupEvidenceTimeoutMs?: number;
+    },
+  ) {
     // Boot v1 configures its one directory at startup, as it always has.
     const tools = createManagedToolSet(workspaceCwd, runtimeInstanceId);
-    return new ManagedToolExecutor(async () => tools);
+    return new ManagedToolExecutor(
+      async () => tools,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      options,
+    );
   }
 
   hasTool(toolName: string): boolean {
@@ -737,8 +796,12 @@ export class ManagedToolExecutor {
 
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
+      // The dedicated code names the one condition a Hook release may absorb
+      // as a fence — this Session still owns unfinished work of any kind;
+      // both class defaults stay catch-alls other refusals share.
       throw new ManagedToolConflictError(
         'Managed Runtime Session still owns unfinished work.',
+        'managed_runtime_owner_hold_pending',
       );
     }
     this.closedSessions.add(sessionId);
@@ -1797,6 +1860,33 @@ export class ManagedToolExecutor {
       this.backgroundRegistry.stopAll(5_000),
       this.monitorRegistry.stopAll(5_000),
     ]);
+    if (this.options.ledger) {
+      // Leave nothing behind: what a call's own cancellation did not stop,
+      // SIGKILL does, and only a proven-empty ledger is deleted. An unproven
+      // group keeps the ledger truth on disk for the host's sweep to judge —
+      // and a bookkeeping filesystem failure keeps it too, contained, never
+      // a reason to make the shutdown itself reject.
+      try {
+        const remaining = await this.options.ledger.killOutstanding();
+        if (remaining.length === 0) {
+          this.options.ledger.complete();
+        } else {
+          debugLogger.warn(
+            `Managed Runtime worker could not prove ${
+              remaining.length
+            } Shell process group(s) stopped: ${remaining
+              .map((group) => group.pgid)
+              .join(', ')}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Managed Runtime worker could not sweep its ledger on close: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
   }
 
   /**
@@ -1850,6 +1940,8 @@ export class ManagedToolExecutor {
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
+    /** The Shell's process-group leader, when this call is one with a ledger. */
+    let shellPgid: number | undefined;
     let invocationStarted = false;
     try {
       // Runs start only from a fresh journal entry, which still carries its
@@ -1894,10 +1986,14 @@ export class ManagedToolExecutor {
         // does not exist yet, so resolve the deepest ancestor that does —
         // a genuinely absent path stays lexical and keeps the tool's own
         // not-found answer rather than a traversal accusation.
-        const realTarget = await realpathDeepestExisting(
-          params['file_path'] as string,
-        );
-        const realDirectory = await realpathDeepestExisting(directory);
+        // Retained storage owns no-follow admission through the original
+        // root descriptor; ambient realpaths cannot authenticate that root.
+        const realTarget = tools.retainedFileHistory
+          ? (params['file_path'] as string)
+          : await realpathDeepestExisting(params['file_path'] as string);
+        const realDirectory = tools.retainedFileHistory
+          ? directory
+          : await realpathDeepestExisting(directory);
         const relative = path.relative(realDirectory, realTarget);
         let outOfBoundary = false;
         if (
@@ -1911,6 +2007,7 @@ export class ManagedToolExecutor {
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
           outOfBoundary =
+            tools.retainedFileHistory !== undefined ||
             workspaceRoot === undefined ||
             escapesSession(
               path.relative(
@@ -2020,25 +2117,66 @@ export class ManagedToolExecutor {
         return sessionIdContext.run(sessionId, () => {
           const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
-          return entry.version === 3 && entry.captureSink
-            ? (invocation as ShellToolInvocation).execute(
-                entry.controller.signal,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                entry.captureSink,
-              )
-            : invocation.execute(entry.controller.signal);
+          if (entry.version === 3 && entry.captureSink) {
+            return (invocation as ShellToolInvocation).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              entry.captureSink,
+            );
+          }
+          if (entry.toolName === ShellTool.Name && this.options.ledger) {
+            const ledger = this.options.ledger;
+            return (invocation as ShellToolInvocation).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              (pid) => {
+                // Before any settle step of this call can run, the group is
+                // durable for the host's sweeps: the pid leads the group.
+                shellPgid = pid;
+                try {
+                  ledger.addGroup({
+                    pgid: pid,
+                    callId: entry.reference.callId,
+                    startedAt: Date.now(),
+                  });
+                } catch (error) {
+                  // A group that could not get into the ledger must not
+                  // outlive the failure: stop it first, then let the call
+                  // fail loudly instead of settling an outcome nothing
+                  // recorded.
+                  signalProcessGroup(pid, 'SIGKILL');
+                  void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
+                  throw error;
+                }
+              },
+            );
+          }
+          return invocation.execute(entry.controller.signal);
         });
       };
-      const history = this.fileHistories.get(entry.reference.sessionId);
-      let result: ToolResult;
+      const registeredHistory = this.fileHistories.get(
+        entry.reference.sessionId,
+      );
+      const history = tools.fileHistory ?? registeredHistory;
+      const mutating = [WriteFileTool.Name, EditTool.Name].includes(
+        entry.toolName,
+      );
       if (
-        history &&
-        [WriteFileTool.Name, EditTool.Name].includes(entry.toolName)
-      ) {
+        (history &&
+          (history.directory !== tools.directory ||
+            (tools.fileHistory &&
+              history.ownerSessionId !== entry.reference.sessionId) ||
+            (registeredHistory && registeredHistory !== history))) ||
+        (mutating && tools.retainedFileHistory && !tools.fileHistory)
+      )
+        throw new ManagedToolConflictError('File history binding conflicts.');
+      let result: ToolResult;
+      if (history && mutating) {
         let outcome: { result: ToolResult } | { error: unknown };
         let invoked = false;
         try {
@@ -2134,6 +2272,37 @@ export class ManagedToolExecutor {
               : message,
         },
       };
+    }
+    if (
+      entry.version === 2 &&
+      shellPgid !== undefined &&
+      entry.controller.signal.aborted &&
+      this.options.ledger
+    ) {
+      // A settled cancel carries the group's exit evidence: the call is
+      // journaled settled only once no member of the Shell's process group
+      // answers. A group that outlives the budget makes the outcome unknown:
+      // the session blocks and the ledger entry keeps naming the group. The
+      // ledger's own filesystem failure can never un-prove the stop either:
+      // unknown is the only honest next state.
+      let state: ProcessLiveness = 'denied';
+      try {
+        state = await this.options.ledger.waitForGroupExit(
+          shellPgid,
+          this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Managed Runtime group-exit evidence failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (state !== 'gone') {
+        entry.state = 'unknown';
+        entry.lastSequence++;
+        return;
+      }
     }
     if (entry.version === 3) {
       try {
