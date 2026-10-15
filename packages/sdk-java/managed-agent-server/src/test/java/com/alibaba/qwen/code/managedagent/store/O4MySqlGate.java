@@ -1,7 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -10,12 +14,9 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Real SQL gates plus controlled storage/process faults; OSS is a separate required gate. */
 @Timeout(value = 240)
@@ -27,7 +28,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         database = new O4MySqlDatabase();
         return database.source();
     }
-    @AfterEach void dropDatabase() { if (database != null) { database.close(); } }
+    @AfterEach void dropDatabase() { if (database != null) {
+            database.close();
+        } }
 
     @Test
     void writerReallyWaitsOnRetirementTransactionAndThenIsRejected() throws Exception {
@@ -40,8 +43,11 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             var deleting = executor.submit(() -> tx.executeWithoutResult(status -> {
                 ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, session);
                 locked.countDown();
-                try { assertThat(release.await(30, TimeUnit.SECONDS)).isTrue(); }
-                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                try {
+                    assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    throw new IllegalStateException(error);
+                }
                 ToolPublicationRetentionStore.retire(jdbc, tenant, session, "delete-contended");
             }));
             try {
@@ -62,7 +68,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                             + " AND locks.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
                             + " WHERE threads.PROCESSLIST_ID = ? AND locks.OBJECT_SCHEMA = ?"
                             + " AND locks.OBJECT_NAME = 'ma_tenant_guard'", Long.class, connection.get(), schema) > 0;
-                    if (!waiting) { Thread.sleep(20); }
+                    if (!waiting) {
+                        Thread.sleep(20);
+                    }
                 }
                 assertThat(waiting).as("writer connection observed in an actual InnoDB lock wait").isTrue();
                 assertThat(writer.isDone()).isFalse();
@@ -71,7 +79,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                 assertThatThrownBy(() -> writer.get(10, TimeUnit.SECONDS))
                         .cause().isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
                                 error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
-            } finally { release.countDown(); }
+            } finally {
+                release.countDown();
+            }
         }
     }
 
@@ -83,7 +93,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(child.waitFor(10, TimeUnit.SECONDS)).as("bounded child pause: %s", childLog()).isTrue();
             assertThat(child.exitValue()).isNotZero();
             assertThat(childLog()).contains("O4 child pause ended without resume");
-        } finally { stop(child); }
+        } finally {
+            stop(child);
+        }
     }
 
     @Test
@@ -103,7 +115,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(blocker()).isNull();
             assertThat(held()).isEqualTo(3000);
             assertThat(Files.exists(root.resolve("exact/one"))).isTrue();
-        } finally { stop(child); }
+        } finally {
+            stop(child);
+        }
     }
 
     @Test
@@ -125,7 +139,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             retire();
             assertThat(collector(objects).runOnce()).isFalse();
             assertThat(blocker()).isEqualTo("put_unresolved");
-        } finally { stop(child); }
+        } finally {
+            stop(child);
+        }
     }
 
     @Test
@@ -157,14 +173,19 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(replacement.runOnce()).isFalse();
             assertThat(jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
                     Long.class, scope)).isEqualTo(2);
-        } finally { stop(child); }
+        } finally {
+            stop(child);
+        }
     }
 
     @Test
     void stoppedProcessResumesAfterRealLeaseDeadlineWithoutReturningBytes() throws Exception {
         boolean windows = System.getProperty("os.name").startsWith("Windows");
-        if (Boolean.getBoolean("qwen.o4.required")) { assertThat(windows).as("POSIX process stop gate requires macOS/Linux").isFalse(); }
-        else { org.junit.jupiter.api.Assumptions.assumeFalse(windows, "POSIX process stop gate requires macOS/Linux"); }
+        if (Boolean.getBoolean("qwen.o4.required")) {
+            assertThat(windows).as("POSIX process stop gate requires macOS/Linux").isFalse();
+        } else {
+            org.junit.jupiter.api.Assumptions.assumeFalse(windows, "POSIX process stop gate requires macOS/Linux");
+        }
         new O4FileObjects(root).putIfAbsent("exact/one", new byte[] {7});
         Process child = child("read");
         try {
@@ -174,13 +195,17 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                     Long.class, ToolPublicationRetentionStore.hash(tenant));
             assertThat(expires - ToolPublicationRetentionStore.now(jdbc)).as("two-minute reader budget")
                     .isBetween(115_000L, 120_000L);
-            while (ToolPublicationRetentionStore.now(jdbc) <= expires + 1000) { Thread.sleep(1000); }
+            while (ToolPublicationRetentionStore.now(jdbc) <= expires + 1000) {
+                Thread.sleep(1000);
+            }
             Files.writeString(root.resolve("resume"), "resume");
             signal(child, "-CONT");
             assertThat(child.waitFor(15, TimeUnit.SECONDS)).as("reader child: %s", childLog()).isTrue();
             assertThat(child.exitValue()).as("reader child: %s", childLog()).isZero();
             assertThat(Files.readString(root.resolve("result"))).isEqualTo("tool_output_read_expired");
-        } finally { stop(child); }
+        } finally {
+            stop(child);
+        }
     }
 
     @Test
@@ -194,8 +219,11 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                     if (first) {
                         first = false;
                         arrival.set(executor.submit(() -> {
-                            try { late.await(); }
-                            catch (InterruptedException error) { throw new IllegalStateException(error); }
+                            try {
+                                late.await();
+                            } catch (InterruptedException error) {
+                                throw new IllegalStateException(error);
+                            }
                             super.putIfAbsent(objectKey, bytes);
                         }));
                         throw new IllegalStateException("PUT response lost while request is still running");
@@ -210,7 +238,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                         .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
                 retire();
                 assertThat(collector(objects).runOnce()).isFalse();
-            } finally { late.countDown(); }
+            } finally {
+                late.countDown();
+            }
         }
         arrival.get().get(10, TimeUnit.SECONDS);
         assertThat(blocker()).isEqualTo("put_unresolved");
@@ -247,7 +277,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                     segment.length, digest, scope, slot);
             stored += segment.length;
         }
-        for (String name : java.util.List.of("manifest", "pages", "outcome")) { addObject("z-" + name, null, new byte[] {1}); }
+        for (String name : java.util.List.of("manifest", "pages", "outcome")) {
+            addObject("z-" + name, null, new byte[] {1});
+        }
         jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = ?, capture_held_bytes = ?,"
                         + " producer_used_bytes = 3, producer_held_bytes = 1000 WHERE scope_key = ?", total, total, scope);
         assertThat(jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE scope_key = ?",
@@ -259,7 +291,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
             assertThat(gc.runOnce()).isTrue();
             pages++;
             assertThat(pages).isLessThanOrEqualTo((count + 3 + 99) / 100);
-            if (!"COLLECTED".equals(state())) { assertThat(held()).isEqualTo(total + 2000); }
+            if (!"COLLECTED".equals(state())) {
+                assertThat(held()).isEqualTo(total + 2000);
+            }
         }
         assertThat(pages).isEqualTo((count + 3 + 99) / 100);
         assertThat(held()).isZero();
@@ -267,7 +301,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                 Long.class, scope)).isEqualTo(total + 3);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE scope_key = ?"
                 + " AND (capture_state <> 'COLLECTED' OR inline_bytes IS NOT NULL)", Long.class, scope)).isZero();
-        try (var input = objects.open(prefix + "outside")) { assertThat(input.read()).isEqualTo(9); }
+        try (var input = objects.open(prefix + "outside")) {
+            assertThat(input.read()).isEqualTo(9);
+        }
         System.out.println("O4 capacity: bytes=" + total + ", catalogObjects=" + (count + 3) + ", pages=" + pages);
     }
 
@@ -280,13 +316,19 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                 "-Xmx128m", "-Dqwen.o4.pause-timeout-millis=" + pauseMillis, "-cp", classpath, O4FaultProcess.class.getName(), mode,
                 database.url(), database.user(), tenant, session, scope, root.toString())
                 .redirectErrorStream(true).redirectOutput(root.resolve("child.log").toFile()).start();
-        try { Files.writeString(root.resolve("child.pid"), Long.toString(child.pid())); }
-        catch (IOException error) { child.destroyForcibly(); throw error; }
+        try {
+            Files.writeString(root.resolve("child.pid"), Long.toString(child.pid()));
+        } catch (IOException error) {
+            child.destroyForcibly();
+            throw error;
+        }
         return child;
     }
     private void ready(Process child) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
-        while (!Files.exists(root.resolve("ready")) && child.isAlive() && System.nanoTime() < deadline) { Thread.sleep(20); }
+        while (!Files.exists(root.resolve("ready")) && child.isAlive() && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
         assertThat(Files.exists(root.resolve("ready"))).as("child reached durable boundary, exit=%s output=%s root=%s",
                 child.isAlive() ? "alive" : child.exitValue(), childLog(), root).isTrue();
     }

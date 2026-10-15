@@ -209,6 +209,11 @@ export class HostedMonitorLoop {
       );
     }
     if (record.stopReason !== null) {
+      // The Session close stops every registered loop; unmarked, that stop
+      // writes a second terminal revision the settled record refuses, and
+      // the close fails (#13984).
+      this.ended = true;
+      this.settled = true;
       return;
     }
     this.handle = await this.executor.start(
