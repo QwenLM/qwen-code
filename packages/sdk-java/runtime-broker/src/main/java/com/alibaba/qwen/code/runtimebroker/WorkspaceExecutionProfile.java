@@ -12,4 +12,9 @@ public final class WorkspaceExecutionProfile {
 
     private WorkspaceExecutionProfile() {
     }
+
+    /** Whether Workspace execution may run under this Runtime isolation class. */
+    public static boolean admitsIsolationClass(String isolationClass) {
+        return "session".equals(isolationClass);
+    }
 }

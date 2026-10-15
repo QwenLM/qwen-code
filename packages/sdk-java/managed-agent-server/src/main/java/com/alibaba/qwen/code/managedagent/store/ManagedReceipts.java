@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Base64;
@@ -112,6 +111,32 @@ final class ManagedReceipts {
             String state,
             String previousStatus,
             long now) {
+        insertCommand(
+                jdbc, tenant, operation, key, digest, session, turn, state, previousStatus, null,
+                now);
+    }
+
+    // A command this build records without an attributable actor — a
+    // server-keyed command, or an actor id the registry key cannot encode.
+    // Zero bytes, which no actor key equals (an actor id has at least one
+    // code point), so NULL stays reserved for receipts recorded before the
+    // recorder stamp existed.
+    static final byte[] UNATTRIBUTED = new byte[0];
+
+    // The recording actor rides on the receipt so a replay answers the
+    // actor who recorded the command, not only the Session's creator.
+    static void insertCommand(
+            JdbcTemplate jdbc,
+            String tenant,
+            String operation,
+            String key,
+            String digest,
+            String session,
+            String turn,
+            String state,
+            String previousStatus,
+            byte[] actor,
+            long now) {
         insert(
                 jdbc,
                 ReceiptNamespace.SESSION_COMMAND,
@@ -121,7 +146,7 @@ final class ManagedReceipts {
                 key,
                 digest,
                 operation,
-                null,
+                actor == null ? UNATTRIBUTED : actor,
                 session,
                 turn,
                 state,

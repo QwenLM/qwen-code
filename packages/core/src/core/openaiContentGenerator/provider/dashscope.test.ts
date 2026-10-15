@@ -286,6 +286,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       ],
       [
+        'should return true for Model Studio workspace-dedicated URL',
+        'https://llm-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for international workspace-dedicated URL',
+        'https://llm-abc123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for Model Studio trial URL',
+        'https://trial.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
         'should return true for internal aliyun-inc.com subdomain',
         'https://model-gateway.aliyun-inc.com/dashscope/v1',
       ],
@@ -353,8 +365,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
-        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://maas.aliyuncs.com/v1',
+        'https://notmaas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://evil.example.com/llm-abc123.cn-beijing.maas.aliyuncs.com/v1',
         'https://notalicloudapi.com/v1',
         'https://alicloudapi.com.evil.com/v1',
       ].forEach((baseUrl) => {

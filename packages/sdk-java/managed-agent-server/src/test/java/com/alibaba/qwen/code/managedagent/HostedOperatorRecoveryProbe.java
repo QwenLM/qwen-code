@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -9,11 +7,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -24,9 +26,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Real maintenance CLI, real worker and SQL; only the model is deterministic. */
 final class HostedOperatorRecoveryProbe implements AutoCloseable {
