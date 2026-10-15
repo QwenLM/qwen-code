@@ -16,12 +16,13 @@ import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.CursorPositions;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.EventPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.TaskEvent;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.regex.Pattern;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 
 /**
  * The task list, detail and events of a Session (SessionTaskView), read

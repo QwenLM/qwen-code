@@ -46,7 +46,7 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow_run.name))) }}
+      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name))) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:
@@ -176,7 +176,7 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
-          WORKFLOW_NAME: '${{ github.event.workflow_run.name }}'
+          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           # Actions supplies the timestamp; the helper stays free of clock reads

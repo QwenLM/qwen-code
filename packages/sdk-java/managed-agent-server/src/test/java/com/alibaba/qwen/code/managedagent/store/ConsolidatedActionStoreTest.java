@@ -1,29 +1,30 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ConsolidatedActionStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -58,7 +59,9 @@ class ConsolidatedActionStoreTest {
 
     @AfterEach
     void closeFixture() {
-        if (fixture != null) fixture.close();
+        if (fixture != null) {
+            fixture.close();
+        }
     }
 
     @Test
@@ -138,19 +141,24 @@ class ConsolidatedActionStoreTest {
                     .put("inputRevision", 1).put("policyRevision", "hosted-tool-approval/1");
             decision = storeBody("decision", "managed-action-decision", body);
         }
-        ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:"+sequence)
+        ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:" + sequence)
                 .put("kind", "action.changed").put("occurredAt", sequence);
         envelope.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", "session");
         ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
                 .put("inputRevision", 1).put("state", state);
         payload.set("optionsRef", optionsRef);
-        if (decision == null) payload.putNull("decisionRef"); else payload.set("decisionRef", decision);
+        if (decision == null) {
+            payload.putNull("decisionRef");
+        }
+        else {
+            payload.set("decisionRef", decision);
+        }
         ObjectNode record = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
         record.set("managedSession", envelope);
         transactions.executeWithoutResult(status -> actions.apply("tenant", "workspace", "session", sequence, 1,
                 record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT * FROM ma_resource WHERE resource_key=?",
-                        (row,n) -> new StoredResource(id,row.getString("kind"),row.getInt("schema_version"),row.getLong("byte_length"),
-                                row.getString("sha256"),row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope,id))));
+                        (row, n) -> new StoredResource(id, row.getString("kind"), row.getInt("schema_version"), row.getLong("byte_length"),
+                                row.getString("sha256"), row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope, id))));
     }
 
     private ObjectNode storeBody(String id, String kind, JsonNode body) throws Exception {
@@ -159,11 +167,11 @@ class ConsolidatedActionStoreTest {
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                         + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
                         + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                ManagedSchemaKeys.key(scope,id), scope,"tenant","workspace","session",id,kind,bytes.length,digest,bytes);
-        return JSON.createObjectNode().put("resourceId",id).put("kind",kind).put("schemaVersion",1).put("byteLength",bytes.length).put("digest",digest);
+                ManagedSchemaKeys.key(scope, id), scope, "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
+        return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
     }
 
     private ObjectNode response(String option) {
-        return JSON.createObjectNode().put("optionId",option).put("inputRevision",1).put("policyRevision","hosted-tool-approval/1");
+        return JSON.createObjectNode().put("optionId", option).put("inputRevision", 1).put("policyRevision", "hosted-tool-approval/1");
     }
 }

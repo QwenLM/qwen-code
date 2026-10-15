@@ -14,18 +14,19 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletResponse;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.HexFormat;
-import java.util.concurrent.Semaphore;
-import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.regex.Pattern;
 
 @Service
 public class ManagedArtifactService {
@@ -214,8 +215,7 @@ public class ManagedArtifactService {
             Selection selection;
             try {
                 selection = select(range, size);
-            }
-            catch (ApiException error) {
+            } catch (ApiException error) {
                 if (error.getStatus() == HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE) {
                     response.setHeader("Content-Range", "bytes */" + size);
                 }

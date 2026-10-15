@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import java.util.Map;
 import org.springframework.http.HttpStatus;
+
+import java.util.Map;
 
 public class ApiException extends RuntimeException {
     private final HttpStatus status;

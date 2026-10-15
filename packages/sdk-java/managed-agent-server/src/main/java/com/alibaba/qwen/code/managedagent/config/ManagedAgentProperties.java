@@ -1,6 +1,13 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.core.env.Environment;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -9,15 +16,9 @@ import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.convert.DurationUnit;
-import org.springframework.context.EnvironmentAware;
-import org.springframework.core.env.Environment;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties implements EnvironmentAware {
