@@ -166,6 +166,13 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
 
+    it('keeps an empty busy replay empty', async () => {
+      await replayer.replay([], undefined, { finalizeDangling: false });
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+      expect(replayer.getPendingToolCalls()).toEqual([]);
+    });
+
     it('should replay records in order', async () => {
       const records = [
         createUserRecord('Hello'),
@@ -481,6 +488,30 @@ describe('HistoryReplayer', () => {
         expect.objectContaining({ callId: 'call-inflight' }),
       ]);
     });
+
+    it.each([false, true])(
+      'finalizes calls without a turn boundary only for idle replay (idle: %s)',
+      async (finalizeDangling) => {
+        await replayer.replay(
+          [
+            callRecord('first-call', ['first']),
+            createAssistantRecord('continuation without a user record'),
+            callRecord('parallel-calls', ['second', 'parallel']),
+          ],
+          undefined,
+          { finalizeDangling },
+        );
+
+        expect(
+          sentUpdates()
+            .filter((update) => update['status'] === 'failed')
+            .map((update) => update['toolCallId']),
+        ).toEqual(finalizeDangling ? ['first', 'second', 'parallel'] : []);
+        expect(
+          replayer.getPendingToolCalls().map((pending) => pending.callId),
+        ).toEqual(finalizeDangling ? [] : ['first', 'second', 'parallel']);
+      },
+    );
 
     it.each([false, true])(
       'finalizes an older call while preserving parallel trailing calls (duplicate ids: %s)',

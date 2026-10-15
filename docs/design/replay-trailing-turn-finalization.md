@@ -24,6 +24,14 @@ It does not prove that every unmatched call in the trailing turn is executing.
 The existing caller decides whether the session is busy. Idle replay continues
 to finalize every unmatched call unless explicitly exempted for restore.
 
+This rendering boundary does not identify autonomous execution turns: cron,
+Goal, and notification activity can stay grouped with the last ordinary user
+record, so abandoned calls within that group remain pending. Notification
+records can also be persisted before admission or consumed inline during an
+active turn; their subtype alone is not a safe execution boundary. Broader
+autonomous-turn cleanup needs execution/delivery evidence and maintainer
+agreement rather than widening the shared rendering classifier.
+
 ## Change
 
 Bulk replay identifies the source record UUIDs in the trailing turn, then
@@ -56,3 +64,12 @@ exemptions, and cross-page matching. Run the affected CLI and bridge tests,
 build, typecheck, and bundle. The recorded test-script reproduction also
 checks client state and background-task polling; real model execution blocking
 or hallucination is not an established consequence of this issue.
+
+Round-1 verification exercised a real ACP notification turn with seeded older
+cron/Goal call records, confirming the cleanup gap for that shape. It also
+persisted a notification between an active
+shell call and its result: applying the proposed subtype-only boundary to that
+real snapshot incorrectly finalized the active call. In a separate real
+cross-prompt background-shell scenario, the job was still running but its
+launching call already had a persisted result and replayed as completed. These
+observations do not establish a universal cross-turn liveness invariant.

@@ -56,6 +56,7 @@ export interface PendingReplayToolCall {
 
 export interface HistoryReplayPageOptions {
   pendingToolCalls?: PendingReplayToolCall[];
+  /** False skips all finalization: a later page may contain the results. */
   finalizeDangling?: boolean;
   skipFinalizeCallIds?: ReadonlySet<string>;
   skipFinalizeRecordIds?: ReadonlySet<string>;
@@ -110,7 +111,12 @@ export class HistoryReplayer {
       initialGoalCause?: GoalStateCause;
       goalBootstrap?: HistoryReplayGoalBootstrap;
       skipFinalizeCallIds?: ReadonlySet<string>;
-      /** A busy bulk replay preserves only the trailing turn's calls. */
+      /**
+       * False preserves the trailing replay turn's unmatched calls while
+       * finalizing earlier ones. Unlike bulk replay, replayPage(false)
+       * finalizes nothing because later pages may contain the results.
+       * See docs/design/replay-trailing-turn-finalization.md.
+       */
       finalizeDangling?: boolean;
     } = {},
   ): Promise<void> {
@@ -128,6 +134,8 @@ export class HistoryReplayer {
         };
         await this.sendUpdate(update);
       }
+      // Voice records do not own tools. Without a boundary the walk returns zero
+      // (-1 for empty input), so a busy replay preserves every source record.
       const lastTurnStart = findBoundaryAtOrBefore(
         records,
         records.length - 1,

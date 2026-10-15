@@ -19,6 +19,11 @@ Goal 和 session-agent 内联消息不另开回合。无法确定回合起点时
 调用都仍在执行。是否忙碌继续由既有调用方判断。空闲重放仍终结所有未匹配调用，显式的
 restore 豁免除外。
 
+这一渲染边界不识别自治执行回合：cron、Goal 和 notification 活动可能都归在最后一条
+普通用户记录之后，同组内部的遗留调用仍会保持 pending。notification 还可能在准入前
+持久化，或在活跃回合中以内联方式被消费，因此仅凭 subtype 不能安全判定新的执行边界。
+更广的自治回合清理需要执行或交付证据及 maintainer 确认，而不是放宽共享的渲染分类规则。
+
 ## 改动
 
 批量重放确定尾部回合的来源记录 UUID 集合，再允许既有 replay machine 终结该集合之外
@@ -44,3 +49,9 @@ restore 豁免除外。
 重放、restore 豁免和跨页配对。运行受影响的 CLI 与 bridge 测试、build、typecheck 和
 bundle。已记录的 test-script 复现还检查客户端状态及后台任务轮询；真实模型执行阻塞或
 幻觉并非本 Issue 已证实的后果。
+
+第一轮复验在预置较早 cron/Goal 调用记录的会话中执行真实 ACP notification 回合，确认
+该形态下的清理缺口；还在活跃 shell 调用与其结果之间持久化 notification，对这份真实
+快照应用所建议的 subtype-only 边界
+会错误终结活跃调用。另一个真实跨 prompt 后台 shell 场景中，job 仍在运行，但启动调用
+已经有持久化结果，重放为 completed。这些观察不能证明适用于所有情形的跨回合存活性约束。
