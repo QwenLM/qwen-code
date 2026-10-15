@@ -79,6 +79,21 @@ public interface ToolExecutionRepository {
     List<ToolExecutionRecord> findBackgroundProcesses(RuntimeSessionRecord session,
             String afterExecutionCallId, int limit);
 
+    /** The hold rows (a background Shell process or a Monitor watch) of
+     * this Harness Session across all of its Runtime Sessions, in ANY
+     * execution state, ordered by execution ID hash — the read a reloaded
+     * Harness makes to restore the close's drain obligation after a restart
+     * (#13930 R1-2). A hold row's terminal settle is NOT a discharge: the
+     * run exiting leaves its Runtime Session unreleased, so the caller owes
+     * the release-state filter — a row stops mattering only when that
+     * Session's release is durably recorded. Ownership is found by harness
+     * session instead of by one Runtime Session, because the held obligation
+     * outlives the process that named the turn. At most 100 rows per page,
+     * and a short page means the scan is exhausted; the exclusive cursor is
+     * an execution ID, including one already settled. */
+    List<ToolExecutionRecord> findHoldRowsByHarnessSession(String harnessSessionId,
+            String afterExecutionCallId, int limit);
+
     /**
      * At most 100 executions in any state for this exact binding generation,
      * across all Sessions, ordered by execution ID hash. The exclusive cursor

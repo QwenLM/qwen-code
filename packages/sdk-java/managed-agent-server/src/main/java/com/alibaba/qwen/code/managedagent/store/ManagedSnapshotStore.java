@@ -4,8 +4,13 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -14,6 +19,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.security.GeneralSecurityException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -206,10 +212,7 @@ final class ManagedSnapshotStore {
                                         "Snapshot body resource is no longer available");
                             }
                             jdbc.update(
-                                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind,"
-                                        + " owner_key, owner_revision, resource_key, tenant_id,"
-                                        + " session_id, resource_id, created_at) VALUES (?,"
-                                        + " 'SNAPSHOT', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'SNAPSHOT', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                                     scope,
                                     owner,
                                     version,
@@ -258,7 +261,7 @@ final class ManagedSnapshotStore {
                                 "INSERT INTO ma_snapshot (tenant_id, session_id, snapshot_id,"
                                     + " snapshot_version, covered_sequence, projection_version,"
                                     + " manifest_resource_key, manifest_sha256, item_count, state,"
-                                    + " created_at, published_at, retain_until) VALUES (?, ?, ?, ?,"
+                                    + " gmt_create, published_at, retain_until) VALUES (?, ?, ?, ?,"
                                     + " ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?)",
                                 tenant,
                                 session,
@@ -338,7 +341,7 @@ final class ManagedSnapshotStore {
                             status -> {
                                 Root root;
                                 Cursor position;
-                                if (cursor == null || cursor.isBlank()) {
+                                if (StringUtils.isBlank(cursor)) {
                                     lockStream(tenant, session);
                                     List<Root> roots = current(tenant, session);
                                     if (roots.isEmpty()) {
@@ -373,7 +376,7 @@ final class ManagedSnapshotStore {
                                     }
                                     var roots =
                                             jdbc.query(
-                                                    "SELECT * FROM ma_snapshot WHERE tenant_id = ?"
+                                                    "SELECT " + ManagedSchemaProjection.SNAPSHOT.columns() + " FROM ma_snapshot WHERE tenant_id = ?"
                                                         + " AND session_id = ? AND snapshot_id = ?"
                                                         + " AND state = 'PUBLISHED' AND"
                                                         + " retain_until >= ?",
@@ -401,7 +404,7 @@ final class ManagedSnapshotStore {
                         Root root = start.root();
                         Cursor position = start.cursor();
                         Manifest manifest = manifest(root, tenant, session);
-                        if (cursor != null && !cursor.isBlank()) {
+                        if (StringUtils.isNotBlank(cursor)) {
                             verifyCursor(cursor, manifest);
                         }
                         if (position.page() < 0
@@ -411,7 +414,7 @@ final class ManagedSnapshotStore {
                         }
                         int page = position.page();
                         int offset = position.offset();
-                        if (cursor == null || cursor.isBlank()) {
+                        if (StringUtils.isBlank(cursor)) {
                             List<Integer> starts =
                                     jdbc.query(
                                             "SELECT snapshot_page_ordinal FROM ma_resource WHERE"
@@ -559,7 +562,7 @@ final class ManagedSnapshotStore {
 
     private List<Root> current(String tenant, String session) {
         return jdbc.query(
-                "SELECT p.* FROM ma_event_stream s JOIN ma_snapshot p ON p.tenant_id = s.tenant_id"
+                "SELECT " + ManagedSchemaProjection.SNAPSHOT.columns("p") + " FROM ma_event_stream s JOIN ma_snapshot p ON p.tenant_id = s.tenant_id"
                     + " AND p.session_id = s.session_id AND p.snapshot_id = s.current_snapshot_id"
                     + " WHERE s.tenant_id = ? AND s.session_id = ? AND s.stream_kind = 'SESSION'"
                     + " AND s.stream_id = X'' AND p.state = 'PUBLISHED'",
@@ -576,7 +579,7 @@ final class ManagedSnapshotStore {
                 row.getInt("projection_version"),
                 row.getString("manifest_resource_key"),
                 row.getString("manifest_sha256"),
-                row.getLong("created_at"));
+                row.getLong("gmt_create"));
     }
 
     private Manifest manifest(Root root, String tenant, String session) {
@@ -698,13 +701,7 @@ final class ManagedSnapshotStore {
             PageLocation page) {
         String key = ManagedSessionStore.resourceKey(scope, id);
         jdbc.update(
-                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id,"
-                    + " resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
-                    + " inline_bytes, state, created_at, last_verified_at, snapshot_id,"
-                    + " snapshot_page_ordinal, snapshot_page_first_sequence,"
-                    + " snapshot_page_last_sequence) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?,"
-                    + " 'MYSQL_INLINE', ?, 'REFERENCED', CURRENT_TIMESTAMP(6),"
-                    + " CURRENT_TIMESTAMP(6), ?, ?, ?, ?)",
+                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at, snapshot_id, snapshot_page_ordinal, snapshot_page_first_sequence, snapshot_page_last_sequence) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, ?)",
                 key,
                 scope,
                 tenant,
@@ -719,9 +716,7 @@ final class ManagedSnapshotStore {
                 page == null ? null : page.firstSequence(),
                 page == null ? null : page.lastSequence());
         jdbc.update(
-                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                    + " owner_revision, resource_key, tenant_id, session_id, resource_id,"
-                    + " created_at) VALUES (?, 'SNAPSHOT', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'SNAPSHOT', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scope,
                 owner,
                 version,
@@ -785,13 +780,13 @@ final class ManagedSnapshotStore {
 
     private static byte[] cursorMac(byte[] payload, String secret) {
         try {
-            var mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(
-                    new javax.crypto.spec.SecretKeySpec(
-                            Base64.getDecoder().decode(secret), "HmacSHA256"));
-            return mac.doFinal(payload);
-        } catch (java.security.GeneralSecurityException error) {
-            throw new IllegalStateException("Snapshot cursor signing is unavailable", error);
+            return new HmacUtils(HmacAlgorithms.HMAC_SHA_256,
+                    Base64.getDecoder().decode(secret)).hmac(payload);
+        } catch (IllegalArgumentException error) {
+            if (error.getCause() instanceof GeneralSecurityException cause) {
+                throw new IllegalStateException("Snapshot cursor signing is unavailable", cause);
+            }
+            throw error;
         }
     }
 

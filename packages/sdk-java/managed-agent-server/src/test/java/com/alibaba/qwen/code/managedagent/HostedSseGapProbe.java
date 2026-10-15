@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -163,12 +164,11 @@ final class HostedSseGapProbe implements AutoCloseable {
     }
 
     private List<Map<String, Object>> events() {
-        return jdbc.queryForList("SELECT * FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY sequence_id", tenant, session);
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE tenant_id = ? AND session_id = ? ORDER BY sequence_id", tenant, session);
     }
 
     private void assertExecution(boolean finished) throws Exception {
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         var execution = rows.getFirst();
         if (!finished) {
@@ -176,9 +176,7 @@ final class HostedSseGapProbe implements AutoCloseable {
         }
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
         String storage = "storage-0";
-        var owner = jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
-                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
-                + " AND s.storage_id = ?",
+        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
         if (finished) {

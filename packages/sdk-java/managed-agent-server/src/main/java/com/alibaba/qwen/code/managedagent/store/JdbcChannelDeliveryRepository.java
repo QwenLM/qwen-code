@@ -13,16 +13,16 @@ import java.util.Optional;
 
 /**
  * JDBC ledger of the H5 channel delivery outbox. Times are the database
- * clock's epoch milliseconds, the store's convention, so created_at and
- * updated_at never depend on an application host's clock.
+ * clock's epoch milliseconds, the store's convention, so gmt_create and
+ * gmt_modified never depend on an application host's clock.
  */
 public final class JdbcChannelDeliveryRepository
         implements ChannelDeliveryRepository {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String COLUMNS = String.join(", ",
             "tenant_id", "channel_id AS channel_instance_id", "delivery_id", "segment_id",
-            "segment_ordinal", "transport_state AS state", "provider_receipt_json", "created_at",
-            "updated_at");
+            "segment_ordinal", "transport_state AS state", "provider_receipt_json", "gmt_create",
+            "gmt_modified");
     private static final RowMapper<ChannelDelivery> MAPPER = (row, index) ->
             new ChannelDelivery(
                     row.getString("tenant_id"),
@@ -32,8 +32,8 @@ public final class JdbcChannelDeliveryRepository
                     row.getInt("segment_ordinal"),
                     row.getString("state"),
                     receipt(row.getString("provider_receipt_json")),
-                    row.getLong("created_at"),
-                    row.getLong("updated_at"));
+                    row.getLong("gmt_create"),
+                    row.getLong("gmt_modified"));
 
     private final JdbcTemplate jdbc;
 
@@ -52,7 +52,7 @@ public final class JdbcChannelDeliveryRepository
             jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, source_scope_key,"
                             + " tenant_id, channel_id, delivery_id, segment_id, segment_ordinal,"
                             + " transport_state, reception_state, consumption_state, provider_receipt_json,"
-                            + " payload_json, created_at, updated_at)"
+                            + " payload_json, gmt_create, gmt_modified)"
                             + " VALUES (?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
                             + " 'NOT_APPLICABLE', ?, '{\"schemaVersion\":1}', ?, ?)",
                     deliveryKey(candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId()),
@@ -123,7 +123,7 @@ public final class JdbcChannelDeliveryRepository
             throw new IllegalArgumentException("channel delivery cannot step " + expectedState + " -> " + state);
         }
         int updated = jdbc.update("UPDATE ma_delivery SET transport_state = ?,"
-                        + " provider_receipt_json = COALESCE(?, provider_receipt_json), updated_at = ?"
+                        + " provider_receipt_json = COALESCE(?, provider_receipt_json), gmt_modified = ?"
                         + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
                         + " AND channel_id = ? AND delivery_id = ? AND transport_state = ?"
                         + " AND claim_generation = ?",
@@ -160,7 +160,7 @@ public final class JdbcChannelDeliveryRepository
         arguments.add(channelInstanceId);
         String cursor = "";
         if (before != null) {
-            cursor = " AND (created_at < ? OR created_at = ?"
+            cursor = " AND (gmt_create < ? OR gmt_create = ?"
                     + " AND delivery_id < ?)";
             arguments.add(before.createdAt());
             arguments.add(before.createdAt());
@@ -171,7 +171,7 @@ public final class JdbcChannelDeliveryRepository
                         + " FROM ma_delivery"
                         + " WHERE delivery_kind = 'CHANNEL' AND source_scope_key = ?"
                         + " AND tenant_id = ? AND channel_id = ?" + cursor
-                        + " ORDER BY created_at DESC, delivery_id DESC LIMIT ?",
+                        + " ORDER BY gmt_create DESC, delivery_id DESC LIMIT ?",
                 MAPPER, arguments.toArray());
         boolean hasMore = rows.size() > limit;
         return new DeliveryPage(hasMore ? rows.subList(0, limit) : rows,

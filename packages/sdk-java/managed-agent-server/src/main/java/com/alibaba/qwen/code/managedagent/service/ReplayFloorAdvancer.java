@@ -42,7 +42,7 @@ public class ReplayFloorAdvancer {
             return;
         }
         // A pass drains the backlog, not just the first batch: the candidate
-        // query orders by updated_at, which the advance never moves, so a
+        // query orders by gmt_modified, which the advance never moves, so a
         // Session that keeps appending would sort last of every full batch
         // and starve while more than TARGET_LIMIT candidates remain. A target
         // whose advance keeps failing stays a candidate, so the attempted set
