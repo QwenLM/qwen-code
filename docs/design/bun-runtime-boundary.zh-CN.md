@@ -15,7 +15,7 @@
 
 ## 现状：调用点清单
 
-审计基线：`main` `d8558bba0198c1cdadac1523940c88c04b038f62`（与方案基线 `5aae8991bede…` 的 diff 不涉及下列任何文件）。按该位置真正需要的身份分类。
+概念表源自 `main` `d8558bba0198c1cdadac1523940c88c04b038f62`，不是穷尽列表；下方固定父提交的字面调用点复核补齐范围内的每处命中及排除项。分类不代表迁移或兼容性已获证明。
 
 ### App launcher 身份（如何再次唤起本构建）
 
@@ -58,8 +58,63 @@
 | `packages/cli/src/utils/managed-npm-update.ts`                         | 经 `process.execPath` 运行 npm 的 `cli.js`；npm **必须**在 Node 身份下运行，绝不能落入私有内置 Bun —— 这里要保持宿主 Node 解析 |
 | `packages/cli/src/ui/handleAutoUpdate.ts`                              | 选择更新命令；Node 身份路径                                                                                                    |
 | `packages/cli/src/serve/daemon-update-restart.ts`                      | 已在 Bun 下禁用（`process.versions['bun']`）且对 execve 做特性检测                                                             |
-| `packages/cli/src/utils/installationInfo.ts`                           | 以 `process.execPath` 报告 node 路径（信息性）                                                                                 |
+| `packages/cli/src/utils/installationInfo.ts`                           | npm CLI 路径解析默认使用 `process.execPath`（宿主 Node）                                                                       |
 | `scripts/build-standalone-release.js` / `create-standalone-package.js` | 固定 Bun 1.3.14、五个 target、`manifest.json`（`runtime`、版本）；布局 `bun/bin/bun`、`node/bin/node`                          |
+
+### 固定父提交的完整字面调用点复核
+
+上表是按概念分组的历史清单，不是穷尽列表。本表补齐固定父提交
+`8b4a0a25ea2bc570a1a6070e05182f29501a1b7f` 上 `packages/**/src/**`
+的所有可执行 `process.execPath` 字面读取：34 文件、48 处。行号固定于该父提交；
+同文件不同用途逐一列出。扫描排除注释、`*.test.*`、`*.spec.*`、`__tests__`、
+`test` 目录、`*test-helper*` 与 `acceptance` 目录；下面明确记录例外。
+此清单是源码分类，不是平台/编译产物兼容性证明，也不是所有隐式 fork、别名、
+外部命令或原生 spawn 的完整审计。后续改动需重跑同范围扫描。
+
+| 固定源码位置（所有行号）                                               | 身份、当前行为及后续范围                                                                                                               |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/acp-bridge/src/spawnChannel.ts:554`                          | 启动器：带堆参数的 ACP CLI 子进程；未迁移（S4）。                                                                                      |
+| `packages/browser-use/src/native-host-installer.ts:378`                | 解释器：将 native-host 运行时持久写入 shell 启动器；未迁移（S3），需验证安装生命周期和宿主兼容性。                                     |
+| `packages/channels/base/src/AcpBridge.ts:141`                          | 启动器：CLI 入口、--acp 及继承的运行时参数；未迁移（S4）。                                                                             |
+| `packages/cli/src/agent-view/current-cli-argv.ts:27,34`                | 启动器：开发态 tsx 入口（27）、普通入口（34）；均未迁移（S4）。                                                                        |
+| `packages/cli/src/commands/review/run.ts:602`                          | 启动器：带 --expose-gc 的 CLI review agent；未迁移（S4）。                                                                             |
+| `packages/cli/src/commands/review/test-efficacy.ts:1849`               | 宿主工具：本地 Vitest 入口；有意保留测试宿主，不属应用解释器迁移。                                                                     |
+| `packages/cli/src/commands/sandbox.ts:228`                             | 解释器：沙箱 -e 诊断与 realpath 白名单；未迁移（S3、Linux）。                                                                          |
+| `packages/cli/src/config/mem0-settings.ts:153,208`                     | 解释器：MCP 子进程（153）及匹配身份检查（208）；需一同迁移（S3），本 PR 均未修改。                                                     |
+| `packages/cli/src/serve/channel-worker-supervisor.ts:1119`             | 启动器：带 IPC 的 channel daemon-worker 入口；未迁移（S4）。                                                                           |
+| `packages/cli/src/serve/daemon-update-restart.ts:99,100`               | 启动器：execve 可执行文件及 argv[0]；Bun 下禁用的路径，不代表编译应用支持（S4）。                                                      |
+| `packages/cli/src/serve/local-process-runtime-activator.ts:315`        | 启动器：配置的 managed-runtime 入口参数；未迁移（S4）。                                                                                |
+| `packages/cli/src/serve/managed-runtime-session-worker.ts:250`         | 启动器：managed-runtime-worker 入口；未迁移（S4）。                                                                                    |
+| `packages/cli/src/serve/pem-certificate-blocks.ts:83`                  | 解释器：CommonJS PEM oracle；未迁移（S3），运行时 crypto 语义待验证。                                                                  |
+| `packages/cli/src/serve/run-qwen-serve.ts:913`                         | 解释器：module eval TLS 信任探针；未迁移（S3），须保留 Node/Bun TLS 差异。                                                             |
+| `packages/cli/src/serve/session-agents/orchestrator.ts:631`            | 启动器：agents session-send-mcp 入口；未迁移（S4）。                                                                                   |
+| `packages/cli/src/ui/handleAutoUpdate.ts:124`                          | 宿主 Node：npm 更新命令；保留宿主身份，不改用私有 Bun（S3 验证待补）。                                                                 |
+| `packages/cli/src/ui/utils/updateCheck.ts:148`                         | 宿主 Node：npm 更新检查运行器默认值；保留宿主身份（S3 验证待补）。                                                                     |
+| `packages/cli/src/utils/installationInfo.ts:27`                        | 宿主 Node：npm CLI 路径解析默认值，并非仅展示信息；与 npm 消费方一同保留。                                                             |
+| `packages/cli/src/utils/managed-npm-update.ts:118,120,137,188,329,331` | 宿主 Node：npm 配置/路径解析（118/120/137）、暂存 CLI 健康启动（188）、npm 安装及路径查找（329/331）；保留宿主身份，逐阶段验证（S3）。 |
+| `packages/cli/src/utils/processUtils.ts:68,69`                         | 启动器：execve 可执行文件及 argv[0]；尚未迁移编译应用形态（S4）。                                                                      |
+| `packages/cli/src/utils/relaunch.ts:167,168,190`                       | 启动器：execve 可执行文件/argv[0]（167/168）、监督式 IPC spawn 回退（190）；尚未迁移编译应用形态（S4）。                               |
+| `packages/core/src/agents/arena/ArenaManager.ts:1096`                  | 启动器：agent 工作树中的 argv[1]；未迁移（S4）。                                                                                       |
+| `packages/core/src/hooks/hook-command-cgroup.ts:166`                   | 解释器：CommonJS eval cgroup 启动器；未迁移（S3、Linux cgroup v2）。                                                                   |
+| `packages/core/src/sandbox/bwrap-execution.ts:41`                      | 解释器：JS relay 的 realpath 暂存；未迁移（S3、Linux bubblewrap）。                                                                    |
+| `packages/core/src/sandbox/landlock-execution.ts:113`                  | 解释器：JS relay 的 realpath 暂存；未迁移（S3、Linux landlock）。                                                                      |
+| `packages/core/src/utils/runtime-info.ts:175`                          | 解释器解析器回退：manifest 缺失/拒绝时使用宿主可执行文件；S1 已实现，不支持编译形态。                                                  |
+| `packages/mobile-mcp/src/server.ts:189`                                | 信息：遥测身份哈希输入；不启动子进程，有意排除于迁移范围。                                                                             |
+| `packages/node-repl/src/desktop-relay/cli.ts:89,174,192`               | 混合：npm 宿主解释器（89）；持久 launchd relay 应用入口（174，S4 待迁移）；权限提示文本（192，信息）；不可盲目统一替换。               |
+| `packages/node-repl/src/desktop-relay/runtime.ts:53`                   | 解释器：node-repl 包入口，并非 Qwen CLI 启动器；未迁移（S3），须保留包/运行时边界。                                                    |
+| `packages/node-repl/src/kernel-manager.ts:567`                         | 解释器：带实验参数和 fd3/fd4 协议的 VM kernel；属宿主 Node 契约，不自动换为 Bun（S3 兼容性待验证）。                                   |
+| `packages/sdk-typescript/src/utils/cliPath.ts:313,340`                 | 启动器：捆绑 CLI 默认值（313）；解释器：显式 JS 可执行文件（340）。使用 SDK 宿主身份，有意不强制私有 Bun；编译形态处理待 S4。          |
+| `packages/vscode-ide-companion/src/extension.ts:409`                   | 启动器：扩展宿主 CLI 终端命令；保留 Electron/VSCode 环境契约，不强制私有 Bun（S4 待迁移）。                                            |
+| `packages/vscode-ide-companion/src/services/acpConnection.ts:109`      | 启动器：扩展宿主 ACP 入口；保留 Electron run-as-Node 契约（S4 待迁移）。                                                               |
+| `packages/vscode-ide-companion/src/services/qwenDaemonProcess.ts:76`   | 启动器：扩展宿主 serve 入口；保留 Electron run-as-Node 契约（S4 待迁移）。                                                             |
+| `scripts/cli-entry.js:476,488`                                         | 启动器：Bun/Windows 的 `spawnSync(--expose-gc, cliPath)` 分支及其错误文案；未迁移编译形态（S4），不是解释器选择器接线。                |
+| `scripts/dev.js:237`                                                   | 开发宿主解释器选择；有意保留开发工具身份，非 standalone 生产入口迁移。                                                                 |
+
+范围例外：`packages/sdk-typescript/src/transport/ProcessTransport.ts` 的字面命中仅在注释中，实际通过 `forkOptions.execPath` 消费 `cliPath.ts` 的选择，须与 SDK/Electron 契约共同验证；`channel-worker-supervisor.ts:196,271,280` 的 `execPath` 参数消费对应本表的 1119 调用。`core/src/utils/runtime-info.ts` 的其他字面命中均为注释。
+
+有意排除生产迁移：`packages/cli/src/serve/cdp-tunnel/acceptance/run-real-chrome.mjs:95,112,129` 是验收驱动；`packages/cli/src/serve/managed-runtime-tool-v3-host.test-helper.ts:44` 是测试 helper；所有测试/夹具及 `packages/sdk-java/**/src/test/**` 是宿主测试。`packages/**/scripts/**`、包根的 `build.mjs` 和 `scripts/**` 中其余命中属于构建、打包、开发、benchmark、sandbox prototype、lint 或 E2E 驱动，保留各自工具宿主；不把它们算作已迁移的应用调用点。`scripts/build-standalone-release.js` 的脚本 spawn 是构建宿主行为，不证明生成归档已能运行。打包脚本中的运行时字符串是布局配置，另走原样归档验收。
+
+S1 已接入选择器的三处是 `core/src/code-mode/host-client.ts`、`core/src/sandbox/file-worker-client.ts`、`core/src/hooks/hookRunner.ts`（均加 `packages/` 前缀）；它们不再直接读取 `process.execPath`，不能因本字面扫描未命中而漏记。`getPty.ts` 是运行时检测，不是解释器 spawn。S3/S4 是待办范围标识，不表示这些迁移已提交或获准；尤其 kernel、npm、SDK 与扩展宿主不能统一替换为私有 Bun。
 
 ### SDK 消费方
 
@@ -70,7 +125,7 @@
 ### 1. App launcher
 
 - `scripts/cli-entry.js` 是 `QWEN_CODE_CLI` 的唯一写入方；`getShellContextEnvVars` 负责传播。自调用在 shell 中用 `"${QWEN_CODE_CLI:-qwen}"`，直接 spawn 用写入的值。
-- 同进程树内再唤起应用（relaunch、managed worker、arena agent）保留同解释器回退 `process.execPath + process.argv[1]`，因为所有已发布布局中入口都是 JS 文件。编译产物形态必须先通过 `QWEN_CODE_CLI` 发布其 launcher，上述位置才能变更 —— 它们已被上面的清单固定。
+- 同进程树内再唤起应用（relaunch、managed worker、arena agent）保留同解释器回退 `process.execPath + process.argv[1]`，因为所有已发布布局中入口都是 JS 文件。编译产物形态必须先通过 `QWEN_CODE_CLI` 发布其 launcher，上述位置才能变更；上面清单仅固定源码位置，不代表已验证编译应用行为。
 
 ### 2. JS interpreter —— `packages/core/src/utils/runtime-info.ts`
 

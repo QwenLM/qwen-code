@@ -24,9 +24,11 @@ before S2/S3/S4 build on it.
 
 ## Current state: call-site inventory
 
-Baseline audited: `main` `d8558bba0198c1cdadac1523940c88c04b038f62`
-(diff vs plan baseline `5aae8991bede…` touches none of the files below).
-Classified by which identity the site actually needs.
+The conceptual tables originated at `main`
+`d8558bba0198c1cdadac1523940c88c04b038f62`. They are not exhaustive;
+the fixed-parent literal call-site audit below supplements them with every
+scoped occurrence and its exclusions. Classification does not prove migration
+or compatibility.
 
 ### App launcher identity (how to re-invoke this build)
 
@@ -74,8 +76,66 @@ platform.
 | `packages/cli/src/utils/managed-npm-update.ts`                         | runs npm's `cli.js` via `process.execPath`; npm **must** run under a Node identity, never the private bundled Bun — keep host Node resolution here |
 | `packages/cli/src/ui/handleAutoUpdate.ts`                              | picks the update command; Node-identity path                                                                                                       |
 | `packages/cli/src/serve/daemon-update-restart.ts`                      | already disabled under Bun (`process.versions['bun']`) and execve-feature-detected                                                                 |
-| `packages/cli/src/utils/installationInfo.ts`                           | reports `process.execPath` as the node path (informational)                                                                                        |
+| `packages/cli/src/utils/installationInfo.ts`                           | defaults npm CLI path resolution to `process.execPath` (host Node)                                                                                 |
 | `scripts/build-standalone-release.js` / `create-standalone-package.js` | pin Bun 1.3.14, five targets, `manifest.json` (`runtime`, version); layout `bun/bin/bun`, `node/bin/node`                                          |
+
+### Complete literal call-site audit at the fixed parent
+
+The tables above are a historical conceptual grouping, not an exhaustive list.
+This table accounts for every executable literal `process.execPath` read in
+`packages/**/src/**` at parent
+`8b4a0a25ea2bc570a1a6070e05182f29501a1b7f`: 34 files, 48 occurrences.
+Line numbers refer to that parent; different roles within a file are explicit.
+The sweep excludes comments, `*.test.*`, `*.spec.*`, `__tests__`, `test`
+directories, `*test-helper*`, and `acceptance` directories; exceptions are
+accounted for below. This is source classification, not platform or compiled
+artifact compatibility evidence, nor an audit of every implicit fork, alias,
+external command, or native spawn. Repeat this scoped sweep after changes.
+
+| Fixed source location (all lines)                                      | Identity, current behavior and follow-up scope                                                                                                                              |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/acp-bridge/src/spawnChannel.ts:554`                          | Launcher: ACP CLI child with heap arguments; not migrated (S4).                                                                                                             |
+| `packages/browser-use/src/native-host-installer.ts:378`                | Interpreter: persists the native-host runtime in its shell launcher; not migrated (S3); installation lifetime and host compatibility need validation.                       |
+| `packages/channels/base/src/AcpBridge.ts:141`                          | Launcher: CLI entry with --acp and inherited runtime flags; not migrated (S4).                                                                                              |
+| `packages/cli/src/agent-view/current-cli-argv.ts:27,34`                | Launcher: development tsx entry (27), ordinary entry (34); neither migrated (S4).                                                                                           |
+| `packages/cli/src/commands/review/run.ts:602`                          | Launcher: CLI review agent with --expose-gc; not migrated (S4).                                                                                                             |
+| `packages/cli/src/commands/review/test-efficacy.ts:1849`               | Host tooling: local Vitest entry; intentionally retains its test host, outside app-interpreter migration.                                                                   |
+| `packages/cli/src/commands/sandbox.ts:228`                             | Interpreter: sandbox -e diagnostic, realpath allowlist; not migrated (S3, Linux).                                                                                           |
+| `packages/cli/src/config/mem0-settings.ts:153,208`                     | Interpreter: MCP child (153) and matching identity check (208); migrate together (S3), neither changed here.                                                                |
+| `packages/cli/src/serve/channel-worker-supervisor.ts:1119`             | Launcher: channel daemon-worker entry with IPC; not migrated (S4).                                                                                                          |
+| `packages/cli/src/serve/daemon-update-restart.ts:99,100`               | Launcher: execve executable and argv[0]; Bun-disabled path, not compiled-app support (S4).                                                                                  |
+| `packages/cli/src/serve/local-process-runtime-activator.ts:315`        | Launcher: configured managed-runtime entry arguments; not migrated (S4).                                                                                                    |
+| `packages/cli/src/serve/managed-runtime-session-worker.ts:250`         | Launcher: managed-runtime-worker entry; not migrated (S4).                                                                                                                  |
+| `packages/cli/src/serve/pem-certificate-blocks.ts:83`                  | Interpreter: CommonJS PEM oracle; not migrated (S3); runtime crypto semantics remain to be verified.                                                                        |
+| `packages/cli/src/serve/run-qwen-serve.ts:913`                         | Interpreter: module eval TLS trust probe; not migrated (S3); preserve Node/Bun TLS distinctions.                                                                            |
+| `packages/cli/src/serve/session-agents/orchestrator.ts:631`            | Launcher: agents session-send-mcp entry; not migrated (S4).                                                                                                                 |
+| `packages/cli/src/ui/handleAutoUpdate.ts:124`                          | Host Node: npm update command; retain host identity, not private Bun (S3 validation pending).                                                                               |
+| `packages/cli/src/ui/utils/updateCheck.ts:148`                         | Host Node: npm update-check runner default; retain host identity (S3 validation pending).                                                                                   |
+| `packages/cli/src/utils/installationInfo.ts:27`                        | Host Node: default for npm CLI path resolution, not merely informational; retain with npm consumers.                                                                        |
+| `packages/cli/src/utils/managed-npm-update.ts:118,120,137,188,329,331` | Host Node: npm config/path resolution (118/120/137), staged CLI health launch (188), npm install and path lookup (329/331); retain host identity, validate each stage (S3). |
+| `packages/cli/src/utils/processUtils.ts:68,69`                         | Launcher: execve executable and argv[0]; not migrated for compiled apps (S4).                                                                                               |
+| `packages/cli/src/utils/relaunch.ts:167,168,190`                       | Launcher: execve executable/argv[0] (167/168), supervised IPC spawn fallback (190); not migrated for compiled apps (S4).                                                    |
+| `packages/core/src/agents/arena/ArenaManager.ts:1096`                  | Launcher: argv[1] in agent worktree; not migrated (S4).                                                                                                                     |
+| `packages/core/src/hooks/hook-command-cgroup.ts:166`                   | Interpreter: CommonJS eval cgroup launcher; not migrated (S3, Linux cgroup v2).                                                                                             |
+| `packages/core/src/sandbox/bwrap-execution.ts:41`                      | Interpreter: realpath staging for JS relay; not migrated (S3, Linux bubblewrap).                                                                                            |
+| `packages/core/src/sandbox/landlock-execution.ts:113`                  | Interpreter: realpath staging for JS relay; not migrated (S3, Linux landlock).                                                                                              |
+| `packages/core/src/utils/runtime-info.ts:175`                          | Interpreter resolver fallback: host executable on rejected/missing manifest; implemented S1, compiled flavor unsupported.                                                   |
+| `packages/mobile-mcp/src/server.ts:189`                                | Information: telemetry identity hash input; no child launch, intentionally outside migration.                                                                               |
+| `packages/node-repl/src/desktop-relay/cli.ts:89,174,192`               | Mixed: npm host interpreter (89); persisted launchd relay app entry (174, S4 pending); permission guidance text (192, informational). Do not replace all three blindly.     |
+| `packages/node-repl/src/desktop-relay/runtime.ts:53`                   | Interpreter: node-repl package entry, not Qwen CLI launcher; not migrated (S3), package/runtime boundary must be preserved.                                                 |
+| `packages/node-repl/src/kernel-manager.ts:567`                         | Interpreter: VM kernel with experimental flags and fd3/fd4 protocol; host Node contract, no automatic Bun substitution (S3 compatibility pending).                          |
+| `packages/sdk-typescript/src/utils/cliPath.ts:313,340`                 | Launcher: bundled CLI default (313); interpreter: explicit JS executable (340). SDK-host identity, intentionally no private-Bun override; compiled handling pending S4.     |
+| `packages/vscode-ide-companion/src/extension.ts:409`                   | Launcher: extension-host CLI terminal command; preserve Electron/VSCode environment contract, not private Bun (S4 pending).                                                 |
+| `packages/vscode-ide-companion/src/services/acpConnection.ts:109`      | Launcher: extension-host ACP entry; preserve Electron run-as-Node contract (S4 pending).                                                                                    |
+| `packages/vscode-ide-companion/src/services/qwenDaemonProcess.ts:76`   | Launcher: extension-host serve entry; preserve Electron run-as-Node contract (S4 pending).                                                                                  |
+| `scripts/cli-entry.js:476,488`                                         | Launcher: Bun/Windows `spawnSync(--expose-gc, cliPath)` branch and error text; not migrated for compiled apps (S4), not interpreter-selector wiring.                        |
+| `scripts/dev.js:237`                                                   | Development host interpreter selection; intentionally retains the development tool host, outside standalone production migration.                                           |
+
+Scope exceptions: literal matches in `packages/sdk-typescript/src/transport/ProcessTransport.ts` are comments; its actual `forkOptions.execPath` consumes the selection from `cliPath.ts` and needs joint SDK/Electron contract validation. The `execPath` parameter reads at `channel-worker-supervisor.ts:196,271,280` consume the 1119 call in the table. Other literal matches in `core/src/utils/runtime-info.ts` are comments.
+
+Intentional production-migration exclusions: `packages/cli/src/serve/cdp-tunnel/acceptance/run-real-chrome.mjs:95,112,129` is an acceptance driver; `packages/cli/src/serve/managed-runtime-tool-v3-host.test-helper.ts:44` is a test helper; all tests/fixtures and `packages/sdk-java/**/src/test/**` are host tests. Remaining matches in `packages/**/scripts/**`, package-root `build.mjs`, and `scripts/**` are build, packaging, development, benchmark, sandbox prototype, lint or E2E drivers. They retain their tool host and are not migrated application sites. Script spawns in `scripts/build-standalone-release.js` are build-host behavior, not proof that generated archives run. Runtime strings in packaging scripts are layout configuration requiring separate unmodified-archive acceptance.
+
+The three S1 selector consumers are `core/src/code-mode/host-client.ts`, `core/src/sandbox/file-worker-client.ts` and `core/src/hooks/hookRunner.ts` (each under `packages/`). They no longer read `process.execPath` directly and remain part of the inventory despite no literal match. `getPty.ts` detects the runtime; it does not spawn an interpreter. S3/S4 designate pending work, not submitted or approved migrations; kernel, npm, SDK and extension hosts must not all be replaced with private Bun.
 
 ### SDK consumers
 
@@ -98,7 +158,7 @@ source installs do not have.
   `process.execPath + process.argv[1]`, because the entry is a JS file in
   every shipped layout. A compiled flavor must publish its launcher through
   `QWEN_CODE_CLI` before those sites can change — they are pinned by the
-  inventory above.
+  inventory above as source locations, not verified compiled-app behavior.
 
 ### 2. JS interpreter — `packages/core/src/utils/runtime-info.ts`
 

@@ -68,8 +68,12 @@ describe('runtime boundary: same fixture under node and bun', () => {
   let tempRoot: string;
   let fixturePath: string;
   const bunBin = process.env['BUN_TEST_BIN'] ?? 'bun';
-  const bunAvailable =
-    spawnSync(bunBin, ['--version'], { timeout: 15_000 }).status === 0;
+  const bunVersionResult = spawnSync(bunBin, ['--version'], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  const bunAvailable = bunVersionResult.status === 0;
+  const bunVersion = bunVersionResult.stdout?.trim() ?? '';
   const runtimes: Array<'node' | 'bun'> = ['node'];
   if (bunAvailable) runtimes.push('bun');
 
@@ -276,19 +280,13 @@ describe('runtime boundary: same fixture under node and bun', () => {
   );
 
   it.skipIf(!bunAvailable)(
-    'bun leg records the interpreter version it ran with',
+    `bun leg records interpreter version: ${bunVersion || 'unavailable'}`,
     { timeout: 30_000 },
     () => {
-      const version = spawnSync(bunBin, ['--version'], {
-        encoding: 'utf8',
-        timeout: 15_000,
-      });
-      // Emitted for the run log; the shipped-version pin is asserted by the
-      // standalone packaging acceptance, not here.
-      console.info(
-        `[runtime-boundary] bun leg ran with bun ${version.stdout.trim()}`,
+      expect(bunVersion).toMatch(/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/);
+      process.stdout.write(
+        `[runtime-boundary] bun leg ran with bun ${bunVersion}\n`,
       );
-      expect(version.status).toBe(0);
     },
   );
 });
