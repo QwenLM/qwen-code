@@ -1,0 +1,158 @@
+.browser {
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.columns {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.content {
+  position: relative;
+  height: 100%;
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.sidebar {
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.splitHandle {
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.splitHandle[hidden],
+.sidebar[hidden] {
+  display: none;
+}
+
+.search {
+  position: relative;
+  margin: 8px;
+}
+
+.search > svg {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.search > input {
+  height: 34px;
+  padding-left: 30px;
+}
+
+.tree {
+  flex: 1;
+  min-height: 0;
+  --trees-bg-override: var(--background);
+  --trees-fg-override: var(--foreground);
+  --trees-fg-muted-override: var(--muted-foreground);
+  --trees-bg-muted-override: var(--muted);
+  --trees-selected-bg-override: var(--accent);
+  --trees-selected-fg-override: var(--accent-foreground);
+  --trees-focus-ring-color-override: var(--ring);
+  --trees-border-color-override: var(--border);
+  --trees-font-family-override: inherit;
+}
+
+.notices {
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow: auto;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.noMatches {
+  flex: 1;
+  padding: 12px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.dropHint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border: 1px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  color: var(--primary);
+  padding: 48px 12px 12px;
+  font-size: 12px;
+  text-align: right;
+}
+
+.uploadProgress {
+  position: absolute;
+  inset: auto 0 0;
+  height: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+
+.uploadProgress > div {
+  height: 100%;
+  background: var(--primary);
+  transition: width 150ms;
+}
+
+.uploadError {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--destructive);
+}
+
+.uploadError > span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}

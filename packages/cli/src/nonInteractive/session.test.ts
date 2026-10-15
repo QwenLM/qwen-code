@@ -5,7 +5,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SendMessageType, type Config } from '@qwen-code/qwen-code-core';
+import {
+  SendMessageType,
+  type ChatRecord,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
@@ -104,6 +108,33 @@ function createUserMessage(content: string): CLIUserMessage {
     },
     parent_tool_use_id: null,
   };
+}
+
+function createResumedUserRecord(text: string): ChatRecord {
+  return {
+    uuid: `uuid-${text}`,
+    parentUuid: null,
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'user',
+    cwd: '/tmp',
+    version: 'test',
+    message: { role: 'user', parts: [{ text }] },
+  } as ChatRecord;
+}
+
+function createResumedTelemetryRecord(promptId: string): ChatRecord {
+  return {
+    uuid: `uuid-${promptId}`,
+    parentUuid: null,
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    subtype: 'ui_telemetry',
+    cwd: '/tmp',
+    version: 'test',
+    systemPayload: { uiEvent: { prompt_id: promptId } },
+  } as unknown as ChatRecord;
 }
 
 function createControlRequest(
@@ -321,10 +352,25 @@ describe('runNonInteractiveStreamJson', () => {
     const getHistoryTail = vi.fn().mockReturnValue(historyTail);
     const llmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
-      getChat: vi.fn().mockReturnValue({ getHistoryTail }),
+      getChat: vi
+        .fn<
+          () => {
+            getHistoryTail: ReturnType<typeof vi.fn>;
+            getHistoryShallow: ReturnType<typeof vi.fn>;
+          }
+        >()
+        .mockReturnValue({
+          getHistoryTail,
+          getHistoryShallow: vi.fn(() => historyTail),
+        }),
     };
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(llmClient),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
+        flush: vi.fn().mockResolvedValue(undefined),
+        finalize: vi.fn(),
+      }),
     });
     return { llmClient, getHistoryTail };
   }
@@ -386,6 +432,74 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('mints a fresh promptId chain when nothing was resumed', async () => {
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Hello world');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########1',
+    );
+  });
+
+  it('seeds the promptId counter past turns the resumed transcript claims', async () => {
+    // A resumed headless chain reuses the session id, so restarting the
+    // counter at 1 would re-mint ids the previous run already persisted —
+    // loadSession keeps only the last file-history snapshot per promptId,
+    // silently dropping the earlier run's /rewind target for that turn.
+    config = createConfig({
+      getResumedSessionData: () => ({
+        conversation: {
+          sessionId: 'test-session',
+          messages: [
+            createResumedUserRecord('first turn'),
+            createResumedUserRecord('second turn'),
+            createResumedTelemetryRecord('test-session########5'),
+          ],
+        },
+      }),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('third turn');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    // 5 is the highest turn the transcript claims (a ui_telemetry record from
+    // the previous run), not the 2 user turns it happens to contain.
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########6',
+    );
+  });
+
+  it('falls back to the resumed user-turn count when no promptId is persisted', async () => {
+    config = createConfig({
+      getResumedSessionData: () => ({
+        conversation: {
+          sessionId: 'test-session',
+          messages: [
+            createResumedUserRecord('first turn'),
+            createResumedUserRecord('second turn'),
+            createResumedUserRecord('third turn'),
+          ],
+        },
+      }),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('fourth turn');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########4',
+    );
+  });
+
   it('processes multiple user messages sequentially', async () => {
     // Initialize first to enable multi-query mode
     const initRequest = createControlRequest('initialize');
@@ -440,6 +554,36 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(getHistoryTail).toHaveBeenCalledWith(50);
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses stream-json continuation of an unknown legacy cancellation', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedLlmClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    vi.mocked(
+      config.getChatRecordingService()!.readActiveTranscriptChain,
+    ).mockResolvedValue([
+      {
+        ...createResumedTelemetryRecord('legacy-daemon'),
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'legacy-daemon',
+          state: 'cancelled',
+          cancelledAt: 1,
+          endedAt: 2,
+        },
+      },
+    ]);
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createContinueRequest();
+    };
+    await runNonInteractiveStreamJson(config, '');
     expect(continueResults).toEqual([
       { accepted: false, interruption: 'none' },
     ]);
@@ -675,6 +819,7 @@ describe('runNonInteractiveStreamJson', () => {
         return vi.fn();
       },
       getChatRecordingService: () => ({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         finalize: () => order.push('finalize'),
         flush: async () => {
           order.push('flush');

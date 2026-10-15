@@ -31,8 +31,10 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-// Mirror the top-level wiring in index.tsx / main.tsx: the boundary wraps the
-// whole App and renders RootErrorFallback (with retry) on a render-phase crash.
+// Mirror the embeddable wiring in index.tsx: the boundary wraps the whole App
+// and renders RootErrorFallback with an in-place retry. (The standalone entry
+// main.tsx instead reloads when the daemon token survives a reload; that path
+// is covered in main.test.tsx.)
 function RootBoundary({
   children,
   language,
@@ -85,11 +87,13 @@ describe('RootErrorFallback', () => {
         error={new Error('x')}
         onRetry={() => {}}
         language="zh-CN"
+        retryMode="reload"
       />,
     );
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       '出了点问题',
     );
+    expect(container.querySelector('button')?.textContent).toBe('重新加载');
   });
 
   it('catches an App-level render crash instead of white-screening', () => {
@@ -106,6 +110,30 @@ describe('RootErrorFallback', () => {
     expect(alert).not.toBeNull();
     expect(alert?.textContent).toContain('Something went wrong');
     expect(alert?.textContent).toContain('app render exploded');
+  });
+
+  it('labels the retry button as a reload when retryMode is reload', () => {
+    const { container } = mount(
+      <RootErrorFallback
+        error={new Error('boom')}
+        onRetry={() => {}}
+        retryMode="reload"
+      />,
+    );
+    expect(container.querySelector('button')?.textContent).toBe('Reload page');
+  });
+
+  it('renders the zh-CN retry label in the default reset mode', () => {
+    // No retryMode: the embeddable call sites (index.tsx, WebShellTranscript)
+    // rely on the 'reset' default this cell pins.
+    const { container } = mount(
+      <RootErrorFallback
+        error={new Error('boom')}
+        onRetry={() => {}}
+        language="zh-CN"
+      />,
+    );
+    expect(container.querySelector('button')?.textContent).toBe('重试');
   });
 
   it('recovers when the user clicks "Try again" after the cause is gone', () => {

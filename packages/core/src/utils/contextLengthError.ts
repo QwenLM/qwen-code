@@ -9,6 +9,16 @@ export interface ContextLengthExceededInfo {
   message: string;
   actualTokens?: number;
   limitTokens?: number;
+  /**
+   * What `limitTokens` bounds. `'input'` when the matched wording names the
+   * prompt/input allowance (DashScope's input range, an input token-count
+   * maximum), `'total'` when it names the context window itself (`maximum
+   * context length`, llama.cpp's available context size). Unset when the
+   * wording does not say (a bare `N tokens > M`), so a consumer that needs a
+   * window can treat "unknown" as "not an input bound" and keep its previous
+   * behavior.
+   */
+  limitKind?: 'input' | 'total';
 }
 
 const MAX_COLLECT_DEPTH = 4;
@@ -30,6 +40,9 @@ const CONTEXT_LENGTH_PATTERNS = [
   /\btoo many tokens\b/i,
   /\btokens?\s*>\s*[\d,]+\s*(?:maximum|max|limit)\b/i,
   /\b(?:input|prompt|messages?|context)\b[^\n]{0,120}\btokens?\b[^\n]{0,120}\bexceed(?:s|ed|ing)?\b/i,
+  // llama.cpp: "request (279935 tokens) exceeds the available context size
+  // (262144 tokens), try increasing it" (#13415).
+  /\bexceeds the available context size\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -39,6 +52,7 @@ function parseInteger(value: string): number {
 function parseTokenCounts(text: string): {
   actualTokens?: number;
   limitTokens?: number;
+  limitKind?: 'input' | 'total';
 } {
   const greaterThanMatch = text.match(/(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)/i);
   if (greaterThanMatch) {
@@ -55,6 +69,7 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(openAiMatch[2]!),
       limitTokens: parseInteger(openAiMatch[1]!),
+      limitKind: 'total',
     };
   }
 
@@ -64,6 +79,7 @@ function parseTokenCounts(text: string): {
   if (maxContextLimitMatch) {
     return {
       limitTokens: parseInteger(maxContextLimitMatch[1]!),
+      limitKind: 'total',
     };
   }
 
@@ -74,6 +90,39 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(inputExceedsMatch[1]!),
       limitTokens: parseInteger(inputExceedsMatch[2]!),
+      limitKind: 'input',
+    };
+  }
+
+  // DashScope: "Range of input length should be [1, 196608]" — the upper
+  // bound is the server's REAL input ceiling (observed to differ from the
+  // configured context window), so parse it out for the retry paths. It
+  // bounds the prompt, not the window: `prompt + max_tokens` may exceed it.
+  const rangeMatch = text.match(
+    /range of input length should be\s*\[\s*\d[\d,]*\s*,\s*(\d[\d,]*)\s*\]/i,
+  );
+  if (rangeMatch) {
+    return {
+      limitTokens: parseInteger(rangeMatch[1]!),
+      limitKind: 'input',
+    };
+  }
+
+  // llama.cpp: "request (279935 tokens) exceeds the available context size
+  // (262144 tokens), try increasing it" — the SECOND number is the server's
+  // real ceiling (its `-c` / model `n_ctx`), which routinely differs from the
+  // window we inferred from the model id. The reactive-compaction anchor
+  // consumes `actualTokens`; a `limitKind` of `'total'` makes `limitTokens`
+  // eligible as `observedServerCeiling` for reactive compaction sizing
+  // (#13432).
+  const llamaCppMatch = text.match(
+    /\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds the available context size\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)/i,
+  );
+  if (llamaCppMatch) {
+    return {
+      actualTokens: parseInteger(llamaCppMatch[1]!),
+      limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
     };
   }
 

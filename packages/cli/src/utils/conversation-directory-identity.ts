@@ -12,16 +12,53 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 /**
  * True iff `ino` can be used as proof of file identity.
  *
- * FAT/exFAT and some SMB-style filesystems do not expose inode numbers and
- * report `Stats.ino === 0` for every entry, so comparing by `dev:ino` there
- * collapses unrelated directories onto one identity.
+ * FAT/exFAT and some SMB-style filesystems report `Stats.ino === 0`, while
+ * Windows can expose file IDs that exceed JavaScript's safe integer range.
+ * Neither value can be compared as an exact identity proof by a
+ * number-backed `Stats`. A stat taken with `{ bigint: true }` reports the
+ * 64-bit id exactly, so there the safe-integer half of this rule is wrong
+ * and only `ino === 0` stays unverifiable — see the two bigint
+ * restatements in the ledger below.
  *
- * This restates core's `hasVerifiableInode()` rather than importing it: this
- * module is reachable from the serve pre-listen fast path, and importing the
- * core package barrel pulls its whole module graph into that bundle closure.
+ * This predicate is the shared verifiability semantics for the
+ * conversation-identity check that imports it
+ * (`acp-integration/acpAgent.ts`). Four call sites keep a deliberate local
+ * restatement — edit them in lockstep with this predicate:
+ *
+ * - `syncStandaloneRoot` (serve/conversations/conversation-workspace.ts)
+ *   inlines the predicate and the root-identity composite around the open
+ *   file handle it re-validates before and after `sync`;
+ * - `hasExpectedManagedDirectoryIdentity` (acp-integration/acpAgent.ts)
+ *   inlines the composite because the wire expectation `{ device, inode }`
+ *   carries no `inodeVerifiable` field and must keep deriving verifiability
+ *   from `inode !== 0`;
+ * - `isSameFile` (commands/review/lib/same-file.ts) and
+ *   `directoryIdentityOf`
+ *   (serve/conversations/standalone-deletion-journal.ts) restate only the
+ *   NON-ZERO half, over exact `{ bigint: true }` ids. Do not re-unify these
+ *   two onto the safe-integer rule above: their ids are exact, so refusing
+ *   them degrades both comparators and re-opens the >2^53 NTFS fail-open
+ *   tracked in #11848.
+ *
+ * Core's canonical predicate (packages/core/src/utils/file-identity.ts)
+ * states the non-zero rule and is bigint-tolerant (`Number(ino) !== 0`).
+ * Do not align THIS predicate with it: widening it here would also flip
+ * `assertVerifiableTranscriptIdentity` on >2^53 Windows transcript inodes.
+ * The comment block above `tryStat` in commands/review/lib/same-file.ts
+ * records the full argument. The two bigint sites restate the rule instead
+ * of importing core's, each for the reason recorded at its own site:
+ * `standalone-deletion-journal.ts` is loaded from the serve entry and keeps
+ * core out of its import graph — the bundle-closure trade-off
+ * serve/managed-scratch-workspace.ts cites this docblock for — and
+ * `same-file.ts` is a leaf helper that imports only node builtins.
  */
-function hasVerifiableInode(ino: number): boolean {
-  return Number(ino) !== 0;
+export function hasVerifiableInode(ino: number): boolean {
+  return Number.isSafeInteger(ino) && ino > 0;
+}
+
+/** The inode value to store: the input when verifiable, else 0. */
+export function normalizedInode(ino: number): number {
+  return hasVerifiableInode(ino) ? ino : 0;
 }
 
 export interface ConversationRootIdentity {
@@ -134,11 +171,11 @@ function hasRootIdentity(
   stats: Stats,
   root: ConversationRootIdentity,
 ): boolean {
-  if (!root.inodeVerifiable) return stats.dev === root.device;
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
   return (
-    hasVerifiableInode(stats.ino) &&
     stats.dev === root.device &&
-    stats.ino === root.inode
+    inodeVerifiable === root.inodeVerifiable &&
+    (!inodeVerifiable || stats.ino === root.inode)
   );
 }
 
@@ -149,12 +186,18 @@ function hasRootIdentity(
  * are available they must match; where the filesystem reports none, there is
  * nothing to compare and reporting a change would be a false positive that
  * blocks the feature outright, so only the device is required.
+ *
+ * Also the anti-swap comparator for ACP managed relocation: acpAgent.ts
+ * imports it directly rather than restating it.
  */
-function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
-  if (!hasVerifiableInode(before.ino) || !hasVerifiableInode(after.ino)) {
-    return before.dev === after.dev;
-  }
-  return before.dev === after.dev && before.ino === after.ino;
+export function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
+  const beforeVerifiable = hasVerifiableInode(before.ino);
+  const afterVerifiable = hasVerifiableInode(after.ino);
+  return (
+    before.dev === after.dev &&
+    beforeVerifiable === afterVerifiable &&
+    (!beforeVerifiable || before.ino === after.ino)
+  );
 }
 
 function hasExpectedDirectoryIdentity(
@@ -225,7 +268,7 @@ export async function createConversationRootIdentity(
     configuredRoot,
     canonicalRoot,
     device: after.dev,
-    inode: after.ino,
+    inode: normalizedInode(after.ino),
     inodeVerifiable: hasVerifiableInode(after.ino),
   };
 }
@@ -350,7 +393,7 @@ async function inspectConversationNamedDirectoryIdentity(
     name,
     canonicalPath: canonical,
     device: after.dev,
-    inode: after.ino,
+    inode: normalizedInode(after.ino),
   };
   if (expected && !hasExpectedDirectoryIdentity(identity, expected)) {
     throw new ConversationDirectoryIdentityError(

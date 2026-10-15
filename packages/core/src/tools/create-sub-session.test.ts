@@ -24,6 +24,16 @@ describe('CreateSubSessionTool', () => {
     );
   });
 
+  it('rejects an unsafe model id at validation, matching the daemon boundary', () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    expect(() =>
+      tool.build({ prompt: 'do X', model: 'm'.repeat(257) }),
+    ).toThrow(/at most 256 characters/);
+    expect(() => tool.build({ prompt: 'do X', model: 'bad\nmodel' })).toThrow(
+      /control characters/,
+    );
+  });
+
   it('defaults to ask permission so delegated prompts face classifier review', async () => {
     const tool = new CreateSubSessionTool(makeConfig());
     const invocation = tool.build({ prompt: 'do X' });

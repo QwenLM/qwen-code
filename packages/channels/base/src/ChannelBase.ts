@@ -8,6 +8,8 @@ import type {
   ChannelMemoryTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
@@ -20,6 +22,9 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  GroupConfig,
+  GroupSenderPolicy,
+  PrivatePolicy,
   ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
@@ -27,7 +32,6 @@ import type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
-import { BlockStreamer } from './BlockStreamer.js';
 import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
@@ -36,13 +40,18 @@ import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
+import { resolvePrivatePolicy } from './private-policy.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
-import { SessionRouter } from './SessionRouter.js';
+import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
+import { matchMessageRoute } from './message-routes.js';
 import {
   NamedSessionManager,
+  NamedSessionTaskError,
   type NamedSessionOwnerInput,
+  type NamedSessionSelection,
+  type NamedSessionTaskReference,
 } from './named-session-manager.js';
 import { getGlobalQwenDir } from './paths.js';
 import {
@@ -57,6 +66,7 @@ import {
 } from './sanitize.js';
 import type {
   AvailableCommand,
+  BackgroundResponseContext,
   ChannelAgentBridge,
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
@@ -66,10 +76,10 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
-  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -88,6 +98,11 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
+
+interface BackgroundResponseDeliveryTarget {
+  target: SessionTarget;
+  sourceLabel?: string;
+}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -219,8 +234,11 @@ interface ChannelMemoryRecallSelection {
 }
 
 export interface ChannelBaseOptions {
+  locale?: 'en' | 'zh';
   router?: SessionRouter;
   proxy?: string;
+  /** Qwen UI language used by adapter-owned presentation. */
+  displayLanguage?: string;
   /** Adapter-owned persistent state directory. */
   stateDir?: string;
   channelMemory?: ChannelMemoryCallbacks;
@@ -245,6 +263,54 @@ export interface ChannelBaseOptions {
     /** Read persisted observations so adapters can hydrate label caches. */
     list?(): ObservedChannelContactGraph;
   };
+}
+
+const PERMISSION_COPY = {
+  en: {
+    toolUse: 'Tool use',
+    allowOnce: 'Allow once',
+    allowAlwaysProject: 'always allow for this project',
+    allowAlwaysUser: 'always allow for this user',
+    allowAlways: 'always allow',
+    deny: 'Deny',
+    required: 'Permission required to run a tool',
+    request: 'Request:',
+    tool: 'Tool:',
+    action: 'Action:',
+    parameters: 'Parameters:',
+    replyWith: 'Reply with:',
+  },
+  zh: {
+    toolUse: '工具调用',
+    allowOnce: '仅允许本次',
+    allowAlwaysProject: '始终允许此项目',
+    allowAlwaysUser: '始终允许此用户',
+    allowAlways: '始终允许',
+    deny: '拒绝',
+    required: '运行工具需要授权',
+    request: '请求：',
+    tool: '工具：',
+    action: '操作：',
+    parameters: '参数：',
+    replyWith: '回复以下命令：',
+  },
+} as const;
+
+/**
+ * Translate the stock prefix of a scoped always-allow label, keeping the
+ * command/tool scope that exec and mcp confirmations append to it.
+ */
+function localizedScopedAlwaysLabel(
+  label: string,
+  stockLabel: string,
+  localizedLabel: string,
+): string | undefined {
+  if (label === stockLabel) return localizedLabel;
+  const scopeSeparator = ': ';
+  if (!label.startsWith(stockLabel + scopeSeparator)) return undefined;
+  return `${localizedLabel}：${label.slice(
+    stockLabel.length + scopeSeparator.length,
+  )}`;
 }
 
 export interface ChannelLoopController {
@@ -274,7 +340,10 @@ type PendingPermission = {
   sessionId: string;
   target: SessionTarget;
   request: PermissionRequestEvent['request'];
+  sourceLabel?: string;
+  taskName?: string;
   userInputPresented?: boolean;
+  permissionPresented?: boolean;
   settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
   settled?: UserInputSettlementReason;
   responsePromise?: Promise<boolean>;
@@ -286,7 +355,6 @@ type PendingPermissionLookup =
   | { kind: 'ambiguous'; requestIds: string[] };
 type CollectBufferEntry = {
   text: string;
-  displayText: string;
   envelope: Envelope;
 };
 type NamedTurnBinding = {
@@ -310,7 +378,6 @@ type ActivePrompt = {
   loopPrompt?: boolean;
   done: Promise<void>;
   resolve: () => void;
-  stopStreaming?: () => void;
   /** The originating turn's chat/message, so a clear-time eviction can run this
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
@@ -320,6 +387,7 @@ type ActivePrompt = {
   senderId?: string;
   senderName?: string;
   metadata?: string;
+  sourceLabel?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -328,6 +396,16 @@ type ActivePrompt = {
    * clobbered.
    */
   clearEvicted?: boolean;
+};
+type ActiveBtw = {
+  id: string;
+  bridge: ChannelAgentBridge;
+  controller: AbortController;
+  target: SessionTarget;
+  chatId: string;
+  threadId?: string;
+  sourceLabel?: string;
+  taskName?: string;
 };
 
 /**
@@ -347,7 +425,8 @@ const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
-const MAX_DISPLAY_PROJECTION_CHARS = 8000;
+// Mirrors BTW_MAX_INPUT_LENGTH in core without adding core to channel-base.
+const CHANNEL_BTW_MAX_INPUT_LENGTH = 4096;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -386,7 +465,10 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
+  protected readonly privatePolicy: PrivatePolicy;
   protected router: SessionRouter;
+  private readonly messageRoutes: ReadonlyMap<string, string>;
+  private readonly routedEnvelopes = new WeakSet<Envelope>();
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
   protected readonly identity: ChannelRuntimeIdentity;
@@ -395,6 +477,7 @@ export abstract class ChannelBase {
   protected proxy?: string;
   /** Adapter-owned persistent state directory, when supplied by the runtime. */
   protected readonly stateDir?: string;
+  protected readonly locale: 'en' | 'zh';
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
   private readonly channelMemoryRecallObserver?: (
@@ -422,6 +505,7 @@ export abstract class ChannelBase {
   private sessionQueues: Map<string, Promise<void>> = new Map();
   private queuedTurns: Map<string, number> = new Map();
   private namedTurnBindings = new WeakMap<Envelope, NamedTurnBinding>();
+  private readonly inboundErrorSourceLabels = new WeakMap<Envelope, string>();
   private readonly registerBridgeEvents: boolean;
   private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
@@ -441,6 +525,7 @@ export abstract class ChannelBase {
 
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
+  private readonly activeBtw: Map<string, ActiveBtw> = new Map();
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
@@ -450,8 +535,9 @@ export abstract class ChannelBase {
   private readonly bridgeBackgroundResponseListener = (
     sessionId: string,
     text: string,
+    context?: BackgroundResponseContext,
   ): void => {
-    void this.dispatchBackgroundResponse(sessionId, text).catch(
+    void this.dispatchBackgroundResponse(sessionId, text, context).catch(
       (err: unknown) => {
         process.stderr.write(
           `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
@@ -463,6 +549,9 @@ export abstract class ChannelBase {
     event: SessionDiedEvent,
   ): void => {
     this.onSessionDied(event.sessionId);
+  };
+  private readonly bridgeDisconnectedListener = (): void => {
+    this.onBridgeDisconnected();
   };
   private readonly bridgePermissionRequestListener = (
     event: PermissionRequestEvent,
@@ -519,20 +608,88 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
+    _context?: BackgroundResponseContext,
   ): Promise<void> {
+    if (text.trim().length === 0) return;
+    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
+      return;
+    }
+    await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+  }
+
+  protected getBackgroundResponseSourceLabel(
+    sessionId: string,
+  ): string | undefined {
     const target = this.router.getTarget(sessionId);
+    const presentation = this.namedSessions?.presentation(sessionId);
     if (
       !target ||
       target.channelName !== this.name ||
-      text.trim().length === 0
+      !this.router.isSessionLive(sessionId) ||
+      !presentation ||
+      presentation.status !== 'open' ||
+      !this.sameTaskOwner(target, presentation.target)
     ) {
-      return;
+      return undefined;
     }
+    return this.createSourceLabel(presentation, target);
+  }
+
+  protected async resolveBackgroundResponseDelivery(
+    sessionId: string,
+  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
+    let target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
+    let sourceLabel: string | undefined;
+    if (this.namedSessions) {
+      const presentation =
+        await this.namedSessions.resolvePresentation(sessionId);
+      const currentTarget = this.router.getTarget(sessionId);
+      const currentPresentation = this.namedSessions.presentation(sessionId);
+      if (
+        !presentation ||
+        presentation.status !== 'open' ||
+        !currentTarget ||
+        !this.router.isSessionLive(sessionId) ||
+        !currentPresentation ||
+        currentPresentation.status !== 'open' ||
+        currentPresentation.taskName !== presentation.taskName ||
+        !this.sameTaskOwner(target, currentTarget) ||
+        !this.sameTaskOwner(currentTarget, currentPresentation.target)
+      ) {
+        throw new Error('Named background response ownership is unavailable.');
+      }
+      target = currentTarget;
+      sourceLabel = this.createSourceLabel(presentation, target);
+    }
+    return { target, sourceLabel };
+  }
+
+  protected async deliverBackgroundResponseToTarget(
+    sessionId: string,
+    text: string,
+    delivery: BackgroundResponseDeliveryTarget,
+  ): Promise<void> {
+    const { target, sourceLabel } = delivery;
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
-      await this.pushProactive(target, text);
+      if (sourceLabel) {
+        await this.pushProactive(target, text, sourceLabel);
+      } else {
+        await this.pushProactive(target, text);
+      }
       return;
     }
-    await this.deliverBackgroundReply(target.chatId, text, sessionId);
+    if (sourceLabel) {
+      await this.deliverBackgroundReply(
+        target.chatId,
+        text,
+        sessionId,
+        sourceLabel,
+      );
+    } else {
+      await this.deliverBackgroundReply(target.chatId, text, sessionId);
+    }
   }
 
   /**
@@ -545,8 +702,177 @@ export abstract class ChannelBase {
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendResponseMessage(chatId, text, sessionId);
+    await this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
+  }
+
+  private async handleBtw(
+    envelope: Envelope,
+    sessionId: string,
+    question: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `Could not resolve the current task for /btw.`,
+        sourceLabel,
+      );
+      return;
+    }
+    const running = this.activeBtw.get(sessionId);
+    if (running) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `BTW #${running.id} is still running for this task.`,
+        sourceLabel,
+      );
+      return;
+    }
+
+    const reference = this.namedSessions?.presentation(sessionId);
+    const request: ActiveBtw = {
+      id: randomUUID().slice(0, 8),
+      bridge: this.bridge,
+      controller: new AbortController(),
+      target: { ...target },
+      chatId: envelope.chatId,
+      ...(envelope.threadId ? { threadId: envelope.threadId } : {}),
+      ...(sourceLabel ? { sourceLabel } : {}),
+      ...(reference?.status === 'open' ? { taskName: reference.taskName } : {}),
+    };
+    this.activeBtw.set(sessionId, request);
+    try {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        `BTW #${request.id} received. The main task will continue.`,
+        sourceLabel,
+      );
+    } catch (error) {
+      if (this.activeBtw.get(sessionId) === request) {
+        this.cancelBtw(sessionId);
+      }
+      throw error;
+    }
+    if (!this.isBtwCurrent(sessionId, request)) {
+      if (this.activeBtw.get(sessionId) === request) {
+        this.cancelBtw(sessionId);
+      }
+      return;
+    }
+    void this.deliverBtw(sessionId, question, request).catch((error) => {
+      process.stderr.write(
+        `[${this.name}] BTW delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
+      );
+    });
+  }
+
+  private async deliverBtw(
+    sessionId: string,
+    question: string,
+    request: ActiveBtw,
+  ): Promise<void> {
+    let message: string;
+    try {
+      let result: { sessionId: string; answer: string | null };
+      try {
+        result = await request.bridge.btw!(
+          sessionId,
+          question,
+          request.controller.signal,
+        );
+        if (result.sessionId !== sessionId) {
+          throw new Error('BTW response session did not match the request');
+        }
+        const answer = result.answer?.trim();
+        message = answer
+          ? `BTW #${request.id}\n\n${answer}`
+          : `BTW #${request.id}\n\nNo answer is available from the current conversation context.`;
+      } catch (error) {
+        if (request.controller.signal.aborted) return;
+        process.stderr.write(
+          `[${this.name}] BTW request failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(error)}\n`,
+        );
+        message = `BTW #${request.id} failed. Please try again.`;
+      }
+      if (!this.isBtwCurrent(sessionId, request)) return;
+      try {
+        await this.sendThreadMessage(
+          request.chatId,
+          request.threadId,
+          message,
+          request.sourceLabel,
+        );
+      } catch (error) {
+        try {
+          await this.sendThreadMessage(
+            request.chatId,
+            request.threadId,
+            `BTW #${request.id} failed. Please try again.`,
+            request.sourceLabel,
+          );
+        } catch {
+          // Best effort only; the original delivery failure is logged by the caller.
+        }
+        throw error;
+      }
+    } finally {
+      if (this.activeBtw.get(sessionId) === request) {
+        this.activeBtw.delete(sessionId);
+      }
+    }
+  }
+
+  private isBtwCurrent(sessionId: string, request: ActiveBtw): boolean {
+    if (
+      request.controller.signal.aborted ||
+      this.activeBtw.get(sessionId) !== request ||
+      this.bridge !== request.bridge ||
+      !this.router.isSessionLive(sessionId)
+    ) {
+      return false;
+    }
+    const currentTarget = this.router.getTarget(sessionId);
+    // Compare owner + thread only: SessionRouter.promoteTargetToGroup flips
+    // the live target's isGroup whenever any group envelope or loop/webhook
+    // target resolves the same routing key, which changes neither the
+    // conversation nor the delivery destination, so it must not void an
+    // acknowledged answer. The named-task branch applies the same tolerance to
+    // the registry's creation-time snapshot, which keeps the pre-promotion
+    // isGroup value.
+    if (
+      !currentTarget ||
+      !this.sameTaskOwner(request.target, currentTarget) ||
+      request.target.threadId !== currentTarget.threadId
+    ) {
+      return false;
+    }
+    if (!request.taskName) return true;
+    const reference = this.namedSessions?.presentation(sessionId);
+    return (
+      reference?.status === 'open' &&
+      reference.taskName === request.taskName &&
+      this.sameTaskOwner(currentTarget, reference.target) &&
+      currentTarget.threadId === reference.target.threadId
+    );
+  }
+
+  private cancelBtw(sessionId: string): void {
+    const request = this.activeBtw.get(sessionId);
+    if (!request) return;
+    this.activeBtw.delete(sessionId);
+    request.controller.abort();
+  }
+
+  private cancelAllBtw(): void {
+    const requests = Array.from(this.activeBtw.values());
+    this.activeBtw.clear();
+    for (const request of requests) request.controller.abort();
   }
 
   async dispatchPermissionRequest(
@@ -565,12 +891,78 @@ export abstract class ChannelBase {
       }
       return;
     }
+    let sourceLabel: string | undefined;
+    let taskName: string | undefined;
+    if (this.namedSessions) {
+      let presentation: NamedSessionTaskReference | undefined;
+      try {
+        presentation = await this.namedSessions.resolvePresentation(
+          event.sessionId,
+        );
+      } catch (err) {
+        try {
+          await this.bridge.respondToPermission?.(event.requestId, {
+            outcome: { outcome: 'cancelled' },
+          });
+        } catch (respondErr) {
+          process.stderr.write(
+            `[${this.name}] permission cancellation failed for request ${sanitizeLogText(event.requestId, 128)}: ${this.lifecycleError(respondErr)}\n`,
+          );
+        }
+        throw err;
+      }
+      const currentTarget = this.permissionTargetForEvent(event);
+      const currentPresentation = this.namedSessions.presentation(
+        event.sessionId,
+      );
+      if (
+        !presentation ||
+        presentation.status !== 'open' ||
+        !currentTarget ||
+        !this.router.isSessionLive(event.sessionId) ||
+        !currentPresentation ||
+        currentPresentation.status !== 'open' ||
+        currentPresentation.taskName !== presentation.taskName ||
+        !this.sameTaskOwner(target, currentTarget) ||
+        !this.sameTaskOwner(currentTarget, currentPresentation.target)
+      ) {
+        try {
+          await this.bridge.respondToPermission?.(event.requestId, {
+            outcome: { outcome: 'cancelled' },
+          });
+        } catch (respondErr) {
+          process.stderr.write(
+            `[${this.name}] permission cancellation failed for request ${sanitizeLogText(event.requestId, 128)}: ${this.lifecycleError(respondErr)}\n`,
+          );
+        }
+        return;
+      }
+      const active = this.activePrompts.get(event.sessionId);
+      sourceLabel = active
+        ? active.sourceLabel
+        : this.createSourceLabel(presentation, target);
+      if (!sourceLabel) {
+        try {
+          await this.bridge.respondToPermission?.(event.requestId, {
+            outcome: { outcome: 'cancelled' },
+          });
+        } catch (respondErr) {
+          process.stderr.write(
+            `[${this.name}] permission cancellation failed for request ${sanitizeLogText(event.requestId, 128)}: ${this.lifecycleError(respondErr)}\n`,
+          );
+        }
+        return;
+      }
+      taskName = presentation.taskName;
+    }
     this.removePendingPermission(event.requestId);
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
       target,
       request: event.request,
+      ...(sourceLabel ? { sourceLabel } : {}),
+      ...(taskName ? { taskName } : {}),
       settlementListeners: new Set(),
     };
     this.pendingPermissions.set(event.requestId, pending);
@@ -583,15 +975,24 @@ export abstract class ChannelBase {
       if (presentation && (await presentation)) {
         return;
       }
+      const permissionPresentation = this.tryPresentPermission(pending);
+      if (permissionPresentation && (await permissionPresentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
         this.supportsProactiveSend() &&
         this.supportsProactiveTarget(target)
       ) {
-        await this.pushProactive(target, text);
+        await this.pushProactive(target, text, pending.sourceLabel);
       } else {
-        await this.sendThreadMessage(target.chatId, target.threadId, text);
+        await this.sendThreadMessage(
+          target.chatId,
+          target.threadId,
+          text,
+          pending.sourceLabel,
+        );
       }
     } catch (err) {
       this.removePendingPermission(event.requestId, 'cancelled');
@@ -636,6 +1037,7 @@ export abstract class ChannelBase {
       runId: active.runId,
       owner: active.owner,
       target: pending.target,
+      ...(pending.sourceLabel ? { sourceLabel: pending.sourceLabel } : {}),
       ...(precedingSegment
         ? { precedingSegmentId: precedingSegment.segmentId }
         : {}),
@@ -690,6 +1092,150 @@ export abstract class ChannelBase {
         return false;
       }
     })();
+  }
+
+  private tryPresentPermission(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const isUserQuestion =
+      meta?.['qwenInteractionKind'] === 'user_question' ||
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const decisions = this.permissionPresentationDecisions(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      isUserQuestion ||
+      !decisions
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelPermissionRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      title: this.permissionTitle(pending.request.toolCall),
+      decisions,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (decision) => {
+        const response = this.permissionPresentationResponse(pending, decision);
+        if (!response) return Promise.resolve(false);
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.permissionPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        const result = await this.presentPermissionRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] permission presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private permissionPresentationDecisions(
+    pending: PendingPermission,
+  ): ChannelPermissionRequestContext['decisions'] | undefined {
+    const allowOnce = this.approvalOption(pending);
+    if (!allowOnce) return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    const allowAlways = this.approvalAlwaysOption(pending);
+    return [
+      {
+        kind: 'allow_once',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(allowOnce, copy.allowOnce),
+          80,
+        ),
+      },
+      ...(allowAlways
+        ? [
+            {
+              kind: 'allow_always' as const,
+              label: sanitizeQuotedText(allowAlways.label, 80),
+            },
+          ]
+        : []),
+      {
+        kind: 'deny',
+        label: sanitizeQuotedText(
+          this.permissionOptionLabel(this.denialOption(pending), copy.deny),
+          80,
+        ),
+      },
+    ];
+  }
+
+  private permissionPresentationResponse(
+    pending: PendingPermission,
+    decision: ChannelPermissionDecision,
+  ): ChannelUserInputResponse | undefined {
+    if (decision === 'deny') return this.denialResponse(pending);
+    const optionId =
+      decision === 'allow_once'
+        ? this.approvalOptionId(pending)
+        : this.approvalAlwaysOption(pending)?.optionId;
+    return optionId
+      ? { outcome: { outcome: 'selected', optionId } }
+      : undefined;
   }
 
   private normalizeUserQuestions(
@@ -772,7 +1318,8 @@ export abstract class ChannelBase {
     response: ChannelUserInputResponse,
   ): Promise<boolean> {
     if (pending.responsePromise) {
-      return pending.responsePromise;
+      await pending.responsePromise;
+      return false;
     }
     if (
       this.pendingPermissions.get(pending.requestId) !== pending ||
@@ -846,7 +1393,33 @@ export abstract class ChannelBase {
   ) {
     this.name = name;
     this.config = config;
+    this.messageRoutes = new Map(Object.entries(config.messageRoutes ?? {}));
+    if (config.multiSession && this.messageRoutes.size > 0) {
+      throw new Error('messageRoutes cannot be combined with multiSession.');
+    }
+    if (
+      [...this.messageRoutes].some(
+        ([prefix, instructions]) =>
+          !prefix.trim() ||
+          prefix !== prefix.trim() ||
+          typeof instructions !== 'string',
+      )
+    ) {
+      throw new Error(
+        'Message routes require non-empty prefixes and string instructions.',
+      );
+    }
+    if (
+      config.defaultMessageRoute !== undefined &&
+      !this.messageRoutes.has(config.defaultMessageRoute)
+    ) {
+      throw new Error(
+        'defaultMessageRoute must name a configured message route.',
+      );
+    }
+    this.privatePolicy = resolvePrivatePolicy(config);
     this.bridge = bridge;
+    this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
     this.stateDir = options?.stateDir;
     this.identity = Object.freeze(this.resolveIdentity(name, config));
@@ -869,7 +1442,7 @@ export abstract class ChannelBase {
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
+      this.privatePolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
     this.groupGate = new GroupGate(
@@ -877,15 +1450,20 @@ export abstract class ChannelBase {
       config.groups,
       pairingStore,
     );
-    this.dmGate = new DmGate(config.dmPolicy);
+    this.dmGate = new DmGate(
+      this.privatePolicy === 'disabled' ? 'disabled' : 'open',
+    );
     this.gate = new SenderGate(
-      config.senderPolicy,
+      this.privatePolicy,
       config.allowedUsers,
       pairingStore,
     );
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
+    if (config.multiSession && config.sessionRotation) {
+      throw new Error('sessionRotation cannot be combined with multiSession.');
+    }
     if (config.multiSession) {
       if (config.sessionScope !== 'user') {
         throw new Error(
@@ -903,6 +1481,38 @@ export abstract class ChannelBase {
         filePath: join(options.stateDir, 'named-sessions.json'),
         router: this.router,
         isBusy: (sessionId) => this.isNamedSessionBusy(sessionId),
+        onSessionRetiring: (sessionId) => this.onSessionRetiring(sessionId),
+      });
+    }
+    this.router.setChannelRotation(this.name, config.sessionRotation);
+    if (config.sessionRotation) {
+      this.router.setRotationActivityChecker(this.name, (sessionId) =>
+        this.isNamedSessionBusy(sessionId),
+      );
+      this.router.setRotationListener(this.name, (sessionId, target) => {
+        try {
+          this.onSessionRetiring(sessionId);
+        } catch (error) {
+          process.stderr.write(
+            `[${this.name}] Session retirement failed: ${this.lifecycleError(error)}\n`,
+          );
+        }
+        this.cancelBtw(sessionId);
+        this.dropCollectBuffer(sessionId);
+        this.instructedSessions.delete(sessionId);
+        this.unattendedMemorySessions.delete(sessionId);
+        this.removePendingPermissionsForSession(sessionId);
+        this.sessionQueues.delete(sessionId);
+        this.sessionGenerations.delete(sessionId);
+        void this.sendThreadMessage(
+          target.chatId,
+          target.threadId,
+          'This conversation reached its configured limit. Starting a fresh session.',
+        ).catch((error: unknown) => {
+          process.stderr.write(
+            `[${this.name}] Failed to announce session rotation: ${this.lifecycleError(error)}\n`,
+          );
+        });
       });
     }
 
@@ -922,7 +1532,11 @@ export abstract class ChannelBase {
 
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
-  abstract disconnect(): void;
+  abstract disconnect(): void | Promise<void>;
+
+  waitForDisconnect(): Promise<void> {
+    return Promise.resolve();
+  }
 
   /**
    * Thread-targeted delivery. Polling adapters override this to post comments
@@ -933,8 +1547,12 @@ export abstract class ChannelBase {
     chatId: string,
     _threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendMessage(chatId, text);
+    await this.sendMessage(
+      chatId,
+      this.formatAttributedText(text, sourceLabel),
+    );
   }
 
   /**
@@ -949,6 +1567,12 @@ export abstract class ChannelBase {
 
   protected async presentUserInputRequest(
     _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
+  protected async presentPermissionRequest(
+    _context: ChannelPermissionRequestContext,
   ): Promise<UserInputPresentationResult> {
     return { kind: 'unsupported' };
   }
@@ -1163,6 +1787,7 @@ export abstract class ChannelBase {
       segmentId,
       owner: active.owner,
       target: resolvedTarget,
+      ...(active.sourceLabel ? { sourceLabel: active.sourceLabel } : {}),
       ...(active.messageId ? { messageId: active.messageId } : {}),
     };
   }
@@ -1224,13 +1849,19 @@ export abstract class ChannelBase {
   protected async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (target.threadId) {
       throw new Error(
         'Channel does not support proactive loop messages for threaded targets.',
       );
     }
-    await this.sendThreadMessage(target.chatId, target.threadId, text);
+    await this.sendThreadMessage(
+      target.chatId,
+      target.threadId,
+      text,
+      sourceLabel,
+    );
   }
 
   protected async pushProactiveDelivery(
@@ -1296,6 +1927,11 @@ export abstract class ChannelBase {
       if (this.config.instructions) {
         staticContext.push(this.config.instructions);
       }
+      const routeInstructions =
+        target.messageRoute === undefined
+          ? undefined
+          : this.messageRoutes.get(target.messageRoute);
+      if (routeInstructions) staticContext.push(routeInstructions);
       // Boundary block goes last: recency bias means later instructions win,
       // and the isolation boundary must not be overridable by operator text.
       if (this.shouldPrependChannelBoundaryPrompt()) {
@@ -1478,13 +2114,11 @@ export abstract class ChannelBase {
     this.collectBuffers.delete(sessionId);
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
-    const coalescedDisplayText = buffer.map((b) => b.displayText).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
     this.notifyPromptBufferDrained(lastEnvelope.chatId, sessionId, buffer);
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
-      displayText: coalescedDisplayText,
       alreadyPrefixed: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
@@ -1508,6 +2142,7 @@ export abstract class ChannelBase {
 
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
+    this.cancelAllBtw();
     if (this.registerBridgeEvents) {
       this.detachBridgeEvents(this.bridge);
     }
@@ -1558,7 +2193,10 @@ export abstract class ChannelBase {
       job.target.threadId,
       job.cwd,
       job.target.isGroup,
+      { routeKey: job.target.messageRoute, holdForTurn: true },
     );
+    this.reserveQueuedTurn(sessionId);
+    this.router.releaseRoutingLease(sessionId);
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
     // Without the delivery-contract sentence the model treats "post X" prompts
@@ -1711,7 +2349,6 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
-          job.prompt,
           promptState,
           job.id,
           options.timeoutMs,
@@ -1818,11 +2455,12 @@ export abstract class ChannelBase {
         );
       }
     });
+    const tracked = current.finally(() => this.releaseQueuedTurn(sessionId));
     this.sessionQueues.set(
       sessionId,
-      current.then(() => undefined).catch(() => {}),
+      tracked.then(() => undefined).catch(() => {}),
     );
-    return current;
+    return tracked;
   }
 
   validateWebhookTask(task: ChannelWebhookTask): void {
@@ -1880,10 +2518,12 @@ export abstract class ChannelBase {
       target.isGroup,
       {
         routingThreadId: this.webhookRoutingThreadId(task, target),
+        holdForTurn: true,
       },
     );
+    this.reserveQueuedTurn(sessionId);
+    this.router.releaseRoutingLease(sessionId);
     const promptText = buildChannelWebhookPrompt(task, target);
-    const displayText = buildChannelWebhookDisplayText(task);
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);
@@ -2009,7 +2649,6 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
-          displayText,
           promptState,
           taskId,
           options.timeoutMs,
@@ -2096,11 +2735,12 @@ export abstract class ChannelBase {
         );
       }
     });
+    const tracked = current.finally(() => this.releaseQueuedTurn(sessionId));
     this.sessionQueues.set(
       sessionId,
-      current.then(() => undefined).catch(() => undefined),
+      tracked.then(() => undefined).catch(() => undefined),
     );
-    return await current;
+    return await tracked;
   }
 
   private webhookRoutingThreadId(
@@ -2114,12 +2754,13 @@ export abstract class ChannelBase {
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
-    displayText: string,
     promptState: ActivePrompt,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
+    const prompt = promptBridge.prompt(sessionId, promptText, {
+      displayText: sanitizeDisplayText(promptText),
+    });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -2163,6 +2804,8 @@ export abstract class ChannelBase {
         }),
       ]);
       if (!cancelled) {
+        this.cancelBtw(sessionId);
+        this.onSessionRetiring(sessionId);
         this.router.removeSessionId(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
@@ -2249,12 +2892,15 @@ export abstract class ChannelBase {
         if (
           !cancelSucceeded ||
           active.deliveryStarted ||
-          (turnEnded && !active.cancelled)
+          (turnEnded && !active.cancelled && !active.cancellationEmitted)
         ) {
           return false;
         }
+        if (turnEnded) {
+          this.emitTaskCancellation(active, sessionId, reason);
+          return true;
+        }
         active.cancelled = true;
-        this.stopActiveStreaming(active, sessionId, reason);
         this.dropCollectBuffer(sessionId);
         this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
@@ -2341,16 +2987,28 @@ export abstract class ChannelBase {
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
   onSessionDied(sessionId: string): void {
+    this.cancelBtw(sessionId);
     this.router.handleSessionDied(sessionId);
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
 
+  /**
+   * Called when the standalone ACP bridge process exits. Its in-flight turns
+   * never settle, but crash recovery restores the sessions on a fresh bridge,
+   * so overrides must clear only turn-scoped transient state (never session
+   * routing) and must not fabricate terminal outcomes for interrupted turns.
+   */
+  onBridgeDisconnected(): void {}
+
+  protected onSessionRetiring(_sessionId: string): void {}
+
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
     bridge.on('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.on('sessionDied', this.bridgeSessionDiedListener);
+    bridge.on('disconnected', this.bridgeDisconnectedListener);
     bridge.on('permissionRequest', this.bridgePermissionRequestListener);
     bridge.on('permissionResolved', this.bridgePermissionResolvedListener);
   }
@@ -2359,6 +3017,7 @@ export abstract class ChannelBase {
     bridge.off('toolCall', this.bridgeToolCallListener);
     bridge.off('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.off('sessionDied', this.bridgeSessionDiedListener);
+    bridge.off('disconnected', this.bridgeDisconnectedListener);
     bridge.off('permissionRequest', this.bridgePermissionRequestListener);
     bridge.off('permissionResolved', this.bridgePermissionResolvedListener);
   }
@@ -2373,6 +3032,11 @@ export abstract class ChannelBase {
     _sessionId: string,
     _messageId?: string,
   ): void {}
+
+  // Queue waits and bridge recovery can outlive an adapter connection.
+  protected canStartInboundTurn(): boolean {
+    return true;
+  }
 
   protected onPromptBuffered(
     _chatId: string,
@@ -2438,11 +3102,17 @@ export abstract class ChannelBase {
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const active = this.activePrompts.get(sessionId);
     const target = this.router.getTarget(sessionId);
     const threadId = active?.threadId ?? target?.threadId;
-    await this.sendThreadMessage(chatId, threadId, text);
+    await this.sendThreadMessage(
+      chatId,
+      threadId,
+      text,
+      sourceLabel ?? active?.sourceLabel,
+    );
   }
 
   /**
@@ -2459,6 +3129,14 @@ export abstract class ChannelBase {
 
   protected getResponseMetadata(sessionId: string): string | undefined {
     return this.activePrompts.get(sessionId)?.metadata;
+  }
+
+  protected getResponseSourceLabel(sessionId: string): string | undefined {
+    return this.activePrompts.get(sessionId)?.sourceLabel;
+  }
+
+  protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
+    return this.inboundErrorSourceLabels.get(envelope);
   }
 
   /**
@@ -2481,9 +3159,14 @@ export abstract class ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
-    _segment?: ChannelOutputSegmentContext,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
-    await this.sendResponseMessage(chatId, fullText, sessionId);
+    await this.sendResponseMessage(
+      chatId,
+      fullText,
+      sessionId,
+      segment?.sourceLabel,
+    );
   }
 
   /**
@@ -2654,6 +3337,7 @@ export abstract class ChannelBase {
   private pendingPermissionForEnvelope(
     envelope: Envelope,
     args: string,
+    selectedSessionId?: string | null,
   ): PendingPermissionLookup {
     const trimmed = args.trim();
     if (trimmed) {
@@ -2677,6 +3361,8 @@ export abstract class ChannelBase {
       .filter(
         (pending): pending is PendingPermission =>
           pending !== undefined &&
+          (selectedSessionId === undefined ||
+            pending.sessionId === selectedSessionId) &&
           this.canEnvelopeAnswerPendingPermission(envelope, pending),
       );
     if (matching.length === 0) {
@@ -2698,7 +3384,7 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
-      (!pending.userInputPresented ||
+      ((!pending.userInputPresented && !pending.permissionPresented) ||
         pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
@@ -2707,35 +3393,153 @@ export abstract class ChannelBase {
 
   private formatPermissionRequest(pending: PendingPermission): string {
     const { toolCall } = pending.request;
-    const title = sanitizeQuotedText(toolCall.title || 'Tool use', 160);
+    const copy = PERMISSION_COPY[this.locale];
+    const parameters = this.permissionParameterSummary(toolCall);
+    const approveLabel = this.permissionOptionLabel(
+      this.approvalOption(pending),
+      copy.allowOnce.toLocaleLowerCase(this.locale),
+    );
     const alwaysOption = this.approvalAlwaysOption(pending);
+    const denyLabel = this.permissionOptionLabel(
+      this.denialOption(pending),
+      copy.deny.toLocaleLowerCase(this.locale),
+    );
+    const requestSuffix = pending.taskName ? ` ${pending.requestId}` : '';
+    const replyPadding = pending.taskName
+      ? { approve: '          ', always: '   ', deny: '             ' }
+      : { approve: '        ', always: ' ', deny: '           ' };
     const replies = [
-      '/approve        allow once',
-      ...(alwaysOption ? [`/approve-always ${alwaysOption.label}`] : []),
-      '/deny           deny',
+      `/approve${requestSuffix}${replyPadding.approve}${approveLabel}`,
+      ...(alwaysOption
+        ? [
+            `/approve-always${requestSuffix}${replyPadding.always}${alwaysOption.label}`,
+          ]
+        : []),
+      `/deny${requestSuffix}${replyPadding.deny}${denyLabel}`,
     ];
-    const lines = [
-      'Permission required to run a tool',
+    return [
+      copy.required,
+      ...(pending.taskName ? [`${copy.request} ${pending.requestId}`] : []),
       '',
-      'Command:',
-      title,
+      `${copy.tool} ${this.permissionToolName(toolCall)}`,
+      `${copy.action} ${this.permissionTitle(toolCall)}`,
+      ...(parameters ? [`${copy.parameters} ${parameters}`] : []),
       '',
-      'Reply with:',
+      copy.replyWith,
       ...replies,
-    ];
-    return lines.join('\n');
+    ].join('\n');
   }
 
-  private approvalOptionId(pending: PendingPermission): string | undefined {
+  private permissionTitle(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawTitle =
+      typeof toolCall.title === 'string' ? toolCall.title : undefined;
+    return (
+      sanitizeQuotedText(rawTitle || '', 160).trim() ||
+      PERMISSION_COPY[this.locale].toolUse
+    );
+  }
+
+  private permissionToolName(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const meta = isRecord(rawToolCall['_meta'])
+      ? rawToolCall['_meta']
+      : undefined;
+    for (const candidate of [meta?.['toolName'], rawToolCall['kind']]) {
+      if (typeof candidate !== 'string') continue;
+      const name = sanitizeQuotedText(candidate, 120).trim();
+      if (name) return name;
+    }
+    return 'unknown';
+  }
+
+  private permissionParameterSummary(
+    toolCall: PermissionRequestEvent['request']['toolCall'],
+  ): string | undefined {
+    const rawToolCall = toolCall as unknown as Record<string, unknown>;
+    const rawInput = isRecord(rawToolCall['rawInput'])
+      ? rawToolCall['rawInput']
+      : undefined;
+    if (!rawInput) return undefined;
+
+    const entries = Object.entries(rawInput);
+    if (entries.length === 0) return undefined;
+    const visible = entries.slice(0, 4).map(([key, value]) => {
+      const safeKey = sanitizeQuotedText(key, 48).trim() || 'unknown';
+      if (Array.isArray(value)) {
+        return `${safeKey} (${value.length} ${value.length === 1 ? 'item' : 'items'})`;
+      }
+      if (isRecord(value)) {
+        return `${safeKey} (object)`;
+      }
+      return safeKey;
+    });
+    if (entries.length > visible.length) {
+      visible.push(`+${entries.length - visible.length} more`);
+    }
+    return visible.join(', ');
+  }
+
+  private permissionOptionLabel(
+    option: PermissionOption | undefined,
+    fallback: string,
+  ): string {
+    const rawLabel = typeof option?.name === 'string' ? option.name : '';
+    const label = sanitizeQuotedText(rawLabel, 160).trim();
+    if (!label) return fallback;
+    return this.localizedPermissionOptionLabel(option, label) ?? label;
+  }
+
+  private localizedPermissionOptionLabel(
+    option: PermissionOption | undefined,
+    label: string,
+  ): string | undefined {
+    if (this.locale !== 'zh') return undefined;
+    const copy = PERMISSION_COPY[this.locale];
+    if (option?.kind === 'allow_always') {
+      if (option.optionId === 'proceed_always_project') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow in project',
+          copy.allowAlwaysProject,
+        );
+      }
+      if (option.optionId === 'proceed_always_user') {
+        return localizedScopedAlwaysLabel(
+          label,
+          'Always Allow for user',
+          copy.allowAlwaysUser,
+        );
+      }
+      if (option.optionId === 'proceed_always' && label === 'Allow All Edits') {
+        return copy.allowAlways;
+      }
+      return undefined;
+    }
+    if (label === 'Allow' || label === 'Allow once') return copy.allowOnce;
+    if (label === 'Deny' || label === 'Reject') return copy.deny;
+    return undefined;
+  }
+
+  private approvalOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
     const options = pending.request.options;
     return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ??
+      options.find((option) => option.kind === 'allow_once') ??
       options.find(
         (option) =>
           option.optionId === 'proceed_once' &&
           (option as { kind?: string }).kind === undefined,
-      )?.optionId
+      )
     );
+  }
+
+  private approvalOptionId(pending: PendingPermission): string | undefined {
+    return this.approvalOption(pending)?.optionId;
   }
 
   private approvalAlwaysOption(
@@ -2753,7 +3557,10 @@ export abstract class ChannelBase {
     }
     return {
       optionId: option.optionId,
-      label: this.approvalAlwaysLabel(option),
+      label: this.permissionOptionLabel(
+        option,
+        this.approvalAlwaysLabel(option),
+      ),
     };
   }
 
@@ -2767,13 +3574,14 @@ export abstract class ChannelBase {
   }
 
   private approvalAlwaysLabel(option: PermissionOption): string {
+    const copy = PERMISSION_COPY[this.locale];
     if (option.optionId === 'proceed_always_project') {
-      return 'always allow for this project';
+      return copy.allowAlwaysProject;
     }
     if (option.optionId === 'proceed_always_user') {
-      return 'always allow for this user';
+      return copy.allowAlwaysUser;
     }
-    return 'always allow';
+    return copy.allowAlways;
   }
 
   private denialResponse(pending: PendingPermission): {
@@ -2781,7 +3589,17 @@ export abstract class ChannelBase {
       | { outcome: 'selected'; optionId: string }
       | { outcome: 'cancelled' };
   } {
-    const option =
+    const option = this.denialOption(pending);
+    if (option) {
+      return { outcome: { outcome: 'selected', optionId: option.optionId } };
+    }
+    return { outcome: { outcome: 'cancelled' } };
+  }
+
+  private denialOption(
+    pending: PendingPermission,
+  ): PermissionOption | undefined {
+    return (
       pending.request.options.find(
         (candidate) => candidate.kind === 'reject_once',
       ) ??
@@ -2789,11 +3607,8 @@ export abstract class ChannelBase {
         (candidate) =>
           candidate.optionId === 'cancel' &&
           (candidate as { kind?: string }).kind === undefined,
-      );
-    if (option) {
-      return { outcome: { outcome: 'selected', optionId: option.optionId } };
-    }
-    return { outcome: { outcome: 'cancelled' } };
+      )
+    );
   }
 
   private async handlePermissionResponseCommand(
@@ -2809,16 +3624,34 @@ export abstract class ChannelBase {
       );
       return true;
     }
-    const lookup = this.pendingPermissionForEnvelope(envelope, args);
+    const namedSessions = this.namedSessions;
+    const bareNamedCommand = namedSessions !== undefined && args.trim() === '';
+    let selectedTask: NamedSessionSelection | undefined;
+    if (bareNamedCommand) {
+      try {
+        selectedTask = await namedSessions.current(
+          this.namedSessionOwner(envelope),
+        );
+      } catch (error) {
+        await this.sendNamedSessionError(envelope, error);
+        return true;
+      }
+    }
+    const lookup = this.pendingPermissionForEnvelope(
+      envelope,
+      args,
+      bareNamedCommand ? (selectedTask?.sessionId ?? null) : undefined,
+    );
     if (lookup.kind === 'ambiguous') {
       const requestList = lookup.requestIds
         .slice(0, 6)
         .map((id) => {
           const pending = this.pendingPermissions.get(id);
           const title = pending
-            ? `: ${sanitizeQuotedText(pending.request.toolCall.title || 'Tool use', 160)}`
+            ? `: ${this.permissionTitle(pending.request.toolCall)}`
             : '';
-          return `- ${sanitizeQuotedText(id, 128)}${title}`;
+          const task = pending?.taskName ? `Task ${pending.taskName} — ` : '';
+          return `- ${task}${sanitizeQuotedText(id, 128)}${title}`;
         })
         .join('\n');
       await this.sendThreadMessage(
@@ -2834,24 +3667,31 @@ export abstract class ChannelBase {
         envelope.threadId,
         lookup.explicit
           ? 'No pending permission request with that id for this chat.'
-          : 'No pending permission request for this chat.',
+          : selectedTask
+            ? `No pending permission request for selected task "${selectedTask.name}". Use an explicit request ID to answer another task.`
+            : this.namedSessions
+              ? 'No task is currently selected. Use an explicit request ID to answer a named task.'
+              : 'No pending permission request for this chat.',
       );
       return true;
     }
+    const { pending } = lookup;
     if (!this.bridge.respondToPermission) {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
         'Permission relay is not available for this session.',
+        pending.sourceLabel,
       );
       return true;
     }
 
-    const { pending } = lookup;
     if (pending.userInputPresented && decision !== 'deny') {
-      await this.sendMessage(
+      await this.sendThreadMessage(
         envelope.chatId,
-        'Submit this question through its interactive card, or use /deny [request-id] to cancel it.',
+        envelope.threadId,
+        `Submit this question through its interactive card, or use /deny [request-id] to cancel it.`,
+        pending.sourceLabel,
       );
       return true;
     }
@@ -2874,15 +3714,17 @@ export abstract class ChannelBase {
         decision === 'approve-always'
           ? 'This permission request has no always-allow option.'
           : 'This permission request has no approvable option.',
+        pending.sourceLabel,
       );
       return true;
     }
 
     let accepted: boolean;
     try {
-      accepted = pending.userInputPresented
-        ? await this.respondToUserInput(pending, response)
-        : await this.bridge.respondToPermission(pending.requestId, response);
+      accepted =
+        pending.userInputPresented || pending.permissionPresented
+          ? await this.respondToUserInput(pending, response)
+          : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(
@@ -2892,6 +3734,7 @@ export abstract class ChannelBase {
         envelope.chatId,
         envelope.threadId,
         'Failed to answer the permission request.',
+        pending.sourceLabel,
       );
       return true;
     }
@@ -2906,6 +3749,7 @@ export abstract class ChannelBase {
             ? 'Permission approved always.'
             : 'Permission denied.'
         : 'Permission request is no longer pending.',
+      pending.sourceLabel,
     );
     return true;
   }
@@ -2934,6 +3778,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
   }
 
@@ -2973,6 +3818,25 @@ export abstract class ChannelBase {
     this.releaseQueuedTurn(binding.sessionId);
   }
 
+  /**
+   * Follow a task onto the session its reload healed to (a superseded
+   * redirect). The queue reservation and the staleness generation are keyed
+   * by session id, so both must move with the binding: leaving them behind
+   * keeps the stale id "busy" forever and drops the turn on a generation the
+   * replacement never had.
+   */
+  private moveNamedTurnBinding(
+    binding: NamedTurnBinding,
+    sessionId: string,
+  ): void {
+    if (binding.sessionId !== null) {
+      this.releaseQueuedTurn(binding.sessionId);
+    }
+    binding.sessionId = sessionId;
+    binding.generation = this.sessionGenerations.get(sessionId) ?? 0;
+    this.reserveQueuedTurn(sessionId);
+  }
+
   private finishNamedTurnBinding(envelope: Envelope): void {
     const binding = this.namedTurnBindings.get(envelope);
     if (!binding) return;
@@ -2997,7 +3861,6 @@ export abstract class ChannelBase {
     try {
       const sessionId = await namedSessions.resolve(
         this.namedSessionOwner(envelope),
-        undefined,
         (resolvedSessionId) => {
           const binding = this.bindNamedTurn(envelope, resolvedSessionId);
           return () => this.releaseNamedTurnBinding(binding);
@@ -3039,14 +3902,88 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * The actionable recovery message for a worktree task whose ownership state
+   * the daemon refused to restore. Both codes come from the load/resume route
+   * — the reset route resumes an interrupted transfer itself and reports a
+   * broken marker as invalid state — so they surface on selection and on a
+   * message, wrapped in the manager's generic load failure.
+   *
+   * Clearing always acts on the *selected* task, so pointing the user at a
+   * clear is only safe when the task that failed is the selected one. Aimed at
+   * any other task it would run a full ownership transfer against a healthy
+   * one and destroy that conversation, so the alternative points at the close
+   * that works on the broken task without loading it. Both name that task.
+   */
+  private async worktreeRecoveryMessage(
+    envelope: Envelope,
+    error: unknown,
+  ): Promise<string | undefined> {
+    const code = readDaemonHttpErrorCode(error);
+    if (
+      code !== 'worktree_reset_interrupted' &&
+      code !== 'worktree_marker_missing'
+    ) {
+      return undefined;
+    }
+    const interrupted = code === 'worktree_reset_interrupted';
+    const failedTaskName =
+      error instanceof NamedSessionTaskError ? error.taskName : undefined;
+    // This message bypasses the wrapper's sanitizeDisplayText, so bound the one
+    // piece of interpolated text it adds.
+    const safeTaskName =
+      failedTaskName === undefined
+        ? undefined
+        : sanitizeDisplayText(failedTaskName, 32);
+    const subject =
+      safeTaskName === undefined ? 'The task' : `Task "${safeTaskName}"`;
+    const problem = interrupted
+      ? 'was interrupted while being reset'
+      : 'cannot verify its worktree because its ownership marker is missing';
+    if (
+      safeTaskName !== undefined &&
+      failedTaskName === (await this.selectedTaskName(envelope))
+    ) {
+      return `${subject} ${problem}. Its files were not changed. ${
+        interrupted
+          ? 'Clear the task again to finish the reset.'
+          : 'Clear the task to restart it in the same worktree, or close it.'
+      }`;
+    }
+    const remedy =
+      safeTaskName === undefined
+        ? 'select this task first or close it'
+        : `select this task first or close it with /session close ${safeTaskName}`;
+    return `${subject} ${problem}. Its files were not changed. Clearing now would reset the selected task instead, so ${remedy}.`;
+  }
+
+  private async selectedTaskName(
+    envelope: Envelope,
+  ): Promise<string | undefined> {
+    const namedSessions = this.namedSessions;
+    if (!namedSessions) return undefined;
+    try {
+      return (await namedSessions.current(this.namedSessionOwner(envelope)))
+        ?.name;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async sendNamedSessionError(
     envelope: Envelope,
     error: unknown,
   ): Promise<void> {
+    if (error instanceof Error && error.cause !== undefined) {
+      process.stderr.write(
+        `[${sanitizeLogText(this.name, 64)}] named-session operation failed: ${this.lifecycleError(error)} | cause: ${this.lifecycleError(error.cause)}\n`,
+      );
+    }
     const message =
-      error instanceof Error
+      (await this.worktreeRecoveryMessage(envelope, error)) ??
+      (error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
-        : 'Named-session operation failed.';
+        : 'Named-session operation failed.');
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
@@ -3065,7 +4002,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /sessions [all]',
+        `Usage: /sessions [all]`,
       );
       return true;
     }
@@ -3118,25 +4055,31 @@ export abstract class ChannelBase {
             envelope.threadId,
             current
               ? `Current task: ${current.name} (${current.isolation})`
-              : 'No task is currently selected. Use /session new <name> or /session use <name>.',
+              : `No task is currently selected. Use /session new <name> or /session use <name>.`,
           );
           return true;
         }
         case 'new': {
-          if (parts.includes('--worktree')) {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              'Worktree tasks are not available in Part 2 yet. Create a shared task with /session new <name>.',
-            );
-            return true;
+          const isolation =
+            parts.length === 2 && parts[1] === '--worktree'
+              ? 'worktree'
+              : 'shared';
+          if (
+            (isolation === 'shared' && parts.length !== 1) ||
+            (isolation === 'worktree' && parts.length !== 2) ||
+            parts[0]?.startsWith('-')
+          ) {
+            break;
           }
-          if (parts.length !== 1) break;
-          const created = await namedSessions.create(owner, parts[0]!);
+          const created = await namedSessions.create(
+            owner,
+            parts[0]!,
+            isolation,
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Created and selected task "${created.name}" (shared workspace).`,
+            `Created and selected task "${created.name}" (${created.isolation} workspace).`,
           );
           return true;
         }
@@ -3152,7 +4095,11 @@ export abstract class ChannelBase {
         }
         case 'close': {
           if (parts.length !== 1) break;
+          const closing = await namedSessions.lookup(owner, parts[0]!);
           const result = await namedSessions.close(owner, parts[0]!);
+          if (closing) {
+            this.cancelBtw(closing.sessionId);
+          }
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
@@ -3162,13 +4109,51 @@ export abstract class ChannelBase {
           );
           return true;
         }
-        case 'cancel':
+        case 'cancel': {
+          if (parts.length > 1) break;
+          const taskName = parts[0];
+          const task = taskName
+            ? await namedSessions.lookup(owner, taskName)
+            : await namedSessions.current(owner);
+          if (!task) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              taskName
+                ? `Task "${sanitizeQuotedText(taskName, 32)}" was not found.`
+                : 'No task is currently selected.',
+            );
+            return true;
+          }
+          if (task.status !== 'open') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `Task "${task.name}" is closed.`,
+            );
+            return true;
+          }
+          if (!this.activePrompts.has(task.sessionId)) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `No request is currently running for task "${task.name}".`,
+            );
+            return true;
+          }
+          const cancelled = await this.requestActivePromptCancellation(
+            task.sessionId,
+            'cancel_command',
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+            cancelled
+              ? `Cancelled task "${task.name}".`
+              : `Failed to cancel task "${task.name}".`,
           );
           return true;
+        }
         default:
           break;
       }
@@ -3179,7 +4164,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+      `Usage: /session current | /session new <name> [--worktree] | /session use <name> | /session close <name> | /session cancel [<name>]`,
     );
     return true;
   }
@@ -3188,15 +4173,43 @@ export abstract class ChannelBase {
   private registerSharedCommands(): void {
     const doClear = async (envelope: Envelope): Promise<void> => {
       let resetTaskName: string | undefined;
+      let resetWorktreeKept = false;
       let removedIds: string[];
+      const retiringSessionId = this.namedSessions
+        ? undefined
+        : this.router.getSession(
+            this.name,
+            envelope.senderId,
+            envelope.chatId,
+            envelope.threadId,
+            envelope.messageRoute,
+          );
+      if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
         try {
           const reset = await this.namedSessions.reset(
             this.namedSessionOwner(envelope),
           );
           resetTaskName = reset?.name;
+          resetWorktreeKept = reset?.worktreeKept ?? false;
           removedIds = reset ? [reset.previousSessionId] : [];
         } catch (error) {
+          // The reset route's busy signal has its own wording; every other
+          // typed failure goes through the shared named-session surface.
+          const code = readDaemonHttpErrorCode(error);
+          if (code !== undefined) {
+            process.stderr.write(
+              `[${sanitizeLogText(this.name, 64)}] worktree reset failed (${sanitizeLogText(code, 64)}): ${this.lifecycleError(error)}\n`,
+            );
+          }
+          if (code === 'worktree_reset_active') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
+            );
+            return;
+          }
           await this.sendNamedSessionError(envelope, error);
           return;
         }
@@ -3206,11 +4219,16 @@ export abstract class ChannelBase {
           envelope.senderId,
           envelope.chatId,
           envelope.threadId,
+          envelope.messageRoute,
         );
       }
       this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
+          if (!this.namedSessions && id !== retiringSessionId) {
+            this.onSessionRetiring(id);
+          }
+          this.cancelBtw(id);
           // Audit: clearing a SHARED session wipes the conversation for every
           // participant, so record who triggered it (sanitized display name +
           // stable senderId) and which session — mirrors the file's stderr audit
@@ -3318,7 +4336,9 @@ export abstract class ChannelBase {
           envelope.chatId,
           envelope.threadId,
           resetTaskName
-            ? `Task "${resetTaskName}" reset with a fresh conversation.`
+            ? resetWorktreeKept
+              ? `Task "${resetTaskName}" reset with a fresh conversation; its worktree and files were kept.`
+              : `Task "${resetTaskName}" reset with a fresh conversation.`
             : 'Session cleared. The next message starts a fresh conversation.',
         );
       } else {
@@ -3331,7 +4351,7 @@ export abstract class ChannelBase {
     };
 
     // For a shared session, clearing it affects everyone who shares it: restrict
-    // it to authorized senders (config.allowedUsers, when set) and require an
+    // it to the session's operators (see isSharedSessionOperator) and require an
     // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
@@ -3347,7 +4367,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.',
+          `This clears the shared session for everyone who shares it. Re-send with "confirm" (e.g. /clear confirm) to proceed.`,
         );
         return true;
       }
@@ -3358,6 +4378,7 @@ export abstract class ChannelBase {
     this.registerCommand('clear', clearHandler);
     this.registerCommand('reset', clearHandler);
     this.registerCommand('new', clearHandler);
+    this.registerCommand('btw', () => Promise.resolve(false));
     if (this.namedSessions) {
       this.registerCommand('sessions', (envelope, args) =>
         this.handleNamedSessionsCommand(envelope, args),
@@ -3395,6 +4416,7 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
       // `single` collapses EVERY DM and group to one `__single__` session, so it
       // is shared channel-wide regardless of where the /who came from — report
@@ -3434,19 +4456,24 @@ export abstract class ChannelBase {
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
-        '/help — Show this help',
+        `/help — Show this help`,
         this.isSharedSession(envelope)
-          ? '/clear confirm — Clear the shared session (aliases: /reset, /new)'
-          : '/clear — Clear your session (aliases: /reset, /new)',
-        '/who — Show current session & workspace',
-        '/status — Show session info',
-        '/approve [request-id] — Approve a pending permission request',
-        '/approve-always [request-id] — Always approve a pending permission request',
-        '/deny [request-id] — Deny a pending permission request',
+          ? `/clear confirm — Clear the shared session (aliases: /reset, /new)`
+          : `/clear — Clear your session (aliases: /reset, /new)`,
+        `/who — Show current session & workspace`,
+        `/status — Show session info`,
+        `/approve [request-id] — Approve a pending permission request`,
+        `/approve-always [request-id] — Always approve a pending permission request`,
+        `/deny [request-id] — Deny a pending permission request`,
+        ...(this.bridge.btw
+          ? [
+              `/btw <question> — Ask a side question without interrupting the current task`,
+            ]
+          : []),
         ...(this.namedSessions
           ? [
-              '/sessions [all] — List your named tasks',
-              '/session current|new|use|close — Manage your named tasks',
+              `/sessions [all] — List your named tasks`,
+              `/session current|new|use|close|cancel — Manage your named tasks`,
             ]
           : []),
       ];
@@ -3460,6 +4487,7 @@ export abstract class ChannelBase {
         'approve',
         'approve-always',
         'deny',
+        'btw',
         'remember-channel',
         'channel-memory',
         'forget-channel',
@@ -3478,9 +4506,18 @@ export abstract class ChannelBase {
       }
 
       const sessionId = await this.currentSessionId(envelope);
-      const agentCommands = sessionId
-        ? this.getAgentCommandsForSession(sessionId)
-        : this.bridge.availableCommands;
+      const agentCommands = (
+        sessionId
+          ? this.getAgentCommandsForSession(sessionId)
+          : this.bridge.availableCommands
+      ).filter(
+        (command) =>
+          !this.commands.has(command.name) ||
+          // `btw` is registered unconditionally but only handled locally when
+          // the bridge supports it. Without that capability the agent's entry
+          // is the working one, so it must stay listed.
+          (command.name === 'btw' && !this.bridge.btw),
+      );
       if (agentCommands.length > 0) {
         lines.push('', 'Agent commands (forwarded to Qwen Code):');
         for (const cmd of agentCommands) {
@@ -3515,8 +4552,12 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
-      const policy = this.config.senderPolicy;
+      const policy =
+        envelope.isGroup && !this.isPersonalConversation(envelope)
+          ? this.groupSendersFor(envelope)
+          : this.privatePolicy;
       const lines = [
         `Session: ${hasSession ? 'active' : 'none'}`,
         `Access: ${policy}`,
@@ -3576,7 +4617,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
+          `Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>`,
         );
         return true;
     }
@@ -3609,7 +4650,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop add "<cron>" <prompt>',
+        `Usage: /loop add "<cron>" <prompt>`,
       );
       return true;
     }
@@ -3836,7 +4877,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop inspect <id>',
+        `Usage: /loop inspect <id>`,
       );
       return true;
     }
@@ -3916,7 +4957,7 @@ export abstract class ChannelBase {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
-        'Usage: /loop cancel <id>',
+        `Usage: /loop cancel <id>`,
       );
       return true;
     }
@@ -3945,6 +4986,9 @@ export abstract class ChannelBase {
   private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
     return this.normalizeLoopTarget({
       channelName: this.name,
+      ...(envelope.messageRoute !== undefined
+        ? { messageRoute: envelope.messageRoute }
+        : {}),
       senderId: envelope.senderId,
       chatId: envelope.chatId,
       threadId: envelope.threadId,
@@ -3979,6 +5023,11 @@ export abstract class ChannelBase {
     target: SessionTarget,
     senderName: string,
   ): boolean {
+    if (
+      target.messageRoute !== undefined &&
+      !this.messageRoutes.has(target.messageRoute)
+    )
+      return false;
     const normalizedTarget = this.normalizeLoopTarget(target);
     const envelope: Envelope = {
       channelName: this.name,
@@ -3994,9 +5043,7 @@ export abstract class ChannelBase {
     return (
       this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
-        ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+      this.senderGateFor(envelope).isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -4013,6 +5060,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
     return sessionId && this.activePrompts.has(sessionId)
       ? sessionId
@@ -4098,6 +5146,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
     if (sessionId) {
       this.unattendedMemorySessions.delete(sessionId);
@@ -4112,6 +5161,8 @@ export abstract class ChannelBase {
     if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
       return false;
     }
+
+    this.forgetPendingGroupHistory(envelope);
 
     // Surface the drop — otherwise an unanswered queued message vanishes
     // silently, making "my message was never answered" undiagnosable.
@@ -4873,34 +5924,34 @@ export abstract class ChannelBase {
   }
 
   /**
-   * Whether `envelope.senderId` may act on the resolved session's destructive or
-   * workspace-leaking commands (/clear, /who). A SHARED session with a non-empty
-   * allowedUsers list is restricted to those members; a per-user session, or one
-   * with no allowlist, is unrestricted. Shared verbatim by /clear and /who so the
-   * gate can't drift; each caller sends its own rejection wording.
+   * Whether `envelope.senderId` may operate the resolved session: answer its
+   * permission prompts, steer it, or run /cancel, /clear, /who, /status, /loop
+   * and /btw. Shared verbatim by every such command so the gate can't drift;
+   * each caller sends its own rejection wording.
    */
   private isAuthorizedForSharedSession(envelope: Envelope): boolean {
-    return this.isAuthorizedForSharedSessionTarget(envelope);
-  }
-
-  private isAuthorizedForSharedSessionTarget(target: {
-    isGroup?: boolean;
-    senderId: string;
-  }): boolean {
-    if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    return authorized.length === 0 || authorized.includes(target.senderId);
+    return this.isSharedSessionOperator(envelope, envelope.senderId);
   }
 
   private isAuthorizedForSharedSessionToolCall(
     target: SessionTarget,
     sessionId: string,
   ): boolean {
+    return this.isSharedSessionOperator(
+      target,
+      this.activePrompts.get(sessionId)?.senderId,
+    );
+  }
+
+  private isSharedSessionOperator(
+    target: { isGroup?: boolean; chatId: string },
+    senderId: string | undefined,
+  ): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    if (authorized.length === 0) return true;
-    const senderId = this.activePrompts.get(sessionId)?.senderId;
-    return senderId !== undefined && authorized.includes(senderId);
+    return (
+      senderId !== undefined &&
+      this.config.operators?.includes(senderId) === true
+    );
   }
 
   private toolCallerName(sessionId: string, target: SessionTarget): string {
@@ -4908,23 +5959,8 @@ export abstract class ChannelBase {
     return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
-  private stopActiveStreaming(
-    active: ActivePrompt,
-    sessionId: string,
-    reason: string,
-  ): void {
-    try {
-      active.stopStreaming?.();
-    } catch (err) {
-      process.stderr.write(
-        `[${this.name}] stopStreaming threw during ${reason} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-      );
-    }
-  }
-
   /**
-   * Cancel the active turn and wait (bounded) for it to wind down. Stops the
-   * BlockStreamer so buffered text can't leak via the idle timer, then fires a
+   * Cancel the active turn and wait (bounded) for it to wind down. Fires a
    * best-effort cancelSession (NOT awaited — a wedged child/daemon can leave the
    * request pending forever). Returns true if active.done settled first, false
    * if the CLEAR_CANCEL_TIMEOUT_MS bound won (the turn never wound down). Used by
@@ -4938,7 +5974,6 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<boolean> {
     active.cancelled = true;
-    this.stopActiveStreaming(active, sessionId, 'cancel');
     // Fire-and-forget, but LOG the IPC failure: a swallowed reason leaves a
     // wedged turn undiagnosable (operator sees only the wind-down timeout below
     // with no cause).
@@ -5087,6 +6122,7 @@ export abstract class ChannelBase {
       this.name,
       envelope.chatId,
       envelope.threadId ?? null,
+      ...(envelope.messageRoute !== undefined ? [envelope.messageRoute] : []),
     ]);
   }
 
@@ -5107,16 +6143,18 @@ export abstract class ChannelBase {
     return Math.floor(configured);
   }
 
-  private recordPendingGroupHistory(envelope: Envelope): void {
+  protected recordPendingGroupHistory(envelope: Envelope): void {
+    if (!this.applyMessageRoute(envelope)) return;
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
     }
+    // An adapter placeholder is not something a member typed, so quoting it
+    // back as history would inject `(image)` into the next prompt as user
+    // text.
+    if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (
-      this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
-    ) {
+    if (!this.senderGateFor(envelope).isAllowed(senderId)) {
       return;
     }
 
@@ -5155,12 +6193,28 @@ export abstract class ChannelBase {
       ) {
         return [];
       }
-      return entries;
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
       );
       return [];
+    }
+  }
+
+  private forgetPendingGroupHistory(envelope: Envelope): void {
+    if (envelope.messageId === undefined) return;
+    try {
+      this.groupHistory.forget(
+        this.groupHistoryKey(envelope),
+        truncateGroupHistoryField(envelope.messageId),
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to forget group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -5182,6 +6236,7 @@ export abstract class ChannelBase {
   }
 
   private prependGroupHistoryContext(
+    envelope: Envelope,
     promptText: string,
     entries: GroupHistoryEntry[],
   ): string {
@@ -5189,10 +6244,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines =
-      this.config.groupPolicy === 'pairing'
-        ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+    const senderGate = this.senderGateFor(envelope);
+    const lines = entries.filter((entry) =>
+      senderGate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -5209,10 +6264,56 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
+  protected senderGateFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): SenderGate {
+    if (target.isGroup !== true || this.isPersonalConversation(target)) {
+      return this.gate;
+    }
+    const senders = this.groupSendersFor(target);
+    return new SenderGate(
+      senders,
+      senders === 'allowlist' ? this.groupAllowedUsersFor(target.chatId) : [],
+    );
+  }
+
+  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+    return (
+      this.groupConfigFor(target.chatId)?.senders ??
+      this.groupConfigFor('*')?.senders ??
+      'open'
+    );
+  }
+
+  /**
+   * Whether a group-shaped conversation acts on behalf of one person, such as
+   * a document comment thread or a task. Its sender follows `privatePolicy`
+   * like a direct message, and `groups` does not apply; its
+   * group shape still decides routing, memory, and presentation.
+   */
+  protected isPersonalConversation(_target: { chatId: string }): boolean {
+    return false;
+  }
+
+  private groupAllowedUsersFor(chatId: string): string[] {
+    return (
+      this.groupConfigFor(chatId)?.allowedUsers ??
+      this.groupConfigFor('*')?.allowedUsers ??
+      []
+    );
+  }
+
+  private groupConfigFor(key: string): GroupConfig | undefined {
+    const groups = this.config.groups;
+    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+  }
+
   protected preflightInbound(
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    if (!this.applyMessageRoute(envelope)) return false;
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -5256,21 +6357,19 @@ export abstract class ChannelBase {
       return false;
     }
 
-    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
-      this.markPreflighted(envelope);
-      return true;
-    }
+    const senderGate = this.senderGateFor(envelope);
 
     if (
       options.deferPairingRequests === true &&
-      this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      senderGate === this.gate &&
+      this.privatePolicy === 'pairing' &&
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -5290,7 +6389,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 
@@ -5455,8 +6556,114 @@ export abstract class ChannelBase {
     }
   }
 
+  protected formatAttributedText(text: string, sourceLabel?: string): string {
+    if (!sourceLabel || text.trim().length === 0) return text;
+    return `${sourceLabel} ${text}`;
+  }
+
+  protected formatMarkdownAttributedText(
+    text: string,
+    sourceLabel?: string,
+  ): string {
+    const escapedLabel = sourceLabel?.replace(
+      /([\\`*_[\]{}()#+\-.!|>~])/gu,
+      '\\$1',
+    );
+    if (!escapedLabel || text.trim().length === 0) return text;
+    return `${escapedLabel}\n${text}`;
+  }
+
+  private sameTaskOwner(a: SessionTarget, b: SessionTarget): boolean {
+    return (
+      a.channelName === b.channelName &&
+      a.chatId === b.chatId &&
+      a.senderId === b.senderId
+    );
+  }
+
+  private createSourceLabel(
+    reference: NamedSessionTaskReference,
+    target: SessionTarget,
+    active?: Pick<ActivePrompt, 'isGroup' | 'senderName'>,
+  ): string {
+    const activeName = active?.senderName
+      ? this.sanitizeSourceSender(active.senderName)
+      : undefined;
+    const senderLabel =
+      (activeName && activeName !== 'unknown' ? activeName : undefined) ??
+      this.observedSenderLabel(target.chatId, target.senderId) ??
+      this.sanitizeSourceSender(target.senderId || 'unknown');
+    const isGroup = active?.isGroup ?? target.isGroup ?? true;
+    return isGroup
+      ? `[${senderLabel} · ${reference.taskName}]`
+      : `[${reference.taskName}]`;
+  }
+
+  private observedSenderLabel(
+    chatId: string,
+    senderId: string,
+  ): string | undefined {
+    const graph = this.persistedObservedContacts();
+    if (!graph) return undefined;
+    const sources = [
+      graph.groups
+        .filter((group) => group.id === chatId)
+        .flatMap((group) => group.users)
+        .filter((user) => user.id === senderId),
+      graph.users.filter((user) => user.id === senderId),
+    ];
+    for (const source of sources) {
+      const candidates = source.sort((a, b) =>
+        b.lastObservedAt.localeCompare(a.lastObservedAt),
+      );
+      for (const candidate of candidates) {
+        const label = this.sanitizeSourceSender(candidate.label);
+        if (label !== 'unknown') return label;
+      }
+    }
+    return undefined;
+  }
+
+  private sanitizeSourceSender(value: string): string {
+    return sanitizeSenderName(value).replace(/\s+/gu, ' ').trim() || 'unknown';
+  }
+
+  private sourceLabelForTurn(
+    sessionId: string,
+    envelope: Envelope,
+  ): string | undefined {
+    const reference = this.namedSessions?.presentation(sessionId);
+    if (!reference || reference.status !== 'open') return undefined;
+    return this.createSourceLabel(reference, reference.target, {
+      isGroup: envelope.isGroup,
+      senderName: envelope.senderName,
+    });
+  }
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
+  }
+
+  private applyMessageRoute(envelope: Envelope): boolean {
+    if (this.routedEnvelopes.has(envelope)) return true;
+    if (
+      this.messageRoutes.size === 0 ||
+      envelope.bypassMessageRoutes ||
+      envelope.syntheticText
+    ) {
+      this.routedEnvelopes.add(envelope);
+      return true;
+    }
+    const matched = matchMessageRoute(
+      envelope.text,
+      this.messageRoutes,
+      this.config.defaultMessageRoute,
+    );
+    if (!matched) return false;
+    envelope.text = matched.text;
+    envelope.messageRoute = matched.prefix;
+    this.routedEnvelopes.add(envelope);
+    return true;
   }
 
   /** Wait until the currently active bridge recovery, if any, has completed. */
@@ -5489,23 +6696,18 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    // Adapters that never set `displayText` fall back to the raw message
-    // text; sanitize at this boundary so attacker-controlled bidi/zero-width/
-    // control chars cannot reach the session-bus echo, recorded transcript,
-    // or session previews.
-    const displayText = sanitizeDisplayText(
-      envelope.displayText ?? envelope.text,
-      MAX_DISPLAY_PROJECTION_CHARS,
-    );
-
+    const parsed = this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parseChannelMemoryIntent(envelope.text);
+      parsed?.command === 'btw'
+        ? null
+        : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
     if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
       !memoryIntent &&
+      parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
       memoryIntent = await this.classifyChannelMemoryIntent(envelope);
@@ -5525,19 +6727,62 @@ export abstract class ChannelBase {
         suppressSaveConfirmation: memorySaveIsSideEffect,
       });
       if (!memorySaveIsSideEffect) {
+        this.forgetPendingGroupHistory(envelope);
         return;
       }
     }
 
     // 3. Slash command handling — before session/agent routing
-    const parsed = this.parseCommand(envelope.text);
+    let btwQuestion: string | undefined;
     if (parsed) {
       const handler = this.commands.get(parsed.command);
       if (handler) {
         const handled = await handler(envelope, parsed.args);
-        if (handled) return;
+        if (handled) {
+          this.forgetPendingGroupHistory(envelope);
+          return;
+        }
       }
       // Unrecognized commands fall through to the agent
+      // Intercept /btw only where the bridge can answer it out of band. With no
+      // btw capability this is not a locally handled command at all: it falls
+      // through to the agent, which serves /btw as its own slash command, the
+      // same path it took before this interception existed.
+      if (parsed.command === 'btw' && this.bridge.btw) {
+        if (!this.isAuthorizedForSharedSession(envelope)) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `Only authorized members can use /btw in this shared session.`,
+          );
+          return;
+        }
+        btwQuestion = parsed.args.trim();
+        if (!btwQuestion) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `Usage: /btw <question>`,
+          );
+          return;
+        }
+        if (btwQuestion.length > CHANNEL_BTW_MAX_INPUT_LENGTH) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `BTW questions are limited to ${CHANNEL_BTW_MAX_INPUT_LENGTH} characters.`,
+          );
+          return;
+        }
+        if (envelope.imageBase64 || envelope.attachments?.length) {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            `/btw supports text-only questions.`,
+          );
+          return;
+        }
+      }
     }
 
     // 3.5. Bang (!) shell command — refuse outside a private 1:1 chat BEFORE
@@ -5602,17 +6847,20 @@ export abstract class ChannelBase {
         return;
       }
       try {
-        sessionId = await this.namedSessions.resolve(
+        sessionId = await this.namedSessions.resumeReserved(
           this.namedSessionOwner(envelope),
           namedTurn.sessionId,
         );
+        if (sessionId && sessionId !== namedTurn.sessionId) {
+          this.moveNamedTurnBinding(namedTurn, sessionId);
+        }
       } catch (error) {
         await this.sendNamedSessionError(envelope, error);
         return;
       }
       if (!sessionId) {
         process.stderr.write(
-          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: selected task changed before it ran\n`,
+          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: reserved task is no longer available\n`,
         );
         return;
       }
@@ -5620,7 +6868,6 @@ export abstract class ChannelBase {
       try {
         sessionId = await this.namedSessions.resolve(
           this.namedSessionOwner(envelope),
-          undefined,
           (resolvedSessionId) => {
             const binding = this.bindNamedTurn(envelope, resolvedSessionId);
             namedTurn = binding;
@@ -5635,7 +6882,7 @@ export abstract class ChannelBase {
         await this.sendThreadMessage(
           envelope.chatId,
           envelope.threadId,
-          'No task is currently selected. Use /session new <name> or /session use <name>.',
+          `No task is currently selected. Use /session new <name> or /session use <name>.`,
         );
         return;
       }
@@ -5647,554 +6894,576 @@ export abstract class ChannelBase {
         envelope.threadId,
         this.config.cwd,
         envelope.isGroup,
+        { routeKey: envelope.messageRoute, holdForTurn: true },
       );
     }
 
-    // Bang (!) execution — a private 1:1 session has a single operator, so
-    // direct shell execution stays allowed. Group/shared contexts were refused
-    // above, before the session was resolved.
-    if (bangText.startsWith('!')) {
-      const cmd = bangText.slice(1).trim();
-      const bridgeShellCommand = this.bridge.shellCommand;
-      if (cmd && bridgeShellCommand) {
-        try {
-          const result = await bridgeShellCommand(sessionId, cmd);
-          const longestRun = Math.max(
-            0,
-            ...Array.from(
-              (result.output || '').matchAll(/`+/g),
-              (m) => m[0].length,
-            ),
-          );
-          const fence = '`'.repeat(Math.max(3, longestRun + 1));
-          const output = result.output
-            ? `${fence}\n${result.output}\n${fence}`
-            : '(no output)';
-          const exitLine =
-            result.exitCode !== null && result.exitCode !== 0
-              ? `\nExit code: ${result.exitCode}`
-              : '';
-          await this.sendThreadMessage(
-            envelope.chatId,
-            envelope.threadId,
-            `$ ${cmd}\n${output}${exitLine}`,
-          );
-        } catch (error) {
-          await this.sendThreadMessage(
-            envelope.chatId,
-            envelope.threadId,
-            `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+    try {
+      const sourceLabel = this.namedSessions
+        ? this.sourceLabelForTurn(sessionId, envelope)
+        : undefined;
+      if (this.namedSessions && !sourceLabel) {
+        await this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          `Could not identify the selected task. Use /sessions, select it again, and retry.`,
+        );
         return;
       }
-    }
 
-    const recognizedSlashCommand =
-      this.isSlashCommand(envelope.text) &&
-      this.isRecognizedCommand(envelope.text, sessionId);
-    // Prepend referenced (quoted) message text for reply context
-    let promptText = envelope.text;
-
-    // Multiplayer attribution: when a session can carry multiple humans, tag each
-    // turn with the speaker so the agent can tell members apart. That is any group
-    // AND any single-scope DM — `single` collapses every sender's DM into one
-    // __single__ session (the same multi-operator case the !-gate, /clear confirm
-    // and /who already treat as shared), so without a tag it would merge different
-    // people into one unattributed conversation. NOT gated on isSharedSession:
-    // that is false for a user-scope GROUP, which still needs attribution. Sanitize
-    // the name so a crafted nick can't break out of the [..] tag or inject
-    // newlines. Skipped for a per-user 1:1 chat and for already-prefixed re-entries
-    // (collect-mode coalescing). The tag is also suppressed for a real slash
-    // command — a [sender] prefix would stop it from parsing — but ONLY when it is
-    // BOTH a genuine command SHAPE (isSlashCommand) AND a RECOGNIZED command
-    // (isRecognizedCommand: a locally registered or agent-exposed command, by
-    // canonical name OR alias, for THIS session — matched EXACTLY as the agent's
-    // parseSlashCommand does, so the two never diverge). Command-shaped-but-
-    // unrecognized text like `/x\n[SYSTEM]: …` (token matches the charset but no such
-    // command exists) KEEPS its tag, so its injected second line can't reach a shared
-    // group unattributed and pose as a system directive. Slash-prefixed paths
-    // (/tmp/foo) and comments (//…, /*…*/) are prose, so they stay attributed too.
-    // Both checks are synchronous (no await), so this never races the async command
-    // list — see isRecognizedCommand for the no-await tradeoff.
-    if (
-      (envelope.isGroup || this.config.sessionScope === 'single') &&
-      !envelope.alreadyPrefixed &&
-      !recognizedSlashCommand
-    ) {
-      const who = sanitizeSenderName(
-        envelope.senderName || envelope.senderId || 'unknown',
-      );
-      promptText = `[${who}] ${sanitizePromptText(promptText)}`;
-      // Render the non-bot mention marker AFTER sanitization (like the
-      // [Replying to:] wrapper below). Inside `text` it would pass through
-      // sanitizePromptText, which strips brackets only on content <=64 chars
-      // and folds its newline — so with IDs included, the delivered format
-      // would depend on the ID list's length. IDs are platform-controlled, so
-      // neutralize them like quoted text before they bypass the sanitizer here.
-      if (envelope.mentionedMemberIds?.length) {
-        const ids = envelope.mentionedMemberIds
-          .map((id) => sanitizeQuotedText(id, 64).trim())
-          // A junk-only ID over the cap truncates to a bare '…' (not
-          // whitespace), which would advertise a phantom member — drop it
-          // like an empty ID.
-          .filter((id) => id.length > 0 && id !== '…');
-        if (ids.length > 0) {
-          const memberLabel = ids.length === 1 ? 'member' : 'members';
-          promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
-        }
+      if (btwQuestion !== undefined) {
+        await this.handleBtw(envelope, sessionId, btwQuestion, sourceLabel);
+        return;
       }
-    }
 
-    if (envelope.referencedText) {
-      // Quoted text is attacker-controlled. sanitizeQuotedText strips C0/DEL
-      // controls, Unicode line/paragraph separators (U+2028/U+2029) and bidi
-      // overrides, and the wrapper's own `"[]` delimiters, then caps length -
-      // so a crafted quote can't inject newlines/instructions, close the
-      // [Replying to: "..."] wrapper, flip text direction, or balloon the prompt.
-      const quoted = sanitizeQuotedText(envelope.referencedText, 500);
-      promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
-    }
-
-    // Resolve attachments: extract images for bridge, append file paths to text
-    let imageBase64 = envelope.imageBase64;
-    let imageMimeType = envelope.imageMimeType;
-    const images: ChannelPromptImage[] = [];
-    if (imageBase64 && imageMimeType) {
-      images.push({ data: imageBase64, mimeType: imageMimeType });
-    }
-    if (envelope.attachments?.length) {
-      const filePaths: string[] = [];
-      for (const att of envelope.attachments) {
-        if (att.type === 'image' && att.data) {
-          images.push({ data: att.data, mimeType: att.mimeType });
-          if (!imageBase64) {
-            imageBase64 = att.data;
-            imageMimeType = att.mimeType;
-          }
-        } else if (att.filePath) {
-          const label = att.type === 'file' ? 'file' : att.type;
-          // The filename is attacker-supplied (e.g. DingTalk), so neutralize both
-          // the human-readable label and the on-disk path as they enter the
-          // prompt. They need DIFFERENT rules: the quoted fileName label is just
-          // prose, so sanitizeQuotedText (which also strips `"[]`) is fine — but
-          // the rendered filePath must stay byte-resolvable. Brackets, quotes and
-          // spaces are VALID, common path chars (e.g. `app/[slug]/page.tsx`), so
-          // stripping them would advertise a path that doesn't exist on disk and
-          // break the agent's read-file tool. sanitizePromptPath preserves them
-          // and removes ONLY what could break/reorder the `saved to:` line
-          // (CR/LF, C0/DEL, Unicode line/para separators, bidi overrides).
-          const name = att.fileName
-            ? ` "${sanitizeQuotedText(att.fileName, 128)}"`
-            : '';
-          const renderedPath = sanitizePromptPath(att.filePath);
-          filePaths.push(
-            `User sent a ${label}${name}. It has been saved to: ${renderedPath}`,
-          );
-        }
-      }
-      if (filePaths.length > 0) {
-        promptText = promptText + '\n\n' + filePaths.join('\n');
-      }
-    }
-
-    if (envelope.metadata) {
-      promptText = promptText + '\n\n' + sanitizePromptText(envelope.metadata);
-    }
-
-    // Resolve dispatch mode: per-group override → channel config → default
-    const groupCfg = envelope.isGroup
-      ? this.config.groups[envelope.chatId] || this.config.groups['*']
-      : undefined;
-    const mode: DispatchMode =
-      groupCfg?.dispatchMode || this.config.dispatchMode || 'steer';
-
-    const active = this.activePrompts.get(sessionId);
-
-    // Diagnostic watchdog for a steered turn that chains behind a wedged
-    // predecessor. Chain-and-wait (option a) means a hung predecessor bridge.prompt()
-    // silently deadlocks this session with no log; this surfaces that. Armed only in
-    // the steer branch, disarmed as the first statement of the chained `.then()` once
-    // the predecessor's tail resolves. Diagnostic-only — it does NOT touch the
-    // chain-and-wait concurrency invariant.
-    let steerWatchdog: ReturnType<typeof setTimeout> | undefined;
-
-    if (active) {
-      // A prompt is already running for this session
-      switch (mode) {
-        case 'collect': {
-          // Buffer the message; it will be coalesced when the active prompt finishes
-          let buffer = this.collectBuffers.get(sessionId);
-          if (!buffer) {
-            buffer = [];
-            this.collectBuffers.set(sessionId, buffer);
-          }
-          const bufferedDisplayText =
-            (envelope.isGroup || this.config.sessionScope === 'single') &&
-            !envelope.alreadyPrefixed &&
-            !recognizedSlashCommand
-              ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
-              : displayText;
-          buffer.push({
-            text: promptText,
-            displayText: bufferedDisplayText,
-            envelope,
-          });
+      // Bang (!) execution — a private 1:1 session has a single operator, so
+      // direct shell execution stays allowed. Group/shared contexts were refused
+      // above, before the session was resolved.
+      if (bangText.startsWith('!')) {
+        const cmd = bangText.slice(1).trim();
+        const bridgeShellCommand = this.bridge.shellCommand;
+        if (cmd && bridgeShellCommand) {
           try {
-            this.onPromptBuffered(
-              envelope.chatId,
-              sessionId,
-              envelope.messageId,
+            const result = await bridgeShellCommand(sessionId, cmd);
+            const longestRun = Math.max(
+              0,
+              ...Array.from(
+                (result.output || '').matchAll(/`+/g),
+                (m) => m[0].length,
+              ),
             );
-          } catch (err) {
-            process.stderr.write(
-              `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            const fence = '`'.repeat(Math.max(3, longestRun + 1));
+            const output = result.output
+              ? `${fence}\n${result.output}\n${fence}`
+              : '(no output)';
+            const exitLine =
+              result.exitCode !== null && result.exitCode !== 0
+                ? `\nExit code: ${result.exitCode}`
+                : '';
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `$ ${cmd}\n${output}${exitLine}`,
+              sourceLabel,
+            );
+          } catch (error) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
+              sourceLabel,
             );
           }
           return;
         }
-        case 'steer': {
-          // Authorization gate (mirrors /cancel): steer = cancel-running +
-          // send-new, so without this an UNAUTHORIZED member of a shared session —
-          // already blocked from /cancel — could abort another user's running turn
-          // just by sending any normal message, defeating the /cancel restriction.
-          // If not authorized, break out of the steer case: the message is NOT
-          // dropped — it falls through to normal queuing (chains onto the session
-          // queue tail and runs AFTER the active turn) without cancelling it.
-          // isAuthorizedForSharedSession returns true for 1:1/non-shared sessions
-          // and for authorized members, so their steer-cancel is unchanged. Audit
-          // the silent steer→queue downgrade (like the /cancel, /clear, /who, /status
-          // gates surface theirs) so an operator can see WHY a member's messages
-          // queue instead of steering. Operator-level only — a normal message from an
-          // unauthorized member shouldn't get a per-message user-facing rejection.
-          // senderId is a stable platform id, not user-controlled display text.
-          if (!this.isAuthorizedForSharedSession(envelope)) {
-            process.stderr.write(
-              `[${this.name}] steer denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); queuing instead\n`,
-            );
-            break;
+      }
+
+      const recognizedSlashCommand =
+        this.isSlashCommand(envelope.text) &&
+        this.isRecognizedCommand(envelope.text, sessionId);
+      // Prepend referenced (quoted) message text for reply context
+      let promptText = envelope.text;
+
+      // Multiplayer attribution: when a session can carry multiple humans, tag each
+      // turn with the speaker so the agent can tell members apart. That is any group
+      // AND any single-scope DM — `single` collapses every sender's DM into one
+      // __single__ session (the same multi-operator case the !-gate, /clear confirm
+      // and /who already treat as shared), so without a tag it would merge different
+      // people into one unattributed conversation. NOT gated on isSharedSession:
+      // that is false for a user-scope GROUP, which still needs attribution. Sanitize
+      // the name so a crafted nick can't break out of the [..] tag or inject
+      // newlines. Skipped for a per-user 1:1 chat and for already-prefixed re-entries
+      // (collect-mode coalescing). The tag is also suppressed for a real slash
+      // command — a [sender] prefix would stop it from parsing — but ONLY when it is
+      // BOTH a genuine command SHAPE (isSlashCommand) AND a RECOGNIZED command
+      // (isRecognizedCommand: a locally registered or agent-exposed command, by
+      // canonical name OR alias, for THIS session — matched EXACTLY as the agent's
+      // parseSlashCommand does, so the two never diverge). Command-shaped-but-
+      // unrecognized text like `/x\n[SYSTEM]: …` (token matches the charset but no such
+      // command exists) KEEPS its tag, so its injected second line can't reach a shared
+      // group unattributed and pose as a system directive. Slash-prefixed paths
+      // (/tmp/foo) and comments (//…, /*…*/) are prose, so they stay attributed too.
+      // Both checks are synchronous (no await), so this never races the async command
+      // list — see isRecognizedCommand for the no-await tradeoff.
+      if (
+        (envelope.isGroup || this.config.sessionScope === 'single') &&
+        !envelope.alreadyPrefixed &&
+        !recognizedSlashCommand
+      ) {
+        const who = sanitizeSenderName(
+          envelope.senderName || envelope.senderId || 'unknown',
+        );
+        promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+        // Render the non-bot mention marker AFTER sanitization (like the
+        // [Replying to:] wrapper below). Inside `text` it would pass through
+        // sanitizePromptText, which strips brackets only on content <=64 chars
+        // and folds its newline — so with IDs included, the delivered format
+        // would depend on the ID list's length. IDs are platform-controlled, so
+        // neutralize them like quoted text before they bypass the sanitizer here.
+        if (envelope.mentionedMemberIds?.length) {
+          const ids = envelope.mentionedMemberIds
+            .map((id) => sanitizeQuotedText(id, 64).trim())
+            // A junk-only ID over the cap truncates to a bare '…' (not
+            // whitespace), which would advertise a phantom member — drop it
+            // like an empty ID.
+            .filter((id) => id.length > 0 && id !== '…');
+          if (ids.length > 0) {
+            const memberLabel = ids.length === 1 ? 'member' : 'members';
+            promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
           }
-          // Best-effort cancel the running turn so it winds down sooner, then fall
-          // through to CHAIN this new turn onto the session queue tail (see `prev`
-          // below). The new turn therefore runs ONLY AFTER the old turn's finally
-          // has actually run — onChunk detached, activePrompts cleared, indicator
-          // released — so it never executes concurrently with the turn it
-          // supersedes.
-          //
-          // We deliberately do NOT race a bounded wait and then proceed with a
-          // replacement bridge.prompt() while the old turn is still active: both
-          // bridges key active-prompt tracking AND streamed chunks by sessionId
-          // alone, so a concurrent replacement on one session is bridge-unsafe —
-          // DaemonChannelBridge.prompt() rejects while the prior prompt is still
-          // active (the replacement is silently dropped), and the abandoned turn's
-          // late chunks mix into the replacement's stream (duplicated/stale
-          // output). So a genuinely wedged turn makes its successor WAIT rather
-          // than be force-interrupted. Turn-scoped cancellation/routing (a new
-          // turn that runs without waiting for a wedged predecessor) is the
-          // deferred fix — it needs an API change across every adapter and is out
-          // of scope for this phase (wenshao option (b)).
-          const firstCancellation = !active.cancelled;
-          active.cancelled = true;
-          if (firstCancellation) {
-            process.stderr.write(
-              `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
+        }
+      }
+
+      if (envelope.referencedText) {
+        // Quoted text is attacker-controlled. sanitizeQuotedText strips C0/DEL
+        // controls, Unicode line/paragraph separators (U+2028/U+2029) and bidi
+        // overrides, and the wrapper's own `"[]` delimiters, then caps length -
+        // so a crafted quote can't inject newlines/instructions, close the
+        // [Replying to: "..."] wrapper, flip text direction, or balloon the prompt.
+        const quoted = sanitizeQuotedText(envelope.referencedText, 500);
+        promptText = `[Replying to: "${quoted}"]\n\n${promptText}`;
+      }
+
+      // Resolve attachments: extract images for bridge, append file paths to text
+      let imageBase64 = envelope.imageBase64;
+      let imageMimeType = envelope.imageMimeType;
+      const images: ChannelPromptImage[] = [];
+      if (imageBase64 && imageMimeType) {
+        images.push({ data: imageBase64, mimeType: imageMimeType });
+      }
+      if (envelope.attachments?.length) {
+        const filePaths: string[] = [];
+        for (const att of envelope.attachments) {
+          if (att.type === 'image' && att.data) {
+            images.push({ data: att.data, mimeType: att.mimeType });
+            if (!imageBase64) {
+              imageBase64 = att.data;
+              imageMimeType = att.mimeType;
+            }
+          } else if (att.filePath) {
+            const label = att.type === 'file' ? 'file' : att.type;
+            // The filename is attacker-supplied (e.g. DingTalk), so neutralize both
+            // the human-readable label and the on-disk path as they enter the
+            // prompt. They need DIFFERENT rules: the quoted fileName label is just
+            // prose, so sanitizeQuotedText (which also strips `"[]`) is fine — but
+            // the rendered filePath must stay byte-resolvable. Brackets, quotes and
+            // spaces are VALID, common path chars (e.g. `app/[slug]/page.tsx`), so
+            // stripping them would advertise a path that doesn't exist on disk and
+            // break the agent's read-file tool. sanitizePromptPath preserves them
+            // and removes ONLY what could break/reorder the `saved to:` line
+            // (CR/LF, C0/DEL, Unicode line/para separators, bidi overrides).
+            const name = att.fileName
+              ? ` "${sanitizeQuotedText(att.fileName, 128)}"`
+              : '';
+            const renderedPath = sanitizePromptPath(att.filePath);
+            filePaths.push(
+              `User sent a ${label}${name}. It has been saved to: ${renderedPath}`,
             );
-            this.stopActiveStreaming(active, sessionId, 'steer');
-            // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
-            // best-effort cancel that fails isn't silently invisible to operators.
-            void this.bridge.cancelSession(sessionId).catch((err) => {
-              process.stderr.write(
-                `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
+          }
+        }
+        if (filePaths.length > 0) {
+          promptText = promptText + '\n\n' + filePaths.join('\n');
+        }
+      }
+
+      if (envelope.metadata) {
+        promptText =
+          promptText + '\n\n' + sanitizePromptText(envelope.metadata);
+      }
+
+      // Resolve dispatch mode: per-group override → channel config → default
+      const groupMode = envelope.isGroup
+        ? (this.groupConfigFor(envelope.chatId)?.dispatchMode ??
+          this.groupConfigFor('*')?.dispatchMode)
+        : undefined;
+      const mode: DispatchMode =
+        groupMode ?? this.config.dispatchMode ?? 'steer';
+
+      const active = this.activePrompts.get(sessionId);
+
+      // Diagnostic watchdog for a steered turn that chains behind a wedged
+      // predecessor. Chain-and-wait (option a) means a hung predecessor bridge.prompt()
+      // silently deadlocks this session with no log; this surfaces that. Armed only in
+      // the steer branch, disarmed as the first statement of the chained `.then()` once
+      // the predecessor's tail resolves. Diagnostic-only — it does NOT touch the
+      // chain-and-wait concurrency invariant.
+      let steerWatchdog: ReturnType<typeof setTimeout> | undefined;
+
+      if (active) {
+        // A prompt is already running for this session
+        switch (mode) {
+          case 'collect': {
+            // Buffer the message; it will be coalesced when the active prompt finishes
+            let buffer = this.collectBuffers.get(sessionId);
+            if (!buffer) {
+              buffer = [];
+              this.collectBuffers.set(sessionId, buffer);
+            }
+            buffer.push({ text: promptText, envelope });
+            try {
+              this.onPromptBuffered(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
               );
-            });
-            // Emitted before the bridge cancel settles: steer supersedes the
-            // turn at the channel level (cancelled is already set above), so
-            // the event reflects that intent, not the bridge RPC outcome.
-            this.emitTaskCancellation(active, sessionId, 'steer');
-            this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
-          }
-          // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
-          // after the wind-down bound, this steered turn is wedged behind a hung
-          // bridge.prompt() — surface it (the chained `.then()` clears it once the
-          // predecessor settles). This only LOGS; it does not start a replacement or
-          // change concurrency. /clear is the recovery path. unref so a pending timer
-          // never keeps the process alive.
-          steerWatchdog = setTimeout(() => {
-            if (this.activePrompts.get(sessionId) === active) {
+            } catch (err) {
               process.stderr.write(
-                `[${this.name}] steer queued behind active turn for session ${sessionId}: still waiting after ${CLEAR_CANCEL_TIMEOUT_MS}ms (use /clear to recover)\n`,
+                `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
               );
             }
-          }, CLEAR_CANCEL_TIMEOUT_MS);
-          steerWatchdog.unref?.();
-          // Prepend a cancellation note so the agent understands context.
-          promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
-          break;
-        }
-        case 'followup': {
-          // Chain onto the session queue (existing sequential behavior)
-          break;
-        }
-        default: {
-          // Exhaustive check — should never happen
-          const _exhaustive: never = mode;
-          throw new Error(`Unknown dispatch mode: ${_exhaustive}`);
+            return;
+          }
+          case 'steer': {
+            // Authorization gate (mirrors /cancel): steer = cancel-running +
+            // send-new, so without this an UNAUTHORIZED member of a shared session —
+            // already blocked from /cancel — could abort another user's running turn
+            // just by sending any normal message, defeating the /cancel restriction.
+            // If not authorized, break out of the steer case: the message is NOT
+            // dropped — it falls through to normal queuing (chains onto the session
+            // queue tail and runs AFTER the active turn) without cancelling it.
+            // isAuthorizedForSharedSession returns true for 1:1/non-shared sessions
+            // and for authorized members, so their steer-cancel is unchanged. Audit
+            // the silent steer→queue downgrade (like the /cancel, /clear, /who, /status
+            // gates surface theirs) so an operator can see WHY a member's messages
+            // queue instead of steering. Operator-level only — a normal message from an
+            // unauthorized member shouldn't get a per-message user-facing rejection.
+            // senderId is a stable platform id, not user-controlled display text.
+            if (!this.isAuthorizedForSharedSession(envelope)) {
+              process.stderr.write(
+                `[${this.name}] steer denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); queuing instead\n`,
+              );
+              break;
+            }
+            // Best-effort cancel the running turn so it winds down sooner, then fall
+            // through to CHAIN this new turn onto the session queue tail (see `prev`
+            // below). The new turn therefore runs ONLY AFTER the old turn's finally
+            // has actually run — onChunk detached, activePrompts cleared, indicator
+            // released — so it never executes concurrently with the turn it
+            // supersedes.
+            //
+            // We deliberately do NOT race a bounded wait and then proceed with a
+            // replacement bridge.prompt() while the old turn is still active: both
+            // bridges key active-prompt tracking AND streamed chunks by sessionId
+            // alone, so a concurrent replacement on one session is bridge-unsafe —
+            // DaemonChannelBridge.prompt() rejects while the prior prompt is still
+            // active (the replacement is silently dropped), and the abandoned turn's
+            // late chunks mix into the replacement's stream (duplicated/stale
+            // output). So a genuinely wedged turn makes its successor WAIT rather
+            // than be force-interrupted. Turn-scoped cancellation/routing (a new
+            // turn that runs without waiting for a wedged predecessor) is the
+            // deferred fix — it needs an API change across every adapter and is out
+            // of scope for this phase (wenshao option (b)).
+            const firstCancellation = !active.cancelled;
+            active.cancelled = true;
+            if (firstCancellation) {
+              process.stderr.write(
+                `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
+              );
+              // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
+              // best-effort cancel that fails isn't silently invisible to operators.
+              void this.bridge.cancelSession(sessionId).catch((err) => {
+                process.stderr.write(
+                  `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
+                );
+              });
+              // Emitted before the bridge cancel settles: steer supersedes the
+              // turn at the channel level (cancelled is already set above), so
+              // the event reflects that intent, not the bridge RPC outcome.
+              this.emitTaskCancellation(active, sessionId, 'steer');
+              this.removePendingPermissionsForSession(
+                sessionId,
+                'run_cancelled',
+              );
+            }
+            // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
+            // after the wind-down bound, this steered turn is wedged behind a hung
+            // bridge.prompt() — surface it (the chained `.then()` clears it once the
+            // predecessor settles). This only LOGS; it does not start a replacement or
+            // change concurrency. /clear is the recovery path. unref so a pending timer
+            // never keeps the process alive.
+            steerWatchdog = setTimeout(() => {
+              if (this.activePrompts.get(sessionId) === active) {
+                process.stderr.write(
+                  `[${this.name}] steer queued behind active turn for session ${sessionId}: still waiting after ${CLEAR_CANCEL_TIMEOUT_MS}ms (use /clear to recover)\n`,
+                );
+              }
+            }, CLEAR_CANCEL_TIMEOUT_MS);
+            steerWatchdog.unref?.();
+            // Prepend a cancellation note so the agent understands context.
+            promptText = `[The user sent a new message while you were working. Their previous request has been cancelled.]\n\n${promptText}`;
+            break;
+          }
+          case 'followup': {
+            // Chain onto the session queue (existing sequential behavior)
+            break;
+          }
+          default: {
+            // Exhaustive check — should never happen
+            const _exhaustive: never = mode;
+            throw new Error(`Unknown dispatch mode: ${_exhaustive}`);
+          }
         }
       }
-    }
 
-    let shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
-    if (shouldPrependSessionContext) {
-      this.instructedSessions.add(sessionId);
-    }
-
-    // Run the prompt with per-session serialization. followup AND steer both chain
-    // onto the existing queue tail; steer additionally best-effort cancelled the
-    // running turn above so the tail resolves sooner. Chaining (rather than seeding
-    // a fresh Promise.resolve()) is what guarantees this turn never runs while the
-    // turn it supersedes is still active — see the steer branch above.
-    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
-    // Fresh turns snapshot the generation at enqueue time. A collected re-entry
-    // keeps the generation captured when its buffer drained, so /clear cannot
-    // resurrect it while preprocessing runs before this queue.
-    const generation =
-      namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
-    const useBlockStreaming = this.config.blockStreaming === 'on';
-    if (namedTurn) {
-      namedTurn.claimed = true;
-    } else {
-      this.reserveQueuedTurn(sessionId);
-    }
-    const current = prev.then(async () => {
-      // Disarm the steer watchdog: the predecessor's tail has resolved, so this
-      // chained turn is no longer wedged behind it. No-op when unarmed (the timer is
-      // only set on the steer path).
-      clearTimeout(steerWatchdog);
-      // A /clear (or reset/new) while we were queued bumps the generation; the
-      // captured session is cleared, so don't run the prompt against it.
-      if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
-        return;
-      }
-      if (
-        !shouldPrependSessionContext &&
-        !this.instructedSessions.has(sessionId)
-      ) {
-        shouldPrependSessionContext = true;
+      let shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
+      if (shouldPrependSessionContext) {
         this.instructedSessions.add(sessionId);
       }
-      const sessionContext: string[] = [];
-      if (shouldPrependSessionContext) {
-        if (this.config.instructions) {
-          sessionContext.push(this.config.instructions);
-        }
-        // Boundary block goes last: recency bias means later instructions win,
-        // and the isolation boundary must not be overridable by operator text.
-        if (this.shouldPrependChannelBoundaryPrompt()) {
-          sessionContext.push(this.channelBoundaryPrompt());
-        }
+
+      // Run the prompt with per-session serialization. followup AND steer both chain
+      // onto the existing queue tail; steer additionally best-effort cancelled the
+      // running turn above so the tail resolves sooner. Chaining (rather than seeding
+      // a fresh Promise.resolve()) is what guarantees this turn never runs while the
+      // turn it supersedes is still active — see the steer branch above.
+      const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+      // Fresh turns snapshot the generation at enqueue time. A collected re-entry
+      // keeps the generation captured when its buffer drained, so /clear cannot
+      // resurrect it while preprocessing runs before this queue.
+      const generation =
+        namedTurn?.generation ?? this.sessionGenerations.get(sessionId) ?? 0;
+      if (namedTurn) {
+        namedTurn.claimed = true;
+      } else {
+        this.reserveQueuedTurn(sessionId);
       }
-      let recallContext: string | undefined;
-      let recallRead: ChannelMemoryReadToken | undefined;
-      if (
-        !recognizedSlashCommand &&
-        this.channelMemory &&
-        this.shouldInjectChannelMemory()
-      ) {
-        const memoryTarget = this.channelMemoryTarget(envelope);
-        recallRead = this.beginChannelMemoryRead(memoryTarget);
-        const recallStartedAt = performance.now();
-        try {
-          const selection = await this.selectRelevantChannelMemory(
-            envelope,
-            memoryTarget,
-            recallRead,
-          );
-          const stale = recallRead.generation !== recallRead.state.generation;
-          const relevantEntries = stale ? [] : selection.entries;
-          this.observeChannelMemoryRecall(
-            recallStartedAt,
-            selection.cache,
-            stale
-              ? 'stale'
-              : (selection.result ??
-                  (relevantEntries.length > 0 ? 'selected' : 'empty')),
-            relevantEntries.length,
-          );
-          if (relevantEntries.length > 0) {
-            recallContext =
-              this.formatRelevantChannelMemoryContext(relevantEntries);
+      const current = prev.then(async () => {
+        // Disarm the steer watchdog: the predecessor's tail has resolved, so this
+        // chained turn is no longer wedged behind it. No-op when unarmed (the timer is
+        // only set on the steer path).
+        clearTimeout(steerWatchdog);
+        // A /clear (or reset/new) while we were queued bumps the generation; the
+        // captured session is cleared, so don't run the prompt against it.
+        if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
+          return;
+        }
+        if (!this.canStartInboundTurn()) return;
+        if (
+          !shouldPrependSessionContext &&
+          !this.instructedSessions.has(sessionId)
+        ) {
+          shouldPrependSessionContext = true;
+          this.instructedSessions.add(sessionId);
+        }
+        const sessionContext: string[] = [];
+        if (shouldPrependSessionContext) {
+          if (this.config.instructions) {
+            sessionContext.push(this.config.instructions);
           }
-        } catch {
-          this.observeChannelMemoryRecall(
-            recallStartedAt,
-            'bypass',
-            'read_error',
-            0,
-          );
-          this.releaseChannelMemoryRead(recallRead);
-          recallRead = undefined;
-          this.logChannelMemoryError('read', envelope, 'entry listing failed');
+          const routeInstructions =
+            envelope.messageRoute === undefined
+              ? undefined
+              : this.messageRoutes.get(envelope.messageRoute);
+          if (routeInstructions) sessionContext.push(routeInstructions);
+          // Boundary block goes last: recency bias means later instructions win,
+          // and the isolation boundary must not be overridable by operator text.
+          if (this.shouldPrependChannelBoundaryPrompt()) {
+            sessionContext.push(this.channelBoundaryPrompt());
+          }
         }
-      }
-      if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
+        let recallContext: string | undefined;
+        let recallRead: ChannelMemoryReadToken | undefined;
+        if (
+          !recognizedSlashCommand &&
+          this.channelMemory &&
+          this.shouldInjectChannelMemory()
+        ) {
+          const memoryTarget = this.channelMemoryTarget(envelope);
+          recallRead = this.beginChannelMemoryRead(memoryTarget);
+          const recallStartedAt = performance.now();
+          try {
+            const selection = await this.selectRelevantChannelMemory(
+              envelope,
+              memoryTarget,
+              recallRead,
+            );
+            const stale = recallRead.generation !== recallRead.state.generation;
+            const relevantEntries = stale ? [] : selection.entries;
+            this.observeChannelMemoryRecall(
+              recallStartedAt,
+              selection.cache,
+              stale
+                ? 'stale'
+                : (selection.result ??
+                    (relevantEntries.length > 0 ? 'selected' : 'empty')),
+              relevantEntries.length,
+            );
+            if (relevantEntries.length > 0) {
+              recallContext =
+                this.formatRelevantChannelMemoryContext(relevantEntries);
+            }
+          } catch {
+            this.observeChannelMemoryRecall(
+              recallStartedAt,
+              'bypass',
+              'read_error',
+              0,
+            );
+            this.releaseChannelMemoryRead(recallRead);
+            recallRead = undefined;
+            this.logChannelMemoryError(
+              'read',
+              envelope,
+              'entry listing failed',
+            );
+          }
+        }
+        if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
+          if (recallRead) {
+            this.releaseChannelMemoryRead(recallRead);
+          }
+          return;
+        }
+        const acceptedRecallContext =
+          recallRead?.generation === recallRead?.state.generation
+            ? recallContext
+            : undefined;
+        if (recognizedSlashCommand) {
+          this.forgetPendingGroupHistory(envelope);
+        }
+        const groupHistoryEntries = recognizedSlashCommand
+          ? []
+          : this.drainPendingGroupHistory(envelope);
+        let promptToSend = this.prependGroupHistoryContext(
+          envelope,
+          promptText,
+          groupHistoryEntries,
+        );
+        const hiddenContext = [
+          ...(acceptedRecallContext ? [acceptedRecallContext] : []),
+          ...sessionContext,
+        ];
+        if (hiddenContext.length > 0) {
+          promptToSend = `${hiddenContext.join('\n\n')}\n\n${promptToSend}`;
+        }
         if (recallRead) {
           this.releaseChannelMemoryRead(recallRead);
         }
-        return;
-      }
-      const acceptedRecallContext =
-        recallRead?.generation === recallRead?.state.generation
-          ? recallContext
-          : undefined;
-      const groupHistoryEntries = recognizedSlashCommand
-        ? []
-        : this.drainPendingGroupHistory(envelope);
-      let promptToSend = this.prependGroupHistoryContext(
-        promptText,
-        groupHistoryEntries,
-      );
-      const hiddenContext = [
-        ...(acceptedRecallContext ? [acceptedRecallContext] : []),
-        ...sessionContext,
-      ];
-      if (hiddenContext.length > 0) {
-        promptToSend = `${hiddenContext.join('\n\n')}\n\n${promptToSend}`;
-      }
-      if (recallRead) {
-        this.releaseChannelMemoryRead(recallRead);
-      }
-      // Register this prompt as active
-      let doneResolve: () => void = () => {};
-      const done = new Promise<void>((r) => {
-        doneResolve = r;
-      });
-      const promptState: ActivePrompt = {
-        runId: randomUUID(),
-        owner: {
-          kind: 'channel_user',
-          id: envelope.senderId,
-        },
-        cancelled: false,
-        done,
-        resolve: doneResolve,
-        chatId: envelope.chatId,
-        threadId: envelope.threadId,
-        isGroup: envelope.isGroup,
-        messageId: envelope.messageId,
-        senderId: envelope.senderId,
-        senderName: envelope.senderName,
-        metadata: envelope.metadata,
-      };
-      // This turn is now the single owner of the session's active-prompt slot.
-      // (Steer no longer hands a still-active session to a replacement; only
-      // /clear evicts, and it gives the next turn a fresh session.)
-      this.activePrompts.set(sessionId, promptState);
-      this.emitTaskLifecycle({
-        ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
-        type: 'started',
-      });
-
-      // Guarded: an adapter indicator failure must not orphan the started
-      // event (no terminal) or leak the activePrompts entry.
-      try {
-        this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
-      } catch (err) {
-        process.stderr.write(
-          `[${this.name}] onPromptStart threw for session ${sessionId}: ${this.lifecycleError(err)}\n`,
-        );
-      }
-
-      const streamer = useBlockStreaming
-        ? new BlockStreamer({
-            minChars: this.config.blockStreamingChunk?.minChars ?? 400,
-            maxChars: this.config.blockStreamingChunk?.maxChars ?? 1000,
-            idleMs: this.config.blockStreamingCoalesce?.idleMs ?? 1500,
-            send: (text) =>
-              this.sendResponseMessage(envelope.chatId, text, sessionId),
-          })
-        : null;
-      promptState.stopStreaming = () => streamer?.stop();
-
-      // Chunks arriving while a cancel is PENDING are held here: pushing them
-      // to any visible sink could send output the cancel can't recall. On a
-      // failed cancel they're replayed; on success, discarded.
-      const heldChunks: string[] = [];
-      let hasStreamedText = false;
-      const releaseHeldChunks = () => {
-        for (const held of heldChunks.splice(0)) {
-          hasStreamedText = true;
-          const segment = this.ensureOutputSegment(sessionId, promptState);
-          this.emitTaskLifecycle({
-            ...this.lifecycleBase(
-              envelope.chatId,
-              sessionId,
-              envelope.messageId,
-            ),
-            type: 'text_chunk',
-            chunk: held,
-          });
-          this.onResponseChunk(envelope.chatId, held, sessionId, segment);
-          streamer?.push(held);
-        }
-      };
-      const onChunk = (sid: string, chunk: string) => {
-        if (sid !== sessionId || promptState.cancelled) {
-          return;
-        }
-        heldChunks.push(chunk);
-        if (!promptState.cancelPending) {
-          releaseHeldChunks();
-        }
-      };
-      const onResponseBoundary = (sid: string) => {
-        if (
-          sid !== sessionId ||
-          promptState.cancelled ||
-          promptState.cancelPending
-        ) {
-          return;
-        }
-        heldChunks.length = 0;
-        hasStreamedText = false;
-        const segment = this.closeOutputSegment(sessionId, promptState);
-        void this.notifyOutputSegmentEnd(
-          envelope.chatId,
-          sessionId,
-          segment,
-          'response_boundary',
-        );
-        streamer?.stop();
-      };
-      // Queue wait and memory recall can outlive a bridge crash. Capture the
-      // bridge only after the latest recovery has restored session routing.
-      await this.waitForBridgeRecovery();
-      const promptBridge = this.bridge;
-      promptBridge.on('textChunk', onChunk);
-      promptBridge.on('responseBoundary', onResponseBoundary);
-
-      try {
-        const response = await promptBridge.prompt(sessionId, promptToSend, {
-          ...(images.length > 0 ? { images } : {}),
-          imageBase64,
-          imageMimeType,
-          displayText,
+        // Register this prompt as active
+        let doneResolve: () => void = () => {};
+        const done = new Promise<void>((r) => {
+          doneResolve = r;
+        });
+        const promptState: ActivePrompt = {
+          runId: randomUUID(),
+          owner: {
+            kind: 'channel_user',
+            id: envelope.senderId,
+          },
+          cancelled: false,
+          done,
+          resolve: doneResolve,
+          chatId: envelope.chatId,
+          threadId: envelope.threadId,
+          isGroup: envelope.isGroup,
+          messageId: envelope.messageId,
+          senderId: envelope.senderId,
+          senderName: envelope.senderName,
+          metadata: envelope.metadata,
+          sourceLabel,
+        };
+        // This turn is now the single owner of the session's active-prompt slot.
+        // (Steer no longer hands a still-active session to a replacement; only
+        // /clear evicts, and it gives the next turn a fresh session.)
+        this.activePrompts.set(sessionId, promptState);
+        this.emitTaskLifecycle({
+          ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
+          type: 'started',
         });
 
-        await this.settleCancelRequested(promptState);
-        if (!promptState.cancelled) {
-          releaseHeldChunks();
+        // Guarded: an adapter indicator failure must not orphan the started
+        // event (no terminal) or leak the activePrompts entry.
+        try {
+          this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
+        } catch (err) {
+          process.stderr.write(
+            `[${this.name}] onPromptStart threw for session ${sessionId}: ${this.lifecycleError(err)}\n`,
+          );
         }
 
-        // If cancelled, skip sending the response
-        if (!promptState.cancelled && response) {
-          promptState.deliveryStarted = true;
-          if (streamer) {
-            if (!hasStreamedText) {
-              streamer.push(response);
-            }
-            await streamer.flush();
-          } else {
+        // Chunks arriving while a cancel is PENDING are held here: pushing them
+        // to any visible sink could send output the cancel can't recall. On a
+        // failed cancel they're replayed; on success, discarded.
+        const heldChunks: string[] = [];
+        const releaseHeldChunks = () => {
+          for (const held of heldChunks.splice(0)) {
             const segment = this.ensureOutputSegment(sessionId, promptState);
+            this.emitTaskLifecycle({
+              ...this.lifecycleBase(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
+              ),
+              type: 'text_chunk',
+              chunk: held,
+            });
+            this.onResponseChunk(envelope.chatId, held, sessionId, segment);
+          }
+        };
+        const onChunk = (sid: string, chunk: string) => {
+          if (sid !== sessionId || promptState.cancelled) {
+            return;
+          }
+          heldChunks.push(chunk);
+          if (!promptState.cancelPending) {
+            releaseHeldChunks();
+          }
+        };
+        const onResponseBoundary = (sid: string) => {
+          if (
+            sid !== sessionId ||
+            promptState.cancelled ||
+            promptState.cancelPending
+          ) {
+            return;
+          }
+          heldChunks.length = 0;
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          void this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'response_boundary',
+          );
+        };
+        // Queue wait and memory recall can outlive a bridge crash. Capture the
+        // bridge only after the latest recovery has restored session routing.
+        await this.waitForBridgeRecovery();
+        const promptBridge = this.bridge;
+        promptBridge.on('textChunk', onChunk);
+        promptBridge.on('responseBoundary', onResponseBoundary);
+
+        let taskResultPartial = false;
+        try {
+          if (!this.canStartInboundTurn()) {
+            throw new ChannelPromptCancelledError();
+          }
+          const response = await promptBridge.prompt(sessionId, promptToSend, {
+            ...(this.config.outputMode === 'per_task'
+              ? {
+                  outputMode: 'per_task' as const,
+                  onTaskResult: ({ partial }: { partial: boolean }) => {
+                    taskResultPartial = partial;
+                  },
+                }
+              : {}),
+            ...(images.length > 0 ? { images } : {}),
+            imageBase64,
+            imageMimeType,
+            // Session history shows exactly what the model receives. Only the
+            // controls that can reorder or hide rendered text are neutralized.
+            displayText: sanitizeDisplayText(promptToSend),
+          });
+
+          await this.settleCancelRequested(promptState);
+          if (!promptState.cancelled) {
+            releaseHeldChunks();
+          }
+
+          // If cancelled, skip sending the response
+          if (!promptState.cancelled && response) {
+            promptState.deliveryStarted = true;
+            const segment = this.ensureOutputSegment(sessionId, promptState);
+            if (segment && taskResultPartial) segment.partial = true;
             await this.onResponseComplete(
               envelope.chatId,
               response,
@@ -6205,145 +7474,154 @@ export abstract class ChannelBase {
               promptState.activeSegmentId = undefined;
             }
           }
-        }
-        // Once delivery started the turn's outcome is fixed — don't let a
-        // cancel settling during the send rewrite completed into cancelled.
-        if (!promptState.deliveryStarted) {
-          await this.settleCancelRequested(promptState);
-        }
-        if (!promptState.cancelled && !promptState.cancellationEmitted) {
-          const segment = this.closeOutputSegment(sessionId, promptState);
-          void this.notifyOutputSegmentEnd(
-            envelope.chatId,
-            sessionId,
-            segment,
-            'completed',
-          );
-          this.emitTaskLifecycle({
-            ...this.lifecycleBase(
+          // Once delivery started the turn's outcome is fixed — don't let a
+          // cancel settling during the send rewrite completed into cancelled.
+          if (!promptState.deliveryStarted) {
+            await this.settleCancelRequested(promptState);
+          }
+          if (!promptState.cancelled && !promptState.cancellationEmitted) {
+            const segment = this.closeOutputSegment(sessionId, promptState);
+            void this.notifyOutputSegmentEnd(
               envelope.chatId,
               sessionId,
-              envelope.messageId,
-            ),
-            type: 'completed',
-          });
-        }
-      } catch (err) {
-        // Mirror the try path: once delivery started, a late-settling cancel
-        // must not suppress the failed emit (the /cancel handler declines to
-        // emit its own terminal once deliveryStarted is set).
-        if (!promptState.deliveryStarted) {
-          await this.settleCancelRequested(promptState);
-        }
-        if (!promptState.cancelled) {
-          releaseHeldChunks();
-          const segment = this.closeOutputSegment(sessionId, promptState);
-          void this.notifyOutputSegmentEnd(
-            envelope.chatId,
-            sessionId,
-            segment,
-            'failed',
-          );
-          this.emitTaskLifecycle({
-            ...this.lifecycleBase(
+              segment,
+              'completed',
+            );
+            this.emitTaskLifecycle({
+              ...this.lifecycleBase(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
+              ),
+              type: 'completed',
+            });
+          }
+        } catch (err) {
+          const runtimeCancelled =
+            !promptState.deliveryStarted &&
+            err instanceof ChannelPromptCancelledError;
+          // Mirror the try path: once delivery started, a late-settling cancel
+          // must not suppress the failed emit (the /cancel handler declines to
+          // emit its own terminal once deliveryStarted is set).
+          if (!promptState.deliveryStarted) {
+            await this.settleCancelRequested(promptState);
+            if (runtimeCancelled) {
+              this.emitTaskCancellation(
+                promptState,
+                sessionId,
+                'runtime_cancelled',
+              );
+            }
+          }
+          if (!promptState.cancelled && !runtimeCancelled) {
+            releaseHeldChunks();
+            const segment = this.closeOutputSegment(sessionId, promptState);
+            void this.notifyOutputSegmentEnd(
               envelope.chatId,
               sessionId,
-              envelope.messageId,
-            ),
-            type: 'failed',
-            error: this.lifecycleError(err),
-            phase: promptState.deliveryStarted ? 'delivery' : 'agent',
-          });
-        } else {
-          const channel = sanitizeLogText(this.name, 64);
-          const safeSessionId = sanitizeLogText(sessionId, 64);
-          const safeMessageId = sanitizeLogText(envelope.messageId ?? '', 64);
-          process.stderr.write(
-            `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
-          );
-        }
-        if (promptState.cancelled) {
-          return;
-        }
-        throw err;
-      } finally {
-        promptBridge.off('textChunk', onChunk);
-        promptBridge.off('responseBoundary', onResponseBoundary);
-        if (streamer) {
-          streamer.stop();
-          // Queued block sends belong to this turn: let them land before
-          // onPromptEnd settles turn-scoped adapter state, or a send racing
-          // the settle can recreate discarded state and leak unredacted text.
-          await streamer.drain();
-        }
-        // Identity guard: a turn that wedged past /clear's bounded wait gets
-        // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
-        // turn the user starts AFTER the clear can re-seed activePrompts (and own
-        // the collect buffer) for this session. When the wedged bridge.prompt
-        // finally settles and runs this finally, touching session-visible state
-        // would clobber that live later turn — ending the working indicator it
-        // re-seeded or draining a buffer it owns. So only touch session-scoped
-        // state when the entry is still ours. (Steer no longer evicts: it cancels
-        // and waits, so a steered turn is always stillCurrent when it completes.)
-        const stillCurrent = this.activePrompts.get(sessionId) === promptState;
-        // onPromptEnd runs platform cleanup (clear the typing interval, recall the
-        // working reaction, finalize the card). Run it UNLESS this turn was a
-        // /clear eviction (clearEvicted): /clear already ran this turn's onPromptEnd
-        // at clear-time, and a turn the user started after the clear may now own the
-        // chat-scoped indicator, so re-running cleanup here would clobber it.
-        // Invariant: clearEvicted is set ONLY by /clear's eviction, which then
-        // UNCONDITIONALLY deletes activePrompts[sessionId] (its try/catch around the
-        // clear-time onPromptEnd guarantees the purge runs even if that throws), and
-        // no turn ever re-inserts THIS promptState object — so clearEvicted ⟹ NOT
-        // stillCurrent. Hence `stillCurrent || !clearEvicted` reduces to
-        // `!clearEvicted` (the `stillCurrent && clearEvicted` case is unreachable).
-        // Steer no longer evicts (it chains and waits), so a steered turn is always
-        // stillCurrent on completion.
-        if (!promptState.clearEvicted) {
-          // onPromptEnd runs platform-adapter cleanup (clear the typing interval,
-          // recall the working reaction, finalize the card) — network/IO that CAN
-          // throw. Guard it like the /clear-eviction path above: an uncaught throw
-          // here would skip activePrompts.delete (session leak), promptState.resolve
-          // (active.done never settles → a later /clear falsely logs "abandoned a
-          // wedged turn" for a turn that completed), and the collect-buffer drain
-          // (lost messages) — and the rejected queue-chain promise, swallowed by the
-          // tail .catch(() => {}), would silently drop every later turn this session.
-          try {
-            this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
-          } catch (err) {
+              segment,
+              'failed',
+            );
+            this.emitTaskLifecycle({
+              ...this.lifecycleBase(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
+              ),
+              type: 'failed',
+              error: this.lifecycleError(err),
+              phase: promptState.deliveryStarted ? 'delivery' : 'agent',
+            });
+          } else {
+            const channel = sanitizeLogText(this.name, 64);
+            const safeSessionId = sanitizeLogText(sessionId, 64);
+            const safeMessageId = sanitizeLogText(envelope.messageId ?? '', 64);
             process.stderr.write(
-              `[${this.name}] onPromptEnd threw in finally for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+              `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
             );
           }
-        }
-        if (stillCurrent) {
-          this.activePrompts.delete(sessionId);
-        }
-        // Signal any /clear waiter racing our done that we're done — even a
-        // /clear-evicted wedged turn must release it (its bounded wait already
-        // timed out). (Steer no longer waits on done; it chains on the queue tail.)
-        promptState.resolve();
+          if (promptState.cancelled || runtimeCancelled) {
+            return;
+          }
+          if (sourceLabel) {
+            this.inboundErrorSourceLabels.set(envelope, sourceLabel);
+          }
+          throw err;
+        } finally {
+          promptBridge.off('textChunk', onChunk);
+          promptBridge.off('responseBoundary', onResponseBoundary);
+          // Identity guard: a turn that wedged past /clear's bounded wait gets
+          // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
+          // turn the user starts AFTER the clear can re-seed activePrompts (and own
+          // the collect buffer) for this session. When the wedged bridge.prompt
+          // finally settles and runs this finally, touching session-visible state
+          // would clobber that live later turn — ending the working indicator it
+          // re-seeded or draining a buffer it owns. So only touch session-scoped
+          // state when the entry is still ours. (Steer no longer evicts: it cancels
+          // and waits, so a steered turn is always stillCurrent when it completes.)
+          const stillCurrent =
+            this.activePrompts.get(sessionId) === promptState;
+          // onPromptEnd runs platform cleanup (clear the typing interval, recall the
+          // working reaction, finalize the card). Run it UNLESS this turn was a
+          // /clear eviction (clearEvicted): /clear already ran this turn's onPromptEnd
+          // at clear-time, and a turn the user started after the clear may now own the
+          // chat-scoped indicator, so re-running cleanup here would clobber it.
+          // Invariant: clearEvicted is set ONLY by /clear's eviction, which then
+          // UNCONDITIONALLY deletes activePrompts[sessionId] (its try/catch around the
+          // clear-time onPromptEnd guarantees the purge runs even if that throws), and
+          // no turn ever re-inserts THIS promptState object — so clearEvicted ⟹ NOT
+          // stillCurrent. Hence `stillCurrent || !clearEvicted` reduces to
+          // `!clearEvicted` (the `stillCurrent && clearEvicted` case is unreachable).
+          // Steer no longer evicts (it chains and waits), so a steered turn is always
+          // stillCurrent on completion.
+          if (!promptState.clearEvicted) {
+            // onPromptEnd runs platform-adapter cleanup (clear the typing interval,
+            // recall the working reaction, finalize the card) — network/IO that CAN
+            // throw. Guard it like the /clear-eviction path above: an uncaught throw
+            // here would skip activePrompts.delete (session leak), promptState.resolve
+            // (active.done never settles → a later /clear falsely logs "abandoned a
+            // wedged turn" for a turn that completed), and the collect-buffer drain
+            // (lost messages) — and the rejected queue-chain promise, swallowed by the
+            // tail .catch(() => {}), would silently drop every later turn this session.
+            try {
+              this.onPromptEnd(envelope.chatId, sessionId, envelope.messageId);
+            } catch (err) {
+              process.stderr.write(
+                `[${this.name}] onPromptEnd threw in finally for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+              );
+            }
+          }
+          if (stillCurrent) {
+            this.activePrompts.delete(sessionId);
+          }
+          // Signal any /clear waiter racing our done that we're done — even a
+          // /clear-evicted wedged turn must release it (its bounded wait already
+          // timed out). (Steer no longer waits on done; it chains on the queue tail.)
+          promptState.resolve();
 
-        // Drain collect buffer if any messages accumulated — but only while we're
-        // still the active turn, so a /clear-evicted wedged turn whose bridge.prompt
-        // settles late can't drain a buffer a later turn now owns. (Belt-and-
-        // suspenders: /clear already deletes the buffer on eviction, so this guard
-        // is defensive — but it keeps the invariant "only the current turn drains".)
-        this.drainCollectBufferForCurrentPrompt(
-          sessionId,
-          stillCurrent,
-          'prompt completion',
-        );
-      }
-    });
-    const tracked = current.finally(() => {
-      this.releaseQueuedTurn(sessionId);
-    });
-    this.sessionQueues.set(
-      sessionId,
-      tracked.catch(() => {}),
-    );
-    await tracked;
+          // Drain collect buffer if any messages accumulated — but only while we're
+          // still the active turn, so a /clear-evicted wedged turn whose bridge.prompt
+          // settles late can't drain a buffer a later turn now owns. (Belt-and-
+          // suspenders: /clear already deletes the buffer on eviction, so this guard
+          // is defensive — but it keeps the invariant "only the current turn drains".)
+          this.drainCollectBufferForCurrentPrompt(
+            sessionId,
+            stillCurrent,
+            'prompt completion',
+          );
+        }
+      });
+      const tracked = current.finally(() => {
+        this.releaseQueuedTurn(sessionId);
+      });
+      this.sessionQueues.set(
+        sessionId,
+        tracked.catch(() => {}),
+      );
+      await tracked;
+    } finally {
+      if (!this.namedSessions) this.router.releaseRoutingLease(sessionId);
+    }
   }
 
   private pairingRejectionMessage(

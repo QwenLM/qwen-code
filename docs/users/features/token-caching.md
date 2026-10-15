@@ -1,5 +1,7 @@
 # Token Caching and Cost Optimization
 
+Caching lowers the price of the prefix every request carries. To make that prefix smaller in the first place — fewer resident tool schemas, smaller context files — see [Resident Context Cost](context-cost.md); the two compose.
+
 Qwen Code automatically optimizes API costs through token caching when using API key authentication. This feature stores frequently used content like system instructions and conversation history to reduce the number of tokens processed in subsequent requests.
 
 ## How It Benefits You

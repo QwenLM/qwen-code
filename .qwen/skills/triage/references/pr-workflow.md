@@ -264,8 +264,15 @@ latest close was manual), treat the closer as unresolved.
   - **Fully subsumed** — applying this PR's ENTIRE diff to the default
     branch would change nothing: every production line this PR adds already
     exists there, AND every production line this PR deletes is already
-    absent there (check per file via
-    `gh api "repos/$REPO/contents/<path>?ref=$DEFAULT_BRANCH"`). A diff
+    absent there. URL-encode the path with
+    `PATH_ENCODED=$(jq -rn --arg value "<path>" '$value | @uri')`, then read
+    each file as raw bytes via
+    `gh api -H "Accept: application/vnd.github.raw+json" --method GET "repos/$REPO/contents/$PATH_ENCODED" -f ref="$DEFAULT_BRANCH"`;
+    the default JSON representation leaves `content` empty for files at or
+    above 1 MiB. A 404 from this encoded-path request means the file is absent
+    — apply the predicates above to that known state. If any other raw fetch fails, subsumption is
+    unverified: never close; flag it in the Stage 1 comment and escalate to
+    the maintainer. A diff
     with NO production changes (e.g. tests-only) is never fully subsumed —
     any file it adds outside the production set is itself a remaining
     delta. → post the terminal comment below, then close the PR. This is
@@ -892,14 +899,89 @@ Reflection shows it shouldn't merge — request changes immediately, citing the 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some rethinking — see my notes above. 🙏"
 ```
 
-Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Post an explicit defer comment that:
+Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Resolve who owns the call, assign the PR to them, and post an explicit defer comment that:
 
 1. States you are escalating to the maintainer.
 2. Names the specific reason(s) for uncertainty — what you cannot resolve from the diff, tests, and PR description.
-3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).
+3. @mentions that maintainer.
+
+Resolve the maintainer deterministically — never eyeball it. `$QWEN_MAINTAINER_HANDLE` wins when set; otherwise the same owner map and load/rotation logic as issue assignment picks one accountable owner from the PR's labels. The resolver prints one login or nothing, and nothing means "fall through", never "guess":
 
 ```bash
-gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$QWEN_MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
+MAINTAINER="${QWEN_MAINTAINER_HANDLE:-}"
+if [ -z "$MAINTAINER" ]; then
+  MAINTAINER=$(REPO="${REPO:-}" PR_NUMBER="${PR_NUMBER:-}" node --input-type=module <<'EOF' 2>/dev/null
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { loadPolicy, matchArea, openIssueCount, pickOwner } from './.github/scripts/assign-issue-owner.mjs';
+
+const gh = (args) => {
+  const r = spawnSync('gh', args, { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(r.stderr.trim() || 'gh failed');
+  return r.stdout.trim();
+};
+
+// No lane exports REPO: the triage agent step exports REPOSITORY and Actions
+// always provides GITHUB_REPOSITORY, so fall through the skill's documented
+// resolve chain. The number arrives as PR_NUMBER or ISSUE_NUMBER depending
+// on the lane. Empty/unset values fall through the || chain.
+const repo = process.env.REPO || process.env.REPOSITORY || process.env.GITHUB_REPOSITORY;
+const prNumber = process.env.PR_NUMBER || process.env.ISSUE_NUMBER;
+const pr = JSON.parse(gh(['pr', 'view', prNumber, '--repo', repo, '--json', 'author,labels']));
+const policy = loadPolicy(readFileSync('.github/issue-owners.json', 'utf8'));
+const area = matchArea(policy, pr);
+if (!area) process.exit(0);
+
+const canWrite = (login) => {
+  try {
+    return ['admin', 'maintain', 'write'].includes(
+      gh(['api', 'repos/' + repo + '/collaborators/' + login + '/permission', '--jq', '.permission']),
+    );
+  } catch {
+    return false;
+  }
+};
+// A null author means the account was deleted — nobody to exclude, and
+// dereferencing it would throw, letting 2>/dev/null silently bypass the
+// deterministic resolver (the jq fallback below already defends this shape).
+const authorLogin = pr.author?.login?.toLowerCase() ?? '';
+const eligible = area.owners.filter(
+  (owner) => owner.toLowerCase() !== authorLogin && canWrite(owner),
+);
+if (eligible.length === 0) process.exit(0);
+
+// Same load metric as issue assignment — reuse the exported counter instead
+// of re-implementing it, so the two assignment paths cannot drift.
+const load = new Map(
+  eligible.map((owner) => [owner, openIssueCount(repo, owner)]),
+);
+console.log(pickOwner(eligible, load, Number(prNumber)));
+EOF
+  )
+fi
+if [ -z "$MAINTAINER" ]; then
+  # Last resort: the most recent human reviewer, if any. latestReviews is
+  # not recency-sorted and bot accounts submit formal reviews here, so
+  # drop null authors first (a deleted account exports as "author": null,
+  # and one null login piped into endswith() aborts the whole filter,
+  # emptying the mention even when a live human reviewer exists), then
+  # filter the bot-suffix logins and order by submittedAt before taking
+  # the last — otherwise a defer escalation @mentions a bot and notifies
+  # nobody.
+  MAINTAINER=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json latestReviews \
+    --jq '[.latestReviews[] | select(.author.login != null) | select((.author.login | (endswith("[bot]") or endswith("-bot"))) | not)] | sort_by(.submittedAt) | last | .author.login // empty')
+fi
+if [ -n "$MAINTAINER" ]; then
+  # Put the PR in their Assigned filter — a stronger signal than the mention
+  # alone. Best-effort: a failed assign must never block the defer comment.
+  gh pr edit "$PR_NUMBER" --repo "$REPO" --add-assignee "$MAINTAINER" || true
+fi
+```
+
+The heredoc resolves the repository as `REPO` → `REPOSITORY` → `GITHUB_REPOSITORY` and the PR number as `PR_NUMBER` → `ISSUE_NUMBER` (first set wins; the invocation line above passes the session's shell variables through, because an unexported variable never reaches the node child process and `2>/dev/null` would swallow the failure), and it resolves its relative import against the repository root, so run it from the workspace root like every other step here. If nothing resolves — no handle set, no area label on the PR, no eligible owner, no human reviewer — post the comment without an @mention rather than guessing a login.
+
+```bash
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @<MAINTAINER> — <reason>. Needs a human call on this one."
 ```
 
 A defer without an explicit comment is invisible — the maintainer won't know they're needed.

@@ -8,7 +8,20 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => true),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 import {
   fetchGitBranches,
   gitCheckout,
@@ -16,37 +29,76 @@ import {
   gitCreateBranch,
   gitEnv,
   gitPull,
+  GitPullFailure,
   gitPush,
   isValidCheckoutRef,
+  parseDroppedStashSha,
+  streamGitRecords,
 } from './git-branches.js';
 import { getDefaultBranch } from './github-prs.js';
 
 const tmpRoots: string[] = [];
+type Env = Record<string, string | undefined>;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
-function makeRepo(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
+function tmpDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tmpRoots.push(dir);
+  return dir;
+}
+
+function makeRepo(): string {
+  const dir = tmpDir('qwen-gitbranches-');
   git(dir, 'init', '-q', '-b', 'master');
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  git(dir, 'config', 'tag.gpgsign', 'false');
+  git(dir, 'config', 'core.autocrlf', 'false');
   git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
-  fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
-  git(dir, 'add', '.');
-  git(dir, 'commit', '-q', '-m', 'init');
+  commitFile(dir, 'a.txt', 'one\n', 'init');
   return dir;
 }
 
 function makeBareRemote(): string {
-  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitremote-'));
-  tmpRoots.push(remote);
+  const remote = tmpDir('qwen-gitremote-');
   git(remote, 'init', '-q', '--bare');
   git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/master');
   return remote;
+}
+
+/** Adds a fresh bare remote as `name`; pushes with `push` args if given. */
+function addRemote(dir: string, name: string, ...push: string[]): string {
+  const remote = makeBareRemote();
+  git(dir, 'remote', 'add', name, remote);
+  if (push.length > 0) git(dir, 'push', '-q', ...push);
+  return remote;
+}
+
+/** A clone of `remote` standing in for another developer. */
+function cloneOf(remote: string): string {
+  const clone = tmpDir('qwen-gitclone-');
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  return clone;
+}
+
+/** Commits `file` in a fresh clone of `remote` and pushes; returns its SHA. */
+function advanceRemote(
+  remote: string,
+  file: string,
+  content = 'remote\n',
+  message = `advance ${file}`,
+): string {
+  const clone = cloneOf(remote);
+  commitFile(clone, file, content, message);
+  git(clone, 'push', '-q', 'origin', 'HEAD');
+  return headSha(clone);
 }
 
 function currentBranch(cwd: string): string {
@@ -55,6 +107,182 @@ function currentBranch(cwd: string): string {
 
 function headSha(cwd: string): string {
   return git(cwd, 'rev-parse', 'HEAD').trim();
+}
+
+function trackingOf(dir: string, branch = currentBranch(dir)): string {
+  return git(dir, 'rev-parse', '--abbrev-ref', `${branch}@{u}`).trim();
+}
+
+function branchNames(dir: string): string[] {
+  return git(dir, 'branch', '--format=%(refname:short)')
+    .split('\n')
+    .map((s) => s.trim());
+}
+
+async function localBranch(dir: string, env?: Env, name = 'master') {
+  return (await fetchGitBranches(dir, env)).local.find((b) => b.name === name);
+}
+
+// Workspace `dir` tracking a bare remote, plus a second clone standing in
+// for another developer. Both repositories pin `pull.rebase` so a diverged
+// pull merges instead of depending on whatever the host's git policy is.
+function makeUpstream(): { dir: string; clone: string } {
+  const dir = makeRepo();
+  const remote = addRemote(dir, 'origin');
+  git(dir, 'config', 'pull.rebase', 'false');
+  git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+  const clone = cloneOf(remote);
+  git(clone, 'config', 'core.autocrlf', 'false');
+  return { dir, clone };
+}
+
+/** makeUpstream plus a remote commit of `file` the workspace has not pulled. */
+function upstreamAhead(file = 'remote-only.txt') {
+  const repos = makeUpstream();
+  remoteCommit(repos.clone, file, 'remote\n');
+  return repos;
+}
+
+/** Remote and workspace each committed a different a.txt. */
+function conflictingUpstream() {
+  const repos = upstreamAhead('a.txt');
+  commitFile(repos.dir, 'a.txt', 'local commit\n');
+  return repos;
+}
+
+function commitFile(
+  cwd: string,
+  file: string,
+  content: string,
+  message = `edit ${file}`,
+): string {
+  write(cwd, { [file]: content });
+  git(cwd, 'add', '.');
+  git(cwd, 'commit', '-q', '-m', message);
+  return headSha(cwd);
+}
+
+function remoteCommit(clone: string, file: string, content: string): void {
+  // The workspace may have pushed since the clone was made.
+  git(clone, 'pull', '-q', '--ff-only');
+  commitFile(clone, file, content);
+  git(clone, 'push', '-q', 'origin', 'HEAD');
+}
+
+function stashList(cwd: string): string[] {
+  return git(cwd, 'stash', 'list')
+    .split('\n')
+    .filter((line) => line.trim() !== '');
+}
+
+/** Writes each file (creating parent directories) in insertion order. */
+function write(cwd: string, files: Record<string, string>): void {
+  for (const [file, content] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+    fs.writeFileSync(path.join(cwd, file), content);
+  }
+}
+
+function read(cwd: string, file: string): string {
+  return fs.readFileSync(path.join(cwd, file), 'utf8');
+}
+
+function has(cwd: string, file: string): boolean {
+  return fs.existsSync(path.join(cwd, file));
+}
+
+function installHook(dir: string, name: string, body: string): void {
+  const hook = path.join(dir, '.git', 'hooks', name);
+  fs.mkdirSync(path.dirname(hook), { recursive: true });
+  fs.writeFileSync(hook, `#!/bin/sh\n${body}`);
+  fs.chmodSync(hook, 0o755);
+}
+
+// The code under test honors HOME/XDG config (gitEnv only strips the
+// GIT_CONFIG_* overrides), so point both at an empty directory: the host's
+// `~/.gitconfig` must not decide how these merges behave.
+function hermeticEnv(): Env {
+  const home = tmpDir('qwen-githome-');
+  return { ...process.env, HOME: home, XDG_CONFIG_HOME: home };
+}
+
+// A `git` on PATH that runs the real binary but injects a terminal's actions
+// right before or after one invocation (matched against the joined argument
+// list): how the concurrent interleavings the flows must survive are
+// produced deterministically.
+function gitShim(
+  env: Env,
+  hooks: ReadonlyArray<{
+    match: string;
+    before?: string;
+    after?: string;
+    /** Raw case body run instead of the real git (must exit itself). */
+    script?: string;
+  }>,
+): Env {
+  const real = execFileSync('sh', ['-c', 'command -v git'], {
+    encoding: 'utf8',
+    env: process.env,
+  }).trim();
+  const dir = tmpDir('qwen-gitshim-');
+  const cases = hooks
+    .map((h) =>
+      h.script
+        ? `  ${h.match}) ${h.script} ;;`
+        : `  ${h.match}) ${h.before ?? ':'}; "$REAL" "$@"; rc=$?; ${h.after ?? ':'}; exit $rc ;;`,
+    )
+    .join('\n');
+  fs.writeFileSync(
+    path.join(dir, 'git'),
+    `#!/bin/sh\nREAL="${real}"\ncase "$*" in\n${cases}\nesac\nexec "$REAL" "$@"\n`,
+  );
+  fs.chmodSync(path.join(dir, 'git'), 0o755);
+  return { ...env, PATH: `${dir}:${env['PATH'] ?? process.env['PATH']}` };
+}
+
+/** A pull that must succeed. */
+async function pullOk(
+  dir: string,
+  options: Parameters<typeof gitPull>[1],
+  env: Env = hermeticEnv(),
+) {
+  const result = await gitPull(dir, options, env);
+  expect(result.success).toBe(true);
+  return result;
+}
+
+/** Exactly one stash entry is left, and it contains `text`. */
+function expectSoleStash(dir: string, text: string): void {
+  const entries = stashList(dir);
+  expect(entries).toHaveLength(1);
+  expect(entries[0]).toContain(text);
+}
+
+async function pullFails(
+  dir: string,
+  options: Parameters<typeof gitPull>[1],
+  code: GitPullFailure['code'],
+  env: Env = hermeticEnv(),
+): Promise<GitPullFailure> {
+  let caught: unknown;
+  try {
+    await gitPull(dir, options, env);
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(GitPullFailure);
+  expect((caught as GitPullFailure).code).toBe(code);
+  return caught as GitPullFailure;
+}
+
+/** Both dirty-tree modes refuse with `code`; returns the stash refusal. */
+async function bothRefused(
+  dir: string,
+  code: GitPullFailure['code'],
+): Promise<GitPullFailure> {
+  const failure = await pullFails(dir, { stash: true }, code);
+  await pullFails(dir, { force: true }, code);
+  return failure;
 }
 
 afterEach(() => {
@@ -92,9 +320,29 @@ describe('isValidCheckoutRef', () => {
 });
 
 describe('gitEnv (R12 env isolation)', () => {
-  it('strips repository-shaping variables from the child environment', () => {
+  it('preserves commit identity while scrubbing repository selectors', () => {
     const env = gitEnv({
-      PATH: '/usr/bin',
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+      GIT_SSL_CAINFO: '/operator/ca.pem',
+      GIT_SSL_CAPATH: '/operator/certs',
+      GIT_DIR: '/elsewhere/.git',
+    });
+    expect(env).toMatchObject({
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+      GIT_SSL_CAINFO: '/operator/ca.pem',
+      GIT_SSL_CAPATH: '/operator/certs',
+    });
+    expect(env['GIT_DIR']).toBeUndefined();
+  });
+
+  it('strips repository-shaping variables from the child environment', () => {
+    const hostile = {
       GH_REPO: 'evil/repo',
       GIT_DIR: '/elsewhere/.git',
       GIT_CONFIG_GLOBAL: '/tmp/evil.gitconfig',
@@ -106,24 +354,57 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_CONFIG_PARAMETERS: "'foo=bar'",
       GIT_OBJECT_DIRECTORY: '/tmp/objects',
       GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+      GIT_ASKPASS: '/tmp/askpass',
+      SSH_ASKPASS: '/tmp/ssh-askpass',
+      GIT_SSH: '/tmp/git-ssh',
+      GIT_SSH_COMMAND: '/tmp/git-ssh-command',
+      GIT_EXEC_PATH: '/tmp/git-exec',
+      GIT_TEMPLATE_DIR: '/tmp/git-template',
+      GIT_EXTERNAL_DIFF: '/tmp/git-diff',
+      GIT_PROXY_COMMAND: '/tmp/git-proxy',
+      PREFIX: '/tmp/prefix',
+      GIT_CONFIG: '/tmp/git-config',
+      XDG_CONFIG_HOME: '/tmp/evil-xdg',
+      GIT_TRACE2: '/tmp/trace',
+      GIT_DEFAULT_HASH: 'sha256',
+      GIT_SSL_NO_VERIFY: '1',
+      GIT_REDIRECT_STDOUT: '/tmp/stdout',
+      git_askpass: '/tmp/lowercase-askpass',
+      git_config_key_1: 'core.sshCommand',
+      git_config_value_1: '/tmp/ssh-command',
+      EDITOR: 'vi',
+      VISUAL: 'vim',
+      GIT_EDITOR: 'vim',
+      GIT_SEQUENCE_EDITOR: 'nano',
+      PAGER: 'less',
+      GIT_PAGER: 'cat',
+    };
+    const env = gitEnv({
+      PATH: '/usr/bin',
+      ...hostile,
+      GIT_ALLOW_PROTOCOL: 'https:ssh:ext',
     });
     expect(env['PATH']).toBe('/usr/bin');
     expect(env['LC_ALL']).toBe('C');
-    for (const key of [
-      'GH_REPO',
-      'GIT_DIR',
-      'GIT_CONFIG_GLOBAL',
-      'GIT_CONFIG_SYSTEM',
-      'GIT_CONFIG_NOSYSTEM',
-      'GIT_CONFIG_COUNT',
-      'GIT_CONFIG_KEY_0',
-      'GIT_CONFIG_VALUE_0',
-      'GIT_CONFIG_PARAMETERS',
-      'GIT_OBJECT_DIRECTORY',
-      'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-    ]) {
+    for (const key of Object.keys(hostile)) {
       expect(env[key]).toBeUndefined();
     }
+    // GIT_ALLOW_PROTOCOL is normalized, not deleted: the helper-executing
+    // entries are stripped while a restrictive inherited list keeps its
+    // deny-by-default force over config-file policy.
+    expect(env['GIT_ALLOW_PROTOCOL']).toBe('https:ssh');
+  });
+
+  it('normalizes an inherited GIT_ALLOW_PROTOCOL instead of deleting it', () => {
+    expect(
+      gitEnv({ GIT_ALLOW_PROTOCOL: 'https:ssh' })['GIT_ALLOW_PROTOCOL'],
+    ).toBe('https:ssh');
+    // A helper-only list filters to empty, which stays SET: an empty list
+    // is deny-all, while undefined would hand the decision to config.
+    expect(gitEnv({ GIT_ALLOW_PROTOCOL: 'ext:fd' })['GIT_ALLOW_PROTOCOL']).toBe(
+      '',
+    );
+    expect(gitEnv({})['GIT_ALLOW_PROTOCOL']).toBeUndefined();
   });
 
   it('keeps repository discovery on the cwd even with a hostile GIT_DIR', async () => {
@@ -139,39 +420,159 @@ describe('gitEnv (R12 env isolation)', () => {
       else process.env['GIT_DIR'] = saved;
     }
   });
+
+  it('does not load inherited XDG git configuration', () => {
+    const dir = makeRepo();
+    const xdg = path.join(dir, 'evil-xdg');
+    fs.mkdirSync(path.join(xdg, 'git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(xdg, 'git', 'config'),
+      '[probe]\n  marker = came-from-xdg\n',
+    );
+    const env = gitEnv({ ...hermeticEnv(), XDG_CONFIG_HOME: xdg });
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'probe.marker'], {
+        cwd: dir,
+        env,
+      }),
+    ).toThrow();
+  });
 });
 
 describe('fetchGitBranches upstream tracking', () => {
   it('marks a branch whose upstream ref was deleted and pruned as gone', async () => {
     const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '-u', 'origin', 'master');
+    addRemote(dir, 'origin', '-u', 'origin', 'master');
     git(dir, 'checkout', '-q', '-b', 'feat');
     git(dir, 'push', '-q', '-u', 'origin', 'feat');
 
-    const tracked = (await fetchGitBranches(dir)).local.find(
-      (b) => b.name === 'feat',
-    );
+    const tracked = await localBranch(dir, undefined, 'feat');
     expect(tracked?.upstream).toBe('origin/feat');
     expect(tracked?.upstreamGone).toBeUndefined();
 
     git(dir, 'push', '-q', 'origin', '--delete', 'feat');
     git(dir, 'fetch', '-q', '--prune', 'origin');
 
-    const gone = (await fetchGitBranches(dir)).local.find(
-      (b) => b.name === 'feat',
-    );
+    const gone = await localBranch(dir, undefined, 'feat');
     // The configured upstream is still reported so the UI can name it, but
     // the flag says its ref no longer exists.
     expect(gone?.upstream).toBe('origin/feat');
     expect(gone?.upstreamGone).toBe(true);
     expect(gone?.ahead).toBe(0);
     expect(gone?.behind).toBe(0);
-    const master = (await fetchGitBranches(dir)).local.find(
-      (b) => b.name === 'master',
-    );
+    const master = await localBranch(dir);
     expect(master?.upstreamGone).toBeUndefined();
+  });
+});
+
+describe('fetchGitBranches push-side tracking', () => {
+  it('reports the push target and its counts in a triangular workflow', async () => {
+    const dir = makeRepo();
+    const upstreamRemote = addRemote(dir, 'upstream');
+    addRemote(dir, 'origin');
+    git(dir, 'push', '-q', '-u', 'upstream', 'master');
+    git(dir, 'config', 'branch.master.pushRemote', 'origin');
+    git(dir, 'push', '-q', 'origin', 'master');
+    // Local gains one commit (ahead of origin), upstream gains one via a
+    // second clone (local behind upstream) — the fork-workflow shape.
+    commitFile(dir, 'local.txt', 'x\n', 'local');
+    advanceRemote(upstreamRemote, 'up.txt', 'y\n', 'up');
+    git(dir, 'fetch', '-q', 'upstream');
+
+    const env = hermeticEnv();
+    // Under the default `push.default=simple`, git refuses to resolve
+    // `@{push}` in a triangular repo even though a plain `git push`
+    // succeeds — the listing names no push destination.
+    const simpleHead = await localBranch(dir, env);
+    expect(simpleHead?.upstream).toBe('upstream/master');
+    expect(simpleHead?.behind).toBe(1);
+    expect(simpleHead?.pushTarget).toBeUndefined();
+
+    // With a resolvable push.default the push-side counts come through.
+    git(dir, 'config', 'push.default', 'current');
+    const head = await localBranch(dir, env);
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushAhead).toBe(1);
+    expect(head?.pushBehind).toBe(0);
+    expect(head?.pushGone).toBeUndefined();
+  });
+
+  it('marks a resolvable push destination whose ref is missing as pushGone', async () => {
+    const dir = makeRepo();
+    addRemote(dir, 'upstream');
+    addRemote(dir, 'origin');
+    git(dir, 'push', '-q', '-u', 'upstream', 'master');
+    git(dir, 'config', 'branch.master.pushRemote', 'origin');
+    git(dir, 'config', 'push.default', 'current');
+    // Never pushed to origin: the push destination resolves by config but
+    // its ref does not exist — `git push` would create it.
+    const head = await localBranch(dir, hermeticEnv());
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushGone).toBe(true);
+    expect(head?.pushAhead).toBeUndefined();
+    expect(head?.pushBehind).toBeUndefined();
+  });
+
+  it('reports the upstream itself as push target in the plain clone shape', async () => {
+    const dir = makeRepo();
+    addRemote(dir, 'origin', '-u', 'origin', 'master');
+    const head = await localBranch(dir, hermeticEnv());
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushAhead).toBe(0);
+    expect(head?.pushBehind).toBe(0);
+  });
+
+  it('reports a nonzero pushBehind when the push remote has advanced', async () => {
+    const dir = makeRepo();
+    const remote = addRemote(dir, 'origin', '-u', 'origin', 'master');
+    advanceRemote(remote, 'r.txt', 'r\n', 'remote moves');
+    git(dir, 'fetch', '-q', 'origin');
+
+    const head = await localBranch(dir, hermeticEnv());
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushBehind).toBe(1);
+    expect(head?.pushAhead).toBe(0);
+  });
+
+  it('reports no push destination when git declines to name one', async () => {
+    // A live upstream git cannot turn into an `@{push}` answer: the bare `git
+    // push` is refused or routed somewhere the listing cannot name, so the
+    // push row stays silent and upstream counts never stand in for it.
+    const env = hermeticEnv();
+
+    // The tracking upstream's name does not match the branch and
+    // `push.default` is the default `simple`.
+    const mismatch = makeRepo();
+    addRemote(mismatch, 'origin', 'origin', 'master:bar');
+    git(mismatch, 'fetch', '-q', 'origin');
+    git(mismatch, 'branch', '--set-upstream-to=origin/bar', 'master');
+    commitFile(mismatch, 'b.txt', 'two\n');
+    const headM = await localBranch(mismatch, env);
+    expect(headM?.upstream).toBe('origin/bar');
+    expect(headM?.ahead).toBe(1);
+    expect(headM?.pushTarget).toBeUndefined();
+    expect(headM?.pushAhead).toBeUndefined();
+    expect(headM?.pushBehind).toBeUndefined();
+
+    // `push.default=nothing`: the upstream matches, git still names nothing.
+    const nothing = makeRepo();
+    addRemote(nothing, 'origin', '-u', 'origin', 'master');
+    commitFile(nothing, 'c.txt', 'three\n');
+    git(nothing, 'config', 'push.default', 'nothing');
+    const headN = await localBranch(nothing, env);
+    expect(headN?.upstream).toBe('origin/master');
+    expect(headN?.ahead).toBe(1);
+    expect(headN?.pushTarget).toBeUndefined();
+    expect(headN?.pushAhead).toBeUndefined();
+
+    // A `remote.<name>.push` refspec (Gerrit): `%(push)` cannot express
+    // `refs/for/*` as a branch at all.
+    const gerrit = makeRepo();
+    addRemote(gerrit, 'origin', '-u', 'origin', 'master');
+    git(gerrit, 'config', 'remote.origin.push', 'refs/heads/*:refs/for/*');
+    const headG = await localBranch(gerrit, env);
+    expect(headG?.upstream).toBe('origin/master');
+    expect(headG?.pushTarget).toBeUndefined();
   });
 });
 
@@ -215,9 +616,7 @@ describe('gitCheckout', () => {
     // Tag the initial commit, then advance the branch and create a same-named branch.
     git(dir, 'tag', 'release');
     const tagCommit = headSha(dir);
-    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'second');
+    commitFile(dir, 'b.txt', 'two\n', 'second');
     git(dir, 'branch', 'release'); // refs/heads/release now differs from refs/tags/release
 
     const result = await gitCheckout(dir, 'refs/tags/release');
@@ -228,13 +627,11 @@ describe('gitCheckout', () => {
 
   it('rejects a pathspec ref that would discard working-tree changes', async () => {
     const dir = makeRepo();
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    write(dir, { 'a.txt': 'local edit\n' });
 
     await expect(gitCheckout(dir, '.')).rejects.toThrow(/invalid checkout ref/);
     // The uncommitted edit must survive the rejected checkout.
-    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
-      'local edit\n',
-    );
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
   });
 
   it.each(['-f', '--force', '--patch', '--output=/tmp/pwned'])(
@@ -252,12 +649,10 @@ describe('gitCheckout', () => {
     // 'a.txt' is a tracked file AND a valid ref name (passes
     // isValidCheckoutRef). Without the -- terminator, git checkout
     // would interpret it as a pathspec and revert the working tree.
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'LOCAL EDIT\n');
+    write(dir, { 'a.txt': 'LOCAL EDIT\n' });
 
     await expect(gitCheckout(dir, 'a.txt')).rejects.toThrow();
-    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
-      'LOCAL EDIT\n',
-    );
+    expect(read(dir, 'a.txt')).toBe('LOCAL EDIT\n');
   });
 });
 
@@ -293,11 +688,9 @@ describe('gitCreateBranch', () => {
 
   it('treats a tracked filename as a ref, not a pathspec (-- terminator)', async () => {
     const dir = makeRepo();
-    // Without the trailing `--`, `git checkout -b a.txt` would error
-    // differently or create a branch from a pathspec interpretation.
-    // The `-b` flag already forces commit-ish interpretation, so this
-    // is defense-in-depth; the lock test ensures a refactor cannot
-    // silently drop the terminator.
+    // Without the trailing `--`, `git checkout -b a.txt` could read it as a
+    // pathspec. `-b` already forces a commit-ish, so this is defense-in-depth
+    // that locks the terminator in against a refactor dropping it.
     const result = await gitCreateBranch(dir, 'a.txt');
     expect(result.branch).toBe('a.txt');
     expect(currentBranch(dir)).toBe('a.txt');
@@ -305,164 +698,204 @@ describe('gitCreateBranch', () => {
 });
 
 describe('gitCreateBranch rollback (R12)', () => {
+  const FAILING_HOOK = 'exit 1\n';
+  const COMMITTING_HOOK =
+    'echo hook-change >> file.txt\ngit add file.txt\ngit commit --no-verify -qm "hook-created commit"\nexit 1\n';
+  const keeping = () => expect.stringContaining('keeping branch "topic"');
+
+  beforeEach(() => {
+    mockDebugLogger.warn.mockClear();
+  });
+
+  /** `create` fails; HEAD is restored, and `topic` is kept iff the hook committed to it. */
+  async function expectRollback(
+    dir: string,
+    create: () => Promise<unknown>,
+    kept: boolean,
+  ): Promise<void> {
+    const before = currentBranch(dir);
+    await expect(create()).rejects.toThrow();
+    expect(currentBranch(dir)).toBe(before);
+    if (kept) {
+      expect(branchNames(dir)).toContain('topic');
+      // The hook-created commit is still reachable from the branch.
+      expect(git(dir, 'log', '--oneline', 'topic')).toContain(
+        'hook-created commit',
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(keeping());
+    } else {
+      expect(branchNames(dir)).not.toContain('topic');
+      expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(keeping());
+    }
+  }
+
   it('rolls back a branch created before a failing post-checkout hook', async () => {
     const dir = makeRepo();
-    const before = currentBranch(dir);
-    const hookDir = path.join(dir, '.git', 'hooks');
-    fs.mkdirSync(hookDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(hookDir, 'post-checkout'),
-      '#!/bin/sh\nexit 1\n',
-      {
-        mode: 0o755,
-      },
-    );
-
-    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
-
+    installHook(dir, 'post-checkout', FAILING_HOOK);
     // HEAD is restored and the half-created branch is removed.
-    expect(currentBranch(dir)).toBe(before);
-    const branches = git(dir, 'branch', '--format=%(refname:short)');
-    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+    await expectRollback(dir, () => gitCreateBranch(dir, 'topic'), false);
   });
+
+  it('rolls back a branch created from an annotated tag before a failing post-checkout hook', async () => {
+    const dir = makeRepo();
+    git(dir, 'tag', '-a', 'v1.0', '-m', 'annotated start');
+    commitFile(dir, 'b.txt', 'two\n', 'second');
+    expect(git(dir, 'cat-file', '-t', 'v1.0').trim()).toBe('tag');
+    installHook(dir, 'post-checkout', FAILING_HOOK);
+    const create = () => gitCreateBranch(dir, 'topic', 'v1.0');
+    await expectRollback(dir, create, false);
+  });
+
+  it('keeps a branch that a failing post-checkout hook committed to', async () => {
+    const dir = makeRepo();
+    installHook(dir, 'post-checkout', COMMITTING_HOOK);
+    // HEAD is restored, but the branch is kept because the hook created a
+    // commit on it — force-deleting would discard that commit.
+    await expectRollback(dir, () => gitCreateBranch(dir, 'topic'), true);
+  });
+
+  it('keeps hook commits when an empty start point defaults to HEAD', async () => {
+    const dir = makeRepo();
+    installHook(dir, 'post-checkout', COMMITTING_HOOK);
+    await expectRollback(dir, () => gitCreateBranch(dir, 'topic', ''), true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps hook commits when resolving the start commit fails',
+    async () => {
+      const dir = makeRepo();
+      installHook(dir, 'post-checkout', COMMITTING_HOOK);
+      const env = gitShim(hermeticEnv(), [
+        { match: '"rev-parse --verify "*', script: 'exit 128' },
+      ]);
+      const create = () => gitCreateBranch(dir, 'topic', undefined, env);
+      await expectRollback(dir, create, true);
+    },
+  );
 });
 
+/** Commits b.txt ("second"), pushes with setUpstream and returns the upstream. */
+async function pushSettingUpstream(dir: string): Promise<string> {
+  commitFile(dir, 'b.txt', 'two\n', 'second');
+  await gitPush(dir, { setUpstream: true }, hermeticEnv());
+  return trackingOf(dir);
+}
+
 describe('gitPush', () => {
+  it.skipIf(process.platform === 'win32')(
+    'preserves the caller SSH command for remote pushes',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'remote', 'add', 'origin', 'ssh://example.invalid/repo');
+      await expect(
+        gitPush(
+          dir,
+          { setUpstream: true },
+          {
+            ...hermeticEnv(),
+            GIT_SSH_COMMAND: "sh -c 'echo qwen-transport-probe >&2; exit 1'",
+          },
+        ),
+      ).rejects.toThrow(/qwen-transport-probe/);
+    },
+  );
+
   it('throws a clear error when setUpstream is used in detached HEAD', async () => {
     const dir = makeRepo();
     git(dir, 'tag', 'v1.0');
     git(dir, 'checkout', '-q', 'v1.0');
 
-    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
-      /detached HEAD/,
-    );
+    await expect(
+      gitPush(dir, { setUpstream: true }, hermeticEnv()),
+    ).rejects.toThrow(/detached HEAD/);
   });
 
   it('preserves an existing upstream instead of rewriting it', async () => {
     const dir = makeRepo();
-    const remoteA = makeBareRemote();
-    const remoteB = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remoteA);
-    git(dir, 'remote', 'add', 'upstream', remoteB);
-    git(dir, 'push', '-q', 'upstream', 'HEAD');
+    addRemote(dir, 'origin');
+    const remoteB = addRemote(dir, 'upstream', 'upstream', 'HEAD');
     // Set tracking to upstream, not origin.
     const branch = currentBranch(dir);
     git(dir, 'branch', '--set-upstream-to', `upstream/${branch}`, branch);
 
-    // Make a new commit so push has something to send.
-    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'second');
-
-    await gitPush(dir, { setUpstream: true });
-
-    // Tracking must still point at upstream, not origin.
-    const tracking = git(
-      dir,
-      'rev-parse',
-      '--abbrev-ref',
-      `${branch}@{u}`,
-    ).trim();
-    expect(tracking).toBe(`upstream/${branch}`);
-    // The commit must have landed in the upstream remote.
-    const upstreamLog = git(remoteB, 'log', '--oneline', '-1');
-    expect(upstreamLog).toContain('second');
+    // Pushes a new commit ("second"); tracking must still point at
+    // upstream, not origin, and the commit must have landed there.
+    expect(await pushSettingUpstream(dir)).toBe(`upstream/${branch}`);
+    expect(git(remoteB, 'log', '--oneline', '-1')).toContain('second');
   });
 
   it('resolves the sole configured remote when no upstream exists', async () => {
     const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'myfork', remote);
-
-    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'second');
-
-    await gitPush(dir, { setUpstream: true });
-
-    const branch = currentBranch(dir);
-    const tracking = git(
-      dir,
-      'rev-parse',
-      '--abbrev-ref',
-      `${branch}@{u}`,
-    ).trim();
-    expect(tracking).toBe(`myfork/${branch}`);
+    addRemote(dir, 'myfork');
+    expect(await pushSettingUpstream(dir)).toBe('myfork/master');
   });
 
   it('uses --force-with-lease when force is requested', async () => {
     const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '--set-upstream', 'origin', 'HEAD');
+    const remote = addRemote(dir, 'origin', '--set-upstream', 'origin', 'HEAD');
 
     // Amend the commit so local and remote diverge, requiring a force push.
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'amended\n');
+    write(dir, { 'a.txt': 'amended\n' });
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '--amend', '-m', 'amended');
 
-    await gitPush(dir, { force: true });
+    await gitPush(dir, { force: true }, hermeticEnv());
 
-    const remoteLog = git(remote, 'log', '--oneline', '-1');
-    expect(remoteLog).toContain('amended');
+    expect(git(remote, 'log', '--oneline', '-1')).toContain('amended');
   });
 });
 
 describe('gitPush push-remote precedence (R12)', () => {
   it('honors remote.pushDefault over the sole/origin remote', async () => {
     const dir = makeRepo();
-    const origin = makeBareRemote();
-    const fork = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', origin);
-    git(dir, 'remote', 'add', 'fork', fork);
+    addRemote(dir, 'origin');
+    addRemote(dir, 'fork');
     git(dir, 'config', 'remote.pushDefault', 'fork');
-    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'second');
-
-    await gitPush(dir, { setUpstream: true });
-
-    const branch = currentBranch(dir);
-    const tracking = git(
-      dir,
-      'rev-parse',
-      '--abbrev-ref',
-      `${branch}@{u}`,
-    ).trim();
-    expect(tracking).toBe(`fork/${branch}`);
+    expect(await pushSettingUpstream(dir)).toBe('fork/master');
   });
 
   it('honors branch.<name>.pushRemote over branch.<name>.remote', async () => {
     const dir = makeRepo();
-    const origin = makeBareRemote();
-    const fork = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', origin);
-    git(dir, 'remote', 'add', 'fork', fork);
+    addRemote(dir, 'origin');
+    addRemote(dir, 'fork');
     const branch = currentBranch(dir);
     // Pull remote is origin but there is no upstream tracking (@{u} fails),
     // and the push remote is explicitly the fork.
     git(dir, 'config', `branch.${branch}.remote`, 'origin');
     git(dir, 'config', `branch.${branch}.pushRemote`, 'fork');
-    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'second');
-
-    await gitPush(dir, { setUpstream: true });
-
-    const tracking = git(
-      dir,
-      'rev-parse',
-      '--abbrev-ref',
-      `${branch}@{u}`,
-    ).trim();
-    expect(tracking).toBe(`fork/${branch}`);
+    expect(await pushSettingUpstream(dir)).toBe(`fork/${branch}`);
   });
 });
 
 describe('gitCommit', () => {
+  it('uses identity supplied by the operator environment', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitidentity-'));
+    tmpRoots.push(dir);
+    const env = {
+      ...hermeticEnv(),
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+    };
+    execFileSync('git', ['init', '-q'], { cwd: dir, env });
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    execFileSync('git', ['add', 'a.txt'], { cwd: dir, env });
+
+    await gitCommit(dir, 'first commit', undefined, env);
+
+    expect(
+      execFileSync('git', ['log', '-1', '--format=%ae'], {
+        cwd: dir,
+        env,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('bot@example.invalid');
+  });
+
   it('commits staged changes and returns sha and subject', async () => {
     const dir = makeRepo();
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    write(dir, { 'a.txt': 'two\n' });
     git(dir, 'add', '.');
 
     const result = await gitCommit(dir, 'update a.txt');
@@ -473,13 +906,12 @@ describe('gitCommit', () => {
 
   it('stages untracked files when all is true', async () => {
     const dir = makeRepo();
-    fs.writeFileSync(path.join(dir, 'new.txt'), 'brand new\n');
+    write(dir, { 'new.txt': 'brand new\n' });
 
     const result = await gitCommit(dir, 'add new file', { all: true });
 
     expect(result.subject).toBe('add new file');
-    const status = git(dir, 'status', '--porcelain');
-    expect(status.trim()).toBe('');
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
   });
 
   it('throws on a clean working tree', async () => {
@@ -490,24 +922,17 @@ describe('gitCommit', () => {
 });
 
 describe('gitPull', () => {
-  it('fetch-only does not merge a divergent remote commit', async () => {
+  /** A repo pushed to origin (`git push -q ...push`), then a divergent commit
+   * on the remote via a second clone. */
+  function behindOrigin(...push: string[]): string {
     const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', 'origin', 'HEAD');
+    const remote = addRemote(dir, 'origin', ...push);
+    advanceRemote(remote, 'remote-only.txt', 'remote\n', 'remote commit');
+    return dir;
+  }
 
-    // Create a divergent commit on the remote via a second clone.
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'remote commit');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-
+  it('fetch-only does not merge a divergent remote commit', async () => {
+    const dir = behindOrigin('origin', 'HEAD');
     const headBefore = headSha(dir);
 
     const result = await gitPull(dir, { fetchOnly: true });
@@ -516,81 +941,765 @@ describe('gitPull', () => {
     // HEAD must not have advanced — fetch-only must not merge.
     expect(headSha(dir)).toBe(headBefore);
     // But the remote ref must have been fetched.
-    const branch = currentBranch(dir);
-    const fetched = git(dir, 'rev-parse', `origin/${branch}`).trim();
-    expect(fetched).not.toBe(headBefore);
+    const fetched = git(dir, 'rev-parse', `origin/${currentBranch(dir)}`);
+    expect(fetched.trim()).not.toBe(headBefore);
   });
 
   it('merge pull integrates a remote commit', async () => {
-    const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
-
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'remote commit');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-
+    const dir = behindOrigin('-u', 'origin', 'HEAD');
     const headBefore = headSha(dir);
 
     const result = await gitPull(dir);
 
     expect(result.success).toBe(true);
     expect(headSha(dir)).not.toBe(headBefore);
-    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(has(dir, 'remote-only.txt')).toBe(true);
   });
 
   it('rebase pull integrates a remote commit', async () => {
-    const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
-
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'remote commit');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-
+    const dir = behindOrigin('-u', 'origin', 'HEAD');
     // Create a local commit so rebase has something to replay.
-    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'local commit');
+    commitFile(dir, 'local-only.txt', 'local\n', 'local commit');
 
     const result = await gitPull(dir, { rebase: true });
 
     expect(result.success).toBe(true);
-    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
-    expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+    expect(has(dir, 'remote-only.txt')).toBe(true);
+    expect(has(dir, 'local-only.txt')).toBe(true);
+  });
+});
+
+describe('gitPull with a dirty working tree', () => {
+  it('a plain pull on a dirty tree is still refused by git, unchanged', async () => {
+    const { dir } = upstreamAhead('a.txt');
+    write(dir, { 'a.txt': 'local\n' });
+
+    await expect(gitPull(dir, undefined, hermeticEnv())).rejects.toThrow(
+      /would be overwritten/,
+    );
+    expect(read(dir, 'a.txt')).toBe('local\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull updates a dirty tree and restores tracked edits and untracked files', async () => {
+    const { dir } = upstreamAhead();
+    write(dir, { 'a.txt': 'local edit\n', 'b.txt': 'untracked\n' });
+    const headBefore = headSha(dir);
+
+    const result = await pullOk(dir, { stash: true });
+
+    expect(result.stashRestoreConflict).toBeUndefined();
+    expect(headSha(dir)).not.toBe(headBefore);
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull with nothing to stash is a plain pull', async () => {
+    const { dir } = upstreamAhead();
+
+    await pullOk(dir, { stash: true });
+
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull with rebase replays the local commit and restores the edits', async () => {
+    const { dir } = upstreamAhead();
+    commitFile(dir, 'local-only.txt', 'local\n');
+    write(dir, { 'a.txt': 'local edit\n' });
+
+    await pullOk(dir, { stash: true, rebase: true });
+
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(read(dir, 'local-only.txt')).toBe('local\n');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    // Linear history: the local commit was replayed, not merged.
+    expect(git(dir, 'rev-list', '--merges', 'HEAD').trim()).toBe('');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull reports a conflicting restore and keeps the stash entry', async () => {
+    const { dir } = upstreamAhead('a.txt');
+    write(dir, { 'a.txt': 'local\n' });
+    const headBefore = headSha(dir);
+
+    const result = await pullOk(dir, { stash: true });
+
+    expect(result.stashRestoreConflict).toBe(true);
+    expect(headSha(dir)).not.toBe(headBefore);
+    expectSoleStash(dir, 'qwen-code: auto-stash before pull');
+    const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+    expect(result.stashSha).toBe(sha);
+    expect(result.output).toContain(sha);
+    // The entry still carries the local edit.
+    expect(git(dir, 'stash', 'show', '-p', sha)).toContain('+local');
+  });
+
+  it('stash pull restores the pre-pull state when the update fails', async () => {
+    const { dir } = conflictingUpstream();
+    commitFile(dir, 'd.txt', 'd\n');
+    const headBefore = headSha(dir);
+    write(dir, { 'd.txt': 'dirty d\n', 'c.txt': 'untracked\n' });
+
+    const failure = await pullFails(dir, { stash: true }, 'pull_failed');
+
+    expect(failure.message).toContain('your local changes were restored');
+    expect(failure.message).toContain('CONFLICT');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(has(dir, '.git/MERGE_HEAD')).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('local commit\n');
+    expect(read(dir, 'd.txt')).toBe('dirty d\n');
+    expect(read(dir, 'c.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull aborts the rebase it started when the replay conflicts', async () => {
+    const { dir } = conflictingUpstream();
+    const headBefore = headSha(dir);
+    write(dir, { 'c.txt': 'untracked\n' });
+
+    await pullFails(dir, { stash: true, rebase: true }, 'pull_failed');
+
+    expect(headSha(dir)).toBe(headBefore);
+    expect(has(dir, '.git/rebase-merge')).toBe(false);
+    expect(has(dir, '.git/rebase-apply')).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('local commit\n');
+    expect(read(dir, 'c.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'stash pull restores its own entry when another stash was pushed meanwhile',
+    async () => {
+      const { dir } = upstreamAhead();
+      write(dir, { 'a.txt': 'local edit\n' });
+      // A post-merge hook stands in for a terminal pushing to the shared
+      // refs/stash while the pull runs.
+      installHook(
+        dir,
+        'post-merge',
+        'echo foreign > foreign.txt\ngit stash push -u -q -m foreign-entry\n',
+      );
+
+      const result = await pullOk(dir, { stash: true });
+
+      expect(result.stashRestoreConflict).toBeUndefined();
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      // Only the foreign entry remains; ours was applied and dropped by
+      // identity even though it was no longer on top.
+      expectSoleStash(dir, 'foreign-entry');
+      expect(has(dir, 'foreign.txt')).toBe(false);
+    },
+  );
+
+  it('stash pull fails with the missing-upstream message before stashing', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'local edit\n' });
+
+    await expect(gitPull(dir, { stash: true }, hermeticEnv())).rejects.toThrow(
+      /no upstream/i,
+    );
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('force pull discards local changes, keeps ignored files, and updates', async () => {
+    const { dir, clone } = makeUpstream();
+    commitFile(dir, '.gitignore', 'build/\n');
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    write(dir, {
+      'a.txt': 'local edit\n',
+      'b.txt': 'untracked\n',
+      'build/out.txt': 'artifact\n',
+    });
+
+    await pullOk(dir, { force: true });
+
+    expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+    expect(has(dir, 'b.txt')).toBe(false);
+    expect(read(dir, 'build/out.txt')).toBe('artifact\n');
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('force pull refuses a diverged branch before discarding anything', async () => {
+    const { dir } = upstreamAhead();
+    commitFile(dir, 'local-only.txt', 'local\n');
+    const headBefore = headSha(dir);
+    write(dir, { 'a.txt': 'local edit\n', 'b.txt': 'untracked\n' });
+
+    await pullFails(dir, { force: true }, 'diverged');
+
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+  });
+
+  it('force pull from a repository subdirectory refuses without discarding', async () => {
+    const { dir, clone } = makeUpstream();
+    commitFile(dir, 'packages/app/index.txt', 'app\n');
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    remoteCommit(clone, 'remote-only.txt', 'remote\n');
+    write(dir, {
+      'a.txt': 'outside edit\n',
+      'packages/app/index.txt': 'inside edit\n',
+    });
+
+    await pullFails(
+      path.join(dir, 'packages', 'app'),
+      { force: true },
+      'force_unsupported',
+    );
+
+    expect(read(dir, 'a.txt')).toBe('outside edit\n');
+    expect(read(dir, 'packages/app/index.txt')).toBe('inside edit\n');
+  });
+
+  it('rejects combining stash and force', async () => {
+    const dir = makeRepo();
+    await expect(gitPull(dir, { stash: true, force: true })).rejects.toThrow(
+      /mutually exclusive/,
+    );
+  });
+
+  it('rejects combining fetchOnly with stash or force instead of dropping them', async () => {
+    const dir = makeRepo();
+    await expect(
+      gitPull(dir, { fetchOnly: true, stash: true }),
+    ).rejects.toThrow(/cannot be combined/);
+    await expect(
+      gitPull(dir, { fetchOnly: true, force: true }),
+    ).rejects.toThrow(/cannot be combined/);
+  });
+
+  it('types the refusal on a detached HEAD without touching anything', async () => {
+    const { dir } = upstreamAhead();
+    git(dir, 'checkout', '-q', '--detach', 'HEAD');
+    write(dir, { 'a.txt': 'local edit\n' });
+    const headBefore = headSha(dir);
+
+    const stash = await bothRefused(dir, 'pull_failed');
+
+    expect(stash.message).toContain('HEAD is detached');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('refuses stash and force pulls while a merge is in progress, keeping it', async () => {
+    const { dir } = conflictingUpstream();
+    git(dir, 'fetch', '-q');
+    expect(() => git(dir, 'merge', '--no-edit', '@{upstream}')).toThrow();
+    // Resolve the conflict but leave the merge uncommitted: this staged
+    // resolution lives only in MERGE_HEAD, which a stash or reset would drop.
+    write(dir, { 'a.txt': 'resolved\n' });
+    git(dir, 'add', 'a.txt');
+    const mergeHead = git(dir, 'rev-parse', 'MERGE_HEAD').trim();
+
+    await bothRefused(dir, 'operation_in_progress');
+
+    expect(git(dir, 'rev-parse', 'MERGE_HEAD').trim()).toBe(mergeHead);
+    expect(read(dir, 'a.txt')).toBe('resolved\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('refuses a stash pull while a rebase is stopped, keeping the edits', async () => {
+    const { dir } = conflictingUpstream();
+    git(dir, 'fetch', '-q');
+    expect(() => git(dir, 'rebase', '@{upstream}')).toThrow();
+    write(dir, { 'b.txt': 'untracked\n' });
+
+    const failure = await pullFails(
+      dir,
+      { stash: true },
+      'operation_in_progress',
+    );
+
+    expect(failure.message).toContain('rebase');
+    expect(has(dir, '.git/rebase-merge')).toBe(true);
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+});
+
+describe('gitPull dirty-tree flows against a concurrent terminal', () => {
+  const unix = process.platform !== 'win32';
+  /** A terminal stashes its own file just before our drop, shifting the
+   * stack; our restored edit must stay in the tree. */
+  const DROP_SHIFT = {
+    match: '"stash drop"*',
+    before:
+      'echo shift > shift.txt; "$REAL" stash push -u -q -m foreign-shift -- shift.txt',
+  };
+
+  it('parses the SHA git reports for a dropped entry', () => {
+    expect(
+      parseDroppedStashSha(
+        'Dropped refs/stash@{1} (2ea0b3d3f5c1a4c8e0b2d6f7a9c1e3b5d7f9a1c3)\n',
+      ),
+    ).toBe('2ea0b3d3f5c1a4c8e0b2d6f7a9c1e3b5d7f9a1c3');
+    expect(parseDroppedStashSha('')).toBeUndefined();
+  });
+
+  it.skipIf(!unix)(
+    'captures its own entry by provenance when a terminal pushes right after it',
+    async () => {
+      const { dir } = upstreamAhead();
+      write(dir, { 'a.txt': 'local edit\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"stash push"*',
+          after:
+            'echo foreign > foreign.txt; "$REAL" stash push -u -q -m foreign-terminal',
+        },
+      ]);
+
+      const result = await pullOk(dir, { stash: true }, env);
+
+      expect(result.stashRestoreConflict).toBeUndefined();
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      expect(has(dir, 'foreign.txt')).toBe(false);
+      expectSoleStash(dir, 'foreign-terminal');
+    },
+  );
+
+  it.skipIf(!unix)(
+    'keeps the other entry when the stash shifts between slot lookup and drop',
+    async () => {
+      const { dir } = upstreamAhead();
+      write(dir, { 'a.txt': 'local edit\n' });
+      const env = gitShim(hermeticEnv(), [DROP_SHIFT]);
+
+      const result = await pullOk(dir, { stash: true }, env);
+
+      expect(result.output).toContain('was kept');
+      // Structured, so the client renders the notice sticky.
+      expect(result.stashKept).toBe(true);
+      expect(result.stashSha).toBe(
+        git(dir, 'rev-parse', 'refs/stash^{commit}').trim() === ''
+          ? undefined
+          : result.stashSha,
+      );
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(2);
+      expect(entries.join('\n')).toContain('foreign-shift');
+      expect(entries.join('\n')).toContain('qwen-code: auto-stash before pull');
+    },
+  );
+
+  it.skipIf(!unix)(
+    'leaves a merge a terminal parked mid-pull alone and reports the entry as kept',
+    async () => {
+      const { dir, clone } = makeUpstream();
+      git(dir, 'branch', 'topic');
+      git(dir, 'checkout', '-q', 'topic');
+      commitFile(dir, 'a.txt', 'topic\n');
+      const topicSha = headSha(dir);
+      git(dir, 'checkout', '-q', 'master');
+      commitFile(dir, 'a.txt', 'main side\n');
+      git(dir, 'push', '-q', 'origin', 'HEAD');
+      remoteCommit(clone, 'remote-only.txt', 'remote\n');
+      write(dir, { 'b.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        // The terminal starts a conflicting merge after the stash and before
+        // the pull runs; the pull then fails on "not concluded your merge".
+        { match: 'pull*', before: '"$REAL" merge topic >/dev/null 2>&1' },
+      ]);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      expect(failure.message).toContain('kept in stash entry');
+      expect(git(dir, 'rev-parse', 'MERGE_HEAD').trim()).toBe(topicSha);
+      expect(stashList(dir)).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(!unix)(
+    'force pull integrates the validated tip even when the remote moves after the check',
+    async () => {
+      const { dir, clone } = upstreamAhead();
+      const validated = git(clone, 'rev-parse', 'HEAD').trim();
+      write(dir, { 'a.txt': 'local edit\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"merge-base --is-ancestor"*',
+          // A teammate rewrites the branch AND the workspace fetches it
+          // (a terminal, or a fetchOnly request) before the discard runs.
+          after: `cd "${clone}" && "$REAL" checkout -q --orphan rewritten && "$REAL" commit -q -m rewritten && "$REAL" push -q -f origin HEAD:master && cd "${dir}" && "$REAL" fetch -q --prune`,
+        },
+      ]);
+
+      await pullOk(dir, { force: true }, env);
+
+      // The interleaving really happened: the remote branch is rewritten…
+      expect(git(clone, 'rev-parse', 'HEAD').trim()).not.toBe(validated);
+      expect(git(dir, 'rev-parse', 'origin/master').trim()).not.toBe(validated);
+      // …and the update still landed on the commit the check validated.
+      expect(headSha(dir)).toBe(validated);
+      expect(read(dir, 'remote-only.txt')).toBe('remote\n');
+      expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    },
+  );
+
+  it('force pull refuses when the upstream branch was deleted on the remote', async () => {
+    const { dir, clone } = makeUpstream();
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitFile(dir, 'feature.txt', 'f\n');
+    git(dir, 'push', '-q', '-u', 'origin', 'feature');
+    git(clone, 'push', '-q', 'origin', '--delete', 'feature');
+    const headBefore = headSha(dir);
+    write(dir, { 'a.txt': 'local edit\n', 'b.txt': 'untracked\n' });
+
+    const failure = await pullFails(dir, { force: true }, 'pull_failed');
+
+    expect(failure.message).toContain('no longer exists');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'b.txt')).toBe('untracked\n');
+  });
+
+  it('stash pull with nothing to stash still aborts and types a conflicting update', async () => {
+    const { dir } = conflictingUpstream();
+    const headBefore = headSha(dir);
+
+    const failure = await pullFails(dir, { stash: true }, 'pull_failed');
+
+    expect(failure.message).toContain('CONFLICT');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(has(dir, '.git/MERGE_HEAD')).toBe(false);
+    expect(read(dir, 'a.txt')).toBe('local commit\n');
+  });
+
+  it('stash pull types the refusal when edits hidden by skip-worktree block the update', async () => {
+    const { dir } = upstreamAhead('a.txt');
+    write(dir, { 'a.txt': 'hidden edit\n' });
+    git(dir, 'update-index', '--skip-worktree', 'a.txt');
+
+    const failure = await pullFails(dir, { stash: true }, 'pull_failed');
+
+    expect(failure.message).toContain('update failed');
+    expect(read(dir, 'a.txt')).toBe('hidden edit\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it('stash pull types the refusal when git cannot stash an intent-to-add entry', async () => {
+    const { dir } = upstreamAhead();
+    write(dir, { 'a.txt': 'local edit\n', 'new.txt': 'new\n' });
+    git(dir, 'add', '-N', 'new.txt');
+    const headBefore = headSha(dir);
+
+    const failure = await pullFails(dir, { stash: true }, 'pull_failed');
+
+    expect(failure.message).toContain('cannot stash the local changes');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'new.txt')).toBe('new\n');
+    expect(stashList(dir)).toEqual([]);
+  });
+
+  it.skipIf(!unix)(
+    'reports the kept entry when a failed update cannot restore the stash',
+    async () => {
+      const { dir } = conflictingUpstream();
+      write(dir, { 'c.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        // After the pull's merge is aborted, an untracked file appears at a
+        // path the stash holds, so `stash apply` refuses to overwrite it.
+        { match: '"merge --abort"*', after: 'echo clash > c.txt' },
+      ]);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      expect(failure.message).toContain('could not be restored automatically');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+      expect(failure.message).toContain(sha);
+      expect(has(dir, '.git/MERGE_HEAD')).toBe(false);
+    },
+  );
+
+  it('refuses stash and force pulls while a cherry-pick is parked, keeping it', async () => {
+    const { dir } = makeUpstream();
+    git(dir, 'branch', 'topic');
+    git(dir, 'checkout', '-q', 'topic');
+    commitFile(dir, 'a.txt', 'topic\n');
+    git(dir, 'checkout', '-q', 'master');
+    commitFile(dir, 'a.txt', 'main side\n');
+    expect(() => git(dir, 'cherry-pick', 'topic')).toThrow();
+    write(dir, { 'a.txt': 'resolved\n' });
+    git(dir, 'add', 'a.txt');
+    const pickHead = git(dir, 'rev-parse', 'CHERRY_PICK_HEAD').trim();
+
+    const failure = await bothRefused(dir, 'operation_in_progress');
+
+    expect(failure.message).toContain('cherry-pick');
+    expect(git(dir, 'rev-parse', 'CHERRY_PICK_HEAD').trim()).toBe(pickHead);
+    expect(read(dir, 'a.txt')).toBe('resolved\n');
+  });
+
+  it.skipIf(!unix)(
+    'leaves a same-tip merge a terminal parked before the pull alone',
+    async () => {
+      const { dir } = conflictingUpstream();
+      write(dir, { 'b.txt': 'untracked\n' });
+      // The terminal merges the very tip the pull is about to integrate,
+      // resolves the conflict and stages it; git then refuses the pull with
+      // exit 128 before touching the tree.
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: 'pull*',
+          before:
+            '"$REAL" merge @{upstream} >/dev/null 2>&1; printf "resolved\\n" > a.txt; "$REAL" add a.txt',
+        },
+      ]);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      // So recovery leaves the terminal's merge and staged resolution exactly
+      // as they were, and puts the untracked file back beside them.
+      expect(failure.message).toContain('merge');
+      expect(has(dir, '.git/MERGE_HEAD')).toBe(true);
+      expect(read(dir, 'a.txt')).toBe('resolved\n');
+      expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+      expect(read(dir, 'b.txt')).toBe('untracked\n');
+      expect(stashList(dir)).toEqual([]);
+    },
+  );
+
+  it.skipIf(!unix)(
+    'types the failure and names the entry when the auto-stash cannot be re-listed',
+    async () => {
+      const { dir } = upstreamAhead();
+      write(dir, { 'a.txt': 'local edit\n' });
+      const mark = path.join(dir, '.git', 'pushed.mark');
+      const env = gitShim(hermeticEnv(), [
+        { match: '"stash push"*', after: `: > "${mark}"` },
+        {
+          match: '"stash list"*',
+          script: `if [ -f "${mark}" ]; then exit 128; fi; exec "$REAL" "$@"`,
+        },
+      ]);
+      const headBefore = headSha(dir);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      expect(failure.message).toContain('qwen-code: auto-stash before pull');
+      expect(failure.message).toContain('was not attempted');
+      expect(stashList(dir)).toHaveLength(1);
+      // The update was never attempted: HEAD must not have advanced to the
+      // reachable upstream commit.
+      expect(headSha(dir)).toBe(headBefore);
+    },
+  );
+
+  it.skipIf(!unix)(
+    'still types a failed update when the recovery listing fails',
+    async () => {
+      const { dir } = conflictingUpstream();
+      write(dir, { 'c.txt': 'untracked\n' });
+      const mark = path.join(dir, '.git', 'pulled.mark');
+      const env = gitShim(hermeticEnv(), [
+        { match: 'pull*', after: `: > "${mark}"` },
+        {
+          match: '"stash list"*',
+          script: `if [ -f "${mark}" ]; then exit 128; fi; exec "$REAL" "$@"`,
+        },
+      ]);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+      expect(failure.message).toContain('your local changes were restored');
+      expect(failure.message).toContain(sha);
+      expect(read(dir, 'c.txt')).toBe('untracked\n');
+      expect(has(dir, '.git/MERGE_HEAD')).toBe(false);
+    },
+  );
+
+  it.skipIf(!unix)(
+    'names the displaced entry when storing it back fails after a drop shift',
+    async () => {
+      const { dir } = upstreamAhead();
+      write(dir, { 'a.txt': 'local edit\n' });
+      const env = gitShim(hermeticEnv(), [
+        DROP_SHIFT,
+        { match: '"stash store"*', script: 'exit 1' },
+      ]);
+
+      const result = await pullOk(dir, { stash: true }, env);
+
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      // Ours survived; the foreign entry is gone from the stack but named
+      // by SHA, with the command that brings it back.
+      expectSoleStash(dir, 'qwen-code: auto-stash before pull');
+      expect(result.stashKept).toBe(true);
+      const match = /git stash store ([0-9a-f]{40})/.exec(result.output);
+      expect(match).not.toBeNull();
+      expect(git(dir, 'cat-file', '-t', match![1]!).trim()).toBe('commit');
+    },
+  );
+
+  it.skipIf(!unix)(
+    'carries the drop diagnostic when a failed update restores but cannot drop',
+    async () => {
+      const { dir } = conflictingUpstream();
+      write(dir, { 'c.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"stash drop"*',
+          script: 'echo "error: cannot lock ref refs/stash" >&2; exit 1',
+        },
+      ]);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+      expect(failure.message).toContain('could not be dropped');
+      expect(failure.message).toContain(sha);
+      expect(read(dir, 'c.txt')).toBe('untracked\n');
+    },
+  );
+
+  it('types the refusal with a lock hint when the index is wedged', async () => {
+    const { dir } = upstreamAhead();
+    write(dir, { 'a.txt': 'local edit\n', '.git/index.lock': '' });
+
+    const failure = await pullFails(dir, { stash: true }, 'pull_failed');
+
+    expect(failure.message).toContain('cannot stash the local changes');
+    expect(failure.message.toLowerCase()).toContain('lock');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+  });
+
+  it('pulls again once a pruned upstream branch is recreated on the remote', async () => {
+    const { dir, clone } = makeUpstream();
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitFile(dir, 'feature.txt', 'f\n');
+    git(dir, 'push', '-q', '-u', 'origin', 'feature');
+    // The teammate has the branch before it is deleted on the remote.
+    git(clone, 'fetch', '-q', 'origin', 'feature');
+    git(clone, 'push', '-q', 'origin', '--delete', 'feature');
+    git(dir, 'fetch', '-q', '--prune');
+    expect(() => git(dir, 'rev-parse', '@{upstream}')).toThrow();
+    // A teammate recreates the branch with a new commit on top of ours.
+    git(clone, 'checkout', '-q', '-b', 'feature', 'FETCH_HEAD');
+    commitFile(clone, 'more.txt', 'more\n');
+    git(clone, 'push', '-q', 'origin', 'feature');
+    write(dir, { 'a.txt': 'local edit\n' });
+
+    await pullOk(dir, { stash: true });
+    expect(read(dir, 'more.txt')).toBe('more\n');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+
+    // And the force path heals the same way.
+    git(clone, 'push', '-q', 'origin', '--delete', 'feature');
+    git(dir, 'fetch', '-q', '--prune');
+    commitFile(clone, 'even-more.txt', 'x\n');
+    git(clone, 'push', '-q', 'origin', 'feature');
+    write(dir, { 'a.txt': 'discard me\n' });
+    await pullOk(dir, { force: true });
+    expect(read(dir, 'even-more.txt')).toBe('x\n');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+  });
+
+  it.skipIf(!unix)(
+    'aborts and restores when the pull is killed mid-integration',
+    async () => {
+      const { dir } = conflictingUpstream();
+      const headBefore = headSha(dir);
+      write(dir, { 'c.txt': 'untracked\n' });
+      // The pull writes its conflicted MERGE_HEAD and then dies the way a
+      // timeout kill arrives: by signal, with no numeric exit code.
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: 'pull*',
+          script:
+            '"$REAL" fetch -q; "$REAL" merge @{upstream} >/dev/null 2>&1; kill -TERM $$',
+        },
+      ]);
+
+      const failure = await pullFails(dir, { stash: true }, 'pull_failed', env);
+
+      expect(failure.message).toContain('your local changes were restored');
+      expect(has(dir, '.git/MERGE_HEAD')).toBe(false);
+      expect(headSha(dir)).toBe(headBefore);
+      expect(read(dir, 'a.txt')).toBe('local commit\n');
+      expect(read(dir, 'c.txt')).toBe('untracked\n');
+      expect(stashList(dir)).toEqual([]);
+    },
+  );
+
+  it('types the force failure when a skip-worktree file blocks the validated update', async () => {
+    const { dir } = upstreamAhead('a.txt');
+    write(dir, { 'a.txt': 'hidden edit\n' });
+    git(dir, 'update-index', '--skip-worktree', 'a.txt');
+    write(dir, { 'b.txt': 'untracked\n' });
+    const headBefore = headSha(dir);
+
+    const failure = await pullFails(dir, { force: true }, 'pull_failed');
+
+    // Typed, so the route cannot re-classify it as dirty_working_tree and
+    // loop the panel on a discard that can never succeed.
+    expect(failure.message).toContain('discard applied, but the update failed');
+    expect(headSha(dir)).toBe(headBefore);
+    expect(read(dir, 'a.txt')).toBe('hidden edit\n');
+  });
+
+  it('refuses stash and force pulls while a git am is stopped, keeping it', async () => {
+    const { dir } = makeUpstream();
+    git(dir, 'checkout', '-q', '-b', 'series');
+    commitFile(dir, 'a.txt', 'series 1\n');
+    commitFile(dir, 'a.txt', 'series 2\n');
+    const patches = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-patches-'));
+    tmpRoots.push(patches);
+    git(dir, 'format-patch', '-q', '-2', '-o', patches);
+    git(dir, 'checkout', '-q', 'master');
+    // The first patch applies; the second conflicts with this edit.
+    commitFile(dir, 'a.txt', 'series 1\n');
+    commitFile(dir, 'a.txt', 'main side\n');
+    const [first, second] = fs.readdirSync(patches).sort();
+    expect(() =>
+      git(dir, 'am', path.join(patches, first!), path.join(patches, second!)),
+    ).toThrow();
+    expect(has(dir, '.git/rebase-apply')).toBe(true);
+
+    const failure = await bothRefused(dir, 'operation_in_progress');
+
+    expect(failure.message).toContain('am');
+    expect(has(dir, '.git/rebase-apply')).toBe(true);
+  });
+
+  it('refuses a stash pull while a revert is parked, keeping it', async () => {
+    const { dir } = makeUpstream();
+    commitFile(dir, 'a.txt', 'A\n');
+    const a = headSha(dir);
+    commitFile(dir, 'a.txt', 'B\n');
+    expect(() => git(dir, 'revert', '--no-edit', a)).toThrow();
+
+    const failure = await pullFails(
+      dir,
+      { stash: true },
+      'operation_in_progress',
+    );
+
+    expect(failure.message).toContain('revert');
+    expect(git(dir, 'rev-parse', 'REVERT_HEAD').trim()).toBe(a);
   });
 });
 
 describe('gitCommit index rollback (R10 #1)', () => {
   it('restores the original index when the commit fails after add -A', async () => {
     const dir = makeRepo();
-    const hookDir = path.join(dir, '.git', 'hooks');
-    fs.mkdirSync(hookDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(hookDir, 'pre-commit'),
-      '#!/bin/sh\necho "lint failed" >&2\nexit 1\n',
-      { mode: 0o755 },
-    );
+    installHook(dir, 'pre-commit', 'echo "lint failed" >&2\nexit 1\n');
     // Stage a deliberate subset and leave another file untracked.
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'staged edit\n');
+    write(dir, { 'a.txt': 'staged edit\n' });
     git(dir, 'add', 'a.txt');
-    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'never staged\n');
+    write(dir, { 'scratch.txt': 'never staged\n' });
 
     expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
 
@@ -603,34 +1712,12 @@ describe('gitCommit index rollback (R10 #1)', () => {
 
   it('refuses add -A when unmerged entries prevent rollback', async () => {
     const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', 'origin', 'HEAD');
-
-    // Create a conflicting change on the remote.
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'remote edit');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-
-    // Create a conflicting local change and attempt merge.
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'local change\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'local edit');
+    const remote = addRemote(dir, 'origin', 'origin', 'HEAD');
+    // Conflicting changes on the remote and locally, then attempt a merge.
+    advanceRemote(remote, 'a.txt', 'remote change\n', 'remote edit');
+    commitFile(dir, 'a.txt', 'local change\n', 'local edit');
     git(dir, 'fetch', '-q', 'origin');
-    let mergeFailed = false;
-    try {
-      git(dir, 'merge', 'origin/' + currentBranch(dir));
-    } catch {
-      mergeFailed = true;
-    }
-    expect(mergeFailed).toBe(true);
+    expect(() => git(dir, 'merge', 'origin/' + currentBranch(dir))).toThrow();
 
     // The index now has unmerged entries; gitCommit with all:true must
     // refuse rather than destroy the conflict state.
@@ -644,11 +1731,11 @@ describe('gitCommit index rollback (R10 #1)', () => {
 
   it('refuses add -A when write-tree fails for a non-unmerged reason', async () => {
     const dir = makeRepo();
-    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    write(dir, { 'b.txt': 'two\n' });
     // Wedge the index lock so write-tree fails but ls-files --unmerged is
     // empty — the code must throw instead of silently continuing without
     // an index snapshot.
-    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+    write(dir, { '.git/index.lock': '' });
 
     await expect(gitCommit(dir, 'feat: x', { all: true })).rejects.toThrow(
       /failed to snapshot index/,
@@ -657,29 +1744,11 @@ describe('gitCommit index rollback (R10 #1)', () => {
 });
 
 describe('gitCheckout remote-tracking refs (R10 #4)', () => {
-  function advanceRemote(remote: string, fileName: string): string {
-    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
-    tmpRoots.push(clone);
-    git(clone, 'clone', '-q', remote, '.');
-    git(clone, 'config', 'user.email', 'other@example.com');
-    git(clone, 'config', 'user.name', 'Other');
-    git(clone, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(clone, fileName), 'remote\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', `advance ${fileName}`);
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-    return git(clone, 'rev-parse', 'HEAD').trim();
-  }
-
   it('tracks the exact remote ref when no local branch exists (multi-remote)', async () => {
     const dir = makeRepo();
     const branch = currentBranch(dir);
-    const remoteA = makeBareRemote();
-    const remoteB = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remoteA);
-    git(dir, 'remote', 'add', 'upstream', remoteB);
-    git(dir, 'push', '-q', 'origin', 'HEAD');
-    git(dir, 'push', '-q', 'upstream', 'HEAD');
+    addRemote(dir, 'origin', 'origin', 'HEAD');
+    const remoteB = addRemote(dir, 'upstream', 'upstream', 'HEAD');
     // Advance upstream only, then fetch so upstream/<branch> differs.
     const upstreamHead = advanceRemote(remoteB, 'upstream-only.txt');
     git(dir, 'fetch', '-q', 'upstream');
@@ -692,20 +1761,12 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
     expect(result).toEqual({ branch, detached: false });
     expect(currentBranch(dir)).toBe(branch);
     expect(headSha(dir)).toBe(upstreamHead);
-    const tracking = git(
-      dir,
-      'rev-parse',
-      '--abbrev-ref',
-      `${branch}@{u}`,
-    ).trim();
-    expect(tracking).toBe(`upstream/${branch}`);
+    expect(trackingOf(dir, branch)).toBe(`upstream/${branch}`);
   });
 
   it('rejects a remote-tracking ref whose local name is an option (e.g. origin/-f)', async () => {
     const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', 'origin', 'HEAD');
+    addRemote(dir, 'origin', 'origin', 'HEAD');
     // Create refs directly — git branch rejects '-f' as a name, but a
     // malicious remote could still carry refs/heads/-f.
     git(dir, 'update-ref', 'refs/heads/-f', 'HEAD');
@@ -719,9 +1780,7 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
   it('checks out the existing local branch rather than the remote commit', async () => {
     const dir = makeRepo();
     const branch = currentBranch(dir);
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', 'origin', 'HEAD');
+    const remote = addRemote(dir, 'origin', 'origin', 'HEAD');
     // Advance the remote so origin/<branch> differs from the local branch.
     advanceRemote(remote, 'remote-only.txt');
     git(dir, 'fetch', '-q', 'origin');
@@ -742,19 +1801,146 @@ describe('getDefaultBranch (R10 #3)', () => {
   it('returns the fully-qualified remote ref so log ranges stay correct', async () => {
     const dir = makeRepo();
     const branch = currentBranch(dir);
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', 'origin', 'HEAD');
+    addRemote(dir, 'origin', 'origin', 'HEAD');
     git(dir, 'fetch', '-q', 'origin');
     git(dir, 'remote', 'set-head', 'origin', branch);
 
-    const result = await getDefaultBranch(dir);
-
-    expect(result).toBe(`origin/${branch}`);
+    expect(await getDefaultBranch(dir)).toBe(`origin/${branch}`);
   });
 
   it('returns null when origin/HEAD is not set', async () => {
     const dir = makeRepo();
     expect(await getDefaultBranch(dir)).toBeNull();
+  });
+});
+
+describe('streamGitRecords', () => {
+  it('hands over each record as it arrives, and stops when told to', async () => {
+    const dir = makeRepo();
+    write(dir, { 'b.txt': 'x\n', 'c.txt': 'x\n', 'd.txt': 'x\n' });
+    git(dir, 'add', '.');
+    const seen: string[] = [];
+    const stopped = await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      seen.push(r.toString('utf8'));
+      return r.toString('utf8') === 'b.txt';
+    });
+    // Stopped on the second record, and nothing after it reached the reader.
+    expect([stopped, seen]).toEqual([true, ['a.txt', 'b.txt']]);
+
+    const all: string[] = [];
+    const reachedEnd = await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      all.push(r.toString('utf8'));
+      return false;
+    });
+    expect([reachedEnd, all]).toEqual([
+      false,
+      ['a.txt', 'b.txt', 'c.txt', 'd.txt'],
+    ]);
+  });
+
+  it('keeps a path the bytes it is', async () => {
+    const dir = makeRepo();
+    const blob = git(dir, 'rev-parse', 'HEAD:a.txt').trim();
+    // git writes paths as bytes, and `-z` does not quote them. Decoding the
+    // stream before splitting it would replace this byte and hand the
+    // reader a path that names some other file.
+    const odd = Buffer.from('sub\xff.txt', 'latin1');
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: dir,
+      input: Buffer.concat([
+        Buffer.from(`100644 ${blob} 0\t`),
+        odd,
+        Buffer.from('\n'),
+      ]),
+    });
+    const records: Buffer[] = [];
+    await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      records.push(Buffer.from(r));
+      return false;
+    });
+    expect(records.some((r) => r.equals(odd))).toBe(true);
+  });
+
+  it('counts the last record, which no separator follows', async () => {
+    const dir = makeRepo();
+    const records: string[] = [];
+    await streamGitRecords(dir, ['rev-parse', 'HEAD'], (r) => {
+      records.push(r.toString('utf8').trim());
+      return false;
+    });
+    expect(records).toEqual([git(dir, 'rev-parse', 'HEAD').trim()]);
+  });
+
+  it('rejects when the reader throws, on any record, the last one included', async () => {
+    const dir = makeRepo();
+    // The last record is only seen once git has closed; a throw there has
+    // to become this promise's rejection, not an uncaught one from inside
+    // an event listener.
+    await expect(
+      streamGitRecords(dir, ['rev-parse', 'HEAD'], () => {
+        throw new Error('reader broke');
+      }),
+    ).rejects.toThrow('reader broke');
+    await expect(
+      streamGitRecords(dir, ['ls-files', '-z'], () => {
+        throw new Error('reader broke early');
+      }),
+    ).rejects.toThrow('reader broke early');
+  });
+
+  it('rejects when git fails, rather than answering "nothing found"', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-norepo-'));
+    tmpRoots.push(outside);
+    await expect(
+      streamGitRecords(
+        outside,
+        ['ls-files', '-z'],
+        () => false,
+        // Without a repository of its own, git would otherwise walk up to
+        // whatever repository holds the temporary directory.
+        { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(outside) },
+      ),
+    ).rejects.toThrow(/not a git repository/i);
+  });
+
+  it('names the subcommand when git fails without a word', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'changed\n' });
+    // `diff --quiet` exits 1 on a change and says nothing, and the `-c`
+    // pair in front is how every call here begins.
+    await expect(
+      streamGitRecords(
+        dir,
+        ['-c', 'core.fsmonitor=false', 'diff', '--quiet'],
+        () => false,
+      ),
+    ).rejects.toThrow('git diff exited with 1');
+  });
+
+  // A shell-script stand-in for git on PATH; POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'says which signal stopped git when nothing else is said',
+    async () => {
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-fakegit-'));
+      tmpRoots.push(bin);
+      write(bin, { git: '#!/bin/sh\nkill -TERM $$\n' });
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      await expect(
+        streamGitRecords(bin, ['ls-files', '-z'], () => false, {
+          ...process.env,
+          PATH: `${bin}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        }),
+      ).rejects.toThrow('git ls-files exited with SIGTERM');
+    },
+  );
+
+  it('gives up on git that never finishes', async () => {
+    const dir = makeRepo();
+    // `cat-file --batch` waits on its input, which nothing ever sends.
+    await expect(
+      streamGitRecords(dir, ['cat-file', '--batch'], () => false, undefined, {
+        timeoutMs: 300,
+      }),
+    ).rejects.toThrow(/timed out/);
   });
 });

@@ -344,6 +344,36 @@
   color: var(--error-color);
 }
 
+.routingFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+
+.newGroupFields {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.4fr);
+  gap: 12px;
+}
+
+.inlineError {
+  grid-column: 1 / -1;
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .routingFields,
+  .newGroupFields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .scheduleRow {
   display: flex;
   flex-wrap: wrap;

@@ -95,6 +95,26 @@ export class StreamJsonOutputAdapter
     super.startAssistantMessage();
   }
 
+  override restartAttempt(
+    preserveText: boolean,
+    discardedToolCalls: ToolCallRequestInfo[],
+  ): void {
+    if (preserveText && discardedToolCalls.length === 0) {
+      return;
+    }
+    // Stream frames cannot be retracted. Close the abandoned assistant first,
+    // then pair every flushed tool_use with a synthetic not-started result so
+    // transcript replay remains valid before the replacement attempt begins.
+    if (
+      this.mainAgentMessageState.messageStarted &&
+      !this.mainAgentMessageState.finalized
+    ) {
+      this.finalizeAssistantMessage();
+    }
+    this.emitDiscardedAttemptToolResults(discardedToolCalls);
+    super.restartAttempt(false, discardedToolCalls);
+  }
+
   finalizeAssistantMessage(): CLIAssistantMessage {
     const message = this.finalizeAssistantMessageInternal(
       this.mainAgentMessageState,
@@ -147,20 +167,6 @@ export class StreamJsonOutputAdapter
         },
       };
       this.emitMessageImpl(partial);
-      return;
-    }
-
-    // Active goal updates are session-level metadata, not message content.
-    // They intentionally bypass the base finalized guard so late goal state
-    // changes can still reach stream consumers.
-    if (event.type === LlmEventType.ActiveGoal) {
-      this.emitStreamEventIfEnabled(
-        {
-          type: 'active_goal',
-          active_goal: event.value,
-        },
-        null,
-      );
       return;
     }
 

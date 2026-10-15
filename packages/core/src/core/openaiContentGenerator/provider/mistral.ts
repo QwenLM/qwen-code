@@ -7,6 +7,7 @@
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+import { stripReasoningContent } from './utils.js';
 
 const MISTRAL_API_HOST = 'api.mistral.ai';
 const MISTRAL_MODEL_MARKERS = [
@@ -53,22 +54,16 @@ export class MistralOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
+    if (
+      !isMistralHostname(this.contentGeneratorConfig) &&
+      this.getReasoningCapabilities(request.model)?.profile ===
+        'deepseek-openai'
+    )
+      return baseRequest;
 
     return {
       ...baseRequest,
       messages: baseRequest.messages.map(stripReasoningContent),
     };
   }
-}
-
-function stripReasoningContent(
-  message: OpenAI.Chat.ChatCompletionMessageParam,
-): OpenAI.Chat.ChatCompletionMessageParam {
-  if (!('reasoning_content' in message)) {
-    return message;
-  }
-
-  const next = { ...(message as unknown as Record<string, unknown>) };
-  delete next['reasoning_content'];
-  return next as unknown as OpenAI.Chat.ChatCompletionMessageParam;
 }

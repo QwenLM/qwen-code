@@ -5,6 +5,7 @@
  */
 
 import type { IncomingMessage } from 'node:http';
+import { TLSSocket } from 'node:tls';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -18,6 +19,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import {
   singleTokenCredentials,
+  type DesktopRelayCredentialClaim,
   type ListenerScopedCredentials,
 } from '../local-control/credentials.js';
 import { listenerIdentityOfSocket } from '../local-control/listener-identity.js';
@@ -25,6 +27,11 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
+import {
+  canonicalHost,
+  formatHostForAuthority,
+  isLoopbackBind,
+} from '../loopback-binds.js';
 import {
   AcpDispatcher,
   type LegacyStandaloneSessionRestorer,
@@ -200,6 +207,8 @@ function pluralWorkspaceRawSelector(
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+const DESKTOP_RELAY_CLIENT_NAME = 'qwen-desktop-relay';
+const DESKTOP_RELAY_SERVER_NAME = 'desktop-node-repl';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
 
@@ -323,7 +332,11 @@ const WS_READ_METHODS = new Set([
   '_qwen/session/supported_commands',
   '_qwen/session/context_usage',
   '_qwen/session/tasks',
+  '_qwen/session/agents',
+  '_qwen/session/agent_trace',
+  '_qwen/session/attachments',
   '_qwen/session/lsp',
+  '_qwen/session/saved_workflow',
   '_qwen/session/artifacts',
   '_qwen/workspace/mcp',
   '_qwen/workspace/skills',
@@ -352,7 +365,11 @@ const WS_READ_METHODS = new Set([
   '_qwen/file/glob',
 ]);
 
-function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
+function isSameLoopbackOrigin(
+  origin: string,
+  localPort?: number,
+  hostname?: string,
+): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
   // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
@@ -365,13 +382,29 @@ function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
     `https://127.0.0.1:${localPort}`,
     `https://[::1]:${localPort}`,
   ]);
+  const boundHost =
+    hostname && isLoopbackBind(hostname)
+      ? formatHostForAuthority(hostname)
+      : undefined;
+  if (boundHost) {
+    allowed.add(`http://${boundHost}:${localPort}`);
+    allowed.add(`https://${boundHost}:${localPort}`);
+  }
   // RFC 7230 §5.4: browsers omit the port in the Origin header when it
-  // matches the scheme default (http→80, https→443). Accept the port-less
-  // forms so the check doesn't fail on default ports.
-  if (localPort === 80 || localPort === 443) {
+  // matches the scheme default (http→80, https→443).
+  if (localPort === 80) {
     for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`http://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`http://${boundHost}`);
+    }
+  } else if (localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`https://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`https://${boundHost}`);
     }
   }
   return allowed.has(parsed.origin.toLowerCase());
@@ -916,11 +949,11 @@ export function mountAcpHttp(
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
       return;
     }
-    // NOTE: like every other route, DELETE is gated only by the bearer
-    // token — the daemon's trust boundary is "holds the token for this
-    // daemon", so any token-holder may tear down any connection (same posture
+    // NOTE: like every other route, DELETE is gated by deployment-level
+    // operator authority, not by ownership of this ACP connection. Any
+    // authorized caller may therefore tear down any connection (same posture
     // as the REST `DELETE /session/:id`). A per-connection secret would add
-    // intra-token isolation; deferred with the rest of the multi-tenant
+    // intra-operator isolation; deferred with the rest of the multi-tenant
     // hardening (design §7).
     const existed = mount.registry.delete(connectionId);
     if (existed) {
@@ -1614,6 +1647,11 @@ export function mountAcpHttp(
       const fromLoopback = isLoopbackSocket(socket);
       const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
       const host = (req.headers['host'] ?? '').toLowerCase();
+      const authenticatedRemoteBind =
+        upgradeListenerIdentity.kind === 'primary' &&
+        opts.hostname !== undefined &&
+        !isLoopbackBind(canonicalHost(opts.hostname)) &&
+        !upgradeCredentials.isOpen(upgradeListenerIdentity);
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
       // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
@@ -1635,13 +1673,16 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
-      } else if (fromLoopback) {
+      } else if (fromLoopback && !authenticatedRemoteBind) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        if (opts.hostname && isLoopbackBind(opts.hostname)) {
+          allowed.add(`${formatHostForAuthority(opts.hostname)}:${localPort}`);
+        }
         // RFC 7230 §5.4: browsers omit the port suffix when it matches the
         // scheme default (http→80, https→443). On TLS/port 443 the browser
         // sends `Host: localhost`, which won't match `localhost:443` and
@@ -1652,6 +1693,9 @@ export function mountAcpHttp(
           allowed.add('127.0.0.1');
           allowed.add('[::1]');
           allowed.add('host.docker.internal');
+          if (opts.hostname && isLoopbackBind(opts.hostname)) {
+            allowed.add(formatHostForAuthority(opts.hostname));
+          }
         }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
@@ -1667,7 +1711,11 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
+          const isLoopbackOrigin = isSameLoopbackOrigin(
+            origin,
+            localPort,
+            opts.hostname,
+          );
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
           // origin — e.g. a browser extension's `chrome-extension://<id>`
@@ -1678,7 +1726,17 @@ export function mountAcpHttp(
           const isListenerOrigin =
             upgradeListenerIdentity.kind === 'local-control' &&
             upgradeListenerIdentity.origin === origin.toLowerCase();
-          if (!isLoopbackOrigin && !isAllowlistedOrigin && !isListenerOrigin) {
+          const scheme =
+            socket instanceof TLSSocket && socket.encrypted ? 'https' : 'http';
+          const isPrimaryOrigin =
+            authenticatedRemoteBind &&
+            new URL(`${scheme}://${host}`).origin === origin;
+          if (
+            !isLoopbackOrigin &&
+            !isAllowlistedOrigin &&
+            !isListenerOrigin &&
+            !isPrimaryOrigin
+          ) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
@@ -1700,14 +1758,23 @@ export function mountAcpHttp(
       // credential, and the runtime token does not satisfy it. Without this
       // the subprotocol path would be a way around the scoping that
       // `bearerAuth` enforces for plain HTTP.
+      let desktopRelayClaim: DesktopRelayCredentialClaim | undefined;
       if (!upgradeCredentials.isOpen(upgradeListenerIdentity)) {
         // Accept the token from `Authorization` (non-browser clients) or the
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
         // on a WebSocket). Hash-compare in constant time, same posture as REST.
         const presented = extractUpgradeBearer(req);
+        desktopRelayClaim =
+          presented && upgradeListenerIdentity.kind === 'primary'
+            ? upgradeCredentials.consumeDesktopRelayCredential?.(
+                presented,
+                rawPath,
+              )
+            : undefined;
         if (
           !presented ||
-          !upgradeCredentials.verify(presented, upgradeListenerIdentity)
+          (!desktopRelayClaim &&
+            !upgradeCredentials.verify(presented, upgradeListenerIdentity))
         ) {
           logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -1980,6 +2047,32 @@ export function mountAcpHttp(
             parsed !== null && typeof parsed === 'object'
               ? (parsed as { type?: unknown }).type
               : undefined;
+          const isClientMcpFrame =
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            ClientMcpWsConnection.isClientMcpFrameType(frameType);
+          if (desktopRelayClaim && initialized && !isClientMcpFrame) {
+            ws.close(1008, 'Desktop relay credential scope violation');
+            return;
+          }
+          if (desktopRelayClaim && isClientMcpFrame) {
+            const frame = parsed as Record<string, unknown>;
+            if (
+              frame['server'] !== DESKTOP_RELAY_SERVER_NAME ||
+              (frameType === 'mcp_register' &&
+                frame['sessionId'] !== desktopRelayClaim.sessionId)
+            ) {
+              ws.send(
+                JSON.stringify({
+                  type: 'mcp_error',
+                  code: 'credential_scope_violation',
+                  message:
+                    'desktop relay credential is scoped to one server and session',
+                }),
+              );
+              return;
+            }
+          }
           if (
             activeMount.draining &&
             frameType === 'mcp_message' &&
@@ -2038,9 +2131,7 @@ export function mountAcpHttp(
             opts.clientMcpOverWs === true &&
             parsed !== null &&
             typeof parsed === 'object' &&
-            ClientMcpWsConnection.isClientMcpFrameType(
-              (parsed as { type?: unknown }).type,
-            )
+            isClientMcpFrame
           ) {
             // Client-MCP requires an initialized connection (the ACP handshake
             // establishes the connection identity + stream first).
@@ -2241,6 +2332,30 @@ export function mountAcpHttp(
               return;
             }
 
+            const clientName =
+              message.params &&
+              typeof message.params === 'object' &&
+              !Array.isArray(message.params)
+                ? (
+                    (message.params as Record<string, unknown>)[
+                      'clientInfo'
+                    ] as { name?: string } | undefined
+                  )?.name
+                : undefined;
+            if (desktopRelayClaim && clientName !== DESKTOP_RELAY_CLIENT_NAME) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(
+                    message.id,
+                    RPC.INVALID_REQUEST,
+                    'Desktop relay credential requires the desktop relay client',
+                  ),
+                ),
+              );
+              ws.close(1008, 'Desktop relay credential scope violation');
+              return;
+            }
+
             const conn = activeMount.registry.create(fromLoopback);
             if (!conn) {
               ws.send(
@@ -2301,16 +2416,6 @@ export function mountAcpHttp(
             // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
             // endpoint, and an un-gated last-writer-wins would let an agent steal
             // the bridge with `cdp_*` frames it can't answer.
-            const clientName =
-              message.params &&
-              typeof message.params === 'object' &&
-              !Array.isArray(message.params)
-                ? (
-                    (message.params as Record<string, unknown>)[
-                      'clientInfo'
-                    ] as { name?: string } | undefined
-                  )?.name
-                : undefined;
             if (
               activeMount.primary &&
               opts.cdpTunnelOverWs === true &&

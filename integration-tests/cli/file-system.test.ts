@@ -4,14 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { join } from 'node:path';
 import {
+  runForcedToolCallScenario,
   TestRig,
   printDebugInfo,
   validateModelOutput,
 } from '../test-helper.js';
+import { fakeToolCall } from '../fake-openai-server.js';
 
 describe('file-system', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('should be able to read a file', async () => {
     const rig = new TestRig();
     await rig.setup('should be able to read a file');
@@ -95,15 +102,19 @@ describe('file-system', () => {
     const rig = new TestRig();
     await rig.setup('should correctly handle file paths with spaces');
     const fileName = 'my test file.txt';
+    const filePath = join(rig.testDir!, fileName);
 
-    const result = await rig.run(
-      `Use write_file to write exactly "hello" to "${fileName}".`,
-    );
+    await runForcedToolCallScenario({
+      rig,
+      toolCall: fakeToolCall('write_file', {
+        file_path: filePath,
+        content: 'hello',
+      }),
+      prompt: `Use write_file to write exactly "hello" to "${fileName}".`,
+      finalResponse: 'Done.',
+    });
 
     const foundToolCall = await rig.waitForToolCall('write_file');
-    if (!foundToolCall) {
-      printDebugInfo(rig, result);
-    }
     expect(
       foundToolCall,
       'Expected to find a write_file tool call',

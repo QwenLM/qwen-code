@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionActions,
   DaemonSessionStatsStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { TokenUsagePanel } from './TokenUsagePanel';
 

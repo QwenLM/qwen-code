@@ -206,7 +206,6 @@ export async function sendText(params: {
   contextToken: string;
 }): Promise<void> {
   const { to, text, baseUrl, token, contextToken } = params;
-  const plainText = markdownToPlainText(text);
 
   await sendMessage(baseUrl, token, {
     to_user_id: to,
@@ -215,7 +214,7 @@ export async function sendText(params: {
     message_type: MessageType.BOT,
     message_state: MessageState.FINISH,
     context_token: contextToken,
-    item_list: [{ type: MessageItemType.TEXT, text_item: { text: plainText } }],
+    item_list: [{ type: MessageItemType.TEXT, text_item: { text } }],
   });
 }
 

@@ -19,6 +19,7 @@ describe('getLocalCommands', () => {
     expect(
       getLocalCommands(en).every((c) => c.source === 'builtin-command'),
     ).toBe(true);
+    expect(byName.get('plan')?.subcommands).toEqual(['on', 'off', 'exit']);
     expect(byName.get('fork')?.argumentHint).toBe('<directive>');
     expect(byName.get('btw')?.argumentHint).toBe('<your question>');
     expect(
@@ -127,6 +128,20 @@ describe('skillDescriptionKey', () => {
 
   it('returns undefined for an unknown (user) skill', () => {
     expect(skillDescriptionKey('my-personal-skill')).toBeUndefined();
+  });
+});
+
+describe('settings message catalog', () => {
+  it('does not retain translations for the removed dynamic command setting', () => {
+    const removedKeys = [
+      'settings.label.general.dynamicCommandTranslation',
+      'settings.description.general.dynamicCommandTranslation',
+    ];
+
+    for (const key of removedKeys) {
+      expect(zh(key)).toBe(key);
+      expect(en(key)).toBe(key);
+    }
   });
 });
 

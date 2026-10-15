@@ -49,6 +49,23 @@ describe('workflow file size', () => {
     expect(bytes).toBeLessThan(gateBytes);
   });
 
+  it('fails fast: the size gate precedes the dependency install', () => {
+    // In the pre-split test job the gate deliberately ran right after the
+    // profile step — dependency-free bash, seconds into the job. The split
+    // initially parked it after `npm ci`, which delays the verdict by ~6
+    // minutes warm and ~15 cold, and (worse) hides a size violation behind
+    // any unrelated install failure since the step has no always() gate.
+    const lintJob = ciWorkflow.match(
+      /^ {2}lint_and_static:[\s\S]*?(?=^ {2}[a-z_]+:)/m,
+    )?.[0];
+    expect(lintJob).toBeDefined();
+    const gate = lintJob.indexOf("- name: 'Check workflow file size'");
+    const install = lintJob.indexOf("- name: 'Install dependencies'");
+    expect(gate).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(install);
+  });
+
   it('runs the gate on every CI profile, not just full', () => {
     // A .github-only PR classifies as `github_ci_only`; gating the check on the
     // `full` profile would skip it for exactly the changes that can trip it.
@@ -217,13 +234,12 @@ describe('workflow size growth ratchet', () => {
   });
 });
 
-// The gate script's `declare -A baseline=()` needs bash 4+. The merge-queue
-// macOS lane ships bash 3.2, where the assoc-array errors leave the ratchet
-// failing open, so probe the capability rather than the platform: that lane
-// must skip instead of reporting red on a script it cannot execute.
-const bashSupportsAssocArrays =
-  spawnSync('bash', ['-c', 'declare -A t=()'], { stdio: 'ignore' }).status ===
-  0;
+// The gate script's associative arrays need bash 4+. Probe the capability
+// so the full execution suite only runs with a supported interpreter.
+const bashProbe = spawnSync('bash', ['-c', 'declare -A t=()'], {
+  stdio: 'ignore',
+});
+const bashSupportsAssocArrays = bashProbe.status === 0;
 // The stale-baseline fixtures commit their base with git. Only the fixtures
 // need it — the strict-path tests above run on a git-less runner too, so
 // gate the git block separately instead of folding git into this skip.
@@ -255,6 +271,36 @@ const hermeticGateEnv = (dir) => {
     GIT_CONFIG_GLOBAL: gitconfigPath,
   });
 };
+
+it.skipIf(
+  process.platform === 'win32' ||
+    bashProbe.status === null ||
+    bashSupportsAssocArrays,
+)(
+  'rejects unsupported Bash instead of passing a workflow growth violation',
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), 'workflow-size-old-bash-'));
+    try {
+      const fixtureDir = join(dir, WORKFLOW_DIR);
+      mkdirSync(fixtureDir, { recursive: true });
+      writeFileSync(join(fixtureDir, 'example.yml'), 'a'.repeat(5000));
+      writeFileSync(join(fixtureDir, '.size-baseline'), '10 example.yml\n');
+
+      const result = spawnSync('bash', [gatePath], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: hermeticGateEnv(dir),
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('requires Bash 4 or newer');
+      expect(result.stderr).not.toContain('declare:');
+      expect(result.stdout).not.toContain('every workflow file is under');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 // Both fetch-arm fixtures need the same shape: a bare origin whose base
 // commit sits behind an unrelated tip, so a depth-1 clone of the tip lacks

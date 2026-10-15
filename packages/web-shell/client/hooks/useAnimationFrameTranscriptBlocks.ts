@@ -11,7 +11,7 @@ import type {
 import {
   useConnection,
   useTranscriptStore,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 
 // Cap transcript re-renders at ~20fps. During streaming every network chunk
 // notifies the store; each render then runs the O(transcript) normalization

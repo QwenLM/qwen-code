@@ -213,15 +213,35 @@ describe('verify-capture helper', () => {
     const { data, info } = await sharp(png)
       .raw()
       .toBuffer({ resolveWithObject: true });
-    // FG_DEFAULT is #d4d4d4 — look for a pixel matching it.
-    let hasFallback = false;
+    // FG_DEFAULT is #d4d4d4. Text is anti-aliased, so how many pixels land
+    // exactly on it depends on the host's font rasterisation, and the exact
+    // scan flaked. Count bright near-neutral pixels instead — both ends of
+    // the blend axis (#d4d4d4 over #1e1e1e) are neutral, so every blend of
+    // them is neutral at any coverage, while a grossly tinted FG_DEFAULT or
+    // the hardcoded #9cdcfe title fill is not and cannot satisfy the count
+    // in the fallback's place. The bound is tight because this pipeline never
+    // fringes (measured max spread 0) — slack would only let a tinted
+    // FG_DEFAULT (#d4d4c8) pass; the floor is strict to keep a mid-grey
+    // FG_DEFAULT (#808080) out. Deleting the guard ships fill="undefined",
+    // which librsvg paints black, never this bright on #1e1e1e.
+    let fallbackPixels = 0;
     for (let i = 0; i + 2 < data.length; i += info.channels) {
-      if (data[i] === 0xd4 && data[i + 1] === 0xd4 && data[i + 2] === 0xd4) {
-        hasFallback = true;
-        break;
+      const spread =
+        Math.max(data[i], data[i + 1], data[i + 2]) -
+        Math.min(data[i], data[i + 1], data[i + 2]);
+      if (
+        data[i] > 0x80 &&
+        data[i + 1] > 0x80 &&
+        data[i + 2] > 0x80 &&
+        spread <= 4
+      ) {
+        fallbackPixels += 1;
       }
     }
-    expect(hasFallback, '256-colour text did not render as #d4d4d4').toBe(true);
+    expect(
+      fallbackPixels,
+      '256-colour text did not render as #d4d4d4',
+    ).toBeGreaterThan(0);
   });
 
   // SGR 30 maps to #1e1e1e — identical to the canvas BG — so black-foreground

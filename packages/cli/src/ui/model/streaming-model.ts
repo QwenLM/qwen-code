@@ -29,17 +29,13 @@ export type StreamEvent =
   | { type: 'thinking-end' }
   | { type: 'text'; delta: string }
   | { type: 'tool-start'; id: string; tool: string; title: string }
-  | { type: 'tool-output'; id: string; delta: string }
+  /** The whole output so far, not an increment — a tool card replaces its
+   * output per event, unlike the incremental `text`/`thinking` above. */
+  | { type: 'tool-output'; id: string; output: string }
   | { type: 'tool-end'; id: string; success: boolean; summary: string }
   | { type: 'task-start'; id: string; name: string; description: string }
   | { type: 'task-progress'; id: string; line: string }
-  | {
-      type: 'task-end';
-      id: string;
-      tools: number;
-      seconds: number;
-      tokens: string;
-    }
+  | { type: 'task-end'; id: string }
   | { type: 'done' };
 
 export type HistoryItem =
@@ -68,8 +64,6 @@ export type HistoryItem =
       name: string;
       description: string;
       progress: string[];
-      done: boolean;
-      stats?: string;
     };
 
 /**
@@ -189,7 +183,7 @@ export function reduceStreamEvent(
       const index = findItemIndex(items, 'tool', event.id);
       if (index >= 0) {
         const tool = items[index] as Extract<HistoryItem, { kind: 'tool' }>;
-        items[index] = { ...tool, output: tool.output + event.delta };
+        items[index] = { ...tool, output: event.output };
       }
       break;
     }
@@ -214,7 +208,6 @@ export function reduceStreamEvent(
         name: event.name,
         description: event.description,
         progress: [],
-        done: false,
       };
       // Replayed-start reset; see the tool-start case for the reasoning.
       const index = findItemIndex(items, 'task', event.id);
@@ -241,14 +234,7 @@ export function reduceStreamEvent(
     }
     case 'task-end': {
       const index = findItemIndex(items, 'task', event.id);
-      if (index >= 0) {
-        const task = items[index] as Extract<HistoryItem, { kind: 'task' }>;
-        items[index] = {
-          ...task,
-          done: true,
-          stats: `${event.tools} tools · ${event.seconds}s · ${event.tokens} tokens`,
-        };
-      }
+      if (index >= 0) items.splice(index, 1);
       break;
     }
     case 'done': {

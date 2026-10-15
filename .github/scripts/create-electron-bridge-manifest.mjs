@@ -7,20 +7,17 @@ import path from 'node:path';
 const options = parseArguments(process.argv.slice(2));
 const assets = fs.readdirSync(options.assets).sort();
 const patterns = {
-  macos: [
-    /-arm64\.zip$/i,
-    /-x64\.zip$/i,
-    /-arm64\.dmg$/i,
-    /-x64\.dmg$/i,
-  ],
+  macos: [/-arm64\.zip$/i, /-x64\.zip$/i, /-arm64\.dmg$/i, /-x64\.dmg$/i],
   windows: [/-setup\.exe$/i],
-  linux: [/\.AppImage$/i],
+  linux: [/_amd64\.AppImage$/i], // the bridge ships the x64 AppImage only
 };
 const selectedPatterns = patterns[options.platform];
 if (!selectedPatterns) {
   throw new Error(`Invalid --platform: ${options.platform}`);
 }
-const names = selectedPatterns.map((pattern) => selectArtifact(assets, pattern));
+const names = selectedPatterns.map((pattern) =>
+  selectArtifact(assets, pattern),
+);
 const artifacts = names.map((name) => readArtifact(assets, name));
 const primary = artifacts[0];
 

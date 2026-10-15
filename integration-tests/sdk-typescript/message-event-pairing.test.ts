@@ -805,10 +805,9 @@ describe('Message Start/Stop Event Pairing (E2E)', () => {
     });
 
     it('should have content_block_stop after message_start and before message_stop', async () => {
-      const events: Array<{
-        type: string;
-        timestamp: number;
-      }> = [];
+      const events: Array<
+        'message_start' | 'message_stop' | 'content_block_stop'
+      > = [];
 
       const q = query({
         prompt: 'Say hello',
@@ -822,17 +821,17 @@ describe('Message Start/Stop Event Pairing (E2E)', () => {
 
       try {
         for await (const message of q) {
-          if (isSDKPartialAssistantMessage(message)) {
+          if (
+            isSDKPartialAssistantMessage(message) &&
+            message.parent_tool_use_id === null
+          ) {
             const eventType = message.event.type;
             if (
               eventType === 'message_start' ||
               eventType === 'message_stop' ||
               eventType === 'content_block_stop'
             ) {
-              events.push({
-                type: eventType,
-                timestamp: Date.now(),
-              });
+              events.push(eventType);
             }
           }
         }
@@ -840,31 +839,44 @@ describe('Message Start/Stop Event Pairing (E2E)', () => {
         await q.close();
       }
 
-      // Verify message_start exists
-      const messageStartIndex = events.findIndex(
-        (e) => e.type === 'message_start',
-      );
-      expect(messageStartIndex).toBeGreaterThanOrEqual(0);
+      let messageOpen = false;
+      let sawContentBlockStop = false;
+      let messageCount = 0;
+      const eventTrace = events.join(' -> ');
 
-      // Verify message_stop exists
-      const messageStopIndex = events.findIndex(
-        (e) => e.type === 'message_stop',
-      );
-      expect(messageStopIndex).toBeGreaterThanOrEqual(0);
+      for (const [index, event] of events.entries()) {
+        if (event === 'message_start') {
+          expect(
+            messageOpen,
+            `unexpected message_start at ${index}: ${eventTrace}`,
+          ).toBe(false);
+          messageOpen = true;
+          sawContentBlockStop = false;
+        } else if (event === 'content_block_stop') {
+          expect(
+            messageOpen,
+            `content_block_stop without message_start at ${index}: ${eventTrace}`,
+          ).toBe(true);
+          sawContentBlockStop = true;
+        } else {
+          expect(
+            messageOpen,
+            `message_stop without message_start at ${index}: ${eventTrace}`,
+          ).toBe(true);
+          expect(
+            sawContentBlockStop,
+            `message_stop without content_block_stop at ${index}: ${eventTrace}`,
+          ).toBe(true);
+          messageOpen = false;
+          messageCount += 1;
+        }
+      }
 
-      // Verify content_block_stop exists (use reverse find for ES compatibility)
-      const lastContentBlockStopIndex =
-        events
-          .map((e, i) => ({ ...e, originalIndex: i }))
-          .reverse()
-          .find((e) => e.type === 'content_block_stop')?.originalIndex ?? -1;
-      expect(lastContentBlockStopIndex).toBeGreaterThanOrEqual(0);
-
-      // content_block_stop should be after message_start
-      expect(lastContentBlockStopIndex).toBeGreaterThan(messageStartIndex);
-
-      // content_block_stop should be before message_stop
-      expect(lastContentBlockStopIndex).toBeLessThan(messageStopIndex);
+      expect(messageOpen, `unterminated message: ${eventTrace}`).toBe(false);
+      expect(
+        messageCount,
+        `no complete message: ${eventTrace}`,
+      ).toBeGreaterThan(0);
     });
   });
 });
