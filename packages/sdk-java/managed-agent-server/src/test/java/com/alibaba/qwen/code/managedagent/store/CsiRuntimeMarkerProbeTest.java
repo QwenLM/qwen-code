@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import org.junit.jupiter.api.Test;
 
 class CsiRuntimeMarkerProbeTest {
     /**

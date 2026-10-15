@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -14,19 +8,6 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
-import java.nio.charset.StandardCharsets;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.time.Clock;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -40,6 +21,26 @@ import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The public Turn read model: a Session's Turns newest first across pages,
@@ -140,8 +141,7 @@ class ManagedTurnQueryTest {
                 jdbc.getDataSource(), "(session_id, turn_id) IN");
         var recompiling = new ManagedAgentStore(
                 new ManagedSchemaJdbcTemplate(freshSession),
-                objectMapper, Clock.systemUTC(), ignored -> {
-                }, registry, new ManagedAgentProperties());
+                objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties());
 
         assertThat(recompiling.findLatestEnvironmentEvents(tenant, latest)
                 .get(sessionId))
@@ -225,7 +225,8 @@ class ManagedTurnQueryTest {
                 hasMore.add(page.get("has_more").asBoolean());
                 cursor = page.get("next_cursor").isNull() ? null
                         : page.get("next_cursor").asText();
-            } while (cursor != null);
+            }
+            while (cursor != null);
             assertThat(order).as("limit %d", limit).containsExactly(
                     "turn_c2", "turn_c1", "turn_b2", "turn_b1", "turn_a1",
                     "turn_z1");

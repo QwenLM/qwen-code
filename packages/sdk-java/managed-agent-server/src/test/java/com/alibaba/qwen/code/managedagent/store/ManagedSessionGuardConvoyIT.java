@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
@@ -21,6 +17,19 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -44,17 +53,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.sql.DataSource;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.DefaultTransactionDefinition;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Witness for #13800: an externally held tenant guard row must not wedge
@@ -255,8 +257,8 @@ class ManagedSessionGuardConvoyIT {
 
             // A Turn submit admits through the same placement row on its
             // per-turn path, so it is bounded and named the same way.
-            var agents = new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {
-            }, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+            var agents = new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
             assertFastGuardFailure(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
                     "turn.submit", "submit-witness", "a".repeat(64), "victim", List.of(), "b".repeat(64))));
         } finally {

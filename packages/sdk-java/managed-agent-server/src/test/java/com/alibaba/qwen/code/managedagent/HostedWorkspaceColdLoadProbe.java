@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.ManagedSessionStoreConnection;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -16,7 +16,8 @@ import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class HostedWorkspaceColdLoadProbe implements AutoCloseable {
     private final JdbcTemplate jdbc;

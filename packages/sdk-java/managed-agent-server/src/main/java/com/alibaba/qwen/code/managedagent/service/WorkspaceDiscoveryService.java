@@ -4,6 +4,9 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -11,8 +14,6 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 
 @Service
 public class WorkspaceDiscoveryService {

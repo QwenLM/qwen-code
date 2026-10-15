@@ -1,19 +1,20 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.util.List;
-import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
 
 class ManagedMcpCatalogServiceTest {
     private static final ObjectMapper JSON = new ObjectMapper();

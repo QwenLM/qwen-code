@@ -1,27 +1,24 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
+
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-
-import org.flywaydb.core.Flyway;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-
-import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-
-import java.util.UUID;
-
-import javax.sql.DataSource;
 
 class ManagedSchemaConfigurationTest {
     @Test

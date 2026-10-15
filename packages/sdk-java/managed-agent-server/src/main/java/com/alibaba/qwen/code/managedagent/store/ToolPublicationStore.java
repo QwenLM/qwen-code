@@ -1,12 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
-
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -18,7 +15,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -27,13 +23,18 @@ import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import javax.sql.DataSource;
+
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 /** Reserves publication capacity and fences producer grants against the Session owner. */
 public final class ToolPublicationStore {

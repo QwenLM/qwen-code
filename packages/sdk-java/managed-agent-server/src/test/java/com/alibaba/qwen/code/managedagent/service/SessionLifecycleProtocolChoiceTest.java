@@ -1,13 +1,12 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import org.junit.jupiter.api.Test;
 
-class SessionLifecycleProtocolChoiceTest {
+import static org.assertj.core.api.Assertions.assertThat;
 
+class SessionLifecycleProtocolChoiceTest {
     private static SessionRecord session(String status, String toolProfile) {
         return new SessionRecord("tenant", "session", "agent", "1", null,
                 status, null, null, 0, 0, 0, 0, 0, null, 0, null, "yolo",
