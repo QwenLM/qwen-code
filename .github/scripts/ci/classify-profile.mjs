@@ -7,6 +7,10 @@ export const CI_PROFILES = {
   FULL: 'full',
 };
 
+// Membership skips application tests while keeping full-effort automatic
+// review (only docs_only downgrades review). Add a path only when the
+// dep-free helper lane (actionlint/yamllint/helper tests) covers it, or no
+// lane needs to cover it at all.
 export const GITHUB_CI_ONLY_FILES = new Set([
   '.github/CODEOWNERS',
   '.github/actionlint.yaml',
