@@ -44,6 +44,8 @@ let dropped = 0;
 let modelCalls = 0;
 let proxyFailure: unknown;
 let exchanges: Exchange[] = [];
+let cleanupRetry: Promise<void> | undefined;
+let allowCleanupRetry: (() => void) | undefined;
 
 async function json(route: string, body?: unknown, expected = 200) {
   const response = await cli.request(route, {
@@ -85,6 +87,10 @@ const proxy = createServer(async (req, res) => {
     const executionCallId = route.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     assert.equal(fields['harnessSessionId'], sessionId);
     assert.equal(fields['runtimeSessionId'], promptId);
+    // Keep the background cleanup pump from paying the debt before the
+    // reload witness starts observing retries.
+    if (operation === 'release' && fault.startsWith('release') && dropped > 0)
+      await cleanupRetry;
     if (fault === 'release-before-forward' && operation === 'release') {
       dropped++;
       exchanges.push({ operation, fields, reply: {} });
@@ -183,6 +189,9 @@ try {
     dropped = 0;
     modelCalls = 0;
     exchanges = [];
+    cleanupRetry = new Promise<void>((resolve) => {
+      allowCleanupRetry = resolve;
+    });
     const connection = {
       baseUrl: config.storeUrl,
       tenantId: config.tenantId,
@@ -313,6 +322,7 @@ try {
     const traffic = exchanges.length;
     const callsBeforeReload = modelCalls;
     const rejectLoad = blocked && !retryRelease;
+    allowCleanupRetry?.();
     await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
       `/session/${sessionId}/load`,
@@ -391,6 +401,7 @@ try {
   console.error(`FG6A ${fault}`, JSON.stringify(exchanges), cli.output);
   throw cause;
 } finally {
+  allowCleanupRetry?.();
   await cli.close();
   await model.close();
   proxy.closeAllConnections();
