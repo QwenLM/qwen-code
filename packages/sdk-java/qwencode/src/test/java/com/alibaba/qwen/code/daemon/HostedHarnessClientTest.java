@@ -5129,6 +5129,118 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void aNonOwningReplayedAdmissionAfterTerminalEventPlantsNoMarker()
+            throws Exception {
+        // R17-2: the non-owning ordering of
+        // aReplayedAdmissionAfterTerminalEventPlantsNoMarker — the
+        // terminal event is consumed BEFORE both same-identity replays,
+        // so the first replay owns the marker it plants and the second
+        // joins it. The route answers both from its journal with a bare
+        // 202 and emits no event, so the terminal-record check must gate
+        // the non-owning republish too: an unconditional replace plants a
+        // fresh instance the owning arm's release can no longer see, and
+        // the replanted marker could never be cleared — it would veto
+        // every later identity for this client's lifetime.
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        CountDownLatch ownerParked = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    int call = promptCalls.incrementAndGet();
+                    if (call == 2) {
+                        // The owning replay parks server-side while the
+                        // non-owning replay runs to its 202.
+                        ownerParked.countDown();
+                        try {
+                            assertTrue(releaseOwner.await(15,
+                                    TimeUnit.SECONDS));
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException(e);
+                        }
+                    }
+                    var request = JsonSupport.parseObject(
+                            readBody(exchange), "prompt");
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + request.get("promptId")
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    sendSseHeaders(exchange);
+                    exchange.getResponseBody().write(terminalEvent(1,
+                            PROMPT_ID).getBytes(StandardCharsets.UTF_8));
+                    exchange.getResponseBody().flush();
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "non-owning-replay-after-terminal");
+
+        HostedHarnessClient client = newClient();
+        ExecutorService callers = Executors.newSingleThreadExecutor();
+        try {
+            HarnessSessionRef session = createSession(client);
+            SubmitHarnessTurn first = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build();
+            assertNotNull(client.submitTurn(first));
+            HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build());
+            try {
+                // The terminal event is consumed before both replays:
+                // observeEvent clears the marker and records the terminal
+                // promptId, so both replays are answered from the journal.
+                DaemonEvent ended = assertTimeoutPreemptively(
+                        Duration.ofSeconds(5), stream::next);
+                assertEquals("turn_complete", ended.getType());
+            } finally {
+                stream.closeQuietly();
+            }
+            // The owning replay plants the marker and parks mid-send; the
+            // non-owning replay joins it and is answered first.
+            Future<Throwable> owner = callers.submit(() -> {
+                try {
+                    client.submitTurn(first);
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertTrue(ownerParked.await(5, TimeUnit.SECONDS));
+            assertNotNull(client.submitTurn(first));
+            releaseOwner.countDown();
+            assertNull(owner.get(5, TimeUnit.SECONDS));
+            // No marker may survive the journal replays: a different
+            // identity reaches the wire.
+            PromptReceipt receipt = client.submitTurn(
+                    SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build());
+            assertEquals(SECOND_PROMPT_ID, receipt.getPromptId());
+            assertEquals(4, promptCalls.get());
+        } finally {
+            releaseOwner.countDown();
+            callers.shutdownNow();
+            client.close();
+        }
+    }
+
+    @Test
     void aRefusedCloseByIdKeepsStateRegisteredMidFlight() throws Exception {
         // R5-3: a by-id close may retire only the records it observed
         // before the DELETE was dispatched. A refusal landing after a
@@ -6844,13 +6956,17 @@ class HostedHarnessClientTest {
         }
     }
 
-    @Test
-    void aLifecycleDetachRacingAMarkerPlantLeavesNoVeto() throws Exception {
-        // R10-4: a detach whose 204 proves the session gone must retire
-        // even a marker this same identity planted while the detach was
-        // in flight — the session the turn ran on no longer exists,
-        // nothing can clear a retained marker, and the re-opened id would
-        // stay vetoed for this client's lifetime.
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void aLifecycleDetachRacingAMarkerPlantLeavesNoVeto(boolean byId)
+            throws Exception {
+        // R10-4 (ref overload) and R15-2 (id-only overload): a detach
+        // whose 204 proves the session gone must retire even a marker
+        // planted while the detach was in flight — the session the turn
+        // ran on no longer exists, nothing can clear a retained marker,
+        // and the re-opened id would stay vetoed for this client's
+        // lifetime. The id-only overload retires it only when no re-load
+        // raced the round trip; nothing races here.
         createSessionRoute();
         CountDownLatch sawDetach = new CountDownLatch(1);
         CountDownLatch releaseDetach = new CountDownLatch(1);
@@ -6887,7 +7003,11 @@ class HostedHarnessClientTest {
             HarnessSessionRef session = createSession(client);
             Future<Throwable> detach = callers.submit(() -> {
                 try {
-                    client.detachLifecycle(session, Map.of());
+                    if (byId) {
+                        client.detachLifecycle(SESSION_ID, Map.of());
+                    } else {
+                        client.detachLifecycle(session, Map.of());
+                    }
                     return null;
                 } catch (Throwable failure) {
                     return failure;
@@ -6917,6 +7037,110 @@ class HostedHarnessClientTest {
             releaseDetach.countDown();
             callers.shutdownNow();
             client.close();
+        }
+    }
+
+    @Test
+    void aHeaderlessLifecycleDetachRetiresTheTerminalRecord()
+            throws Exception {
+        // R15-2: the headerless detachLifecycle sends no client id, so
+        // its 204 (or tolerated 404) proves the session record gone and
+        // the terminal-event record retires with the dead incarnation. A
+        // surviving record would send a later same-promptId submission in
+        // the re-opened incarnation down the journal-replay arm: the
+        // fresh marker it just planted would be released even though its
+        // turn is live and still owes a terminal event, dropping the
+        // veto a second identity relies on.
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    var request = JsonSupport.parseObject(
+                            readBody(exchange), "prompt");
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 202,
+                            "{\"promptId\":\"" + request.get("promptId")
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}", false);
+                });
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    sendSseHeaders(exchange);
+                    exchange.getResponseBody().write(terminalEvent(1,
+                            PROMPT_ID).getBytes(StandardCharsets.UTF_8));
+                    exchange.getResponseBody().flush();
+                    exchange.close();
+                });
+        server.createContext("/session/" + SESSION_ID + "/detach",
+                exchange -> {
+                    assertPrivateHeaders(exchange, false);
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    exchange.getResponseHeaders().set("Connection", "close");
+                    exchange.sendResponseHeaders(204, -1);
+                    exchange.close();
+                });
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 200,
+                            sessionJson().replace(CLIENT_ID, "client-2"),
+                            false);
+                });
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "headerless-detach-terminal-record");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertNotNull(client.submitTurn(requestForSession(block,
+                    session)));
+            HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build());
+            try {
+                // Consume the terminal event: the marker clears and the
+                // terminal promptId is recorded for this incarnation.
+                DaemonEvent ended = assertTimeoutPreemptively(
+                        Duration.ofSeconds(5), stream::next);
+                assertEquals("turn_complete", ended.getType());
+            } finally {
+                stream.closeQuietly();
+            }
+            // The headerless detach's 204 proves the incarnation gone:
+            // its terminal record retires with it.
+            client.detachLifecycle(SESSION_ID,
+                    Map.of("operationId", "delete-1", "claimGeneration", 2));
+            HarnessSessionRef reopened = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            // A same-promptId submission in the re-opened incarnation is
+            // a fresh admission: its marker tracks a live turn and must
+            // not be released as a journal replay, so a different
+            // identity stays vetoed locally.
+            assertNotNull(client.submitTurn(SubmitHarnessTurn.builder()
+                    .session(reopened)
+                    .promptId(PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build()));
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(reopened)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+            assertEquals(2, promptCalls.get());
         }
     }
 
@@ -6971,6 +7195,75 @@ class HostedHarnessClientTest {
             // The current identity's 204 detach proves the session gone:
             // the older identity's marker retires with it.
             client.detachSession(reloaded);
+            PromptReceipt receipt = client.submitTurn(
+                    SubmitHarnessTurn.builder()
+                            .session(reloaded)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build());
+            assertEquals(SECOND_PROMPT_ID, receipt.getPromptId());
+        }
+
+        assertEquals(2, promptCalls.get());
+    }
+
+    @Test
+    void aProvenDeletingLifecycleDetachRetiresAMarkerFromAnOlderIdentity() {
+        // R10-4: the detachLifecycle twin — the ref overload's 204 is
+        // the same deletion proof detachSession rides, so a marker
+        // planted by an older identity of the same session id is
+        // provably stale: the session no longer exists, nothing can
+        // clear the marker, and it would veto every later identity after
+        // the supported load recovery re-opens the id. The tolerated-404
+        // half stays identity-matched
+        // (aStaleRefLifecycleDetachKeepsTheCurrentOwnersMarker).
+        server.createContext("/session", exchange ->
+                sendSessionJson(exchange, 200, sessionJson()));
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 200,
+                            sessionJson().replace(CLIENT_ID, "client-2"),
+                            false);
+                });
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    int call = promptCalls.incrementAndGet();
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 202,
+                            "{\"promptId\":\"" + (call == 1 ? PROMPT_ID
+                                    : SECOND_PROMPT_ID)
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}", false);
+                });
+        server.createContext("/session/" + SESSION_ID + "/detach",
+                exchange -> {
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    exchange.getResponseHeaders().set("Connection", "close");
+                    exchange.sendResponseHeaders(204, -1);
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "lifecycle-detach-older-identity");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef first = createSession(client);
+            assertNotNull(client.submitTurn(requestForSession(block,
+                    first)));
+            HarnessSessionRef reloaded = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            // The current identity's 204 lifecycle detach proves the
+            // session gone: the older identity's marker retires with it.
+            client.detachLifecycle(reloaded,
+                    Map.of("operationId", "delete-1", "claimGeneration", 2));
             PromptReceipt receipt = client.submitTurn(
                     SubmitHarnessTurn.builder()
                             .session(reloaded)
