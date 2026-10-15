@@ -23,6 +23,10 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return new RuntimeProvisionRequest(scope, isolationKey, kind());
     }
 
+    /** Short, bounded pre-create admission only; never creates a resource or calls a worker. */
+    default void reserveResource(RuntimeBindingRecord binding) {
+    }
+
     /**
      * Provisions with credentials the Broker created and persisted, so a
      * later Broker process can prove the same identity. The default ignores

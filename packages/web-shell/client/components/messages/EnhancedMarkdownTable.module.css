@@ -14,6 +14,32 @@
   stroke-width: 1.5;
 }
 
+.fullscreenPlaceholder {
+  margin: 8px 0;
+}
+
+.tableShell.fullscreenTable {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.fullscreenTable .toolbar {
+  flex-shrink: 0;
+  border-radius: 0;
+}
+
+.fullscreenTable .scroller {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  border-radius: 0;
+}
+
 .densityCompact {
   --table-row-height: 40px;
   --table-cell-padding: 7px 10px;
@@ -146,6 +172,7 @@
 
 .iconButton {
   display: inline-flex;
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   align-items: center;

@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -9,6 +7,28 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,25 +49,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import javax.sql.DataSource;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
-import org.springframework.context.annotation.Primary;
-import org.springframework.http.MediaType;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.MvcResult;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -63,6 +66,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 //
 // Requires a real MySQL 8 server: pass -Dmysql.url/-Dmysql.user/
 // -Dmysql.password (defaults match a local throwaway server on 13306).
+//
+// The Hosted*IT classes share one failsafe fork and one MySQL schema, so
+// the context is closed after the class. Cached for the rest of the fork,
+// its recovery scans (operations, Turns, action responses) would go on
+// covering every tenant and claim later classes' work for this host, whose
+// fixture Harness and missing Runtime Broker can neither run that work nor
+// close its Workspace Sessions. For the same reason a round that stalls
+// has its work ended before the context closes.
 @SpringBootTest(properties = {
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.runtime-broker.enabled=false",
@@ -71,6 +82,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.events.materialize-interval=10ms"})
 @AutoConfigureMockMvc
 @Import(HostedConcurrentTurnBurstMySqlIT.BurstHarnessConfiguration.class)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class HostedConcurrentTurnBurstMySqlIT {
     private static final Duration ROUND_DEADLINE = Duration.ofSeconds(150);
     private static final Duration SILENCE_LIMIT = Duration.ofSeconds(20);
@@ -112,6 +124,21 @@ class HostedConcurrentTurnBurstMySqlIT {
                         + "&allowPublicKeyRetrieval=true&useSSL=false");
     }
 
+    private final List<String> tenants = new ArrayList<>();
+
+    @AfterEach
+    void endOwedWork() {
+        // A round that settled matches nothing.
+        for (String tenant : tenants) {
+            jdbc.update("UPDATE ma_turn SET status = 'FAILED'"
+                    + " WHERE tenant_id = ? AND status NOT IN"
+                    + " ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
+            jdbc.update("UPDATE ma_operation SET delivery_state"
+                    + " = 'CONFIRMED' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id = ? AND delivery_state"
+                    + " IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
+        }
+    }
+
     @Test
     @Timeout(600)
     void turnBurstsSettleWithoutLockConvoy() throws Exception {
@@ -135,6 +162,7 @@ class HostedConcurrentTurnBurstMySqlIT {
     private List<String> runBurst(int burst, long staggerMs)
             throws Exception {
         String tenant = "burst-" + burst + "-" + UUID.randomUUID();
+        tenants.add(tenant);
         Logger coordinator = (Logger) LoggerFactory.getLogger(
                 HarnessCoordinator.class);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();
@@ -236,7 +264,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             long total = 0;
             for (Map<String, Object> row : jdbc.queryForList(
                     "SELECT session_id, COUNT(*) AS deltas FROM"
-                            + " managed_agent_event WHERE tenant_id = ? AND"
+                            + " ma_public_event WHERE tenant_id = ? AND"
                             + " event_type = 'item.output_text.delta' GROUP"
                             + " BY session_id", tenant)) {
                 total += ((Number) row.get("deltas")).longValue();
@@ -323,7 +351,7 @@ class HostedConcurrentTurnBurstMySqlIT {
 
     private int countTurns(String tenant, String status) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " ma_turn WHERE tenant_id = ? AND"
                         + " status = ?", Integer.class, tenant, status);
         return count == null ? 0 : count;
     }
@@ -374,7 +402,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             DataSource source = new DriverManagerDataSource(mysqlUrl(),
                     System.getProperty("mysql.user", "root"),
                     System.getProperty("mysql.password", ""));
-            raw = new JdbcTemplate(source);
+            raw = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
             raw.setQueryTimeout(5);
             thread = new Thread(this::sampleLoop, "issue13333-lock-monitor");
             thread.setDaemon(true);
@@ -499,6 +527,16 @@ class HostedConcurrentTurnBurstMySqlIT {
 
         @Override
         public void cancel(String tenantId, String sessionId) {
+        }
+
+        @Override
+        public boolean supportsFencedTitles() {
+            return true;
+        }
+
+        @Override
+        public void rename(String tenantId, String sessionId, String title, long revision) {
+            rename(tenantId, sessionId, title);
         }
 
         @Override

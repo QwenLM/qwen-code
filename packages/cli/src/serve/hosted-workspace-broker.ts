@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import {
+  parseManagedRuntimeProviderResult,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
 } from './hosted-file-history-protocol.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type {
@@ -29,10 +32,16 @@ import type {
   ManagedHookControl,
   ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import type {
+  ManagedMonitorControl,
+  ManagedMonitorOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
+  lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -66,6 +75,7 @@ export function isHostedFileHistoryRefusal(
 
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
+  private leaseAcquired = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -78,6 +88,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get acquired(): boolean {
+    return this.leaseAcquired;
   }
 
   constructor(
@@ -120,17 +134,51 @@ export class HostedWorkspaceBroker {
     });
   }
 
-  async warm(): Promise<void> {
-    await this.request('/runtimes:warm', {});
+  /** The Session's project instruction files, read outside the execution ledger. */
+  async workspaceContext(): Promise<ManagedWorkspaceContextFile[]> {
+    const operation = { kind: 'workspace-context' } as const;
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    }) as ManagedWorkspaceContextFile[];
   }
 
-  async acquire(): Promise<void> {
+  async warm(): Promise<void> {
+    const response = await this.request('/runtimes:warm', {});
+    if (response['runtime'] !== undefined) this.readRuntime(response);
+  }
+
+  async authorizeLifecycle(): Promise<void> {
+    if (this.options.lifecycleAuthority?.())
+      await this.request('/runtimes:authorize-lifecycle', {});
+  }
+
+  async acquire(expected?: {
+    runtimeBindingId: string;
+    generation: string;
+  }): Promise<void> {
     const response = await this.request('/tool-sessions:acquire', {
       turnKind: 'bootstrap',
+      ...(expected
+        ? {
+            recoveryBindingId: expected.runtimeBindingId,
+            recoveryGeneration: expected.generation,
+          }
+        : {}),
     });
+    if (response['acquired'] !== true)
+      throw new Error('Runtime did not acquire the Session.');
+    this.readRuntime(response);
+    this.leaseAcquired = true;
+  }
+
+  private readRuntime(response: Record<string, unknown>): void {
     const scope = object(response['scope']);
     if (
-      response['acquired'] !== true ||
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
@@ -224,6 +272,7 @@ export class HostedWorkspaceBroker {
     argsDigest: string,
     requestDigest: string,
     publicationId: string,
+    turnId: string,
   ): Promise<{
     executionCallId: string;
     runtimeBindingId: string;
@@ -231,14 +280,19 @@ export class HostedWorkspaceBroker {
   }> {
     const response = await this.request('/executions:prepare', {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
-      turnId: this.identity.runtimeSessionId,
+      // One pair, two axes, same as the publisher registration: the
+      // logical turn id on the checkpoint axis (the reserve's reference
+      // and the persisted execution must both carry it, or the
+      // publication store's `execution.turnId == reference.promptId`
+      // refuses), the mapped Runtime Session on the execution axis.
+      turnId,
       toolCallId: callId,
       requestDigest,
       toolProtocol: 'v3',
       publicationId,
       reference: {
         sessionId: this.identity.runtimeSessionId,
-        promptId: this.identity.runtimeSessionId,
+        promptId: turnId,
         callId,
         argsDigest,
       },
@@ -482,6 +536,28 @@ export class HostedWorkspaceBroker {
     return result as unknown as ManagedHookOperationView;
   }
 
+  /**
+   * #13896: one watch's maintenance through the client route. A watch
+   * answers running, exited or unknown — never the Hook/MCP settlement
+   * states — and only `exited` with its evidence proves the watch ended.
+   */
+  async monitorControl(
+    operation: ManagedMonitorControl,
+  ): Promise<ManagedMonitorOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.targetOperationId ||
+      !['running', 'exited', 'unknown'].includes(String(result['state'])) ||
+      (result['state'] === 'exited' && !result['evidence'])
+    )
+      throw new Error('Runtime Monitor response is invalid.');
+    return result as unknown as ManagedMonitorOperationView;
+  }
+
   async acknowledgeV3(
     id: string,
     receipt: {
@@ -538,6 +614,20 @@ export class HostedWorkspaceBroker {
     return { state };
   }
 
+  /**
+   * Read-only never-started proof for one background dispatch: the Broker
+   * admits the `<executionCallId>:process` ledger row only at the
+   * execute-admission of an `is_background` dispatch, so this probe's
+   * definitive not-found is the absence read that proves the dispatch
+   * never began. The ledger-key suffix lives here, with every other
+   * Broker identity, so a key change cannot drift a caller's proof open.
+   */
+  async backgroundProcessStatus(
+    executionCallId: string,
+  ): Promise<{ state: string } | undefined> {
+    return this.status(`${executionCallId}:process`);
+  }
+
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
     const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
     const body = {
@@ -572,13 +662,27 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(): Promise<void> {
+  async release(
+    options?:
+      | { bindingId: string; generation: string; readonly drain?: boolean }
+      | { readonly drain?: boolean },
+  ): Promise<void> {
+    const expected = options && 'bindingId' in options ? options : undefined;
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      {},
+      {
+        ...(expected
+          ? {
+              cleanupBindingId: expected.bindingId,
+              cleanupGeneration: expected.generation,
+            }
+          : {}),
+        ...(options?.drain === true ? { drain: true } : {}),
+      },
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
+    this.leaseAcquired = false;
   }
 
   private async request(
@@ -595,11 +699,20 @@ export class HostedWorkspaceBroker {
     if (!body)
       for (const [key, value] of Object.entries(fields))
         url.searchParams.set(key, String(value));
+    const authority = this.options.lifecycleAuthority?.();
     const response = await fetch(url, {
       method: body ? 'POST' : 'GET',
       headers: {
         Authorization: `Bearer ${this.options.token}`,
         'Content-Type': 'application/json',
+        ...(authority
+          ? {
+              'X-Qwen-Lifecycle-Operation-Id': authority.operationId,
+              'X-Qwen-Lifecycle-Claim-Generation': String(
+                authority.claimGeneration,
+              ),
+            }
+          : {}),
       },
       ...(body ? { body: JSON.stringify(fields) } : {}),
       redirect: 'error',
@@ -644,4 +757,19 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
 }

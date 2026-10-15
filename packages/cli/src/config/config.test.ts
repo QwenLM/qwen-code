@@ -3342,6 +3342,26 @@ describe('loadCliConfig', () => {
     },
   );
 
+  it('passes the Managed engine quarantine sink to the session Config', async () => {
+    const onManagedEngineQuarantine = vi.fn();
+    await loadCliConfig(
+      {},
+      {} as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { onManagedEngineQuarantine },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onManagedEngineQuarantine }),
+    );
+  });
+
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
@@ -4896,6 +4916,108 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     expect(config.isMcpServerDisabled('server3')).toBe(false);
   });
 
+  it('should exclude exactly the named server via --disable-mcp-server', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server1'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // Exclusion is a disabled-status flag, not removal from the server map —
+    // the same contract as settings.mcp.excluded above.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+      server3: { url: 'http://localhost:8082' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should exclude multiple servers with repeated --disable-mcp-server flags', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      '--disable-mcp-server',
+      'server2',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should union --disable-mcp-server with settings mcp.excluded', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server2'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      ...baseSettings,
+      mcp: { excluded: ['server1'] },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should disable nothing when --disable-mcp-server is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(false);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should apply --disable-mcp-server alongside an allow-list (allow-then-deny)', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--allowed-mcp-server-names',
+      'server1,server2',
+      '--disable-mcp-server',
+      'server1',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // The allow-list narrows the returned map; the disable flag still applies
+    // on top of it, so a server named by both ends up disabled.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+  });
+
+  it('should still apply --disable-mcp-server under --safe-mode', async () => {
+    // Safe mode drops settings.mcpServers entirely (only top-tier session and
+    // `--mcp-config` servers survive), so these servers come from --mcp-config.
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--disable-mcp-server',
+      'cli-server-1',
+      '--mcp-config',
+      JSON.stringify({
+        mcpServers: {
+          'cli-server-1': { command: 'cmd-1' },
+          'cli-server-2': { command: 'cmd-2' },
+        },
+      }),
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getMcpServers()).toEqual({
+      'cli-server-1': { command: 'cmd-1' },
+      'cli-server-2': { command: 'cmd-2' },
+    });
+    expect(config.isMcpServerDisabled('cli-server-1')).toBe(true);
+    expect(config.isMcpServerDisabled('cli-server-2')).toBe(false);
+  });
+
   it('should apply allowedMcpServers filter but excluded servers are still returned', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -5003,6 +5125,35 @@ describe('loadCliConfig with --mcp-config', () => {
     expect(mcpServers['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
+  });
+
+  it('should parse a config file that starts with a UTF-8 BOM', async () => {
+    // `fs` is mocked in this file, so use the untouched `fs.promises` to write
+    // a real file and widen `existsSync` for just this path.
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-bom-'));
+    const file = path.join(dir, 'mcp.json');
+    await fs.promises.writeFile(
+      file,
+      '\uFEFF' +
+        JSON.stringify({ mcpServers: { 'bom-server': { command: 'node' } } }),
+    );
+    const originalExists = vi.mocked(fs.existsSync).getMockImplementation();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === file || Boolean(originalExists?.(p)),
+    );
+    try {
+      process.argv = ['node', 'script.js', '--mcp-config', file];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getMcpServers()).toEqual({
+        'bom-server': { command: 'node' },
+      });
+    } finally {
+      if (originalExists) {
+        vi.mocked(fs.existsSync).mockImplementation(originalExists);
+      }
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('should override settings file servers with same name', async () => {

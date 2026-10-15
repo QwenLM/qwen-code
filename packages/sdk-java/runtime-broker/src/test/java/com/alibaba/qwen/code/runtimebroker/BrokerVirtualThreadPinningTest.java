@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.net.URI;
 import java.time.Clock;
@@ -15,7 +14,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,7 +35,11 @@ import org.junit.jupiter.api.Timeout;
 // SessionContext guard), then proves an unrelated virtual-thread probe
 // still completes — the same mechanism the SSE-reader witness pins in
 // qwencode, asserted for the broker guards. The latched wrapper blocks
-// only that one call; everything else runs at in-memory speed.
+// only that one call; everything else runs at in-memory speed. The
+// arrival latch is sized to the carrier count, not the caller count:
+// under a pinning guard only one caller per carrier can ever arrive, so
+// a caller-sized latch would burn the whole timeout before the probe
+// assert below names the starvation.
 class BrokerVirtualThreadPinningTest {
     private static final RuntimeScope SCOPE = new RuntimeScope("tenant",
             "workspace", "1", "/control", "digest", "session");
@@ -61,10 +63,11 @@ class BrokerVirtualThreadPinningTest {
     @Timeout(120)
     void guardedBlockingRepositoryCallsMustNotStarveVirtualThreads()
             throws Exception {
-        assumeTrue(true, "this module runs on JDK 21+");
         Clock clock = Clock.fixed(START, ZoneOffset.UTC);
+        int carriers = CarrierCount.resolve();
+        int callerCount = carriers + 2;
         sessions = new LatchedSessionRepository(
-                new InMemoryRuntimeSessionRepository());
+                new InMemoryRuntimeSessionRepository(), carriers);
         service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 new InlineProvisioner(), new InlineTransport(),
@@ -73,8 +76,6 @@ class BrokerVirtualThreadPinningTest {
                 new InMemoryToolExecutionRepository(clock),
                 "broker-pinning", Duration.ofMinutes(1),
                 Duration.ofSeconds(1), clock, () -> "execution");
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
-        int callerCount = carriers + 2;
         // One Session per caller, so each parks inside its own
         // SessionContext guard — sharing one Session would serialize the
         // callers at the same guard and only one would reach the block.
@@ -85,6 +86,7 @@ class BrokerVirtualThreadPinningTest {
         AtomicBoolean allOk = new AtomicBoolean(true);
         AtomicInteger probeProgress = new AtomicInteger();
         List<Thread> callers = new ArrayList<>();
+        Throwable primary = null;
         sessions.arm();
         try {
             for (int index = 0; index < callerCount; index++) {
@@ -103,7 +105,7 @@ class BrokerVirtualThreadPinningTest {
                     }
                 }));
             }
-            // Every caller must reach the latched repository call, parked
+            // Every carrier must reach the latched repository call, parked
             // inside its SessionContext guard, before the probe starts;
             // that is exactly the state a pinning runtime wedges.
             sessions.awaitArrived(60, TimeUnit.SECONDS);
@@ -120,10 +122,32 @@ class BrokerVirtualThreadPinningTest {
                             + carriers + " carriers (progress="
                             + probeProgress.get() + ") — a guard pinned"
                             + " its carrier");
+        } catch (Throwable failure) {
+            primary = failure;
+            throw failure;
         } finally {
             sessions.open();
+            // The latch is carrier-sized, so it opens without the last two
+            // callers; a caller wedged before the guarded call fails no other
+            // assertion. One shared budget keeps the method inside @Timeout,
+            // and a pending failure keeps its own message: the wedged callers
+            // ride along as a suppressed error instead of replacing it.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            int unsettled = 0;
             for (Thread caller : callers) {
-                caller.join(30_000);
+                caller.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(
+                        deadline - System.nanoTime())));
+                if (caller.isAlive()) {
+                    unsettled++;
+                }
+            }
+            if (unsettled > 0) {
+                AssertionError wedged = new AssertionError(unsettled
+                        + " caller(s) never finished after the latch opened");
+                if (primary == null) {
+                    throw wedged;
+                }
+                primary.addSuppressed(wedged);
             }
         }
         assertTrue(allOk.get(), "callers failed after the latch opened");
@@ -142,10 +166,10 @@ class BrokerVirtualThreadPinningTest {
         private final CountDownLatch open;
         private final AtomicInteger waiting = new AtomicInteger();
 
-        LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate) {
+        LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate,
+                int arrivals) {
             this.delegate = delegate;
-            arrived = new CountDownLatch(
-                    ForkJoinPool.getCommonPoolParallelism() + 2);
+            arrived = new CountDownLatch(arrivals);
             open = new CountDownLatch(1);
         }
 
@@ -187,6 +211,13 @@ class BrokerVirtualThreadPinningTest {
         public RuntimeSessionRecord findOrCreate(
                 RuntimeSessionRecord candidate) {
             return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public RuntimeSessionRecord findHistorical(String tenantId,
+                String harnessSessionId, String runtimeSessionId) {
+            return delegate.findHistorical(tenantId, harnessSessionId,
+                    runtimeSessionId);
         }
 
         @Override

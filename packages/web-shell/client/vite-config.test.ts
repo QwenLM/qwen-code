@@ -9,7 +9,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { preview } from 'vite';
+import { createServer, preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
@@ -28,6 +28,30 @@ function loadConfig(): UserConfig {
     isPreview: false,
   });
 }
+
+it('serves the settings page without claiming the settings source module', async ({
+  onTestFinished,
+}) => {
+  const server = await createServer({
+    ...loadConfig(),
+    configFile: false,
+    server: { host: '127.0.0.1', port: 0 },
+  });
+  onTestFinished(() => server.close());
+  await server.listen();
+  const baseUrl = server.resolvedUrls!.local[0];
+  for (const path of ['settings', 'settings?theme=dark', 'settings/']) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      headers: { accept: 'text/html' },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(await response.text()).toContain('/main.tsx');
+  }
+  const source = await fetch(`${baseUrl}settings.ts`);
+  expect(source.status).toBe(200);
+  expect(source.headers.get('content-type')).toContain('javascript');
+});
 
 it.each([
   [undefined, false],

@@ -1,10 +1,9 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.aliyun.oss.OSSException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -12,13 +11,16 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
-import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -30,6 +32,16 @@ public class ApiExceptionHandler {
             HttpServletRequest request, HttpServletResponse response) {
         return response(request, response, error.getStatus(), error.getCode(),
                 error.getMessage(), error.getDetails());
+    }
+
+    @ExceptionHandler(RuntimeBrokerException.class)
+    public ResponseEntity<Map<String, Object>> runtime(RuntimeBrokerException error,
+            HttpServletRequest request, HttpServletResponse response) {
+        HttpStatus status = HttpStatus.resolve(error.getStatusCode());
+        Map<String, Object> details = new LinkedHashMap<>(error.getDetails());
+        details.put("retryable", error.isRetryable());
+        return response(request, response, status == null ? HttpStatus.CONFLICT : status,
+                error.getCode(), error.getMessage(), details);
     }
 
     @ExceptionHandler(AsyncRequestNotUsableException.class)

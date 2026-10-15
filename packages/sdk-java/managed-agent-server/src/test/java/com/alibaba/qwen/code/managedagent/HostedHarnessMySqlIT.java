@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonEvent;
 import com.alibaba.qwen.code.daemon.GetHarnessTranscript;
@@ -18,6 +16,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
@@ -46,14 +53,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedHarnessMySqlIT {
     private static final String MODEL = "hosted-mysql-fixture";
@@ -61,6 +62,12 @@ class HostedHarnessMySqlIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final Pattern LISTENING = Pattern.compile(
             "listening on http://127\\.0\\.0\\.1:(\\d+)");
+    // The CI job's MySQL service container can stall journal writes for tens
+    // of seconds when its InnoDB redo log fills under fork load (MY-014084);
+    // a 30s settlement poll expires mid-stall (#13780). 60s keeps a fully
+    // stalled run of this class inside the shared 900s failsafe fork budget
+    // (hosted-harness-mysql profile), so the sibling classes still report.
+    private static final int SETTLEMENT_POLL_SECONDS = 60;
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
@@ -97,13 +104,15 @@ class HostedHarnessMySqlIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         dataSource.setConnectionProperties(timeouts);
-        jdbc = new JdbcTemplate(dataSource);
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource);
         jdbc.setQueryTimeout(10);
         Map<String, Object> database = jdbc.queryForMap(
                 "SELECT VERSION() AS version, @@version_comment AS engine");
         System.out.println("HOSTED_MYSQL_DATABASE " + json.writeValueAsString(database));
         assertThat(database.get("version").toString()).doesNotContainIgnoringCase("mariadb");
-        assertThat(database.get("engine").toString()).containsIgnoringCase("mysql");
+        try (var connection = dataSource.getConnection()) {
+            assertThat(connection.getMetaData().getDatabaseProductName()).isEqualTo("MySQL");
+        }
 
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
@@ -195,7 +204,7 @@ class HostedHarnessMySqlIT {
             assertTranscriptPrefix(committed, transcript(client, reattached, 0));
             client.closeSession(reattached);
             assertWriter("SEALED", 3);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, sessionId))
                     .isGreaterThan(4);
             assertThat(modelFailure.get()).isNull();
@@ -206,11 +215,11 @@ class HostedHarnessMySqlIT {
     }
 
     @Test
-    @Timeout(120)
+    @Timeout(240)
     void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
-        jdbc = new JdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
                 required("mysql.user"), System.getProperty("mysql.password", "")));
         startModel();
         startHarness(cli);
@@ -242,8 +251,8 @@ class HostedHarnessMySqlIT {
                      "input":[{"type":"input_text","text":"LIFECYCLE_FIRST"}]}
                     """, 202).path("id").asText();
             await(() -> api("GET", "/v1/agents/sessions/" + id + "/events", null, null, 200)
-                    .path("data").toString().contains("\"turn.completed\""), 30,
-                    "Turn completion");
+                    .path("data").toString().contains("\"turn.completed\""),
+                    SETTLEMENT_POLL_SECONDS, "Turn completion");
             assertThat(writerState(id)).isEqualTo("ACTIVE");
 
             JsonNode close = api("POST", "/v1/agents/sessions/" + id + "/close", "close",
@@ -277,7 +286,7 @@ class HostedHarnessMySqlIT {
             operation.set(api("GET", "/v1/agents/sessions/" + session + "/operations/"
                     + operationId, null, null, 200));
             return "completed".equals(operation.get().path("status").asText());
-        }, 30, "Operation " + operationId);
+        }, SETTLEMENT_POLL_SECONDS, "Operation " + operationId);
         return operation.get();
     }
 
@@ -311,7 +320,7 @@ class HostedHarnessMySqlIT {
     }
 
     private String writerState(String session) {
-        return jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head"
+        return jdbc.queryForObject("SELECT state FROM ma_session_head"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session);
     }
 
@@ -388,7 +397,7 @@ class HostedHarnessMySqlIT {
         environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", temporary.resolve("system-defaults.json").toString());
         environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", temporary.resolve("trusted-folders.json").toString());
         child = builder.start();
-        watchdog.schedule(this::killChild, 100, TimeUnit.SECONDS);
+        watchdog.schedule(this::killChild, 300, TimeUnit.SECONDS);
         outputReader = Thread.ofPlatform().daemon().start(() -> {
             try (var reader = child.inputReader(StandardCharsets.UTF_8)) {
                 char[] buffer = new char[2048];
@@ -471,7 +480,7 @@ class HostedHarnessMySqlIT {
 
     private List<JsonNode> readEvents(HostedHarnessClient client, HarnessSessionRef session,
             long after, String epoch, int count) throws IOException {
-        // Stream.close cannot interrupt the client's synchronized blocking read.
+        // Stream.close queues on the stream lock and cannot interrupt the client's blocking read.
         var deadline = watchdog.schedule(this::killChild, 10, TimeUnit.SECONDS);
         try (HarnessEventStream stream = client.streamEvents(StreamHarnessEvents.builder()
                 .session(session).lastEventId(after).eventEpoch(epoch).build())) {
@@ -536,7 +545,7 @@ class HostedHarnessMySqlIT {
 
     private void assertWriter(String state, long generation) {
         Map<String, Object> head = jdbc.queryForMap("SELECT state, writer_generation"
-                + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                 tenant, sessionId);
         assertThat(head.get("state")).isEqualTo(state);
         assertThat(((Number) head.get("writer_generation")).longValue()).isEqualTo(generation);

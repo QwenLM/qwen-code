@@ -2,6 +2,8 @@
 
 [English](workspace-session-reliable-close.md) | [简体中文](workspace-session-reliable-close.zh-CN.md)
 
+本设计保留 L1/L2 与可靠 close 的原有协议。新接纳的 ACTIVE files 会话 close/delete 采用 [L3 设计](workspace-session-active-delete-l3.zh-CN.md)：close 仅运行 SessionEnd，delete 顺序运行 SessionEnd 与 SessionDelete，先提交 Hook 证据再永久停机。CLOSED/ARCHIVED 的 L2 删除仍不依赖 Harness；升级前接纳的 operation 按原版本恢复。
+
 ## 状态与范围
 
 已实现并完成本地验证。本切片通过现有 public 和 WebShell lifecycle operation，为空闲的公开 `hosted-workspace-files/1` Session 开放 close。运行中、取消中、已接受或等待审批的 Turn 仍返回 `409 turn_active`。Shell、MCP、archive/delete 和新增 UI 按钮不在范围内。close 保留历史、Artifacts 和共享 Workspace 文件。

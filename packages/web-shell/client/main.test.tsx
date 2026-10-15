@@ -47,6 +47,8 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
+  getFanoutOrigins: () => [],
+  syncFanoutParams: vi.fn(),
   getAllowedDaemonOrigin: (value: string) => value,
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,
@@ -96,6 +98,14 @@ describe('StandaloneApp', () => {
   it('enables the tool calls entry in the standalone app', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
     expect(testState.props?.webShellProps.showToolCalls).toBe(true);
+  });
+
+  it('offers the sidebar defaults, including Agents, in the standalone shell', () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    const sidebar = testState.props?.webShellProps.sidebar;
+    const items =
+      sidebar && typeof sidebar === 'object' ? sidebar.primaryNav?.items : [];
+    expect(items).toContain('agents');
   });
 
   it('reloads the page when the root error fallback retry is clicked', () => {
