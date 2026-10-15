@@ -193,7 +193,11 @@ export class ManagedEmailAdapter {
    * Set when the persisted refusal streak passes the limit; gates the
    * search in poll(). In-memory only: a restart re-derives it from a
    * persisted held claim, so an epoch change that emptied pending
-   * starts the new generation clean.
+   * starts the new generation clean. True only while a held claim is
+   * still pending: the claim can also leave without proving the
+   * binding — dropped on a per-message verdict, settled by a replayed
+   * answer, or un-rebuildable after a restart — and a stall that
+   * outlived it would have no probe left to lift it.
    */
   private instanceStalled = false;
 
@@ -457,15 +461,15 @@ export class ManagedEmailAdapter {
     // A stalled instance binding leaves the search at lastUid while it
     // holds a claim: the mail above it is re-searched once the held
     // claim's re-drive proves the binding answers again, never admitted
-    // to its destruction meanwhile. Once nothing is held — the claim
-    // dropped on a per-message verdict or un-rebuildable — the gate must
-    // reopen: no probe remains to lift the stall, and the streak, still
-    // above the limit, re-holds the next instance-scoped refusal without
-    // an extra drop.
+    // to its destruction meanwhile. The flag is true only while a held
+    // claim is still pending — liftStallWhenNothingHeld clears it the
+    // moment the claim leaves without proving the binding — and the
+    // streak, still above the limit, re-holds the next instance-scoped
+    // refusal without an extra drop.
     if (
       upper <= state.lastUid ||
       state.pending.length >= MANAGED_PENDING_LIMIT ||
-      (this.instanceStalled && state.pending.length > 0)
+      this.instanceStalled
     )
       return;
     const found = await client.search(
@@ -703,7 +707,10 @@ export class ManagedEmailAdapter {
       // workspace through an existing binding row, which the broken
       // binding never decided, and a replayed answer is the idempotent
       // echo of an earlier admission: neither proves the binding, so
-      // neither re-grants the episode's sacrifice (R10-1).
+      // neither re-grants the episode's sacrifice (R10-1). A replay can
+      // still settle the held claim itself — the admission whose own
+      // answer was lost — and with nothing held the stall lifts, while
+      // the streak stands.
       const wasHeld = state.pending.some(
         (entry) => entry.uid === uid && entry.held === true,
       );
@@ -716,6 +723,8 @@ export class ManagedEmailAdapter {
             `Managed email admission for ${this.settings.address} resumed; the instance's workspace answers again.`,
           );
         }
+      } else {
+        this.liftStallWhenNothingHeld();
       }
       this.persist();
       if (admitted.replayed) {
@@ -798,6 +807,7 @@ export class ManagedEmailAdapter {
         );
         state.pending = state.pending.filter((entry) => entry.uid !== uid);
         this.pendingEvents.delete(uid);
+        this.liftStallWhenNothingHeld();
         this.persist();
         return;
       }
@@ -810,6 +820,29 @@ export class ManagedEmailAdapter {
   }
 
   private readonly pendingEvents = new Map<number, ManagedInboundEvent>();
+
+  /**
+   * The stall exists to be lifted by the held claim's probe: when the
+   * last held claim leaves without proving the binding — dropped on a
+   * per-message verdict, settled by a replayed answer, or un-rebuildable
+   * after a restart — no probe remains, and a flag kept armed would gate
+   * every later poll to a single admit and pin settled events in the
+   * cache behind resubmitPending's stall return. The refusal streak is
+   * NOT reset here: only the held claim's fresh admission proves the
+   * binding (R10-1), so the next instance-scoped refusal re-holds
+   * without paying a new first-occurrence drop (R7-1).
+   */
+  private liftStallWhenNothingHeld(): void {
+    if (
+      this.instanceStalled &&
+      !this.state!.pending.some((entry) => entry.held === true)
+    ) {
+      this.instanceStalled = false;
+      this.log(
+        `Managed email admission for ${this.settings.address} resumed; no claim remains held, and the refusal streak still stands for the next instance-scoped refusal.`,
+      );
+    }
+  }
 
   private async resubmitPending(): Promise<void> {
     const state = this.state!;
@@ -835,6 +868,7 @@ export class ManagedEmailAdapter {
           state.pending = state.pending.filter(
             (pending) => pending.uid !== entry.uid,
           );
+          this.liftStallWhenNothingHeld();
           this.persist();
           continue;
         }

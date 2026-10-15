@@ -754,17 +754,18 @@ describe('managed email inbound', () => {
     expect(plane.admitted.size).toBe(2);
   });
 
-  it('lifts the workspace stall only on a fresh admission, never on a replay (R8-1)', async () => {
+  it('never resets the refusal streak on a replayed answer (R8-1)', async () => {
     // A replayed 200 is the server's idempotent answer to a claim it
     // already admitted: the existing binding row short-circuits the
     // workspace resolution, so the answer proves nothing about the
-    // refusal's cause. Lifting the stall on it zeroes the streak with
-    // the binding still broken, and the next fresh submit's refusal
-    // falls to the first-occurrence drop — destroying the mail the
-    // stall kept re-searchable. Held claims probe first (R9-1), so a
-    // replay reaches the probe only once nothing is held: the held
-    // claim's drop on a per-message verdict leaves the stall armed with
-    // the replayable claim behind it.
+    // refusal's cause. Resetting the streak on it re-grants the
+    // episode's sacrifice with the binding still broken, and the next
+    // fresh submit's refusal falls to the first-occurrence drop —
+    // destroying the mail the stall kept re-searchable. Held claims
+    // probe first (R9-1), so a replay reaches the probe only once
+    // nothing is held: the held claim's drop on a per-message verdict
+    // lifts the stall — nothing remains to probe with — and leaves the
+    // replayable claim behind it.
     const lines: string[] = [];
     const adapter = make({}, { log: (line: string) => lines.push(line) });
     await adapter.connect();
@@ -796,7 +797,8 @@ describe('managed email inbound', () => {
         });
       },
       // The held claim's probe meets a per-message verdict and drops:
-      // the stall stays armed with only the replayable claim behind it.
+      // only the replayable claim remains, and the stall lifts with
+      // nothing held.
       () => {
         throw Object.assign(new Error('HTTP 409'), {
           status: 409,
@@ -829,20 +831,17 @@ describe('managed email inbound', () => {
     expect(
       lines.filter((line) => line.includes('the message is skipped')),
     ).toHaveLength(1);
-    // The held claim's probe drops on the per-message verdict; the stall
-    // stays armed with only the replayable claim pending.
+    // The held claim's probe drops on the per-message verdict: with
+    // nothing held the stall lifts — the drop is no proof the binding
+    // answers — and the replayable claim behind it settles within the
+    // same poll. The lift is the drop's own; the replay that settles M
+    // proves nothing, so the streak stands.
     await adapter.tick();
-    expect(state(adapter).pending).toEqual([
-      { uid: lost, eventId: `1:${lost}` },
-    ]);
+    expect(state(adapter).pending).toEqual([]);
     expect(
       lines.filter((line) => line.includes('the message is skipped')),
     ).toHaveLength(2);
-    // The probe now answers M's lost claim with a replay: no fresh
-    // admission, so neither the streak nor the stall moves.
-    await adapter.tick();
-    expect(state(adapter).pending).toEqual([]);
-    expect(lines.join('\n')).not.toContain('resumed');
+    expect(lines.filter((line) => line.includes('resumed'))).toHaveLength(1);
     // The binding still refuses fresh submits. Had the replay zeroed the
     // streak, this refusal would fall to the first-occurrence drop and
     // destroy the mail; the preserved streak re-holds it instead.
@@ -1001,6 +1000,140 @@ describe('managed email inbound', () => {
     await adapter.tick();
     expect(plane.events.map((event) => event.text)).toEqual(['fifth']);
     expect(state(adapter).lastUid).toBe(fifth);
+  });
+
+  it('lifts the stall when the held claim drops on a per-message verdict, resuming full throughput', async () => {
+    // The held claim is the stall's only probe: once a per-message
+    // verdict drops it, nothing remains to probe with, and a flag kept
+    // armed gates every later poll to a single admit — one mail per
+    // minute at the default interval — while pinning every settled
+    // event in the cache behind resubmitPending's stall return. The
+    // refusal streak stands, so a still-broken binding re-holds the
+    // next mail without a new sacrifice.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 404, code: 'workspace_not_found' },
+      { status: 404, code: 'workspace_not_found' },
+    ];
+    append(raw('one', 'first'));
+    const held = append(raw('two', 'second'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    // The held claim's re-drive meets a per-message verdict and drops.
+    plane.submitErrors = [{ status: 409, code: 'channel_route_conflict' }];
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    // The mail behind the dropped claim flows in ONE poll, not one
+    // message per poll.
+    append(raw('n1', 'one behind'));
+    append(raw('n2', 'two behind'));
+    append(raw('n3', 'three behind'));
+    await adapter.tick();
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'one behind',
+      'two behind',
+      'three behind',
+    ]);
+    // The refusal streak still stands: a still-broken binding re-holds
+    // the next mail instead of dropping it as a first occurrence.
+    plane.submitErrors = [{ status: 404, code: 'workspace_not_found' }];
+    const reheld = append(raw('n4', 're-held'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([
+      { uid: reheld, eventId: `1:${reheld}`, held: true },
+    ]);
+    expect(plane.events).toHaveLength(3);
+  });
+
+  it('lifts the stall when a replayed answer settles the held claim, draining the event cache', async () => {
+    // The binding answers again but the fresh admission's own answer is
+    // lost on the wire: the next poll's re-drive settles the held claim
+    // as a REPLAY — no proof the binding answers, so the streak stands,
+    // yet with nothing held the stall has no probe left and must lift,
+    // or every later poll admits a single message and every settled
+    // event stays in the cache.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 404, code: 'workspace_not_found' },
+      { status: 404, code: 'workspace_not_found' },
+    ];
+    append(raw('one', 'first'));
+    const held = append(raw('two', 'held'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    // The probe is admitted server-side, but the answer never arrives.
+    plane.failSubmits = 1;
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    // The re-drive settles the claim as a replay: the stall lifts and
+    // the settled event leaves the cache.
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(
+      (adapter as unknown as { pendingEvents: Map<number, unknown> })
+        .pendingEvents.size,
+    ).toBe(0);
+    // Full throughput resumes: the mail behind it flows in one poll.
+    append(raw('n1', 'one behind'));
+    append(raw('n2', 'two behind'));
+    append(raw('n3', 'three behind'));
+    await adapter.tick();
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'held',
+      'one behind',
+      'two behind',
+      'three behind',
+    ]);
+    // A lost-answer cycle after the lift leaves nothing cached either.
+    plane.failSubmits = 1;
+    append(raw('n4', 'four behind'));
+    await adapter.tick();
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(
+      (adapter as unknown as { pendingEvents: Map<number, unknown> })
+        .pendingEvents.size,
+    ).toBe(0);
+  });
+
+  it('lifts the stall when the restarted held claim can no longer be rebuilt', async () => {
+    // A restart re-arms the stall from the persisted held marker, but
+    // the platform copy the re-drive rebuilds from can be gone: the
+    // claim drops, and a flag kept armed would throttle the mailbox it
+    // can no longer probe.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 404, code: 'workspace_not_found' },
+      { status: 404, code: 'workspace_not_found' },
+    ];
+    append(raw('one', 'first'));
+    const held = append(raw('two', 'held'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    await adapter.disconnect();
+    box.messages.delete(held);
+    const restarted = make();
+    await restarted.connect();
+    await restarted.tick();
+    expect(state(restarted).pending).toEqual([]);
+    append(raw('n1', 'one behind'));
+    append(raw('n2', 'two behind'));
+    append(raw('n3', 'three behind'));
+    await restarted.tick();
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'one behind',
+      'two behind',
+      'three behind',
+    ]);
   });
 
   it('keeps a stall-held claim across a restart instead of dropping it as a first occurrence (R7-2)', async () => {
