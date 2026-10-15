@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
+import org.apache.commons.codec.digest.DigestUtils;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -15,16 +17,19 @@ import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 
 public final class ToolPublicationContract {
     public static final String PROTOCOL = "managed-tool-publication/1";
+    /** The tool families a capture publication may bind to. Every reserve-path
+     * gate must take the family list from here — a second hard-coded copy is
+     * how the Monitor reserve came to be refused one layer below the payload
+     * contract (#13533, A1). */
+    public static final Set<String> PUBLISHABLE_TOOL_NAMES = Set.of(
+            "run_shell_command", "monitor");
     public static final int MAX_BODY_BYTES = 64 * 1024;
     public static final long MAX_CAPTURE_BYTES = 1L << 41;
     public static final long PRODUCER_BYTES = 2_686_976;
@@ -55,7 +60,7 @@ public final class ToolPublicationContract {
             case "binding" -> binding(value);
             case "request" -> request(value);
             case "grant" -> grant(value);
-            default -> throw new IllegalArgumentException("Unknown publication record");
+            default -> throw new ContractViolationException("Unknown publication record");
         }
         return value.deepCopy();
     }
@@ -155,13 +160,18 @@ public final class ToolPublicationContract {
         String toolName = text(body, "toolName");
         // H3: the detached capture family publishes background Shell and
         // Monitor payloads beside the foreground Shell; each family keeps its
-        // own closed input shape.
+        // own closed input shape. Admission takes the family list from one
+        // place — the store's checkpoint gate reads the same constant, and a
+        // second hard-coded copy is what refused the Monitor reserve one layer
+        // below this contract (#13533).
+        require(PUBLISHABLE_TOOL_NAMES.contains(toolName),
+                "Only Shell and Monitor payloads can publish");
         if ("run_shell_command".equals(toolName)) {
             requireShellInput(input);
         } else if ("monitor".equals(toolName)) {
             requireMonitorInput(input);
         } else {
-            require(false, "Only Shell and Monitor payloads can publish");
+            throw new IllegalArgumentException("Publishable tool lacks a contract arm");
         }
         require(("sha256:" + sha256(bytes)).equals(text(binding, "requestDigest")),
                 "Original payload digest conflicts");
@@ -176,10 +186,7 @@ public final class ToolPublicationContract {
         input.fieldNames().forEachRemaining(name -> require(
                 Set.of("command", "timeout", "description", "is_background", "directory")
                         .contains(name), "Shell input field is invalid"));
-        require(!input.has("timeout") || input.get("timeout").isIntegralNumber()
-                && input.get("timeout").canConvertToInt()
-                && input.get("timeout").intValue() >= 1 && input.get("timeout").intValue() <= 600_000,
-                "Shell timeout is invalid");
+        boundedIntField(input, "timeout", 600_000, "Shell timeout is invalid");
         require(!input.has("description") || input.get("description").isTextual(),
                 "Shell description is invalid");
         require(!input.has("is_background") || input.get("is_background").isBoolean(),
@@ -199,17 +206,29 @@ public final class ToolPublicationContract {
                 "Monitor description is invalid");
         require(!input.has("is_monitor") || input.get("is_monitor").isBoolean(),
                 "Monitor marker is invalid");
-        require(!input.has("max_events") || input.get("max_events").isIntegralNumber()
-                && input.get("max_events").canConvertToInt()
-                && input.get("max_events").intValue() >= 1
-                && input.get("max_events").intValue() <= 10_000, "Monitor max_events is invalid");
-        require(!input.has("idle_timeout_ms") || input.get("idle_timeout_ms").isIntegralNumber()
-                && input.get("idle_timeout_ms").canConvertToInt()
-                && input.get("idle_timeout_ms").intValue() >= 1
-                && input.get("idle_timeout_ms").intValue() <= 600_000,
-                "Monitor idle timeout is invalid");
+        boundedIntField(input, "max_events", 10_000, "Monitor max_events is invalid");
+        boundedIntField(input, "idle_timeout_ms", 600_000, "Monitor idle timeout is invalid");
         require(!input.has("directory") || input.get("directory").isTextual()
                 && !input.get("directory").textValue().isEmpty(), "Monitor directory is invalid");
+    }
+
+    /**
+     * An optional integral-valued numeric field bounded below by 1. Integral
+     * doubles (6e5, 600000.0) are the same integer the TypeScript mirror
+     * accepts after JSON.parse normalization — the wire spelling is pinned
+     * again by the request digest, so accepting the integral form here keeps
+     * the two implementations' accepted families identical.
+     */
+    private static void boundedIntField(JsonNode input, String key, long maximum, String reason) {
+        JsonNode value = input.get(key);
+        if (value == null) {
+            return;
+        }
+        BigDecimal number = value.isNumber() && Double.isFinite(value.doubleValue())
+                ? value.decimalValue() : null;
+        require(number != null && number.stripTrailingZeros().scale() <= 0
+                && number.compareTo(BigDecimal.ONE) >= 0
+                && number.compareTo(BigDecimal.valueOf(maximum)) <= 0, reason);
     }
 
     public static String bindingDigest(JsonNode binding) {
@@ -240,7 +259,7 @@ public final class ToolPublicationContract {
             return JSON.reader().with(com.fasterxml.jackson.databind.DeserializationFeature
                     .FAIL_ON_TRAILING_TOKENS).readTree(text);
         } catch (IOException error) {
-            throw new IllegalArgumentException("Invalid publication JSON", error);
+            throw new ContractViolationException("Invalid publication JSON", error);
         }
     }
 
@@ -269,11 +288,7 @@ public final class ToolPublicationContract {
     }
 
     public static String sha256(byte[] bytes) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return DigestUtils.sha256Hex(bytes);
     }
 
     private static JsonNode canonical(JsonNode node) {
@@ -411,9 +426,19 @@ public final class ToolPublicationContract {
         return node == null ? "" : node.path(key).asText("");
     }
 
+    static final class ContractViolationException extends IllegalArgumentException {
+        private ContractViolationException(String message) {
+            super(message);
+        }
+
+        private ContractViolationException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     static void require(boolean condition, String reason) {
         if (!condition) {
-            throw new IllegalArgumentException(reason);
+            throw new ContractViolationException(reason);
         }
     }
 }

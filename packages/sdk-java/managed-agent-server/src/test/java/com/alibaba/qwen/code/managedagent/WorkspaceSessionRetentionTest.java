@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
@@ -24,17 +18,12 @@ import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -50,6 +39,20 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-retention;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -69,11 +72,112 @@ class WorkspaceSessionRetentionTest {
     @Autowired OnceCloseRuntime runtime;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
+    @Autowired ManagedWorkspaceRegistry registry;
+    @Autowired HarnessConnector harness;
+    @Autowired com.alibaba.qwen.code.managedagent.service.HarnessCoordinator coordinator;
 
-    @Test
-    void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"ACTIVE, hosted-workspace-shell/1",
+            "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2"})
+    void unsupportedShellLifecycleStaysDisabledDespiteCloseProof(String state, String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
+        assertThat(runtime.supportsWorkspaceClose()).isTrue();
+        assertThat(store.workspaceFilesEnabled()).isTrue();
+        assertThat(store.workspaceShellEnabled()).isFalse();
+        request(get(PUBLIC + session), tenant, "owner", null)
+                .andExpect(jsonPath("$.capabilities.session_close").value(true))
+                .andExpect(jsonPath("$.capabilities.session_archive").value(true))
+                .andExpect(jsonPath("$.capabilities.session_unarchive").value(true))
+                .andExpect(jsonPath("$.capabilities.session_delete").value(true));
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        var projection = new com.alibaba.qwen.code.managedagent.service.ManagedAgentService(enabled,
+                new com.alibaba.qwen.code.managedagent.service.RequestDigests(), coordinator, harness, registry);
+        org.springframework.test.util.ReflectionTestUtils.setField(projection, "runtimeWarmer", runtime);
+        assertThat(projection.getPublicSession(tenant, "owner", session).capabilities().sessionClose()).isTrue();
+        assertThat(projection.getWebShellSession(tenant, "owner", session).capabilities().sessionDelete()).isTrue();
+        int operations = jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session);
+        int commands = jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session);
+        jdbc.update("UPDATE ma_session SET tool_profile = ?, approval_mode = 'default', status = ?"
+                + " WHERE tenant_id = ? AND session_id = ?", profile, state, tenant, session);
+        var publicCapabilities = projection.getPublicSession(tenant, "owner", session).capabilities();
+        assertThat(publicCapabilities.foregroundShell()).isTrue();
+        assertThat(publicCapabilities.sessionClose()).isFalse();
+        assertThat(publicCapabilities.sessionArchive()).isFalse();
+        assertThat(publicCapabilities.sessionUnarchive()).isFalse();
+        assertThat(publicCapabilities.sessionDelete()).isFalse();
+        var webCapabilities = projection.getWebShellSession(tenant, "owner", session).capabilities();
+        assertThat(webCapabilities.foregroundShell()).isTrue();
+        assertThat(webCapabilities.sessionClose()).isFalse();
+        assertThat(webCapabilities.sessionArchive()).isFalse();
+        assertThat(webCapabilities.sessionUnarchive()).isFalse();
+        assertThat(webCapabilities.sessionDelete()).isFalse();
+        request(get(PUBLIC + session), tenant, "owner", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.foreground_shell").hasJsonPath())
+                .andExpect(jsonPath("$.capabilities.foreground_shell").value(false))
+                .andExpect(jsonPath("$.capabilities.session_close").value(false))
+                .andExpect(jsonPath("$.capabilities.session_archive").value(false))
+                .andExpect(jsonPath("$.capabilities.session_unarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.session_delete").value(false));
+        request(post(WEB + "/sessions/get").contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(java.util.Map.of("sessionId", session))), tenant, "owner", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.foregroundShell").hasJsonPath())
+                .andExpect(jsonPath("$.capabilities.foregroundShell").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
+        for (String operation : new String[] {"close", "archive", "unarchive", "delete"}) {
+            web(operation, tenant, session, "owner", "shell-" + operation)
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+            var mutation = "delete".equals(operation) ? delete(PUBLIC + session) : post(PUBLIC + session + "/" + operation);
+            request(mutation, tenant, "owner", "shell-public-" + operation)
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(operations);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(commands);
+        assertThat(runtime.calls.get(session)).isEqualTo(1);
+    }
+
+    @Test
+    void internalChildCloseStillAdmitsShellSessionsThatPublicLifecycleRefuses() throws Exception {
+        String tenant = tenant();
+        String session = create(tenant);
+        jdbc.update("UPDATE ma_session SET tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        web("close", tenant, session, "owner", "shell-public-close")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isZero();
+        var admission = store.beginWorkspaceLifecycle(tenant, session, OperationKind.CLOSE, "owner",
+                "owner-digest", "child-close-run", "close-digest", true);
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED', delivery_state = 'CONFIRMED',"
+                + " available_at = available_at + 3600000 WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                tenant, session, admission.operation().operationId());
+        assertThat(admission.replayed()).isFalse();
+        assertThat(admission.operation().kind()).isEqualTo(OperationKind.CLOSE);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2", "hosted-workspace-shell/1", "hosted-workspace-mcp/1"})
+    void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup(String profile) throws Exception {
+        String tenant = tenant();
+        String session = closed(tenant, true);
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, tenant, session);
         request(get(PUBLIC + session), tenant, "owner", null)
                 .andExpect(jsonPath("$.capabilities.session_archive").value(true))
                 .andExpect(jsonPath("$.capabilities.session_unarchive").value(true))
@@ -101,10 +205,13 @@ class WorkspaceSessionRetentionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void deletesClosedOrArchivedWithoutRuntimeAndRetiresTheJournal(boolean archived) throws Exception {
+    @CsvSource({"false, hosted-workspace-files/1", "true, hosted-workspace-files/1",
+            "false, hosted-workspace-shell/1", "true, hosted-workspace-shell/1",
+            "false, hosted-workspace-mcp/1", "true, hosted-workspace-mcp/1"})
+    void deletesClosedOrArchivedWithoutRuntimeAndRetiresTheJournal(boolean archived, String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, tenant, session);
         if (archived) {
             archive(tenant, session, "archive");
         }
@@ -120,9 +227,9 @@ class WorkspaceSessionRetentionTest {
                 .andExpect(jsonPath("$.id").value(id)).andExpect(jsonPath("$.replayed").value(true));
         request(delete(PUBLIC + session), tenant, "owner", "fresh").andExpect(status().isNotFound());
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive").andExpect(status().isNotFound());
-        assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head WHERE tenant_id = ?"
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo("DELETED");
-        assertThat(jdbc.queryForObject("SELECT operation_id FROM qwen_output_session_retirement WHERE tenant_id = ?"
+        assertThat(jdbc.queryForObject("SELECT retirement_operation_id FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
         assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);
         assertThat(runtime.calls.get(session)).isEqualTo(1);
@@ -150,7 +257,7 @@ class WorkspaceSessionRetentionTest {
         assertThat(store.findOperation(tenant, session, id).orElseThrow().state()).isEqualTo("RECOVERY_BLOCKED");
         assertThat(store.findDeliverableOperations(Long.MAX_VALUE, 100)).noneMatch(target -> id.equals(target.operationId()));
         assertThat(store.claimOperation(tenant, session, id, "early-worker", Duration.ofMinutes(1))).isEmpty();
-        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE tenant_id = ? AND operation_id = ?", tenant, id);
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE tenant_id = ? AND operation_id = ?", tenant, id);
         lifecycle.recoverOperations();
         await().untilAsserted(() -> assertThat(store.findOperation(tenant, session, id).orElseThrow().state()).isEqualTo("COMPLETED"));
         var completed = store.findOperation(tenant, session, id).orElseThrow();
@@ -158,14 +265,14 @@ class WorkspaceSessionRetentionTest {
         assertThat(completed.failureCode()).isNull();
         assertThat(completed.admissionStage()).isEqualTo("JAVA_DURABLE");
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETED");
-        assertThat(jdbc.queryForObject("SELECT operation_id FROM qwen_output_session_retirement WHERE tenant_id = ?"
+        assertThat(jdbc.queryForObject("SELECT retirement_operation_id FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
         assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);
         assertThat(runtime.calls.get(session)).isEqualTo(1);
     }
 
     @Test
-    void unarchiveKeysAreScopedBySessionAndCaseAndCannotReplayAfterDeletion() throws Exception {
+    void unarchiveKeysAreScopedBySessionAndCaseAndReplayAfterDeletion() throws Exception {
         String tenant = tenant();
         String first = closed(tenant, false);
         String second = closed(tenant, false);
@@ -176,12 +283,42 @@ class WorkspaceSessionRetentionTest {
         }
         archive(tenant, first, "Archive");
         web("unarchive", tenant, first, "owner", "Same").andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"));
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"))
+                .andExpect(jsonPath("$.capabilities.tasks").value(true));
         String id = json(request(delete(PUBLIC + first), tenant, "owner", "delete")
                 .andExpect(status().isAccepted())).path("id").asText();
         await().untilAsserted(() -> assertThat(store.findOperation(tenant, first, id).orElseThrow().state())
                 .isEqualTo("COMPLETED"));
-        web("unarchive", tenant, first, "owner", "same").andExpect(status().isNotFound());
+        // A migration fence on the Session's storage must not turn the
+        // tombstone's answers into the retryable 409: the fence gates work
+        // the Session could still accept, and a deleted Session accepts
+        // none. The recorded unarchive below keeps answering through it,
+        // while the fresh key meets the same 404 every other read gets.
+        String fence = UUID.randomUUID().toString();
+        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
+                fence, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                JdbcRuntimeBindingRepository.storageFenceKey("storage")) == 0) {
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
+                            + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
+                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+                    JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                    JdbcRuntimeBindingRepository.storageFenceKey("storage"), tenant, fence);
+        }
+        // Replay-first, like every other mutation path: the recorded
+        // success answers its body with the Session as last visible
+        // (closed), never a 404 for the later delete — and the tombstone's
+        // capabilities stop advertising the routes that now 404.
+        web("unarchive", tenant, first, "owner", "same").andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.status").value("closed"))
+                .andExpect(jsonPath("$.capabilities.tasks").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
+        web("unarchive", tenant, first, "owner", "fenced-fresh")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         assertThat(count(tenant, first, "session.unarchived")).isEqualTo(2);
     }
 
@@ -196,7 +333,7 @@ class WorkspaceSessionRetentionTest {
             web(operation, tenant, session, "unknown", "key").andExpect(status().isNotFound());
         }
         JsonNode archive = archive(tenant, session, "archive");
-        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ? AND actor_id = ?",
+        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND actor_id = ?",
                 tenant, "owner".getBytes(StandardCharsets.UTF_8));
         web("archive", tenant, session, "owner", "archive").andExpect(status().isNotFound());
         request(get(PUBLIC + session + "/operations/" + archive.path("id").asText()), tenant, "reader", null)
@@ -217,13 +354,13 @@ class WorkspaceSessionRetentionTest {
             web(operation, tenant, session, "owner", "key").andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("session_state_conflict"));
         }
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         for (String operation : new String[] {"archive", "delete"}) {
             web(operation, tenant, session, "owner", "key").andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
         }
-        jdbc.update("UPDATE managed_agent_session SET status = 'ARCHIVED' WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_session SET status = 'ARCHIVED' WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         web("unarchive", tenant, session, "owner", "key").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
@@ -265,23 +402,23 @@ class WorkspaceSessionRetentionTest {
         String tenant = tenant();
         String session = closed(tenant, false);
         for (String state : new String[] {"CLOSING", "DELETING"}) {
-            jdbc.update("UPDATE managed_agent_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, session);
+            jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, session);
             for (String operation : new String[] {"archive", "unarchive", "delete"}) {
                 web(operation, tenant, session, "owner", "fresh").andExpect(status().isConflict())
                         .andExpect(jsonPath("$.error.code").value("session_state_conflict"));
             }
         }
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
-        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json, phase, tenant_id, session_id, operation_id, operation_kind,"
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
                 + " session_status_before, available_at, created_at, updated_at)"
-                + " VALUES (?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
-                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
+                + " VALUES (?, ?, 'SESSION', ?, ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
+                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
         web("archive", tenant, session, "owner", "fresh").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_operation_active"));
         web("delete", tenant, session, "owner", "fresh").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_operation_active"));
-        jdbc.update("UPDATE managed_agent_session SET status = 'ARCHIVED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("UPDATE ma_session SET status = 'ARCHIVED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
         web("unarchive", tenant, session, "owner", "fresh").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_operation_active"));
     }
@@ -311,8 +448,8 @@ class WorkspaceSessionRetentionTest {
     }
 
     private String create(String tenant) throws Exception {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_registry WHERE tenant_id = ?", Integer.class, tenant) == 0) {
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?", Integer.class, tenant) == 0) {
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES (?, 'ws', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             grant(tenant, "owner");
@@ -333,18 +470,20 @@ class WorkspaceSessionRetentionTest {
 
     private ResultActions request(MockHttpServletRequestBuilder request, String tenant, String actor, String key) throws Exception {
         request.header(TenantContextFilter.HEADER, tenant).principal(actor(tenant, actor));
-        if (key != null) { request.header("Idempotency-Key", key); }
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
         return mvc.perform(request);
     }
 
     private JsonNode json(ResultActions result) throws Exception { return mapper.readTree(result.andReturn().getResponse().getContentAsString()); }
     private String tenant() { return "retention-" + UUID.randomUUID(); }
     private int count(String tenant, String session, String type) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event WHERE tenant_id = ? AND session_id = ? AND event_type = ?",
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND event_type = ?",
                 Integer.class, tenant, session, type);
     }
     private void grant(String tenant, String actor) {
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'ws', ?, 'OPERATOR')",
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'ws', ?, 'OPERATOR')",
                 tenant, actor.getBytes(StandardCharsets.UTF_8));
     }
     private AuthenticatedTenantActor actor(String tenant, String id) {
@@ -384,9 +523,14 @@ class WorkspaceSessionRetentionTest {
         public CompletionStage<Void> warm(String id) { throw new AssertionError("Unexpected warm"); }
         public CompletionStage<Void> drain(String id) { throw new AssertionError("Unexpected drain"); }
         public void requestWorkspaceClose(String tenant, String id) { throw new AssertionError("Unexpected legacy close"); }
-        public CompletionStage<Void> closeWorkspace(String tenant, String id) { record(id); return CompletableFuture.completedFuture(null); }
+        public CompletionStage<Void> closeWorkspace(String tenant, String id) {
+            record(id);
+            return CompletableFuture.completedFuture(null);
+        }
         private void record(String id) {
-            if (calls.merge(id, 1, Integer::sum) > 1) { throw new AssertionError("Cleanup repeated after close"); }
+            if (calls.merge(id, 1, Integer::sum) > 1) {
+                throw new AssertionError("Cleanup repeated after close");
+            }
         }
     }
 }

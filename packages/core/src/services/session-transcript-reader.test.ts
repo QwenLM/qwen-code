@@ -1153,13 +1153,27 @@ describe('SessionTranscriptReader', () => {
           startedAt: 10,
         },
       }),
-      sys('attribution', 'request-start', 'attribution_snapshot', {
+      sys('tool-start', 'request-start', 'ui_telemetry', {
+        uiEvent: {
+          'event.name': 'tool_lifecycle',
+          v: 1,
+          kind: 'tool',
+          phase: 'started',
+          executionId: 'tool-execution',
+          sessionId,
+          callId: 'call',
+          toolName: 'shell',
+          startedAt: 12,
+          executionStatus: 'running',
+        },
+      }),
+      sys('attribution', 'tool-start', 'attribution_snapshot', {
         snapshot: attributionSnapshot,
       }),
       sys('files', 'attribution', 'file_history_snapshot', {
         snapshots: [
           {
-            promptId: `${sessionId}########3`,
+            promptId: `${sessionId}########12`,
             timestamp: T0,
             trackedFileBackups: {},
           },
@@ -1208,6 +1222,7 @@ describe('SessionTranscriptReader', () => {
       loaded!.conversation.messages,
       sessionId,
     );
+    expect(turnState.initialTurn).toBe(12);
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );

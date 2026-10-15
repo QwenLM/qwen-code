@@ -48,6 +48,29 @@ describe('QwenSessionUpdateHandler', () => {
     },
   );
 
+  it.each(['started', 'ended', 'unknown'])(
+    'ignores metadata-only tool lifecycle %s without callbacks',
+    (phase) => {
+      handler.handleSessionUpdate({
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call',
+          _meta: {
+            toolLifecycle: {
+              v: phase === 'unknown' ? 99 : 1,
+              phase,
+              kind: 'tool',
+            },
+          },
+        },
+      } as unknown as SessionNotification);
+      for (const callback of Object.values(mockCallbacks)) {
+        expect(callback).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('preserves normal text and duration-only usage metadata', () => {
     handler.handleSessionUpdate({
       sessionId: 'test-session',

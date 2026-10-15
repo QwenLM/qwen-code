@@ -41,6 +41,11 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void rename(String tenantId, String sessionId, String title, long revision) {
+        rename(tenantId, sessionId, title);
+    }
+
+    @Override
     public void rename(String tenantId, String sessionId, String title) {
         throw unavailable();
     }
@@ -50,7 +55,7 @@ public class UnavailableHarnessConnector implements HarnessConnector {
         throw unavailable();
     }
 
-    private static IllegalStateException unavailable() {
-        return new IllegalStateException("Hosted Harness is disabled");
+    private static HarnessDisabledException unavailable() {
+        return new HarnessDisabledException("Hosted Harness is disabled");
     }
 }

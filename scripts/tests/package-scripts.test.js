@@ -1048,6 +1048,31 @@ describe('package scripts', () => {
     expect(readPackageJson().workspaces).toContain('packages/*');
   });
 
+  it('detects an unapplied ink patch by a file the patch creates', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+    const sentinel = buildScript.match(
+      /'node_modules\/ink\/build\/([^']+)'/,
+    )?.[1];
+    expect(sentinel).toBeDefined();
+    expect(buildScript).toContain('npm run postinstall');
+
+    const inkPatch = readdirSync(path.join(root, 'patches')).find((name) =>
+      name.startsWith('ink+'),
+    );
+    expect(inkPatch).toBeDefined();
+    const created = readFileSync(path.join(root, 'patches', inkPatch), 'utf8')
+      .split(/^diff --git /m)
+      .find((file) =>
+        file.startsWith(`a/node_modules/ink/build/${sentinel} b/node_modules/`),
+      );
+    // The sentinel only proves the patch is missing if no published ink ships
+    // it, i.e. the patch must create the file rather than edit an existing one.
+    expect(created).toContain('new file mode');
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
