@@ -6376,15 +6376,20 @@ export class DaemonClient {
         const result = matchTurnEvent(event, promptId);
         if (result !== undefined) return result;
       }
+      signal?.throwIfAborted();
       throw new Error('SSE stream ended');
     } catch (err) {
       if (
         signal?.aborted &&
-        err instanceof DOMException &&
-        err.name === 'AbortError'
+        (err === signal.reason ||
+          (err instanceof DOMException && err.name === 'AbortError'))
       ) {
-        this.cancel(sessionId, clientId).catch(() => {});
-        throw err;
+        this.cancel(sessionId, clientId, {
+          cancelReason: 'interrupted',
+        }).catch(() => {});
+        throw err instanceof Error
+          ? err
+          : new DOMException('The operation was aborted.', 'AbortError');
       }
       throw err;
     } finally {
@@ -6420,13 +6425,21 @@ export class DaemonClient {
     );
   }
 
-  async cancel(sessionId: string, clientId?: string): Promise<void> {
+  async cancel(
+    sessionId: string,
+    clientId?: string,
+    options?: { cancelReason?: 'user' | 'interrupted' },
+  ): Promise<void> {
     await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/cancel`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: '{}',
+        body: JSON.stringify(
+          options?.cancelReason
+            ? { _meta: { 'qwen.cancelReason': options.cancelReason } }
+            : {},
+        ),
       },
       async (res) => {
         if (!res.ok && res.status !== 204) {

@@ -114,7 +114,7 @@ class ManagedAgentDefinitionAdmissionTest {
         assertThat(pinned.toolProfile()).isEqualTo("hosted-workspace-files/1");
         assertThat(pinned.agentDefinitionDigest())
                 .isEqualTo(definition.get("digest").asText());
-        assertThat(jdbc.queryForObject("SELECT approval_mode FROM managed_agent_session"
+        assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, custom)).isEqualTo(definitionApproval);
     }
@@ -175,11 +175,11 @@ class ManagedAgentDefinitionAdmissionTest {
                 input, "payload-digest")))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_create_command WHERE tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
     }
 
@@ -199,16 +199,16 @@ class ManagedAgentDefinitionAdmissionTest {
         String sessionId = mapper.readTree(response.getResponse()
                 .getContentAsString()).get("id").asText();
         assertThat(jdbc.queryForObject(
-                "SELECT tool_profile FROM managed_agent_session"
+                "SELECT tool_profile FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, sessionId))
                 .isEqualTo("hosted-workspace-files/1");
         assertThat(jdbc.queryForObject(
-                "SELECT approval_mode FROM managed_agent_session"
+                "SELECT approval_mode FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, sessionId)).isEqualTo("default");
         assertThat(jdbc.queryForObject(
-                "SELECT agent_definition_digest FROM managed_agent_session"
+                "SELECT agent_definition_digest FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, sessionId)).isEqualTo(digest);
         // A second revision supersedes nothing already pinned. The update
@@ -447,11 +447,11 @@ class ManagedAgentDefinitionAdmissionTest {
         assertThat(resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
                 "Review in Chinese.")).isEqualTo(first);
         assertThat(first.resourceId()).isEqualTo("agent-instructions-" + first.digest());
-        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 byte[].class, tenant, session.sessionId(), first.resourceId()))
                 .isEqualTo("Review in Chinese.".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("UPDATE managed_agent_session SET agent_definition_digest = ?"
+        jdbc.update("UPDATE ma_session SET agent_definition_digest = ?"
                         + " WHERE tenant_id = ? AND session_id = ?", "0".repeat(64), tenant, session.sessionId());
         assertThatThrownBy(() -> definitions.pinnedContent(store.requireSession(tenant, session.sessionId())))
                 .isInstanceOf(ApiException.class);
@@ -496,7 +496,7 @@ class ManagedAgentDefinitionAdmissionTest {
 
     private String register(String tenant, String id, String storageId,
             String configRef, String policyRef) {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')",
@@ -506,7 +506,7 @@ class ManagedAgentDefinitionAdmissionTest {
 
     private void grant(String tenant, String workspaceId, String actorId,
             boolean canCreate) {
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, ?)",
                 tenant, workspaceId,

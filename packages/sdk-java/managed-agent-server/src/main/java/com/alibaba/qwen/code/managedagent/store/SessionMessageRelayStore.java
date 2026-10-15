@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -29,7 +30,12 @@ public class SessionMessageRelayStore {
     public record MessageRow(String tenantId, String senderSessionId,
             String messageId, String targetSessionId, String state,
             String claimedBy, long claimedUntil, int attempts,
-            long nextRetryAt, String lastError) {
+            long nextRetryAt, String lastError, long claimGeneration) {
+        public MessageRow(String tenantId, String senderSessionId, String messageId, String targetSessionId,
+                String state, String claimedBy, long claimedUntil, int attempts, long nextRetryAt, String lastError) {
+            this(tenantId, senderSessionId, messageId, targetSessionId, state, claimedBy, claimedUntil,
+                    attempts, nextRetryAt, lastError, 0);
+        }
     }
 
     /** A child Session's recorded lineage edge. */
@@ -51,20 +57,21 @@ public class SessionMessageRelayStore {
     // entry. The query's domain binds one channel: session_message, or
     // H4e-b3's session_command, which discovery drives independently.
     private static final String HANDOVER_SQL =
-            "SELECT r.tenant_id, r.session_id, r.record_id, r.domain,"
-                    + " r.delivery_state, r.record_resource_id"
-                    + " FROM qwen_managed_session_extension_record r"
-                    + " LEFT JOIN qwen_managed_session_message_relay l"
-                    + " ON l.sender_session_id = r.session_id"
-                    + " AND l.message_id = r.record_id"
+            "SELECT r.tenant_id, r.session_id, r.record_id, r.domain, r.delivery_state,"
+                    + " r.record_resource_id"
+                    + " FROM ma_session_record r"
+                    + " LEFT JOIN ma_delivery l"
+                    + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key"
+                    + " AND l.tenant_id = r.tenant_id AND l.source_session_id = r.session_id"
+                    + " AND l.delivery_id = r.record_id"
                     + " WHERE r.domain = ?"
                     + " AND r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown')"
-                    + " AND (l.state IS NULL OR l.state NOT IN ('done',"
+                    + " AND (l.transport_state IS NULL OR l.transport_state NOT IN ('done',"
                     + " 'orphaned', 'unknown'))"
-                    + " AND (l.next_retry_at IS NULL OR l.next_retry_at <= ?)"
-                    + " AND (l.claimed_until IS NULL OR l.claimed_until <= ?"
-                    + " OR l.claimed_by = ?)"
+                    + " AND (l.available_at IS NULL OR l.available_at <= ?)"
+                    + " AND (l.claim_until IS NULL OR l.claim_until <= ?"
+                    + " OR l.claim_owner = ?)"
                     + " ORDER BY r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
 
@@ -75,21 +82,21 @@ public class SessionMessageRelayStore {
     // still `relaying` over an accepted entry lost its advance after the
     // sender's step committed; it waits like a `delivered` one.
     private static final String AWAITING_SQL =
-            "SELECT r.tenant_id, r.session_id, r.record_id, r.domain,"
-                    + " r.delivery_state, r.record_resource_id"
-                    + " FROM qwen_managed_session_message_relay l"
-                    + " JOIN qwen_managed_session_extension_record r"
-                    + " ON r.tenant_id = l.tenant_id"
-                    + " AND r.session_id = l.sender_session_id"
+            "SELECT r.tenant_id, r.session_id, r.record_id, r.domain, r.delivery_state,"
+                    + " r.record_resource_id"
+                    + " FROM ma_delivery l"
+                    + " JOIN ma_session_record r"
+                    + " ON r.session_scope_key = l.source_scope_key AND r.tenant_id = l.tenant_id"
+                    + " AND r.session_id = l.source_session_id"
                     + " AND r.domain = 'session_message'"
-                    + " AND r.record_id = l.message_id"
-                    + " WHERE l.state IN ('relaying', 'delivered')"
-                    + " AND l.next_retry_at <= ?"
-                    + " AND (l.claimed_until IS NULL OR l.claimed_until <= ?"
-                    + " OR l.claimed_by = ?)"
+                    + " AND r.record_id = l.delivery_id"
+                    + " WHERE l.delivery_kind = 'SESSION_MESSAGE' AND l.transport_state IN ('relaying', 'delivered')"
+                    + " AND l.available_at <= ?"
+                    + " AND (l.claim_until IS NULL OR l.claim_until <= ?"
+                    + " OR l.claim_owner = ?)"
                     + " AND r.delivery_state = 'accepted'"
-                    + " ORDER BY l.next_retry_at, l.sender_session_id,"
-                    + " l.message_id LIMIT ?";
+                    + " ORDER BY l.available_at, l.source_session_id,"
+                    + " l.delivery_id LIMIT ?";
 
     private final JdbcTemplate jdbc;
 
@@ -128,13 +135,13 @@ public class SessionMessageRelayStore {
             String domain, String messageId) {
         List<CurrentRecord> rows = jdbc.query(
                 "SELECT delivery_state, record_resource_id FROM"
-                        + " qwen_managed_session_extension_record"
-                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " ma_session_record"
+                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = ? AND record_id = ?",
                 (result, row) -> new CurrentRecord(
                         result.getString("delivery_state"),
                         result.getString("record_resource_id")),
-                tenantId, sessionId, domain, messageId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -142,18 +149,18 @@ public class SessionMessageRelayStore {
     public String deliveryState(String tenantId, String sessionId,
             String domain, String messageId) {
         List<String> rows = jdbc.query(
-                "SELECT delivery_state FROM qwen_managed_session_extension_record"
-                        + " WHERE tenant_id = ? AND session_id = ?"
+                "SELECT delivery_state FROM ma_session_record"
+                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = ? AND record_id = ?",
                 (result, row) -> result.getString("delivery_state"),
-                tenantId, sessionId, domain, messageId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     /** The lineage a child Session was created with, or null for a root. */
     public Lineage lineage(String tenantId, String sessionId) {
         List<Lineage> rows = jdbc.query("SELECT parent_session_id,"
-                        + " parent_child_run_id FROM managed_agent_session"
+                        + " parent_child_run_id FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND parent_session_id IS NOT NULL",
                 (result, row) -> new Lineage(
@@ -161,6 +168,10 @@ public class SessionMessageRelayStore {
                         result.getString("parent_child_run_id")),
                 tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    private static String deliveryKey(String tenant, String sender, String message) {
+        return ManagedSchemaKeys.key("delivery", "SESSION_MESSAGE", ManagedSessionStore.sessionScopeKey(tenant, sender), message);
     }
 
     /** Whether an older command of the same sender is still unclassified:
@@ -174,24 +185,24 @@ public class SessionMessageRelayStore {
     public boolean olderOpenCommand(String tenantId, String senderSessionId,
             String commandId) {
         return !jdbc.query("SELECT 1 FROM"
-                        + " qwen_managed_session_extension_record r"
-                        + " JOIN qwen_managed_session_extension_record c"
-                        + " ON c.tenant_id = r.tenant_id"
+                        + " ma_session_record r"
+                        + " JOIN ma_session_record c"
+                        + " ON c.session_scope_key = r.session_scope_key AND c.tenant_id = r.tenant_id"
                         + " AND c.session_id = r.session_id"
                         + " AND c.domain = r.domain"
                         + " AND c.record_id = ?"
-                        + " LEFT JOIN qwen_managed_session_message_relay l"
-                        + " ON l.tenant_id = r.tenant_id"
-                        + " AND l.sender_session_id = r.session_id"
-                        + " AND l.message_id = r.record_id"
-                        + " WHERE r.tenant_id = ? AND r.session_id = ?"
+                        + " LEFT JOIN ma_delivery l"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key AND l.tenant_id = r.tenant_id"
+                        + " AND l.source_session_id = r.session_id"
+                        + " AND l.delivery_id = r.record_id"
+                        + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'session_command'"
                         + " AND r.first_sequence < c.first_sequence"
                         + " AND r.delivery_state IN ('planned', 'accepting')"
-                        + " AND (l.state IS NULL"
-                        + " OR l.state NOT IN ('done', 'unknown', 'orphaned'))"
+                        + " AND (l.transport_state IS NULL"
+                        + " OR l.transport_state NOT IN ('done', 'unknown', 'orphaned'))"
                         + " LIMIT 1",
-                (result, row) -> result.getInt(1), commandId, tenantId,
+                (result, row) -> result.getInt(1), commandId, ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId,
                 senderSessionId).isEmpty();
     }
 
@@ -199,114 +210,74 @@ public class SessionMessageRelayStore {
      * another live claim holds it. */
     public MessageRow claim(String tenantId, String senderSessionId,
             String messageId, String owner, long leaseUntil, long now) {
-        MessageRow existing = find(tenantId, senderSessionId, messageId);
-        if (existing == null) {
-            jdbc.update("INSERT IGNORE INTO qwen_managed_session_message_relay"
-                            + " (tenant_id, sender_session_id, message_id,"
-                            + " target_session_id, state, claimed_by,"
-                            + " claimed_until, attempts, next_retry_at,"
-                            + " created_at, updated_at)"
-                            + " VALUES (?, ?, ?, NULL, 'relaying', ?, ?, 0,"
-                            + " ?, ?, ?)",
-                    tenantId, senderSessionId, messageId, owner, leaseUntil,
-                    now, now, now);
-            existing = find(tenantId, senderSessionId, messageId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId);
+        String key = deliveryKey(tenantId, senderSessionId, messageId);
+        jdbc.update("INSERT IGNORE INTO ma_delivery (delivery_key, delivery_kind, tenant_id, source_scope_key,"
+                        + " source_session_id, delivery_id, payload_json, transport_state, reception_state,"
+                        + " consumption_state, claim_owner, claim_until, available_at, created_at, updated_at)"
+                        + " VALUES (?, 'SESSION_MESSAGE', ?, ?, ?, ?, '{\"version\":1}', 'relaying', 'pending',"
+                        + " 'pending', ?, ?, ?, ?, ?)",
+                key, tenantId, scope, senderSessionId, messageId, owner, leaseUntil, now, now, now);
+        int claimed = jdbc.update("UPDATE ma_delivery SET claim_owner = ?, claim_until = ?,"
+                        + " claim_generation = claim_generation + 1, updated_at = ? WHERE delivery_key = ?"
+                        + " AND delivery_kind = 'SESSION_MESSAGE' AND (claim_owner = ? OR claim_until < ?)",
+                owner, leaseUntil, now, key, owner, now);
+        return claimed == 1 ? find(tenantId, senderSessionId, messageId) : null;
+    }
+
+    public MessageRow find(String tenantId, String senderSessionId, String messageId) {
+        return jdbc.query("SELECT * FROM ma_delivery WHERE delivery_key = ?"
+                        + " AND delivery_kind = 'SESSION_MESSAGE' AND tenant_id = ? AND source_session_id = ?"
+                        + " AND delivery_id = ?",
+                (result, index) -> new MessageRow(result.getString("tenant_id"), result.getString("source_session_id"),
+                        result.getString("delivery_id"), result.getString("target_session_id"),
+                        result.getString("transport_state"), result.getString("claim_owner"),
+                        result.getLong("claim_until"), result.getInt("attempt_count"), result.getLong("available_at"),
+                        result.getString("last_error"), result.getLong("claim_generation")),
+                deliveryKey(tenantId, senderSessionId, messageId), tenantId, senderSessionId, messageId)
+                .stream().findFirst().orElse(null);
+    }
+
+    public void advance(MessageRow row, String owner, String state, String targetSessionId,
+            long nextRetryAt, long leaseUntil, long now) {
+        if (!List.of("relaying", "delivered").contains(state)) {
+            throw new IllegalArgumentException("Unknown message delivery state " + state);
         }
-        if (existing == null) {
-            return null;
+        jdbc.update("UPDATE ma_delivery SET transport_state = ?, target_session_id = ?, attempt_count = ?,"
+                        + " reception_state = CASE WHEN ? = 'delivered' THEN 'accepted' ELSE reception_state END,"
+                        + " available_at = ?, claim_until = ?, updated_at = ? WHERE delivery_key = ?"
+                        + " AND delivery_kind = 'SESSION_MESSAGE' AND claim_owner = ? AND claim_generation = ?"
+                        + " AND claim_until > ?",
+                state, targetSessionId, Math.max(row.attempts(), 0), state, nextRetryAt, leaseUntil, now,
+                deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()), owner, row.claimGeneration(), now);
+    }
+
+    public void scheduleRetry(MessageRow row, String owner, long nextRetryAt, long leaseUntil, long now) {
+        jdbc.update("UPDATE ma_delivery SET available_at = ?, claim_until = ?, updated_at = ?"
+                        + " WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE' AND claim_owner = ?"
+                        + " AND claim_generation = ? AND claim_until > ?",
+                nextRetryAt, leaseUntil, now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
+                owner, row.claimGeneration(), now);
+    }
+
+    public void defer(MessageRow row, String owner, long nextRetryAt, String lastError, long leaseUntil, long now) {
+        jdbc.update("UPDATE ma_delivery SET attempt_count = ?, available_at = ?, last_error = ?,"
+                        + " claim_until = ?, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
+                        + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+                row.attempts() + 1, nextRetryAt, truncate(lastError), leaseUntil, now,
+                deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()), owner, row.claimGeneration(), now);
+    }
+
+    public void classify(MessageRow row, String owner, String state, String lastError, long now) {
+        if (!List.of("done", "orphaned", "unknown").contains(state)) {
+            throw new IllegalArgumentException("Unknown message delivery classification " + state);
         }
-        if (owner.equals(existing.claimedBy())
-                || existing.claimedUntil() < now) {
-            // The guard binds the claimant, never the owner the read saw:
-            // two workers that both read an expired lease must not both
-            // win it, so the second meets the first one's fresh lease.
-            int claimed = jdbc.update(
-                    "UPDATE qwen_managed_session_message_relay SET"
-                            + " claimed_by = ?, claimed_until = ?,"
-                            + " updated_at = ? WHERE tenant_id = ?"
-                            + " AND sender_session_id = ? AND message_id = ?"
-                            + " AND (claimed_by = ? OR claimed_until < ?)",
-                    owner, leaseUntil, now, tenantId, senderSessionId,
-                    messageId, owner, now);
-            if (claimed == 1) {
-                return find(tenantId, senderSessionId, messageId);
-            }
-        }
-        return null;
-    }
-
-    public MessageRow find(String tenantId, String senderSessionId,
-            String messageId) {
-        List<MessageRow> rows = jdbc.query(
-                "SELECT * FROM qwen_managed_session_message_relay"
-                        + " WHERE tenant_id = ? AND sender_session_id = ?"
-                        + " AND message_id = ?",
-                (result, row) -> new MessageRow(result.getString("tenant_id"),
-                        result.getString("sender_session_id"),
-                        result.getString("message_id"),
-                        result.getString("target_session_id"),
-                        result.getString("state"),
-                        result.getString("claimed_by"),
-                        result.getLong("claimed_until"),
-                        result.getInt("attempts"),
-                        result.getLong("next_retry_at"),
-                        result.getString("last_error")),
-                tenantId, senderSessionId, messageId);
-        return rows.isEmpty() ? null : rows.getFirst();
-    }
-
-    /** One held claim advances its state and target. */
-    public void advance(MessageRow row, String owner, String state,
-            String targetSessionId, long nextRetryAt, long leaseUntil,
-            long now) {
-        // A forward step neither adds nor erases a failure: the attempt
-        // bound measures failures (ChildResultRelayStore.advance).
-        jdbc.update("UPDATE qwen_managed_session_message_relay SET state = ?,"
-                        + " target_session_id = ?, attempts = ?,"
-                        + " next_retry_at = ?, claimed_until = ?,"
-                        + " updated_at = ?"
-                        + " WHERE tenant_id = ? AND sender_session_id = ?"
-                        + " AND message_id = ? AND claimed_by = ?",
-                state, targetSessionId, Math.max(row.attempts(), 0),
-                nextRetryAt, leaseUntil, now,
-                row.tenantId(), row.senderSessionId(), row.messageId(), owner);
-    }
-
-    /** A wait, not a failure: no attempt, just the next look. */
-    public void scheduleRetry(MessageRow row, String owner, long nextRetryAt,
-            long leaseUntil, long now) {
-        jdbc.update("UPDATE qwen_managed_session_message_relay SET"
-                        + " next_retry_at = ?, claimed_until = ?,"
-                        + " updated_at = ? WHERE tenant_id = ?"
-                        + " AND sender_session_id = ? AND message_id = ?"
-                        + " AND claimed_by = ?",
-                nextRetryAt, leaseUntil, now, row.tenantId(),
-                row.senderSessionId(), row.messageId(), owner);
-    }
-
-    /** A failed step counts an attempt and reschedules with backoff. */
-    public void defer(MessageRow row, String owner, long nextRetryAt,
-            String lastError, long leaseUntil, long now) {
-        jdbc.update("UPDATE qwen_managed_session_message_relay SET"
-                        + " attempts = ?, next_retry_at = ?, last_error = ?,"
-                        + " claimed_until = ?, updated_at = ?"
-                        + " WHERE tenant_id = ? AND sender_session_id = ?"
-                        + " AND message_id = ? AND claimed_by = ?",
-                row.attempts() + 1, nextRetryAt, truncate(lastError),
-                leaseUntil, now, row.tenantId(), row.senderSessionId(),
-                row.messageId(), owner);
-    }
-
-    /** A classification is terminal, and only the claimant may write it. */
-    public void classify(MessageRow row, String owner, String state,
-            String lastError, long now) {
-        jdbc.update("UPDATE qwen_managed_session_message_relay SET state = ?,"
-                        + " claimed_by = NULL, claimed_until = NULL,"
-                        + " last_error = ?, updated_at = ?"
-                        + " WHERE tenant_id = ? AND sender_session_id = ?"
-                        + " AND message_id = ? AND claimed_by = ?",
-                state, truncate(lastError), now, row.tenantId(),
-                row.senderSessionId(), row.messageId(), owner);
+        jdbc.update("UPDATE ma_delivery SET transport_state = ?, claim_owner = NULL, claim_until = NULL,"
+                        + " consumption_state = CASE WHEN ? = 'done' THEN 'consumed' ELSE consumption_state END,"
+                        + " last_error = ?, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
+                        + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+                state, state, truncate(lastError), now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
+                owner, row.claimGeneration(), now);
     }
 
     private static String truncate(String text) {

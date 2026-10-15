@@ -90,14 +90,18 @@ final class HostedCancellationProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(String session) {
-        var rows = jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String storageKey = sha256((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8));
-        return jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
+        String storage = "storage-" + sessions.indexOf(session);
+        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
+                + " AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
     }
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
@@ -150,7 +154,7 @@ final class HostedCancellationProbe implements AutoCloseable {
                 .getBytes(StandardCharsets.UTF_8)));
         if (released) assertThat(owner.get("holder_key")).isNull();
         else assertThat(owner).as("original owner until confirmed cancellation").isEqualTo(original);
-        assertThat(jdbc.queryForObject("SELECT session_state FROM qwen_runtime_session WHERE harness_session_id = ?"
+        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, id, execution.get("runtime_session_id")))
                 .isEqualTo(released ? "RELEASED" : "READY");
         return Map.of("state", execution.get("execution_state"), "executions", count(executions, id),
@@ -171,7 +175,7 @@ final class HostedCancellationProbe implements AutoCloseable {
     private void assertJournal(Map<String, Object> session, boolean result, boolean terminal, String phase,
             boolean cleanupConfirmed) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_tx"
+        var rows = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
                 + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
         var events = new ArrayList<JsonNode>();
         var transactions = new HashSet<String>();
@@ -214,7 +218,7 @@ final class HostedCancellationProbe implements AutoCloseable {
         }
         assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                 && event.path("payload").path("role").asText().equals("tool_result"))).hasSize(result ? 1 : 0);
-        var outcomes = jdbc.queryForList("SELECT inline_bytes FROM qwen_managed_session_resource WHERE tenant_id = ?"
+        var outcomes = jdbc.queryForList("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ?"
                 + " AND session_id = ? AND kind = 'managed-tool-outcome'", byte[].class, tenant, id);
         assertThat(outcomes).hasSize(result ? 1 : 0);
         if (result) {
@@ -222,10 +226,10 @@ final class HostedCancellationProbe implements AutoCloseable {
             assertThat(outcome.path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
             assertThat(outcome.path("functionResponse").path("response").path("executionStatus").asText()).isEqualTo("cancelled");
         }
-        var head = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
-        byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+        byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class, tenant, id,
                 head.get("latest_checkpoint_resource_id"));
         assertThat(JSON.readTree(bytes).path("continuation").path("phase").asText()).isEqualTo(phase);

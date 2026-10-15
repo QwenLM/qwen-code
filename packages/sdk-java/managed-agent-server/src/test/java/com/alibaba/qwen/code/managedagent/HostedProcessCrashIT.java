@@ -6,9 +6,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -49,7 +55,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new JdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         var database = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
         try (var connection = source.getConnection()) {
@@ -58,12 +64,265 @@ class HostedProcessCrashIT {
         }
         System.out.println("FG6C_DATABASE " + JSON.writeValueAsString(database));
         String selected = System.getProperty("qwen.fg6c.case");
+        if ("coordinator-only".equals(selected)) {
+            return;
+        }
         if (selected != null) {
             assertThat(CASES).contains(selected);
         }
         for (String fault : selected == null ? CASES : List.of(selected)) {
             try (Fixture fixture = new Fixture(jdbc, fault)) {
                 fixture.run();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(180)
+    void coordinatorRestartReattachesTheResidentTurnOnMySql() throws Exception {
+        String selected = System.getProperty("qwen.fg6c.case");
+        if (selected != null && !"coordinator-only".equals(selected)) {
+            return;
+        }
+        assertThat(required("mysql.url")).startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("os.name").toLowerCase()).doesNotContain("windows");
+        var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
+                System.getProperty("mysql.password", ""));
+        Properties timeouts = new Properties();
+        timeouts.setProperty("connectTimeout", "5000");
+        timeouts.setProperty("socketTimeout", "10000");
+        source.setConnectionProperties(timeouts);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        jdbc.setQueryTimeout(10);
+        try (var fixture = new CoordinatorRestartFixture(jdbc)) {
+            fixture.run();
+        }
+    }
+
+    private final class CoordinatorRestartFixture implements AutoCloseable {
+        private final JdbcTemplate jdbc;
+        private final Path root;
+        private final Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath().normalize();
+        private final String node = required("node.executable");
+        private final String tenant = "hosted-coordinator-" + UUID.randomUUID();
+        private final int port;
+        private final Set<ProcessHandle> processes = new LinkedHashSet<>();
+        private final HttpClient http = HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(5)).build();
+        private Process spring;
+        private Process driver;
+        private ObjectNode driverReady;
+        private int boots;
+
+        private CoordinatorRestartFixture(JdbcTemplate jdbc) throws Exception {
+            this.jdbc = jdbc;
+            root = Files.createDirectory(temporary.resolve("coordinator-only")).toRealPath();
+            assertThat(cli).isRegularFile();
+            try (var socket = new ServerSocket(0)) {
+                socket.setReuseAddress(true);
+                port = socket.getLocalPort();
+            }
+        }
+
+        private void run() throws Exception {
+            startDriver();
+            startSpring();
+            JsonNode created = api("POST", "/v1/agents/sessions", "create", """
+                    {"agent_id":"qwen-code","input":[]}
+                    """, 202);
+            String session = created.path("id").asText();
+            JsonNode admitted = api("POST", "/v1/agents/sessions/" + session + "/events", "primary", """
+                    {"type":"agent.session.input.message",
+                     "input":[{"type":"input_text","text":"COORDINATOR_ONLY"}]}
+                    """, 202);
+            String turn = admitted.path("turn_id").asText();
+            await(() -> {
+                JsonNode state = driverState();
+                return state.path("firstChunk").asBoolean()
+                        && state.path("primaryRequests").asInt() == 1;
+            }, 30, "first model chunk");
+            await(() -> jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
+                            + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?"
+                            + " AND event_type = 'item.output_text.delta'", Integer.class,
+                    tenant, session, turn) == 1, 30, "first persisted delta");
+            int loadResponsesBeforeRestart = driverState().path("loadResponses").asInt();
+            String originalOwner = jdbc.queryForObject("SELECT dispatch_owner FROM ma_turn"
+                    + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?", String.class,
+                    tenant, session, turn);
+
+            long killedPid = spring.pid();
+            spring.destroyForcibly();
+            assertThat(spring.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(spring.exitValue()).isEqualTo(137);
+            JsonNode during = driverState();
+            assertThat(during.path("harnessAlive").asBoolean()).isTrue();
+            assertThat(during.path("primaryRequests").asInt()).isEqualTo(1);
+            assertThat(during.path("released").asBoolean()).isFalse();
+
+            startSpring();
+            await(() -> {
+                String owner = jdbc.queryForObject("SELECT dispatch_owner FROM ma_turn"
+                                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                        String.class, tenant, session, turn);
+                return owner != null && !owner.equals(originalOwner);
+            }, 30, "replacement coordinator claim");
+            await(() -> driverState().path("loadResponses").asInt() > loadResponsesBeforeRestart,
+                    30, "replacement coordinator Harness load");
+            control("POST", "/release");
+            await(() -> "COMPLETED".equals(jdbc.queryForObject("SELECT status FROM ma_turn"
+                            + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                    String.class, tenant, session, turn)), 45, "recovered Turn completion");
+            assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
+                    null, null, 200).path("status").asText()).isEqualTo("completed");
+            await(() -> api("GET", "/v1/agents/sessions/" + session + "/items?limit=100",
+                    null, null, 200).toString().contains("RESTART_OK"), 15,
+                    "materialized recovered output");
+
+            JsonNode state = driverState();
+            assertThat(state.path("primaryRequests").asInt()).isEqualTo(1);
+            assertThat(state.path("harnessAlive").asBoolean()).isTrue();
+            List<String> deltas = jdbc.queryForList("SELECT data_json FROM ma_public_event"
+                            + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?"
+                            + " AND event_type = 'item.output_text.delta' ORDER BY sequence_id",
+                    String.class, tenant, session, turn);
+            String output = deltas.stream().map(value -> {
+                try {
+                    return JSON.readTree(value).path("text").asText();
+                } catch (Exception error) {
+                    throw new IllegalStateException(error);
+                }
+            }).reduce("", String::concat);
+            assertThat(output).isEqualTo("RESTART_OK");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
+                            + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?"
+                            + " AND event_type IN ('turn.completed','turn.failed','turn.cancelled')",
+                    Integer.class, tenant, session, turn)).isEqualTo(1);
+            assertThat(api("GET", "/v1/agents/sessions/" + session + "/events", null,
+                    null, 200).path("data").toString()).contains("RESTART_").contains("OK")
+                    .contains("turn.completed");
+
+            JsonNode followup = api("POST", "/v1/agents/sessions/" + session + "/events", "follow-up", """
+                    {"type":"agent.session.input.message",
+                     "input":[{"type":"input_text","text":"FOLLOW_UP"}]}
+                    """, 202);
+            String followupTurn = followup.path("turn_id").asText();
+            await(() -> "COMPLETED".equals(jdbc.queryForObject("SELECT status FROM ma_turn"
+                            + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                    String.class, tenant, session, followupTurn)), 30, "following Turn completion");
+            await(() -> api("GET", "/v1/agents/sessions/" + session + "/items?limit=100",
+                    null, null, 200).toString().contains("FOLLOW_UP_OK"), 15,
+                    "materialized following output");
+            state = driverState();
+            assertThat(state.path("primaryRequests").asInt()).isEqualTo(1);
+            assertThat(state.path("followupRequests").asInt()).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?"
+                            + " AND session_id = ? AND status = 'COMPLETED'", Integer.class,
+                    tenant, session)).isEqualTo(2);
+            System.out.printf("ISSUE13327 coordinatorPid=%d replacementPid=%d session=%s turn=%s"
+                            + " primaryModelRequests=1 output=%s terminal=1 followup=COMPLETED%n",
+                    killedPid, spring.pid(), session, turn, output);
+        }
+
+        private void startDriver() throws Exception {
+            Path config = root.resolve("coordinator-driver.json");
+            Path ready = root.resolve("coordinator-driver-ready.json");
+            JSON.writeValue(config.toFile(), Map.of("readyPath", ready.toString()));
+            Path log = root.resolve("coordinator-driver.log");
+            driver = new ProcessBuilder(node, "--import", "tsx",
+                    "integration-tests/helpers/hosted-coordinator-restart-driver.ts", config.toString())
+                    .directory(cli.getParent().getParent().toFile()).redirectErrorStream(true)
+                    .redirectOutput(log.toFile()).start();
+            processes.add(driver.toHandle());
+            await(() -> Files.exists(ready) || !driver.isAlive(), 30, "coordinator driver readiness");
+            assertThat(driver.isAlive()).as("Driver failed: %s", Files.readString(log)).isTrue();
+            driverReady = (ObjectNode) JSON.readTree(Files.readString(ready));
+        }
+
+        private void startSpring() throws Exception {
+            Path readiness = root.resolve("ready.json");
+            Files.deleteIfExists(readiness);
+            String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
+            Path log = root.resolve("coordinator-spring-" + ++boots + ".log");
+            ProcessBuilder builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", classpath, HostedProcessCrashFixtureMain.class.getName(), root.toString(), node,
+                    cli.toString(), tenant, "coordinator-only", Integer.toString(port),
+                    driverReady.path("harnessUrl").asText()).redirectErrorStream(true).redirectOutput(log.toFile());
+            builder.environment().put("FG6C_MYSQL_URL", required("mysql.url"));
+            builder.environment().put("FG6C_MYSQL_USER", required("mysql.user"));
+            builder.environment().put("FG6C_MYSQL_PASSWORD", System.getProperty("mysql.password", ""));
+            spring = builder.start();
+            processes.add(spring.toHandle());
+            await(() -> Files.exists(readiness) || !spring.isAlive(), 30, "coordinator Spring readiness");
+            assertThat(spring.isAlive()).as("Spring failed: %s", Files.readString(log)).isTrue();
+            assertThat(JSON.readTree(Files.readString(readiness)).path("storeUrl").asText())
+                    .isEqualTo("http://127.0.0.1:" + port);
+        }
+
+        private JsonNode api(String method, String route, String idempotencyKey,
+                String body, int expected) {
+            try {
+                HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + route))
+                        .timeout(java.time.Duration.ofSeconds(10))
+                        .header("X-Qwen-Tenant-Id", tenant).header("X-Qwen-Actor-Id", "actor")
+                        .header("Accept", "application/json")
+                        .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+                                : HttpRequest.BodyPublishers.ofString(body));
+                if (body != null) {
+                    request.header("Content-Type", "application/json");
+                }
+                if (idempotencyKey != null) {
+                    request.header("Idempotency-Key", idempotencyKey);
+                }
+                HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+                assertThat(response.statusCode()).as("%s %s: %s", method, route, response.body())
+                        .isEqualTo(expected);
+                return JSON.readTree(response.body());
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        private JsonNode driverState() {
+            return control("GET", "/state");
+        }
+
+        private JsonNode control(String method, String route) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder(URI.create(driverReady.path("controlUrl").asText() + route))
+                        .timeout(java.time.Duration.ofSeconds(10))
+                        .method(method, HttpRequest.BodyPublishers.noBody()).build();
+                HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+                assertThat(response.statusCode()).as("driver %s %s: %s", method, route, response.body())
+                        .isEqualTo(200);
+                return JSON.readTree(response.body());
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (driver != null && driver.isAlive()) {
+                processes.addAll(driver.descendants().toList());
+                if (driverReady == null) {
+                    driver.destroyForcibly();
+                } else {
+                    try {
+                        control("POST", "/stop");
+                        if (!driver.waitFor(10, TimeUnit.SECONDS)) {
+                            driver.destroyForcibly();
+                        }
+                    } catch (RuntimeException ignored) {
+                        driver.destroyForcibly();
+                    }
+                }
+            }
+            if (spring != null) {
+                processes.addAll(spring.descendants().toList());
+            }
+            processes.forEach(ProcessHandle::destroyForcibly);
+            for (ProcessHandle process : processes) {
+                await(() -> !running(process), 10, "process cleanup " + process.pid());
             }
         }
     }
@@ -91,11 +350,23 @@ class HostedProcessCrashIT {
             root = Files.createDirectory(temporary.resolve(fault)).toRealPath();
             Files.createDirectory(root.resolve("runtime"));
             Files.createDirectories(root.resolve("workspace/child"));
+            // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+            Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
             assertThat(cli).isRegularFile();
         }
 
         private void run() throws Exception {
             startSpring();
+            if ("Linux".equals(System.getProperty("os.name"))) {
+                var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+                storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+                storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                                tenant, "storage", root.resolve("workspace").toString())));
+                new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
+                        .register(tenant, "storage", UUID.randomUUID().toString());
+            }
             controller = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
             controller.createContext("/", exchange -> {
                 try {
@@ -208,13 +479,15 @@ class HostedProcessCrashIT {
         }
 
         private List<Map<String, Object>> executions() {
-            return jdbc.queryForList("SELECT * FROM qwen_tool_execution WHERE harness_session_id = ?",
+            return jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?",
                     ready.path("sessionId").asText());
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?",
-                    sha256((tenant + "\u0000storage").getBytes(StandardCharsets.UTF_8)));
+            return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                            + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                    com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+                    tenant, "storage");
         }
 
         private void captureOwner(Map<String, Object> execution) throws Exception {
@@ -258,12 +531,12 @@ class HostedProcessCrashIT {
                 assertThat(execution.get("result_json")).isNull();
             }
             assertOwner(execution);
-            var session = jdbc.queryForMap("SELECT * FROM qwen_runtime_session WHERE harness_session_id = ?",
+            var session = jdbc.queryForMap("SELECT * FROM ma_runtime_session WHERE harness_session_id = ?",
                     ready.path("sessionId").asText());
             assertThat(session.get("session_state")).isEqualTo("READY");
             assertThat(session.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
             assertThat(session.get("binding_id")).isEqualTo(execution.get("binding_id"));
-            assertThat(jdbc.queryForList("SELECT binding_state FROM qwen_runtime_binding WHERE tenant_id = ?", String.class,
+            assertThat(jdbc.queryForList("SELECT binding_state FROM ma_runtime_binding WHERE tenant_id = ?", String.class,
                     tenant)).containsExactly("READY");
             Path proof = root.resolve("workspace/child/proof.txt");
             assertThat(proof).isRegularFile();
@@ -274,7 +547,7 @@ class HostedProcessCrashIT {
 
         private void assertJournal(JsonNode report, boolean prepared) throws Exception {
             String session = ready.path("sessionId").asText();
-            var journal = jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_tx"
+            var journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, session);
             var transactionIds = new HashSet<String>();
             var eventIds = new HashSet<String>();
@@ -297,12 +570,12 @@ class HostedProcessCrashIT {
                     events.add(event);
                 }
             }
-            var head = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+            var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     tenant, session);
             assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
             assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
             Object checkpointId = head.get("latest_checkpoint_resource_id");
-            byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+            byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class, tenant, session, checkpointId);
             JsonNode saved = JSON.readTree(checkpoint);
             assertThat(saved.path("continuation").path("phase").asText()).isEqualTo(prepared ? "before_model" : "await_runtime");
@@ -312,7 +585,7 @@ class HostedProcessCrashIT {
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("turn.settled"))).isEmpty();
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                     && event.path("payload").path("role").asText().equals("tool_result"))).isEmpty();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE tenant_id = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? AND kind = 'managed-tool-outcome'", Integer.class, tenant, session))
                     .isZero();
             JsonNode target = report.path("target");

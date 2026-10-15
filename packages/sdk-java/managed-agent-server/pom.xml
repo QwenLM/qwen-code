@@ -152,6 +152,30 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>workspace-maintenance-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-maintenance-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceMaintenanceRecoveryMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-session</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-session</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-runtime</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-runtime</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>operator-recovery</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>
@@ -243,8 +267,15 @@
                                  gates (five letters FG7a,b,d–f plus the FG7c
                                  crash class) extend the fork's wall-clock by
                                  ~150 s — ~60 s of it test time — at 2×
-                                 headroom. -->
-                            <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                                 headroom. The L4 shell-lifecycle recovery
+                                 class (#14039) then added four cuts that each
+                                 boot a real Spring, the packaged Harness and
+                                 a durable worker — roughly another 300 s of
+                                 healthy wall-clock the FG7 sizing never
+                                 covered, so a contended main runner killed
+                                 the fork before any test reported (#14125).
+                                 1800 s restores the 2× headroom. -->
+                            <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -284,7 +315,7 @@
                 <configuration>
                     <includes><include>**/HostedProcessCrashIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <forkedProcessTimeoutInSeconds>480</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>720</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
@@ -350,6 +381,33 @@
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
+        </profile>
+        <profile>
+            <!-- MQ2d: the EventTransport against a real RocketMQ LiteTopic
+                 cluster (scripts/rocketmq-lite-broker.sh start). The unit
+                 suite is the test job's; this profile runs only the gate,
+                 and the broker coordinates are required system properties
+                 (qwen.gate.rocketmq.endpoints / topic / normal-topic). -->
+            <id>event-transport-broker-gates</id>
+            <build><plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration><skipTests>true</skipTests></configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <includes><include>**/EventTransportBrokerGate.java</include></includes>
+                        <failIfNoTests>true</failIfNoTests>
+                        <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                        <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+                    </configuration>
+                    <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+                </plugin>
+            </plugins></build>
         </profile>
     </profiles>
 </project>

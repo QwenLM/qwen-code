@@ -26,7 +26,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Contract for the H5 channel route and delivery repositories
- * (qwen_managed_channel_route, qwen_managed_channel_delivery), run against
+ * (ma_request_receipt/ma_operation, ma_delivery), run against
  * the Flyway schema. It is public so a MySQL gate can run the same checks;
  * ManagedChannelJdbcContractTest runs it on H2 in MySQL mode.
  */
@@ -72,7 +72,7 @@ public final class ManagedChannelJdbcContract {
         // Ingress redelivery of one platform event keeps the first row.
         ChannelRoute redelivered = routes.findOrCreate(candidate);
         assertEquals(created.routeKey(), redelivered.routeKey());
-        assertEquals(1, count(jdbc, "qwen_managed_channel_route", tenant));
+        assertEquals(1, count(jdbc, "ma_request_receipt", tenant));
 
         // An edited message binds a new revision; a re-authenticated account
         // starts a new generation. Each stays its own binding.
@@ -80,7 +80,7 @@ public final class ManagedChannelJdbcContract {
                 List.of()));
         routes.findOrCreate(route(tenant, channel, 2, "event-1", 1, null,
                 List.of()));
-        assertEquals(3, count(jdbc, "qwen_managed_channel_route", tenant));
+        assertEquals(3, count(jdbc, "ma_request_receipt", tenant));
         assertTrue(routes.find(tenant, created.routeKey()).isPresent());
         assertTrue(routes.find(prefix + "-other", created.routeKey())
                 .isEmpty());
@@ -192,17 +192,10 @@ public final class ManagedChannelJdbcContract {
             String key = ChannelRouteRepository.routeKey(tenant, tieChannel,
                     1, eventId, 1);
             tieKeys.add(key);
-            jdbc.update("INSERT INTO qwen_managed_channel_route (tenant_id,"
-                            + " route_key, channel_instance_id,"
-                            + " account_generation, platform_event_id,"
-                            + " semantic_revision, session_id, sender_id,"
-                            + " chat_id, thread_id, state, input_id,"
-                            + " staged_attachment_refs_json, created_at,"
-                            + " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
-                            + " ?, ?, ?, ?, ?, ?, ?)",
-                    tenant, key, tieChannel, 1L, eventId, 1L, SESSION,
-                    "sender-1", null, null, "staged", null, null, tieTime,
-                    tieTime);
+            routes.findOrCreate(route(tenant, tieChannel, 1L, eventId, 1L, null, List.of()));
+            jdbc.update("UPDATE ma_request_receipt SET created_at=?,updated_at=? WHERE namespace='CHANNEL_INGRESS' AND tenant_id=? AND idempotency_key=?",
+                    tieTime,tieTime,tenant,key);
+
         }
         tieKeys.sort(Comparator.reverseOrder());
         assertEquals(tieKeys, routes.listByChannel(tenant, tieChannel, null,
@@ -223,7 +216,7 @@ public final class ManagedChannelJdbcContract {
 
         ChannelDelivery retried = deliveries.findOrCreate(candidate);
         assertEquals(created.deliveryId(), retried.deliveryId());
-        assertEquals(1, count(jdbc, "qwen_managed_channel_delivery", tenant));
+        assertEquals(1, count(jdbc, "ma_delivery", tenant));
         assertThrows(IllegalStateException.class,
                 () -> deliveries.findOrCreate(delivery(tenant, channel,
                         "delivery-1", "segment-other", 0)));
@@ -359,13 +352,10 @@ public final class ManagedChannelJdbcContract {
         List<String> tieIds = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
             tieIds.add("tie-" + i);
-            jdbc.update("INSERT INTO qwen_managed_channel_delivery (tenant_id,"
-                            + " channel_instance_id, delivery_id, segment_id,"
-                            + " segment_ordinal, state, provider_receipt,"
-                            + " created_at, updated_at) VALUES (?, ?, ?, ?,"
-                            + " ?, ?, ?, ?, ?)",
-                    tenant, tieChannel, "tie-" + i, "segment-" + i, 0,
-                    "planned", null, tieTime, tieTime);
+            deliveries.findOrCreate(delivery(tenant,tieChannel,"tie-"+i,"segment-"+i,0));
+            jdbc.update("UPDATE ma_delivery SET created_at=?,updated_at=? WHERE delivery_kind='CHANNEL' AND tenant_id=? AND channel_id=? AND delivery_id=?",
+                    tieTime,tieTime,tenant,tieChannel,"tie-"+i);
+
         }
         tieIds.sort(Comparator.reverseOrder());
         assertEquals(tieIds, deliveries
@@ -393,7 +383,7 @@ public final class ManagedChannelJdbcContract {
 
     private static int count(JdbcTemplate jdbc, String table, String tenant) {
         Integer total = jdbc.queryForObject("SELECT COUNT(*) FROM " + table
-                + " WHERE tenant_id = ?", Integer.class, tenant);
+                + " WHERE tenant_id = ?" + (table.equals("ma_request_receipt") ? " AND namespace='CHANNEL_INGRESS'" : " AND delivery_kind='CHANNEL'"), Integer.class, tenant);
         return total == null ? 0 : total;
     }
 }

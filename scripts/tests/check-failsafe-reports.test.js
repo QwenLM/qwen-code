@@ -67,6 +67,8 @@ describe('check-failsafe-reports', () => {
     ['o4-mysql', 'O4MySqlGate', 'error'],
     ['o4-oss', 'O4OssGate', 'failure'],
     ['o4-oss', 'O4OssGate', 'error'],
+    ['event-transport', 'EventTransportBrokerGate', 'failure'],
+    ['event-transport', 'EventTransportBrokerGate', 'error'],
   ])('rejects %s %s %s even with Maven failure-ignore', (family, gate, tag) => {
     const className = `com.example.${gate}`;
     const dir = module('failed', [className]);
@@ -82,6 +84,7 @@ describe('check-failsafe-reports', () => {
   it.each([
     ['o4-mysql', 'O4MySqlGate'],
     ['o4-oss', 'O4OssGate'],
+    ['event-transport', 'EventTransportBrokerGate'],
   ])(
     'requires complete opt-in %s evidence without changing the ordinary family',
     (family, gate) => {
@@ -89,6 +92,7 @@ describe('check-failsafe-reports', () => {
         'com.example.OrdersIT',
         'com.example.O4MySqlGate',
         'com.example.O4OssGate',
+        'com.example.EventTransportBrokerGate',
       ];
       const complete = module('complete', sources, {
         [`com.example.${gate}`]: [3, 0],
