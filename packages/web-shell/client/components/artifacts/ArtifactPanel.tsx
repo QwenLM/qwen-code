@@ -481,6 +481,7 @@ interface ArtifactPanelProps {
   onUnarchiveSideTasks?: (
     sideTasks: readonly SideTaskListItem[],
   ) => void | Promise<void>;
+  onSideTaskMenuOpen?: () => void;
   onCreateSideTaskSession?: (
     tabId: string,
     parentSessionId: string,
@@ -673,6 +674,7 @@ export function ArtifactPanel({
   onOpenSideTask,
   onArchiveSideTasks,
   onUnarchiveSideTasks,
+  onSideTaskMenuOpen,
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
@@ -722,6 +724,9 @@ export function ArtifactPanel({
       sideTaskMenuCloseTimerRef.current = null;
     }, 120);
   }, []);
+  useEffect(() => {
+    if (sideTaskMenuOpen) onSideTaskMenuOpen?.();
+  }, [onSideTaskMenuOpen, sideTaskMenuOpen]);
   useEffect(
     () => () => {
       if (sideTaskMenuCloseTimerRef.current) {
@@ -1369,6 +1374,7 @@ export function ArtifactPanel({
                             </span>
                           </DropdownMenuSubTrigger>
                           <DropdownMenuSubContent
+                            className="max-h-(--radix-dropdown-menu-content-available-height) overflow-x-hidden overflow-y-auto"
                             onMouseEnter={openSideTaskMenu}
                             onMouseLeave={scheduleSideTaskMenuClose}
                           >
