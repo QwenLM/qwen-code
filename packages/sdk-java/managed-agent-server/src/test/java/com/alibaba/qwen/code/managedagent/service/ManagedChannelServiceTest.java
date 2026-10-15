@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicChannelDelivery;
@@ -24,10 +21,17 @@ import com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -39,11 +43,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * H5b/H5c: the control plane's channel service against the real stores on
@@ -87,7 +89,7 @@ class ManagedChannelServiceTest {
 
     @BeforeEach
     void setUp() {
-        jdbc.update("INSERT IGNORE INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, 'storage', 'Workspace', ?, ?,"
@@ -95,7 +97,7 @@ class ManagedChannelServiceTest {
                 TENANT, WORKSPACE,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT IGNORE INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT IGNORE INTO ma_workspace_access (tenant_id,"
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')",
                 TENANT, WORKSPACE, ACTOR.getBytes(StandardCharsets.UTF_8));
@@ -105,7 +107,7 @@ class ManagedChannelServiceTest {
             // delivery line in the same transaction — and the segment
             // receipts in the record body; the recording Harness mirrors
             // both projections.
-            jdbc.update("UPDATE qwen_managed_session_extension_record"
+            jdbc.update("UPDATE ma_session_record"
                             + " SET delivery_state = ? WHERE tenant_id = ?"
                             + " AND session_id = ? AND record_id = ?",
                     state, TENANT, sessionId, deliveryId);
@@ -159,11 +161,7 @@ class ManagedChannelServiceTest {
         assertThat(instances.sessionStatus(TENANT, first.sessionId()))
                 .isEqualTo("ACTIVE");
         // The ingress row is admitted with the input it committed.
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = '" + channel + "'"
-                        + " AND platform_event_id = '1700:42'", String.class,
-                TENANT)).isEqualTo("admitted");
+        assertThat(route("1700:42").state()).isEqualTo("admitted");
 
         // A provider redelivery: the same identity, the same input, no
         // second Session and no second ingress row.
@@ -172,10 +170,7 @@ class ManagedChannelServiceTest {
         assertThat(again.inputId()).isEqualTo(first.inputId());
         assertThat(again.sessionId()).isEqualTo(first.sessionId());
         assertThat(again.replayed()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = ?",
-                Integer.class, TENANT, channel)).isEqualTo(1);
+        assertThat(routes().size()).isEqualTo(1);
 
         // A second real message with identical text is a second input on
         // the same Session.
@@ -184,14 +179,78 @@ class ManagedChannelServiceTest {
         assertThat(second.inputId()).isNotEqualTo(first.inputId());
         assertThat(second.sessionId()).isEqualTo(first.sessionId());
         assertThat(second.routeId()).isEqualTo(first.routeId());
+        assertThat(routes().size()).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = ?",
-                Integer.class, TENANT, channel)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_channel_binding WHERE tenant_id = ?"
+                        + " ma_channel_binding WHERE tenant_id = ?"
                         + " AND channel_id = ?",
                 Integer.class, TENANT, channel)).isEqualTo(1);
+    }
+
+    // A TAB in an inbound subject survives the producer chain's
+    // [\r\n\0] sanitization, and the create route refuses control
+    // characters in a title — folding them to spaces at the derivation
+    // keeps the route's Session creatable instead of dropping the event as
+    // a deterministic refusal the adapter never re-drives.
+    @Test
+    void bindsARouteWhoseSubjectCarriesAControlCharacter() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                new InboundEventRequest(1, "1700:99", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-9"),
+                        "alice@example.com", "alice@example.com", "thread-9",
+                        "Build\tstatus", "check the build", List.of(), null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, channel, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("email: Build status");
+    }
+
+    @Test
+    void bindsARouteWhoseSenderIdCarriesAControlCharacter() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                new InboundEventRequest(1, "1700:98", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-8"),
+                        "alice\t@example.com", "alice@example.com",
+                        "thread-8", null, "check the build", List.of(),
+                        null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, channel, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("email: alice @example.com");
+    }
+
+    // The platform name composes the same title and is validated only as
+    // @NotBlank @Size(max = 64) at registration — no character class — so
+    // a TAB in it refuses the route's Session exactly like an unfolded
+    // subject, and with no binding row written every later event of the
+    // route re-drives the same refusal: the platform folds too.
+    @Test
+    void bindsARouteWhosePlatformCarriesAControlCharacter() {
+        String tabbed = "tab-" + UUID.randomUUID();
+        service.register(TENANT, tabbed, new RegisterChannelRequest(
+                "emai\til", "agent@example.com", 1, ACTOR, WORKSPACE, ".",
+                new ChannelPolicy("emai\til", "allowlist",
+                        List.of("alice@example.com"), "followup")));
+        InboundAdmission admitted = service.submitInbound(TENANT, tabbed,
+                new InboundEventRequest(1, "1700:97", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-7"),
+                        "alice@example.com", "alice@example.com", "thread-7",
+                        "Build status", "check the build", List.of(), null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, tabbed, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("emai il: Build status");
     }
 
     @Test
@@ -203,19 +262,11 @@ class ManagedChannelServiceTest {
         assertThatThrownBy(() -> service.submitInbound(TENANT, channel,
                 event(1, "1700:50", "hello")))
                 .isInstanceOf(RuntimeException.class);
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = '" + channel + "'"
-                        + " AND platform_event_id = '1700:50'", String.class,
-                TENANT)).isEqualTo("staged");
+        assertThat(route("1700:50").state()).isEqualTo("staged");
         InboundAdmission retried = service.submitInbound(TENANT, channel,
                 event(1, "1700:50", "hello"));
         assertThat(retried.replayed()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = '" + channel + "'"
-                        + " AND platform_event_id = '1700:50'", String.class,
-                TENANT)).isEqualTo("admitted");
+        assertThat(route("1700:50").state()).isEqualTo("admitted");
         assertThat(harness.operations).hasSize(2);
     }
 
@@ -322,7 +373,7 @@ class ManagedChannelServiceTest {
                         .count())
                 .isEqualTo(before);
         clock.addAndGet(Duration.ofMinutes(11).toMillis());
-        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
+        jdbc.update("UPDATE ma_delivery SET claimed_at = ?"
                         + " WHERE tenant_id = ? AND delivery_id = ?",
                 clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
                 deliveryId);
@@ -389,11 +440,7 @@ class ManagedChannelServiceTest {
                 });
         // The ingress row stays staged for no second drive: the adapter
         // treats this class as final.
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = '" + channel + "'"
-                        + " AND platform_event_id = '1700:98'", String.class,
-                TENANT)).isEqualTo("staged");
+        assertThat(route("1700:98").state()).isEqualTo("staged");
     }
 
     @Test
@@ -440,7 +487,7 @@ class ManagedChannelServiceTest {
         // keeps working.
         service.submitInbound(TENANT, channel, event(1, "1700:90", "hi"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_channel_binding WHERE tenant_id = ?"
+                        + " ma_channel_binding WHERE tenant_id = ?"
                         + " AND channel_id = ?", Integer.class, TENANT,
                 channel)).isEqualTo(1);
         RegisterChannelRequest moved = new RegisterChannelRequest("email",
@@ -480,7 +527,7 @@ class ManagedChannelServiceTest {
         ChannelInstanceStore.ChannelInstance snapshot = instances
                 .findInstance(TENANT, channel).orElseThrow();
         assertThat(snapshot.accountGeneration()).isEqualTo(1);
-        jdbc.update("UPDATE qwen_managed_channel_instance"
+        jdbc.update("UPDATE ma_channel_instance"
                         + " SET account_generation = 3"
                         + " WHERE tenant_id = ? AND channel_id = ?",
                 TENANT, channel);
@@ -532,7 +579,7 @@ class ManagedChannelServiceTest {
                     Object... args) {
                 T value = super.queryForObject(sql, requiredType, args);
                 if (sql.contains(
-                        "SELECT COUNT(*) FROM qwen_managed_channel_binding")) {
+                        "SELECT COUNT(*) FROM ma_channel_binding")) {
                     atCount.countDown();
                     try {
                         bound.await();
@@ -599,7 +646,7 @@ class ManagedChannelServiceTest {
         for (int i = 0; i < stalled.size(); i++) {
             // Strictly ordered past-marks, each older than the next: the
             // sweep's first page is exactly this 50, ties impossible.
-            jdbc.update("UPDATE qwen_managed_channel_claim"
+            jdbc.update("UPDATE ma_delivery"
                             + " SET claimed_at = ? WHERE tenant_id = ?"
                             + " AND delivery_id = ?",
                     clock.get() - Duration.ofDays(1).toMillis() - i * 1000L,
@@ -616,7 +663,7 @@ class ManagedChannelServiceTest {
                 .hasSize(1);
         assertThat(service.ledger(TENANT, channel2, lateDelivery)).get()
                 .extracting(row -> row.state()).isEqualTo("sending");
-        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
+        jdbc.update("UPDATE ma_delivery SET claimed_at = ?"
                         + " WHERE tenant_id = ? AND delivery_id = ?",
                 clock.get() - Duration.ofMinutes(10).toMillis() - 30_000,
                 TENANT, lateDelivery);
@@ -624,9 +671,9 @@ class ManagedChannelServiceTest {
         // takes its turn on the next one instead of never.
         service.reconcile();
         List<String> unknowns = jdbc.queryForList(
-                "SELECT delivery_id FROM qwen_managed_channel_delivery"
-                        + " WHERE tenant_id = ? AND channel_instance_id = ?"
-                        + " AND state = 'unknown'",
+                "SELECT delivery_id FROM ma_delivery"
+                        + " WHERE delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ?"
+                        + " AND transport_state = 'unknown'",
                 String.class, TENANT, channel);
         // Every stalled row advanced; the sweep may also carry an expired
         // planned claim an earlier test of this suite left behind — the
@@ -664,20 +711,12 @@ class ManagedChannelServiceTest {
                     assertThat(error.getCode())
                             .isEqualTo("channel_operation_failed");
                 });
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = '" + channel + "'"
-                        + " AND platform_event_id = '1700:99'", String.class,
-                TENANT)).isEqualTo("staged");
+        assertThat(route("1700:99").state()).isEqualTo("staged");
         // The retry lands clean: the staged row admits on the second drive.
         InboundAdmission retried = service.submitInbound(TENANT, channel,
                 event(1, "1700:99", "hello"));
         assertThat(retried.replayed()).isFalse();
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                        + " qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND channel_instance_id = '" + channel + "'"
-                        + " AND platform_event_id = '1700:99'", String.class,
-                TENANT)).isEqualTo("admitted");
+        assertThat(route("1700:99").state()).isEqualTo("admitted");
     }
 
     @Test
@@ -697,7 +736,7 @@ class ManagedChannelServiceTest {
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("planned");
         assertThat(jdbc.queryForObject("SELECT delivery_state FROM"
-                        + " qwen_managed_session_extension_record"
+                        + " ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND record_id = ?", String.class, TENANT,
                 admitted.sessionId(), deliveryId)).isEqualTo("sending");
@@ -738,7 +777,7 @@ class ManagedChannelServiceTest {
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("sending");
         assertThat(jdbc.queryForObject("SELECT delivery_state FROM"
-                        + " qwen_managed_session_extension_record"
+                        + " ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND record_id = ?", String.class, TENANT,
                 admitted.sessionId(), deliveryId)).isEqualTo("delivered");
@@ -764,9 +803,9 @@ class ManagedChannelServiceTest {
         // newest-first window, and none of them owes a delivery.
         for (int i = 0; i < 64; i++) {
             String crowdSession = "crowd-" + i + '-' + channel;
-            jdbc.update("INSERT IGNORE INTO managed_agent_session"
+            jdbc.update("INSERT IGNORE INTO ma_session"
                             + " (tenant_id, session_id, agent_id, title,"
-                            + " status, created_at, updated_at)"
+                            + " status, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 'qwen-code', 'mail thread',"
                             + " 'ACTIVE', 1, 1)",
                     TENANT, crowdSession);
@@ -799,7 +838,7 @@ class ManagedChannelServiceTest {
         assertThat(listedChannel.platform()).isEqualTo("email");
         assertThat(listedChannel.state()).isEqualTo("connected");
         // Two bindings created inside one database millisecond tie on
-        // created_at and order by route key, so only the set is pinned.
+        // gmt_create and order by route key, so only the set is pinned.
         assertThat(listedChannel.routes())
                 .extracting(r -> r.platformEventId())
                 .containsExactlyInAnyOrder("1700:90", "1700:91");
@@ -837,10 +876,7 @@ class ManagedChannelServiceTest {
                         "text/plain",
                         Base64.getEncoder().encodeToString(bytes))), null);
         service.submitInbound(TENANT, channel, event);
-        String refs = jdbc.queryForObject("SELECT staged_attachment_refs_json"
-                        + " FROM qwen_managed_channel_route WHERE tenant_id = ?"
-                        + " AND platform_event_id = '1700:95'", String.class,
-                TENANT);
+        String refs = route("1700:95").stagedAttachmentRefs().toString();
         assertThat(refs).contains("sha256:" + HexFormat.of().formatHex(
                 MessageDigest.getInstance("SHA-256").digest(bytes)));
         @SuppressWarnings("unchecked")
@@ -864,23 +900,16 @@ class ManagedChannelServiceTest {
                  "run":{"state":"admitted","reason":null,"definition":null,"executionCallId":null,"effectId":"%s","dispatchId":null,"deliveryId":"%s","execution":null,"runtime":null,"delivery":{"target":"channel","state":"planned"}}}
                 """.formatted(deliveryId, routeId, "a".repeat(64), deliveryId,
                 "b".repeat(64), deliveryId, deliveryId);
-        jdbc.update("INSERT INTO qwen_managed_session_resource"
-                        + " (session_scope_key, tenant_id, workspace_id,"
-                        + " session_id, resource_id, kind, schema_version,"
-                        + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, created_at)"
-                        + " VALUES (?, ?, ?, ?, ?, 'managed-channel_delivery',"
-                        + " 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED',"
-                        + " CURRENT_TIMESTAMP(6))",
-                scopeKey(sessionId), TENANT, WORKSPACE, sessionId, resourceId,
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, ?, ?, 'managed-channel_delivery', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scopeKey(sessionId), resourceId), scopeKey(sessionId), TENANT, WORKSPACE, sessionId, resourceId,
                 body.length(), "c".repeat(64),
                 body.getBytes(StandardCharsets.UTF_8), "publish-" + resourceId);
-        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+        jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
-                        + " delivery_state, created_at)"
+                        + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, 'channel_delivery', ?, ?,"
                         + " 1, ?, NULL, NULL, 'channel', 'planned', ?)",
                 scopeKey(sessionId),
@@ -895,13 +924,13 @@ class ManagedChannelServiceTest {
      * store writes it with the delivered revision. */
     private void mirrorReceiptIntoRecord(String sessionId,
             String deliveryId) {
-        for (Map<String, Object> row : jdbc.queryForList(
+        for (Map<String, Object> row : jdbc.query(
                 "SELECT resource_id, inline_bytes"
-                        + " FROM qwen_managed_session_resource"
+                        + " FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND kind = 'managed-channel_delivery'"
+                        + " AND kind = ?"
                         + " AND state = 'REFERENCED'",
-                TENANT, sessionId)) {
+                (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), TENANT, sessionId, "managed-channel_delivery")) {
             JsonNode tree;
             try {
                 tree = mapper.readTree(
@@ -920,7 +949,7 @@ class ManagedChannelServiceTest {
                 ((ObjectNode) segment).set("receipt", receipt.deepCopy());
             }
             try {
-                jdbc.update("UPDATE qwen_managed_session_resource"
+                jdbc.update("UPDATE ma_resource"
                                 + " SET inline_bytes = ?"
                                 + " WHERE tenant_id = ? AND resource_id = ?",
                         mapper.writeValueAsString(tree)
@@ -932,22 +961,24 @@ class ManagedChannelServiceTest {
         }
     }
 
+    private List<com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute> routes() {
+        return new JdbcChannelRouteRepository(jdbc).listByChannel(TENANT, channel, null, 100).routes();
+    }
+
+    private com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute route(String eventId) {
+        return routes().stream().filter(route -> eventId.equals(route.platformEventId())).findFirst().orElseThrow();
+    }
+
     /** Back-dates the claim so the reconciler sees it as expired. */
     private void expire(String deliveryId) {
-        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
+        jdbc.update("UPDATE ma_delivery SET claimed_at = ?"
                         + " WHERE tenant_id = ? AND delivery_id = ?",
                 clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
                 deliveryId);
     }
 
     private static String scopeKey(String sessionId) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest((TENANT + "\u0000" + sessionId)
-                            .getBytes(StandardCharsets.UTF_8)));
-        } catch (java.security.NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
     }
 
     /** Answers the channel operations the way the hosted funnel does. */

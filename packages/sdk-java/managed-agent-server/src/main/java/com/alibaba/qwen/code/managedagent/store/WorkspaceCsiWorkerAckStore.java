@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
-
-import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
@@ -11,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -18,6 +16,15 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
@@ -28,13 +35,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
 
 /** Confirms one original receipt; it cannot authorize physical retirement. */
 public final class WorkspaceCsiWorkerAckStore {
@@ -141,11 +143,16 @@ public final class WorkspaceCsiWorkerAckStore {
                     + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))", (row, index) ->
                             Math.addExact(Math.multiplyExact(row.getLong(1), 1_000_000), row.getLong(2)));
             require(observed > 0, "CSI ACK observation time is unavailable");
-            jdbc.update("INSERT INTO managed_workspace_csi_worker_ack (retirement_id, execution_call_id_hash,"
-                            + " execution_call_id, evidence_json, evidence_digest, recorded_at_epoch_micros)"
-                            + " VALUES (?, ?, ?, ?, ?, ?)", selector.retirementId(), hash(execution.getExecutionCallId()),
-                    execution.getExecutionCallId(), new String(bytes, StandardCharsets.UTF_8),
-                    ToolPublicationContract.sha256(bytes), observed);
+            WorkspaceOperations operations = new WorkspaceOperations(jdbc, selector.tenantId());
+            String target = hash(execution.getExecutionCallId());
+            String owner = WorkspaceOperations.hash(operations.key(WorkspaceOperations.Kind.CSI_RETIREMENT,
+                    selector.retirementId()), "CSI_WORKER_ACK", target);
+            String proof = WorkspaceEvidenceResources.publish(jdbc, selector.tenantId(), selector.workspaceId(),
+                    selector.sessionId(), owner, bytes);
+            operations.insertWork(WorkspaceOperations.Kind.CSI_RETIREMENT, selector.retirementId(), "CSI_WORKER_ACK",
+                    target, execution.getExecutionCallId(), selector.sessionId(), WorkspaceOperations.values(
+                            "evidence_resource_key", proof, "evidence_sha256", ToolPublicationContract.sha256(bytes),
+                            "recorded_at_epoch_micros", observed), "COMPLETE");
             Evidence saved = read(selector, execution.getExecutionCallId(), true, publication);
             require(saved != null && saved.document().equals(document), "CSI ACK insert could not be verified");
             return saved;
@@ -188,9 +195,10 @@ public final class WorkspaceCsiWorkerAckStore {
                 && execution.getState() == ToolExecutionRecord.State.SETTLED
                 && runtime.getBindingId().equals(execution.getBindingId())
                 && runtime.getGeneration() == execution.getRuntimeGeneration(), "Original CSI result conflicts");
-        String identity = jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement"
-                + " WHERE retirement_id = ? AND binding_id = ? AND runtime_generation = ? FOR UPDATE",
-                String.class, selector.retirementId(), runtime.getBindingId(), runtime.getGeneration());
+        String identity = jdbc.queryForObject("SELECT request_json FROM ma_operation"
+                + " WHERE operation_key = ? AND operation_kind = 'CSI_RETIREMENT' AND target_key = ? AND target_revision = ? FOR UPDATE",
+                String.class, WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, selector.tenantId(), selector.retirementId()),
+                WorkspaceOperations.hash(runtime.getBindingId()), runtime.getGeneration());
         require(identity != null, "Original CSI retirement identity is missing");
         JsonNode publication = publication(selector);
         require(publication.equals(expectedPublication), "Original publication binding changed");
@@ -226,8 +234,8 @@ public final class WorkspaceCsiWorkerAckStore {
     private JsonNode publication(Selector selector) {
         ObjectNode key = json.createObjectNode().put("tenantId", selector.tenantId())
                 .put("workspaceId", selector.workspaceId()).put("sessionId", selector.sessionId());
-        var rows = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, publication_id, binding_json, binding_digest"
-                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, workspace_id, session_id, publication_id, binding_json, binding_digest"
+                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?",
                 ToolPublicationDataStore.scope(key), selector.publicationId());
         require(rows.size() == 1, "Original publication is missing or ambiguous");
         var row = rows.getFirst();
@@ -243,25 +251,21 @@ public final class WorkspaceCsiWorkerAckStore {
     }
 
     private Evidence read(Selector selector, String executionId, boolean lock, JsonNode publication) {
-        var rows = jdbc.queryForList("SELECT execution_call_id, evidence_json, evidence_digest,"
-                + " recorded_at_epoch_micros FROM managed_workspace_csi_worker_ack"
-                + " WHERE retirement_id = ? AND execution_call_id_hash = ?" + (lock ? " FOR UPDATE" : ""),
-                selector.retirementId(), hash(executionId));
-        require(rows.size() <= 1, "Original CSI ACK is ambiguous");
-        if (rows.isEmpty()) {
+        var row = new WorkspaceOperations(jdbc, selector.tenantId()).findWork(WorkspaceOperations.Kind.CSI_RETIREMENT,
+                selector.retirementId(), "CSI_WORKER_ACK", hash(executionId), lock);
+        if (row == null) {
             return null;
         }
-        var row = rows.getFirst();
-        require(executionId.equals(row.get("execution_call_id")), "CSI ACK execution hash alias conflicts");
-        String encoded = (String) row.get("evidence_json");
-        require(encoded != null, "CSI ACK document is missing");
-        byte[] bytes = encoded.getBytes(StandardCharsets.UTF_8);
-        require(ToolPublicationContract.sha256(bytes).equals(row.get("evidence_digest")), "CSI ACK digest conflicts");
+        require(executionId.equals(row.get("work_key")), "CSI ACK execution hash alias conflicts");
+        String expectedDigest = (String) row.get("evidence_sha256");
+        require(expectedDigest != null, "CSI ACK digest is missing");
+        byte[] bytes = WorkspaceEvidenceResources.read(jdbc, (String) row.get("evidence_resource_key"), expectedDigest);
+        require(ToolPublicationContract.sha256(bytes).equals(expectedDigest), "CSI ACK digest conflicts");
         JsonNode document = decode(bytes);
         validateDocument(document, selector, executionId, publication);
         long observed = ((Number) row.get("recorded_at_epoch_micros")).longValue();
         require(observed > 0, "CSI ACK observation time is invalid");
-        return new Evidence(document, (String) row.get("evidence_digest"), observed);
+        return new Evidence(document, (String) row.get("evidence_sha256"), observed);
     }
 
     private void validateDocument(JsonNode document, Selector selector, String executionId, JsonNode publication) {

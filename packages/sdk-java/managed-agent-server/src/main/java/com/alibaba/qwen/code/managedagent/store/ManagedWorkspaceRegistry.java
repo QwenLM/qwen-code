@@ -7,17 +7,16 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.List;
 
 @Repository
 public class ManagedWorkspaceRegistry {
@@ -27,13 +26,7 @@ public class ManagedWorkspaceRegistry {
         this.jdbc = jdbc;
     }
 
-    /**
-     * Whether the actor created this Workspace-bound Session. The create
-     * command is the owner of record for Sessions written before V40; later
-     * Turns still run under the creator's grants.
-     */
-    public boolean createdSession(String tenantId, String actorId,
-            String sessionId) {
+    public boolean createdSession(String tenantId, String actorId, String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
@@ -43,25 +36,13 @@ public class ManagedWorkspaceRegistry {
         } catch (IllegalArgumentException error) {
             return false;
         }
-        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_create_command"
-                + " WHERE tenant_id = ? AND session_id = ?"
-                + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND actor_id = ?",
-                Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
+        List<byte[]> creators = jdbc.queryForList(
+                "SELECT creator_actor_key FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        return creators.size() == 1 && java.util.Arrays.equals(creators.getFirst(), key);
     }
 
-    /**
-     * Whether the actor owns this Session: the recorded owner
-     * ({@code owner_actor_key}) when one is set — the handover's own
-     * keying, so a transferred Session answers only its new owner. With
-     * no owner record, a Session with a create command answers its
-     * command actor — H4b child Sessions register the parent cascade's
-     * synthetic one — and only a command-less, pre-V40 row falls back to
-     * {@code creator_actor_key}.
-     */
-    public boolean isSessionOwner(String tenantId, String actorId,
-            String sessionId) {
+    public boolean isSessionOwner(String tenantId, String actorId, String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
@@ -72,25 +53,10 @@ public class ManagedWorkspaceRegistry {
             return false;
         }
         List<byte[]> owners = jdbc.queryForList(
-                "SELECT owner_actor_key FROM managed_agent_session WHERE"
-                        + " tenant_id = ? AND session_id = ?",
+                "SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
                 byte[].class, tenantId, sessionId);
-        if (!owners.isEmpty() && owners.getFirst() != null) {
-            return java.util.Arrays.equals(owners.getFirst(), key);
-        }
-        List<String> commands = jdbc.queryForList(
-                "SELECT 1 FROM managed_workspace_create_command WHERE"
-                        + " tenant_id = ? AND session_id = ? LIMIT 1",
-                String.class, tenantId, sessionId);
-        if (!commands.isEmpty()) {
-            return createdSession(tenantId, actorId, sessionId);
-        }
-        List<byte[]> creators = jdbc.queryForList(
-                "SELECT creator_actor_key FROM managed_agent_session WHERE"
-                        + " tenant_id = ? AND session_id = ?",
-                byte[].class, tenantId, sessionId);
-        return !creators.isEmpty() && creators.getFirst() != null
-                && java.util.Arrays.equals(creators.getFirst(), key);
+        return owners.size() == 1 && java.util.Arrays.equals(owners.getFirst(), key);
     }
 
     /**
@@ -108,16 +74,29 @@ public class ManagedWorkspaceRegistry {
         } catch (IllegalArgumentException error) {
             return WorkspaceAccess.NONE;
         }
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        while (true) {
+            if (!visited.add(workspaceId)) {
+                return WorkspaceAccess.NONE;
+            }
+            List<String> parents = jdbc.queryForList(
+                    "SELECT parent_workspace_id FROM ma_workspace"
+                            + " WHERE tenant_id = ? AND workspace_id = ? AND workspace_kind = 'CHILD_GIT'",
+                    String.class, tenantId, workspaceId);
+            if (parents.isEmpty()) {
+                break;
+            }
+            if (parents.size() != 1 || parents.getFirst() == null) {
+                return WorkspaceAccess.NONE;
+            }
+            workspaceId = parents.getFirst();
+        }
         List<String> roles = jdbc.queryForList(
-                "SELECT role FROM managed_workspace_access"
+                "SELECT role FROM ma_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
                         + " 'OWNER')",
-                String.class, tenantId, workspaceId, tenantId, workspaceId,
+                String.class, tenantId, workspaceId,
                 key);
         // An out-of-enum stored value (only reachable by an out-of-band
         // write past V53's CHECK) fails closed exactly like a revoked
@@ -135,27 +114,12 @@ public class ManagedWorkspaceRegistry {
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
         byte[] key = actorKey(tenantId, actorId);
-        return jdbc.query("SELECT r.workspace_id, r.display_name, r.state,"
-                        + " a.role FROM managed_workspace_registry r"
-                        + " JOIN managed_workspace_access a ON"
-                        + " a.tenant_id = r.tenant_id"
-                        + " AND a.workspace_id = r.workspace_id"
-                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
-                        + " WHERE r.tenant_id = ?"
-                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND a.actor_id = ? AND a.role IN ('READER',"
-                        + " 'OPERATOR', 'OWNER')"
-                        + " AND (? IS NULL OR"
-                        + " CAST(CONCAT(r.workspace_id, '!') AS BINARY(513)) >"
-                        + " CAST(CONCAT(?, '!') AS BINARY(513)))"
-                        + " ORDER BY CAST(CONCAT(r.workspace_id, '!')"
-                        + " AS BINARY(513)) LIMIT ?",
-                (result, row) -> summary(result), tenantId, tenantId, key,
-                afterId, afterId, limit);
+        byte[] after = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
+        return jdbc.query("SELECT r.workspace_id, r.display_name, r.state, a.role FROM ma_workspace r"
+                        + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
+                        + " WHERE r.tenant_id = ? AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
+                        + " AND r.workspace_id > ? ORDER BY r.workspace_id LIMIT ?",
+                (result, row) -> summary(result), tenantId, key, after, limit);
     }
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
@@ -163,23 +127,14 @@ public class ManagedWorkspaceRegistry {
         byte[] key = actorKey(tenantId, actorId);
         List<WorkspaceSummary> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
-                        + " a.role FROM managed_workspace_registry r"
-                        + " JOIN managed_workspace_access a ON"
+                        + " a.role FROM ma_workspace r"
+                        + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
-                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
                         + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
-                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
-                (result, row) -> summary(result), tenantId, workspaceId,
-                tenantId, workspaceId, key);
+                (result, row) -> summary(result), tenantId, workspaceId, key);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -198,32 +153,20 @@ public class ManagedWorkspaceRegistry {
         byte[] key = actorKey(tenantId, actorId);
         String plain = String.join(", ", java.util.Collections.nCopies(
                 workspaceIds.size(), "?"));
-        String binary = String.join(", ", java.util.Collections.nCopies(
-                workspaceIds.size(), "CAST(CONCAT(?, '!') AS BINARY(513))"));
         List<Object> arguments = new java.util.ArrayList<>(
-                workspaceIds.size() * 2 + 3);
+                workspaceIds.size() + 2);
         arguments.add(tenantId);
         arguments.addAll(workspaceIds);
-        arguments.addAll(workspaceIds);
-        arguments.add(tenantId);
         arguments.add(key);
         List<ReadableGrant> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
                         + " r.storage_id, r.state, a.role"
-                        + " FROM managed_workspace_registry r"
-                        + " JOIN managed_workspace_access a ON"
+                        + " FROM ma_workspace r"
+                        + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
-                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
                         + " WHERE r.tenant_id = ? AND r.workspace_id IN ("
                         + plain + ")"
-                        + " AND CAST(CONCAT(r.workspace_id, '!') AS"
-                        + " BINARY(513)) IN (" + binary + ")"
-                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
                 (result, row) -> readableGrant(result), arguments.toArray());
@@ -238,11 +181,9 @@ public class ManagedWorkspaceRegistry {
     public WorkspaceSummary readableDefault(String tenantId,
             String actorId) {
         List<String> ids = jdbc.queryForList(
-                "SELECT workspace_id FROM managed_workspace_default"
-                        + " WHERE tenant_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))",
-                String.class, tenantId, tenantId);
+                "SELECT workspace_id FROM ma_workspace"
+                        + " WHERE tenant_id = ? AND is_default = TRUE",
+                String.class, tenantId);
         if (ids.isEmpty()) {
             return null;
         }
@@ -278,7 +219,7 @@ public class ManagedWorkspaceRegistry {
      */
     public boolean bindingCurrent(String tenantId, String workspaceId,
             long generation, String storageId) {
-        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_registry"
+        return !jdbc.queryForList("SELECT 1 FROM ma_workspace"
                 + " WHERE tenant_id = ? AND workspace_id = ?"
                 + " AND workspace_generation = ? AND storage_id = ?",
                 Integer.class, tenantId, workspaceId, generation, storageId)
@@ -318,11 +259,9 @@ public class ManagedWorkspaceRegistry {
         String workspaceId;
         if (selection == null) {
             List<String> defaults = jdbc.queryForList(
-                    "SELECT workspace_id FROM managed_workspace_default"
-                            + " WHERE tenant_id = ?"
-                            + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                            + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
-                    String.class, tenantId, tenantId);
+                    "SELECT workspace_id FROM ma_workspace"
+                            + " WHERE tenant_id = ? AND is_default = TRUE FOR UPDATE",
+                    String.class, tenantId);
             if (defaults.isEmpty()) {
                 throw workspaceRequired();
             }
@@ -333,14 +272,10 @@ public class ManagedWorkspaceRegistry {
         List<WorkspaceRecord> records = jdbc.query(
                 "SELECT workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state FROM"
-                        + " managed_workspace_registry WHERE tenant_id = ?"
-                        + " AND workspace_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
+                        + " ma_workspace WHERE tenant_id = ?"
+                        + " AND workspace_id = ? FOR UPDATE",
                 (result, row) -> workspaceRow(tenantId, workspaceId,
-                        result), tenantId, workspaceId, tenantId, workspaceId);
+                        result), tenantId, workspaceId);
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -349,17 +284,13 @@ public class ManagedWorkspaceRegistry {
                     "workspace_not_found", "Workspace not found.");
         }
         List<AccessRow> access = jdbc.query(
-                "SELECT role FROM managed_workspace_access"
+                "SELECT role FROM ma_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
                         + " 'OWNER') FOR UPDATE",
                 (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
                         result.getString("role"))), tenantId,
-                workspaceId, tenantId, workspaceId, key);
+                workspaceId, key);
         if (access.isEmpty() || !access.getFirst().value().canRead()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -390,7 +321,7 @@ public class ManagedWorkspaceRegistry {
                 record.getPolicyRef());
     }
 
-    static byte[] actorKey(String tenantId, String actorId) {
+    public static byte[] actorKey(String tenantId, String actorId) {
         return new WorkspaceActor(tenantId, actorId).getActorId()
                 .getBytes(StandardCharsets.UTF_8);
     }
@@ -399,9 +330,8 @@ public class ManagedWorkspaceRegistry {
         try {
             byte[] bytes = (configRef + "\u0000" + policyRef)
                     .getBytes(StandardCharsets.UTF_8);
-            return "sha256:" + HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException error) {
+            return "sha256:" + DigestUtils.sha256Hex(bytes);
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }
