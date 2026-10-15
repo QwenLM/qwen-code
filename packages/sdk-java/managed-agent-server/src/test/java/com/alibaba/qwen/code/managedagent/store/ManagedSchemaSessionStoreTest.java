@@ -137,8 +137,18 @@ public class ManagedSchemaSessionStoreTest {
 
     @Test
     void oversizedPartsAreResourceBackedAndRemainReadable() {
+        long derived = clock.millis();
         event("big", "a".repeat(70_000));
         materialize();
+        // Writing the resource-backed body must not re-stamp the item: its modification
+        // time belongs to the derived event timeline, so re-materializing an old session
+        // cannot make every item look freshly changed.
+        assertThat(
+                        jdbc.queryForObject(
+                                "SELECT gmt_modified FROM ma_message WHERE tenant_id = ?",
+                                Long.class,
+                                tenant))
+                .isEqualTo(derived);
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT body_resource_key FROM ma_message WHERE tenant_id = ?",

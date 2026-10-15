@@ -4482,7 +4482,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             int changed =
                     jdbc.update(
-                            "UPDATE ma_message SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", parts_json = ?, body_resource_key = ?"
+                            "UPDATE ma_message SET parts_json = ?, body_resource_key = ?"
                                     + " WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                             resource == null
                                     ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
