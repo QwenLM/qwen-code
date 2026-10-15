@@ -5,7 +5,7 @@
 Status: Steps 1 and 2 are implemented (D1-D9). Step 3's bounded native-file
 approval and main-model slices are implemented (#13777). Its packaged gates,
 the model-round arm and the Q2 binding-half arm are steps of the Hosted MySQL
-CI job (D11), which has not run them yet. The broader
+CI job (D11), which had not run them when they were added. The broader
 acceptance matrix remains open, as recorded in the [Step 3 design](2026-10-09-hosted-g3-step3-recovery.md). Issue tracker: #12952 (Stage G). Code references are to
 `main` @ `728c13de21` unless a decision notes a later refinement. This
 design answers Q2 and Q3 of #12952 following the proposal in its comments,
@@ -641,11 +641,12 @@ The seven new steps are capped at 10 minutes each, so the step ceilings sum
 to 275 (45 + 16×10 + 20 + 50) and the job ceiling moves from 220 to 290
 minutes.
 
-Since #14205 the job runs daily or on demand, never on a pull request, and
-the new steps come after `Verify Hosted Java, Spring and MySQL processes`,
-so they run only once that step passes. When these gates were added that
-step was failing on `main`, so no CI run had executed them; their evidence
-so far comes from running the same `package.json` scripts outside CI.
+Since #14205 the job runs daily or on demand, never on a pull request. The
+new steps come after `Verify Hosted Java, Spring and MySQL processes` and the
+earlier failover steps, and none of them has an `if:`, so they run only when
+every earlier step passes. When these gates were added the Verify step was
+failing on `main`, so no CI run had executed them; their evidence at that
+point came from running the same `package.json` scripts outside CI.
 
 ## Changes and ownership
 

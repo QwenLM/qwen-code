@@ -4,7 +4,7 @@
 
 状态：Step 1 与 Step 2 已实现（D1-D9）。Step 3 的限定原生文件审批与
 主模型切片已实现（#13777）；它的打包门禁、模型轮支路和 Q2 binding 半边
-支路都已是 Hosted MySQL CI 任务的步骤（D11），但该任务尚未实际运行过它们。
+支路都已是 Hosted MySQL CI 任务的步骤（D11），加入时该任务还没有运行过它们。
 更广的验收矩阵仍未完成，详见
 [Step 3 设计](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
 `728c13de21` 为准，除非某个决策注明了更晚的修正。本设计按 issue 评论
@@ -528,10 +528,11 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 新增的七个步骤各占 10 分钟上限，步骤上限之和因此为 275（45 + 16×10 + 20 + 50），
 任务上限从 220 分钟调到 290 分钟。
 
-自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行；
-新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 之后，只有该步骤
-通过才会执行。加入这些门禁时，该步骤在 `main` 上是失败的，因此还没有任何一次
-CI 运行执行过它们；目前的证据来自在 CI 之外运行同样的 `package.json` 脚本。
+自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行。
+新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 和此前的 failover
+步骤之后，且都不带 `if:`，因此只有前面每个步骤都通过才会执行。加入这些门禁时，
+Verify 步骤在 `main` 上是失败的，因此还没有任何一次 CI 运行执行过它们；当时的
+证据来自在 CI 之外运行同样的 `package.json` 脚本。
 
 ## 改动与属主
 

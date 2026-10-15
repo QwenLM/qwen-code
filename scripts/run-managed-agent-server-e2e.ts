@@ -3145,6 +3145,9 @@ try {
         // Several lease periods for anything the wake set in motion.
         await new Promise((resolve) => setTimeout(resolve, 6_000));
         const afterWake = fencedState();
+        // The probes are synchronous: let the loop record an exit during
+        // them before the owners are checked.
+        await new Promise((resolve) => setImmediate(resolve));
         for (const owner of owners) {
           if (childExited(owner.child)) {
             throw new Error(

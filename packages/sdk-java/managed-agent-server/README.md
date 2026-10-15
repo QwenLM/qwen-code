@@ -1310,10 +1310,11 @@ on the same MySQL, and the new Harness reissues the round to completion.
 After the wake, the MySQL general log must show the former Spring's claim
 `UPDATE`s carrying its stale owner id, and the former Harness must log the
 store's refusal of its stale writer grant. None of these attempts may change
-the Session binding, the Turn row, the public events or the journal. All of these
-arms are steps of the Hosted MySQL CI job, which runs daily or on demand and
-reaches them only after its `Verify Hosted Java, Spring and MySQL processes`
-step passes.
+the Session binding, the Turn row, the public events or the journal, as far as
+the snapshot listed in D11 of the replaceable-Harness design can see. All of
+these arms are steps of the Hosted MySQL CI job, which runs daily or on demand.
+They come after `Verify Hosted Java, Spring and MySQL processes` and the
+earlier failover steps, and run only when every earlier step passes.
 
 ### Hosted recovery scope
 

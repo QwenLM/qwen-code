@@ -354,7 +354,7 @@ describe('managed-agent-server e2e runner', () => {
       expect(source.slice(at, end), label).toMatch(/\n {10}owners,$/);
     }
     const ownersAlive = source.indexOf(
-      'for (const owner of owners) {',
+      'for (const owner of owners) {\n          if (childExited(owner.child)) {\n            throw new Error(',
       compare,
     );
     expect(ownersAlive).toBeGreaterThan(compare);
