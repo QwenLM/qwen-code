@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -16,6 +13,22 @@ import com.sun.net.httpserver.HttpServer;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.awaitility.core.ConditionFactory;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.IOException;
 import java.net.BindException;
 import java.net.InetSocketAddress;
@@ -47,21 +60,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.awaitility.core.ConditionFactory;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
-import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.io.CleanupMode;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * H4e-b1: the lead-side team runtime end to end. A real Spring server on
@@ -244,8 +245,9 @@ class HostedTeamLeadMySqlIT {
         waiting().atMost(Duration.ofSeconds(45)).pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
             assertNoModelFailure();
             String status = operationStatus(lead, closeOperation);
-            if (List.of("failed", "recovery_blocked").contains(status))
+            if (List.of("failed", "recovery_blocked").contains(status)) {
                 throw new IllegalStateException("The lead's close ended " + status);
+            }
             assertThat(status).isEqualTo("completed");
         });
         waiting().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
@@ -289,7 +291,9 @@ class HostedTeamLeadMySqlIT {
             for (JsonNode action : request("GET", "/v1/agents/sessions/" + lead + "/actions", null, null, 200)
                     .path("data")) {
                 String id = action.path("id").asText();
-                if (answered.contains(id)) continue;
+                if (answered.contains(id)) {
+                    continue;
+                }
                 // The id is the idempotency key, so a response retried after
                 // a failed attempt is the same response.
                 request("POST", "/v1/agents/sessions/" + lead + "/actions/" + id + "/responses", Map.of(
@@ -305,8 +309,9 @@ class HostedTeamLeadMySqlIT {
         });
         // One card per asking tool, each previewing its own input; task_list asks nothing.
         Map<String, String> previews = new LinkedHashMap<>();
-        for (JsonNode card : cards)
+        for (JsonNode card : cards) {
             previews.put(card.path("tool_name").asText(), card.at("/input_preview/text").asText());
+        }
         assertThat(cards).hasSize(4);
         assertThat(previews).containsOnlyKeys("team_create", "task_create", "task_update", "agent");
         assertThat(previews.get("team_create")).contains("\"team_name\":\"review\"");
@@ -336,7 +341,9 @@ class HostedTeamLeadMySqlIT {
                 return;
             }
             Matcher lead = LEAD.matcher(first);
-            if (!lead.find()) throw new AssertionError("Unknown model request: " + first);
+            if (!lead.find()) {
+                throw new AssertionError("Unknown model request: " + first);
+            }
             Step step = leadStep(lead.group(1), body);
             reply(exchange, step.calls(), step.text());
         } catch (Exception | AssertionError failure) {
@@ -375,8 +382,9 @@ class HostedTeamLeadMySqlIT {
         for (int index = 0; index < messages.size(); index++) {
             JsonNode message = messages.get(index);
             if ("assistant".equals(message.path("role").asText())
-                    && (message.path("tool_calls").isMissingNode() || message.path("tool_calls").isEmpty()))
+                    && (message.path("tool_calls").isMissingNode() || message.path("tool_calls").isEmpty())) {
                 start = index + 1;
+            }
         }
         List<JsonNode> turn = messages.subList(start, messages.size());
         long results = turn.stream().filter(message -> "tool".equals(message.path("role").asText())).count();
@@ -384,16 +392,22 @@ class HostedTeamLeadMySqlIT {
         Set<String> reportedEver = new LinkedHashSet<>();
         for (int index = 0; index < messages.size(); index++) {
             JsonNode message = messages.get(index);
-            if (!"user".equals(message.path("role").asText())) continue;
+            if (!"user".equals(message.path("role").asText())) {
+                continue;
+            }
             Set<String> names = teammates(message.toString());
             reportedEver.addAll(names);
-            if (index >= start) reportedNow.addAll(names);
+            if (index >= start) {
+                reportedNow.addAll(names);
+            }
         }
         boolean wake = turn.stream().anyMatch(message -> "user".equals(message.path("role").asText())
                 && message.toString().contains("task-notification"));
         // Every report here is a member's, so a wake without a label is a
         // lost label, not a plan to wait out.
-        if (wake && reportedNow.isEmpty()) throw new AssertionError("A member's report arrived without its label");
+        if (wake && reportedNow.isEmpty()) {
+            throw new AssertionError("A member's report arrived without its label");
+        }
         List<Step> plan = new ArrayList<>();
         switch (kind) {
             case "LIFECYCLE" -> {
@@ -455,7 +469,9 @@ class HostedTeamLeadMySqlIT {
         }
         long seen = 0;
         for (Step step : plan) {
-            if (results == seen) return step;
+            if (results == seen) {
+                return step;
+            }
             seen += step.calls().size();
         }
         if (kind.equals("LIFECYCLE") && !wake) {
@@ -499,16 +515,22 @@ class HostedTeamLeadMySqlIT {
     private static Set<String> teammates(String text) {
         Set<String> names = new LinkedHashSet<>();
         Matcher matcher = TEAMMATE.matcher(text.replace("\\u003c", "<").replace("\\u003e", ">"));
-        while (matcher.find()) names.add(matcher.group(1));
+        while (matcher.find()) {
+            names.add(matcher.group(1));
+        }
         return names;
     }
 
     private static String firstUserText(JsonNode body) {
         for (JsonNode message : body.path("messages")) {
-            if (!"user".equals(message.path("role").asText())) continue;
+            if (!"user".equals(message.path("role").asText())) {
+                continue;
+            }
             String text = message.path("content").isTextual() ? message.path("content").asText()
                     : message.path("content").toString();
-            if (text.contains("H4EB1_")) return text;
+            if (text.contains("H4EB1_")) {
+                return text;
+            }
         }
         return "";
     }
@@ -526,8 +548,9 @@ class HostedTeamLeadMySqlIT {
     private static List<String> agentProperties(JsonNode body) {
         List<String> names = new ArrayList<>();
         body.path("tools").forEach(tool -> {
-            if ("agent".equals(tool.path("function").path("name").asText()))
+            if ("agent".equals(tool.path("function").path("name").asText())) {
                 tool.path("function").path("parameters").path("properties").fieldNames().forEachRemaining(names::add);
+            }
         });
         return names;
     }
@@ -535,19 +558,27 @@ class HostedTeamLeadMySqlIT {
     private List<String> leadUserMessages(String marker) {
         List<JsonNode> requests = requestsOf(marker);
         List<String> texts = new ArrayList<>();
-        if (requests.isEmpty()) return texts;
-        for (JsonNode message : requests.get(requests.size() - 1).path("messages"))
-            if ("user".equals(message.path("role").asText())) texts.add(message.path("content").toString());
+        if (requests.isEmpty()) {
+            return texts;
+        }
+        for (JsonNode message : requests.get(requests.size() - 1).path("messages")) {
+            if ("user".equals(message.path("role").asText())) {
+                texts.add(message.path("content").toString());
+            }
+        }
         return texts;
     }
 
     /** What the model read as the answer to one tool call, in the latest request carrying it. */
     private String toolAnswerOrNull(String callId) {
-        for (int index = modelRequests.size() - 1; index >= 0; index--)
-            for (JsonNode message : modelRequests.get(index).path("messages"))
+        for (int index = modelRequests.size() - 1; index >= 0; index--) {
+            for (JsonNode message : modelRequests.get(index).path("messages")) {
                 if ("tool".equals(message.path("role").asText())
-                        && callId.equals(message.path("tool_call_id").asText()))
+                        && callId.equals(message.path("tool_call_id").asText())) {
                     return plain(message.path("content").toString());
+                }
+            }
+        }
         return null;
     }
 
@@ -560,8 +591,9 @@ class HostedTeamLeadMySqlIT {
     /** A tool answer as plain text, whatever JSON escaping carried it. */
     private static String plain(String text) {
         String out = text;
-        for (int pass = 0; pass < 4; pass++)
+        for (int pass = 0; pass < 4; pass++) {
             out = out.replace("\\\\", "\\").replace("\\\"", "\"").replace("\\n", "\n");
+        }
         return out;
     }
 
@@ -610,37 +642,43 @@ class HostedTeamLeadMySqlIT {
     // a few stalled awaits would outlast the Hosted fork's shared timeout.
     private void assertNoModelFailure() {
         Throwable failure = modelFailure.get();
-        if (failure != null) throw new IllegalStateException("The model fixture failed", failure);
+        if (failure != null) {
+            throw new IllegalStateException("The model fixture failed", failure);
+        }
     }
 
     private void assertNoFailedChild(String lead) {
         for (Map<String, Object> row : rows(lead, "child_run")) {
             JsonNode run = body(row);
-            if ("failed".equals(run.at("/run/state").asText()))
+            if ("failed".equals(run.at("/run/state").asText())) {
                 throw new IllegalStateException("A member failed: " + run);
+            }
         }
     }
 
-    /** The lead's close stays owed while its member's Turn runs. */
+            /** The lead's close stays owed while its member's Turn runs. */
     private void assertCloseOwed(String lead, String operation, String child) throws Exception {
         String status = operationStatus(lead, operation);
         String session = sessionStatus(child);
         String turn = childTurnStatus(child);
         if (List.of("completed", "failed", "recovery_blocked").contains(status) || !"ACTIVE".equals(session)
-                || !List.of("ACCEPTED", "RUNNING").contains(turn))
+                || !List.of("ACCEPTED", "RUNNING").contains(turn)) {
             throw new IllegalStateException("The close did not wait for the member: close " + status
-                    + ", member Session " + session + ", member Turn " + turn);
+            + ", member Session " + session + ", member Turn " + turn);
+        }
     }
 
     private int closeAttempts(String operation) {
         return jdbc.queryForObject("SELECT attempt_count FROM ma_operation WHERE tenant_id = ?"
-                + " AND operation_id = ?", Integer.class, tenant, operation);
+        + " AND operation_id = ?", Integer.class, tenant, operation);
     }
 
     private void assertNoFailedTurn(String session) {
         List<Map<String, Object>> failed = jdbc.queryForList("SELECT turn_id, error_code FROM ma_turn"
                 + " WHERE tenant_id = ? AND session_id = ? AND status = 'FAILED'", tenant, session);
-        if (!failed.isEmpty()) throw new IllegalStateException("Turns failed: " + failed);
+        if (!failed.isEmpty()) {
+            throw new IllegalStateException("Turns failed: " + failed);
+        }
     }
 
     /** The lead's first request must declare the team tools; nothing later can pass without them. */
@@ -810,19 +848,22 @@ class HostedTeamLeadMySqlIT {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
-        if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        if (approvals) {
+            arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        }
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                 + "Linux".equals(System.getProperty("os.name")));
         // The broker's durable local-process mode only exists on Linux;
         // elsewhere it must be opted out, which starts the broker without
         // workspace execution (workspace closes then keep answering the
         // tolerated 409). Linux CI keeps the mode and its workspace.
-        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("linux"))
+        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("linux")) {
             arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=false");
+        }
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> context.getBeanFactory().registerSingleton("h4eb1Authentication",
                         authentication()))
-                .run(arguments.toArray(String[]::new));
+        .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
             spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
@@ -847,7 +888,9 @@ class HostedTeamLeadMySqlIT {
                 .directory(decoy.toFile()).redirectErrorStream(true).redirectOutput(log.toFile());
         Map<String, String> environment = builder.environment();
         environment.clear();
-        if (System.getenv("PATH") != null) environment.put("PATH", System.getenv("PATH"));
+        if (System.getenv("PATH") != null) {
+            environment.put("PATH", System.getenv("PATH"));
+        }
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
@@ -855,10 +898,14 @@ class HostedTeamLeadMySqlIT {
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
         for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) environment.put(name, temporary.resolve(name + ".json").toString());
+                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
+            environment.put(name, temporary.resolve(name + ".json").toString());
+        }
         harness = builder.start();
         waiting().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-            if (!harness.isAlive()) throw new IllegalStateException("Hosted Harness exited: " + Files.readString(log));
+            if (!harness.isAlive()) {
+                throw new IllegalStateException("Hosted Harness exited: " + Files.readString(log));
+            }
             int status;
             try {
                 status = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
@@ -897,7 +944,9 @@ class HostedTeamLeadMySqlIT {
                 .header("X-H4eb1-Fixture-Actor", "actor")
                 .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                         : HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)));
-        if (key != null) request.header("Idempotency-Key", key);
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
         var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
@@ -943,14 +992,20 @@ class HostedTeamLeadMySqlIT {
                 }
             } finally {
                 try {
-                    if (spring != null) spring.close();
+                    if (spring != null) {
+                        spring.close();
+                    }
                 } finally {
                     try {
                         // Each Session's Broker worker is durable and outlives Spring.
                         HostedDurableWorkers.stop(temporary.resolve("broker"), json);
                     } finally {
-                        if (model != null) model.stop(0);
-                        if (modelThreads != null) modelThreads.shutdownNow();
+                        if (model != null) {
+                            model.stop(0);
+                        }
+                        if (modelThreads != null) {
+                            modelThreads.shutdownNow();
+                        }
                         http.close();
                     }
                 }
