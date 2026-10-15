@@ -104,6 +104,12 @@ export class InteractiveModSession implements ICommandLoader {
     return this.startup;
   }
 
+  failStartup(error: unknown): void {
+    if (this.initialization) return;
+    this.initialization = this.startup;
+    this.rejectStartup(error);
+  }
+
   async loadCommands(signal: AbortSignal) {
     await this.startup;
     signal.throwIfAborted();

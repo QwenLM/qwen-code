@@ -111,6 +111,40 @@ describe('interactive Mod owner', () => {
     );
   });
 
+  it('rejects pending discovery permanently when the host fails before Mod startup', async () => {
+    const { config, owner, runtime } = setup();
+    const error = new Error('Transcript restore failed');
+    const commands = owner.loadCommands(new AbortController().signal);
+    const rejected = commands.catch((reason: unknown) => reason);
+
+    owner.failStartup(error);
+
+    await expect(owner.ready).rejects.toBe(error);
+    expect(await rejected).toBe(error);
+    await expect(owner.initialize()).rejects.toBe(error);
+    expect(runtime.initialize).not.toHaveBeenCalled();
+    expect(runtime.loadCommands).not.toHaveBeenCalled();
+    expect(getInteractiveModSession(config)).toBe(owner);
+  });
+
+  it('leaves Mod readiness intact when later host recovery fails', async () => {
+    const { owner, runtime } = setup();
+    let release!: () => void;
+    runtime.initialize.mockImplementation(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    const initialization = owner.initialize();
+    owner.failStartup(new Error('Background recovery failed'));
+    release();
+
+    await initialization;
+    await expect(owner.ready).resolves.toBeUndefined();
+    owner.failStartup(new Error('Later recovery failed'));
+    await owner.loadCommands(new AbortController().signal);
+    expect(runtime.initialize).toHaveBeenCalledOnce();
+    expect(runtime.loadCommands).toHaveBeenCalledOnce();
+  });
+
   it('buffers current transcript logs across renderer attachment and drops old-session output', () => {
     const { owner, host, config } = setup();
     host.log({ to: 'transcript', text: 'stale' }, 'mod', 'old');

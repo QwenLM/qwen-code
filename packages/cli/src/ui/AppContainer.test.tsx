@@ -80,6 +80,9 @@ import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
 import * as interactiveMods from '../services/interactive-mod-session.js';
+import { ModSession } from '../services/mod-session.js';
+import { CommandService } from '../services/CommandService.js';
+import { registerCleanup } from '../utils/cleanup.js';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
@@ -148,6 +151,8 @@ import {
   ToolCallStatus,
 } from './types.js';
 import { CommandKind } from './commands/types.js';
+import { helpCommand } from './commands/helpCommand.js';
+import { quitCommand } from './commands/quitCommand.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   isContextFilesAnnouncement,
@@ -6622,6 +6627,116 @@ describe('AppContainer State Management', () => {
         expect.any(Number),
       );
     });
+
+    it.each(['config', 'restore'] as const)(
+      'releases command discovery when Ink %s fails before Mod startup',
+      async (failure) => {
+        const errorText =
+          failure === 'config'
+            ? 'Config initialization failed'
+            : 'outputs is not iterable';
+        vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+        const initializeConfig = vi.spyOn(mockConfig, 'initialize');
+        if (failure === 'config') {
+          initializeConfig.mockRejectedValue(new Error(errorText));
+        } else {
+          initializeConfig.mockResolvedValue(undefined);
+        }
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'test-project-hash',
+            startTime: '2024-01-01T00:00:00Z',
+            lastUpdated: '2024-01-01T00:00:01Z',
+            messages: [
+              {
+                uuid: 'bad-result',
+                parentUuid: null,
+                sessionId: 'session-1',
+                timestamp: '2024-01-01T00:00:00Z',
+                type: 'system',
+                subtype: 'slash_command',
+                systemPayload: {
+                  phase: 'result',
+                  rawCommand: '/about',
+                  outputHistoryItems: {},
+                },
+                cwd: '/test/workspace',
+                version: '1.0.0',
+              },
+            ],
+          },
+          filePath: '/tmp/session.jsonl',
+          lastCompletedUuid: 'bad-result',
+        } as unknown as ReturnType<Config['getResumedSessionData']>);
+        const runtime = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          loadCommands: vi.fn().mockResolvedValue([]),
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+        const create = vi
+          .spyOn(ModSession, 'create')
+          .mockReturnValue(runtime as unknown as ModSession);
+        vi.mocked(registerCleanup).mockReturnValue(() => {});
+        mockSettings.merged.experimental = { mods: true };
+        const owner = interactiveMods.createInteractiveModSession(
+          mockConfig,
+          mockSettings,
+        )!;
+        const startupFailure = vi.fn();
+        void owner.ready.catch(startupFailure);
+        const loaded = vi.fn();
+        const commands = CommandService.create(
+          [{ loadCommands: async () => [helpCommand, quitCommand] }, owner],
+          new AbortController().signal,
+        ).then(loaded);
+        try {
+          render(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+          await vi.waitFor(() => expect(loaded).toHaveBeenCalledOnce());
+          expect(loaded.mock.calls[0][0].getCommands()).toEqual([
+            helpCommand,
+            quitCommand,
+          ]);
+          expect(startupFailure).toHaveBeenCalledWith(
+            expect.objectContaining({ message: errorText }),
+          );
+          expect(runtime.initialize).not.toHaveBeenCalled();
+          expect(runtime.loadCommands).not.toHaveBeenCalled();
+          expect(interactiveMods.getInteractiveModSession(mockConfig)).toBe(
+            owner,
+          );
+          expect(
+            mockedUseHistory.mock.results.at(-1)!.value.addItem,
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: MessageType.ERROR,
+              text: expect.stringContaining(errorText),
+            }),
+            expect.any(Number),
+          );
+          if (failure === 'restore') {
+            expect(capturedUIState.isInputActive).toBe(true);
+          }
+        } finally {
+          cleanup();
+          await owner.close();
+          await commands;
+          create.mockRestore();
+        }
+      },
+    );
 
     it.each([false, true])(
       'keeps restored Mod diagnostics and input available when startup fails=%s',

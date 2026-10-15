@@ -422,15 +422,17 @@ export const useSlashCommandProcessor = (
     setBtwItem(null);
   }, []);
 
-  // AbortController for cancelling async slash commands via ESC
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const activeCommandRef = useRef<{
+    controller: AbortController;
+    canCancel: boolean;
+  } | null>(null);
 
   const cancelSlashCommand = useCallback(() => {
     cancelBtw();
-    if (!abortControllerRef.current) {
+    if (!activeCommandRef.current?.canCancel) {
       return;
     }
-    abortControllerRef.current.abort();
+    activeCommandRef.current.controller.abort();
     addItem(
       {
         type: MessageType.INFO,
@@ -938,7 +940,8 @@ export const useSlashCommandProcessor = (
 
       // Create a new AbortController for this command execution
       const abortController = new AbortController();
-      abortControllerRef.current = abortController;
+      const activeCommand = { controller: abortController, canCancel: true };
+      activeCommandRef.current = activeCommand;
 
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
@@ -1150,10 +1153,13 @@ export const useSlashCommandProcessor = (
                 { once: true },
               );
             });
-            const result = await Promise.race([
-              commandToExecute.action(fullCommandContext, args),
-              abortPromise,
-            ]);
+            activeCommand.canCancel = commandToExecute.canCancel !== false;
+            const result = abortController.signal.aborted
+              ? undefined
+              : await Promise.race([
+                  commandToExecute.action(fullCommandContext, args),
+                  abortPromise,
+                ]);
 
             // If the command was cancelled via ESC while executing, skip result processing
             if (abortController.signal.aborted) {
@@ -1629,7 +1635,10 @@ export const useSlashCommandProcessor = (
           });
           logSlashCommand(config, event);
         }
-        setIsProcessing(false);
+        if (activeCommandRef.current === activeCommand) {
+          activeCommandRef.current = null;
+          setIsProcessing(false);
+        }
       }
     },
     [

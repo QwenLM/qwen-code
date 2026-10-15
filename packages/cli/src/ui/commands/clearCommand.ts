@@ -31,6 +31,8 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
+  // Session rotation must finish before the UI admits another turn.
+  canCancel: false,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context, _args) => {
     const { config } = context.services;

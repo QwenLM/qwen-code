@@ -164,6 +164,7 @@ import {
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
+import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -1143,8 +1144,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
-      // Note: the program will not work if this fails so let errors be
-      // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       // Bound the goal-runtime gate: under session-writer lease contention
@@ -1336,7 +1335,17 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-    })();
+    })().catch((error: unknown) => {
+      getInteractiveModSession(config)?.failStartup(error);
+      debugLogger.error('Failed to initialize session:', error);
+      historyManager.addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Failed to initialize session: ${sanitizeTerminalLine(getErrorMessage(error)).slice(0, 2000)}`,
+        },
+        Date.now(),
+      );
+    });
 
     // Register SessionEnd cleanup for process exit
     registerCleanup(async () => {
