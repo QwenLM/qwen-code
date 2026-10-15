@@ -617,6 +617,37 @@ describe('Hosted Harness model boundary', () => {
     expect(model.requests[0]).toEqual([{ text: 'rewritten +10k' }]);
   });
 
+  it('carries the provider request id into the rejection and StopFailure error_details', async () => {
+    const requestId = 'a30a1854-1925-4da8-8803-73fee2865116';
+    config([
+      {
+        type: LlmEventType.Error,
+        value: {
+          error: {
+            message: '400 status code (no body)',
+            status: 400,
+            requestId,
+          },
+        },
+      },
+    ]);
+    const hooks = hostedHooks();
+    await expect(
+      runHostedHarnessTextTurn({ ...input, hooks: hooks.session }),
+    ).rejects.toThrow(
+      `[API Error: 400 status code (no body) (request_id: ${requestId})]`,
+    );
+    expect(hooks.fire).toHaveBeenCalledWith(
+      HookEventName.StopFailure,
+      `${input.promptId}:0:model-failure`,
+      expect.objectContaining({
+        error_details: `[API Error: 400 status code (no body) (request_id: ${requestId})]`,
+      }),
+      input.signal,
+      undefined,
+    );
+  });
+
   it('reports provider failure through StopFailure and leaves Hook recovery failures untouched', async () => {
     config([
       {
@@ -631,7 +662,9 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.fire).toHaveBeenCalledWith(
       HookEventName.StopFailure,
       `${input.promptId}:0:model-failure`,
-      expect.objectContaining({ error_details: 'provider failed' }),
+      expect.objectContaining({
+        error_details: '[API Error: provider failed]',
+      }),
       input.signal,
       undefined,
     );
