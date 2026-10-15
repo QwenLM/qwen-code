@@ -3250,18 +3250,18 @@ public class ManagedAgentStore implements AgentStateStore {
                 .key("SET_MODEL", sessionId, actorId);
         var namespace = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
         var scopeKind = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope.ACTOR;
-        Map<String, Object> replay = ManagedReceipts.find(jdbc, namespace, tenantId,
+        ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
                 scopeKind, scope, key, false);
         if (replay != null) {
-            if (!digest.equals(replay.get("request_digest"))
-                    || !sessionId.equals(replay.get("session_id"))
-                    || !"SET_MODEL".equals(replay.get("operation"))
+            if (!digest.equals(replay.requestDigest())
+                    || !sessionId.equals(replay.sessionId())
+                    || !"SET_MODEL".equals(replay.operation())
                     || !java.util.Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
-                            (byte[]) replay.get("actor_id"))) {
+                            replay.actorKey())) {
                 throw new ApiException(HttpStatus.CONFLICT, "idempotency_conflict",
                         "The idempotency key was reused with different content");
             }
-            Map<String, Object> result = readMap((String) replay.get("result_json"));
+            Map<String, Object> result = readMap(replay.resultJson());
             return new WebShellModelChangeResult(sessionId, new WebShellModelSelection(
                     (String) result.get("modelId"), ((Number) result.get("revision")).longValue()), true);
         }
@@ -3297,7 +3297,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         long revision = current + 1;
         long now = clock.millis();
-        jdbc.update("UPDATE ma_session SET model_id = ?, model_revision = ?, updated_at = ?,"
+        jdbc.update("UPDATE ma_session SET model_id = ?, model_revision = ?, gmt_modified = ?,"
                 + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND model_revision = ?",
                 modelId, revision, now, tenantId, sessionId, current);
         ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,

@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -156,7 +157,7 @@ class ManagedModelSelectionTest {
         }
         if (shape.equals("approval")) {
             jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
-                    + "domain,record_id,revision,created_at,record_kind,state,action_id,action_version,options_json)"
+                    + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
                     + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
                     ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
@@ -224,11 +225,11 @@ class ManagedModelSelectionTest {
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,"
                 + "session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,"
-                + "state,created_at) VALUES (?,?,?,'ws',?,'usage','managed-hosted-model-usage',1,?,?,"
-                + "'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP)", "f".repeat(64), scope, tenant, session,
+                + "state,gmt_create) VALUES (?,?,?,'ws',?,'usage','managed-hosted-model-usage',1,?,?,"
+                + "'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")", "f".repeat(64), scope, tenant, session,
                 bytes.length, ExtensionRecordJournal.sha256(bytes), bytes);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
-                + "session_id,domain,record_id,revision,record_resource_id,created_at,settled_at)"
+                + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
                 + " VALUES (?,?,?,'ws',?,'hosted_context_usage','latest',1,'usage',1,1)", scope, record, tenant, session);
         assertThat(store.findModelContexts(tenant, List.of(session))).containsKey(session);
         var raced = spy(store);
@@ -247,7 +248,7 @@ class ManagedModelSelectionTest {
         String record = com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(session,
                 "hosted_context_usage", "latest");
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
-                + "session_id,domain,record_id,revision,record_resource_id,created_at,settled_at)"
+                + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
                 + " VALUES (?,?,?,'ws',?,'hosted_context_usage','latest',1,'usage',1,1)", scope, record, tenant, session);
         change("actor", "a", "model-a", 0);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE session_scope_key=?",
@@ -255,7 +256,7 @@ class ManagedModelSelectionTest {
         change("actor", "b", "model-b", 1);
         change("actor", "again-a", "model-a", 2);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
-                + "session_id,domain,record_id,revision,record_resource_id,created_at,settled_at)"
+                + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
                 + " VALUES (?,?,?,'ws',?,'hosted_context_usage','latest',2,'new-usage',2,2)", scope, record, tenant, session);
         assertThat(change("actor", "again-a", "model-a", 2).replayed()).isTrue();
         assertThat(jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE session_scope_key=?",

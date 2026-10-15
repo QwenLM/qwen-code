@@ -514,12 +514,17 @@ describe('build artifact — transcript entry (#11031)', () => {
     // File-tree mutation actions are excluded from the transcript build.
     // At 31e02ace main measures 1,330,293; the read-only artifact hook with
     // those actions excluded measures 1,330,497, below the same ceiling.
+    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // Managed home, Workspace creation, approval and model/context copy also
+    // enter the shared table. This branch measures 1,334,590 UTF-16 units;
+    // the 1,336,000 ceiling retains 1,410 units of margin. Managed interactive
+    // code remains excluded from this entry.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_331_500);
+    expect(js.length).toBeLessThan(1_336_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {

@@ -29,10 +29,10 @@ class ManagedSchemaTest {
         executeResource(source, ManagedSchema.WORKSPACE_CREATION);
         assertEquals(4, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,created_at,updated_at)"
+            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                     + " VALUES ('tenant','session','qwen-code',1,1)");
             statement.execute("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,"
-                    + "payload_digest,status,created_at,updated_at) VALUES ('tenant','session','turn',"
+                    + "payload_digest,status,gmt_create,gmt_modified) VALUES ('tenant','session','turn',"
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
@@ -689,7 +689,7 @@ class ManagedSchemaTest {
                 connection.prepareStatement(
                         "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key,"
                             + " tenant_id, scope_kind, scope_key, scope_id, idempotency_key,"
-                            + " idempotency_digest, request_digest, state, created_at, updated_at)"
+                            + " idempotency_digest, request_digest, state, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 'tenant-key', 'tenant', 'ACTOR', 'scope', 'actor', ?,"
                             + " ?, 'digest', 'PENDING', 1, 1)")) {
             statement.setString(1, ManagedSchemaKeys.key(key));
