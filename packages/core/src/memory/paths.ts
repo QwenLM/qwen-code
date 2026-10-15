@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
@@ -13,6 +14,7 @@ import {
   resolvePath,
   sanitizeCwd,
 } from '../utils/paths.js';
+import { getImportedProjectMemoryRoot } from './import-paths.js';
 import type { AutoMemoryType } from './types.js';
 import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
@@ -93,7 +95,18 @@ let warnedUnknownMemoryProjectScope = false;
  * instead of silently falling back to the shared scope this flag exists to
  * prevent.
  */
+const projectScopeContext = new AsyncLocalStorage<'workspace' | 'git-root'>();
+
+export function runWithMemoryProjectScope<T>(
+  scope: 'workspace' | 'git-root',
+  run: () => T,
+): T {
+  return projectScopeContext.run(scope, run);
+}
+
 function resolveWorkspaceProjectScope(): boolean {
+  const scoped = projectScopeContext.getStore();
+  if (scoped) return scoped === 'workspace';
   const raw = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
   if (raw === undefined) return false;
   const normalized = raw.trim().toLowerCase();
@@ -179,10 +192,23 @@ export function getProjectAutoMemoryRoots(
 ): string[] {
   const configuredRoot = getAutoMemoryRoot(projectRoot);
   const localRoot = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
-  if (path.resolve(configuredRoot) === path.resolve(localRoot)) {
-    return trustedProject ? [configuredRoot] : [];
+  const roots =
+    path.resolve(configuredRoot) === path.resolve(localRoot)
+      ? trustedProject
+        ? [configuredRoot]
+        : []
+      : trustedProject
+        ? [configuredRoot, localRoot]
+        : [configuredRoot];
+  if (trustedProject) {
+    try {
+      const imported = getImportedProjectMemoryRoot(projectRoot);
+      if (fs.existsSync(imported)) roots.push(imported);
+    } catch {
+      // Invalid Git metadata must not redirect recall into another repository.
+    }
   }
-  return trustedProject ? [configuredRoot, localRoot] : [configuredRoot];
+  return roots;
 }
 
 export function getMemoryRootTrustedAnchor(root: string): string {

@@ -108,6 +108,7 @@ import {
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
+import { memoryCommand } from '../commands/memory.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
@@ -883,6 +884,7 @@ export async function parseArguments(): Promise<CliArgs> {
     )
     // Register MCP subcommands
     .command(mcpCommand)
+    .command(memoryCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
     .command(authCommand)
@@ -940,6 +942,7 @@ export async function parseArguments(): Promise<CliArgs> {
   if (
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
+      result._[0] === 'memory' ||
       result._[0] === 'extensions' ||
       result._[0] === 'auth' ||
       result._[0] === 'hooks' ||

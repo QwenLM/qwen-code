@@ -40,6 +40,7 @@ initCpuProfiler();
 type BootstrapRoute =
   | 'serve'
   | 'mcp'
+  | 'memory'
   | 'managed-runtime-worker'
   | 'session-send-mcp'
   | 'help'
@@ -58,6 +59,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
   ['mcp', 'Manage MCP servers'],
+  ['memory', 'Preview and import external memories'],
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
@@ -390,6 +392,7 @@ export function resolveBootstrapRoute(
   // Version-bearing mcp argv never reaches here: the intercept above owns
   // every exact version token before `--`, and post-`--` tokens are
   // positional data the fast path persists verbatim.
+  if (firstArg === 'memory') return 'memory';
   if (firstArg === 'mcp') {
     return 'mcp';
   }
@@ -578,6 +581,20 @@ export async function runCliEntry(
     if (await tryRunServeFastPath(argv)) {
       return;
     }
+  } else if (route === 'memory') {
+    const [{ default: yargs }, { memoryCommand }] = await Promise.all([
+      import('yargs'),
+      import('./commands/memory.js'),
+    ]);
+    await yargs(argv)
+      .scriptName('qwen')
+      .command(memoryCommand)
+      .demandCommand(1)
+      .strict()
+      .help()
+      .version(false)
+      .parseAsync();
+    return;
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
     return;

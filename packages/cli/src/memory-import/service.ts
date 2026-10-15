@@ -1,0 +1,779 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import * as fs from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import lockfile from 'proper-lockfile';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getImportedProjectMemoryRoot } from '@qwen-code/qwen-code-core/memory/import-paths.js';
+import {
+  getUserAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
+  scanAutoMemorySnapshot,
+  parseAutoMemoryTopicDocument,
+} from '@qwen-code/qwen-code-core/memory/structured-scan.js';
+import { rebuildAutoMemoryIndexAtRoot } from '@qwen-code/qwen-code-core/memory/indexer.js';
+import {
+  validateMemoryImportProposal,
+  type MemoryImportModelInput,
+  type MemoryImportProposal,
+} from '@qwen-code/qwen-code-core/memory/import-model.js';
+import { resolveTrustedMemoryFile } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
+import { digest, previewSource, type ImportSection } from './source.js';
+
+type Scope = 'project' | 'user';
+export interface ImportSelection {
+  id: string;
+  scope: Scope;
+}
+export interface ImportItemResult {
+  id: string;
+  scope: Scope;
+  status: 'pending' | 'added' | 'duplicate' | 'conflict' | 'skipped' | 'failed';
+  reason?: string;
+  refs?: string[];
+}
+export interface ImportTask {
+  version: 1;
+  kind: 'task';
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+  items: ImportItemResult[];
+  result?: {
+    sourceSections: number;
+    newDocuments: number;
+    duplicateSections: number;
+    conflictSections: number;
+    failedSections: number;
+  };
+}
+interface StoredTask extends ImportTask {
+  requestDigest: string;
+}
+interface RetainedSource {
+  sections: Array<ImportSection & { scope: Scope }>;
+}
+interface LedgerRecord {
+  batchId: string;
+  phase: 'intent' | 'committed';
+  outputs: Array<{ relativePath: string; digest: string; bodyDigest: string }>;
+  stage: string;
+  memoryVersion?: string;
+  outcome: ImportItemResult;
+}
+type Ledger = Record<string, LedgerRecord>;
+export interface ImportServiceOptions {
+  projectRoot: string;
+  assertActive: () => void;
+  propose: (
+    input: MemoryImportModelInput,
+    signal: AbortSignal,
+  ) => Promise<MemoryImportProposal>;
+}
+const exists = async (file: string) =>
+  fs.lstat(file).then(
+    () => true,
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    },
+  );
+
+// Reject symlinked runtime state before reading or publishing private sources.
+async function privateDirectory(
+  directory: string,
+  anchor: string,
+): Promise<void> {
+  const relative = path.relative(anchor, directory);
+  if (relative.startsWith('..') || path.isAbsolute(relative))
+    throw new Error('Import path escapes runtime.');
+  let current = anchor;
+  for (const part of ['', ...relative.split(path.sep).filter(Boolean)]) {
+    if (part) current = path.join(current, part);
+    await fs.mkdir(current, { mode: 0o700 }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    });
+    const stat = await fs.lstat(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error('Import runtime directory must not be a symlink.');
+  }
+}
+async function readJson<T>(file: string): Promise<T> {
+  const handle = await fs.open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > 16 * 1024 * 1024)
+      throw new Error('Invalid import state file.');
+    const buffer = Buffer.alloc(stat.size + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > stat.size)
+      throw new Error('Import state exceeds the supported limit.');
+    return JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')) as T;
+  } finally {
+    await handle.close();
+  }
+}
+async function writeJson(file: string, value: unknown): Promise<void> {
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
+  try {
+    await fs.rename(tmp, file);
+  } finally {
+    await fs.rm(tmp, { force: true });
+  }
+}
+async function abortable<T>(
+  signal: AbortSignal,
+  work: () => Promise<T>,
+): Promise<T> {
+  signal.throwIfAborted();
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(new Error('Import cancelled.'));
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  try {
+    return await Promise.race([work(), cancelled]);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
+}
+function publicTask(task: StoredTask): ImportTask {
+  const { requestDigest: _requestDigest, ...result } = task;
+  return structuredClone({
+    ...result,
+    result: {
+      sourceSections: task.items.length,
+      newDocuments: task.items
+        .filter((item) => item.status === 'added')
+        .reduce((n, item) => n + (item.refs?.length ?? 0), 0),
+      duplicateSections: task.items.filter(
+        (item) => item.status === 'duplicate',
+      ).length,
+      conflictSections: task.items.filter((item) => item.status === 'conflict')
+        .length,
+      failedSections: task.items.filter((item) => item.status === 'failed')
+        .length,
+    },
+  });
+}
+export class MemoryImportService {
+  private readonly base = Storage.getRuntimeBaseDir();
+  private readonly state = path.join(this.base, 'memory-import');
+  private readonly owner: string;
+  private readonly workers = new Map<string, Promise<void>>();
+  private readonly controllers = new Map<string, AbortController>();
+  constructor(private readonly options: ImportServiceOptions) {
+    this.owner = digest(path.resolve(options.projectRoot));
+  }
+  private async readState<T>(file: string): Promise<T> {
+    const relative = path.relative(this.base, path.dirname(file));
+    if (relative.startsWith('..') || path.isAbsolute(relative))
+      throw new Error('Import state escapes runtime.');
+    let current = this.base;
+    for (const part of ['', ...relative.split(path.sep).filter(Boolean)]) {
+      if (part) current = path.join(current, part);
+      const stat = await fs.lstat(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink())
+        throw new Error('Invalid import state directory.');
+    }
+    return readJson<T>(file);
+  }
+  private taskDir(id: string): string {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid import batch ID.');
+    return path.join(this.state, 'batches', this.owner, id);
+  }
+  private async prepare(): Promise<void> {
+    this.options.assertActive();
+    // Private sources must never be written into a Git checkout, even when a
+    // runtime environment variable points into one.
+    let current = path.resolve(this.base);
+    while (true) {
+      if (await exists(path.join(current, '.git')))
+        throw new Error(
+          'Memory import requires a runtime directory outside Git checkouts.',
+        );
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    await fs.mkdir(this.base, { recursive: true, mode: 0o700 });
+    current = await fs.realpath(this.base);
+    while (true) {
+      if (await exists(path.join(current, '.git')))
+        throw new Error(
+          'Memory import requires a private runtime outside Git checkouts.',
+        );
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    await privateDirectory(
+      path.join(this.state, 'batches', this.owner),
+      this.base,
+    );
+  }
+  private async locked<T>(
+    directory: string,
+    run: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    await privateDirectory(directory, this.base);
+    let compromised = false;
+    let release: (() => Promise<void>) | undefined;
+    while (!release) {
+      signal?.throwIfAborted();
+      this.options.assertActive();
+      try {
+        release = await lockfile.lock(directory, {
+          realpath: false,
+          stale: 120_000,
+          update: 10_000,
+          retries: 0,
+          onCompromised: () => {
+            compromised = true;
+            for (const controller of this.controllers.values())
+              controller.abort();
+          },
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ELOCKED') throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    try {
+      if (compromised) throw new Error('Import lock lost.');
+      return await run();
+    } finally {
+      await release();
+    }
+  }
+  async submit(
+    input: unknown,
+    selections: unknown,
+    key: unknown,
+  ): Promise<ImportTask> {
+    this.options.assertActive();
+    const preview = previewSource(input);
+    if (
+      typeof key !== 'string' ||
+      !/^[\w-]{1,128}$/.test(key) ||
+      !Array.isArray(selections) ||
+      !selections.length ||
+      selections.length > 2048
+    )
+      throw new Error(
+        'Provide an idempotency key and explicit non-empty selection.',
+      );
+    const seen = new Set<string>();
+    const selected = selections
+      .map((value: unknown) => {
+        if (!value || typeof value !== 'object')
+          throw new Error('Invalid selection.');
+        const selection = value as ImportSelection;
+        const section = preview.sections.find(
+          (item) => item.id === selection.id && item.selectable,
+        );
+        if (
+          !section ||
+          seen.has(selection.id) ||
+          !['project', 'user'].includes(selection.scope)
+        )
+          throw new Error(
+            'Invalid, duplicate or unavailable section selection.',
+          );
+        seen.add(selection.id);
+        return { ...section, scope: selection.scope };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const retained = JSON.stringify({ sections: selected });
+    if (Buffer.byteLength(retained) > 16 * 1024 * 1024)
+      throw new Error(
+        'Selected contextual source exceeds the retained snapshot limit.',
+      );
+    const requestDigest = digest(JSON.stringify(selected));
+    const id = digest(`${this.owner}\0${key}`);
+    await this.prepare();
+    const dir = this.taskDir(id);
+    return this.locked(
+      path.join(this.state, 'admission', this.owner),
+      async () => {
+        this.options.assertActive();
+        if (await exists(path.join(dir, 'task.json'))) {
+          const task = await this.readState<StoredTask>(
+            path.join(dir, 'task.json'),
+          );
+          if (task.requestDigest !== requestDigest)
+            throw new Error(
+              'Idempotency key was already used with a different selection.',
+            );
+          this.kick(id);
+          return publicTask(task);
+        }
+        await privateDirectory(dir, this.base);
+        await writeJson(path.join(dir, 'source.json'), { sections: selected });
+        const now = new Date().toISOString();
+        const task: StoredTask = {
+          version: 1,
+          kind: 'task',
+          id,
+          status: 'queued',
+          createdAt: now,
+          updatedAt: now,
+          requestDigest,
+          items: selected.map((section) => ({
+            id: section.id,
+            scope: section.scope,
+            status: 'pending',
+          })),
+        };
+        await writeJson(path.join(dir, 'task.json'), task);
+        this.kick(id);
+        return publicTask(task);
+      },
+    );
+  }
+  private kick(id: string): void {
+    if (this.workers.has(id)) return;
+    const worker = this.run(id)
+      .catch(() => {
+        /* Durable state is retained for retry/recovery. */
+      })
+      .finally(() => {
+        this.workers.delete(id);
+        this.controllers.delete(id);
+      });
+    this.workers.set(id, worker);
+  }
+  async recover(): Promise<void> {
+    this.options.assertActive();
+    const root = path.join(this.state, 'batches', this.owner);
+    if (!(await exists(root))) return;
+    await privateDirectory(root, this.base);
+    for (const id of (await fs.readdir(root)).filter((id) =>
+      /^[a-f0-9]{64}$/.test(id),
+    )) {
+      const task = await this.readState<StoredTask>(
+        path.join(this.taskDir(id), 'task.json'),
+      );
+      if (task.status === 'running' || task.status === 'queued') this.kick(id);
+    }
+  }
+  async list(): Promise<ImportTask[]> {
+    this.options.assertActive();
+    const root = path.join(this.state, 'batches', this.owner);
+    if (!(await exists(root))) return [];
+    await privateDirectory(root, this.base);
+    const result: ImportTask[] = [];
+    for (const id of (await fs.readdir(root)).filter((id) =>
+      /^[a-f0-9]{64}$/.test(id),
+    ))
+      result.push(await this.get(id));
+    return result.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  async get(id: string): Promise<ImportTask> {
+    this.options.assertActive();
+    const task = await this.readState<StoredTask>(
+      path.join(this.taskDir(id), 'task.json'),
+    );
+    if (
+      task.status !== 'completed' &&
+      (await exists(path.join(this.taskDir(id), 'cancel.json')))
+    )
+      task.status = 'cancelled';
+    return publicTask(task);
+  }
+
+  async source(id: string, sectionId: string): Promise<ImportSection> {
+    await this.get(id);
+    const source = await this.readState<RetainedSource>(
+      path.join(this.taskDir(id), 'source.json'),
+    );
+    const section = source.sections.find((item) => item.id === sectionId);
+    if (!section) throw new Error('Source section not found in this batch.');
+    return section;
+  }
+  async cancel(id: string): Promise<ImportTask> {
+    this.options.assertActive();
+    this.controllers.get(id)?.abort();
+    const task = await this.get(id);
+    if (task.status === 'completed') return task;
+    await writeJson(path.join(this.taskDir(id), 'cancel.json'), {
+      cancelled: true,
+    });
+    this.controllers.get(id)?.abort();
+    await this.workers.get(id);
+    return this.get(id);
+  }
+
+  async retry(id: string): Promise<ImportTask> {
+    await this.prepare();
+    if (this.workers.has(id)) return this.get(id);
+    const dir = this.taskDir(id);
+    const result = await this.locked(dir, async () => {
+      const task = await this.readState<StoredTask>(
+        path.join(dir, 'task.json'),
+      );
+      if (task.status === 'completed') return publicTask(task);
+      await fs.rm(path.join(dir, 'cancel.json'), { force: true });
+      for (const item of task.items)
+        if (item.status === 'failed') item.status = 'pending';
+      task.status = 'queued';
+      task.updatedAt = new Date().toISOString();
+      await writeJson(path.join(dir, 'task.json'), task);
+      return publicTask(task);
+    });
+    this.kick(id);
+    return result;
+  }
+  async idle(id: string): Promise<ImportTask> {
+    await this.workers.get(id);
+    return this.get(id);
+  }
+  private async run(id: string): Promise<void> {
+    const dir = this.taskDir(id);
+    const controller = new AbortController();
+    this.controllers.set(id, controller);
+    await this.locked(
+      dir,
+      async () => {
+        const task = await this.readState<StoredTask>(
+          path.join(dir, 'task.json'),
+        );
+        if (!['queued', 'running'].includes(task.status)) return;
+        const source = await this.readState<RetainedSource>(
+          path.join(dir, 'source.json'),
+        );
+        task.status = 'running';
+        await writeJson(path.join(dir, 'task.json'), task);
+        for (const item of task.items) {
+          if (item.status !== 'pending') continue;
+          if (await exists(path.join(dir, 'cancel.json'))) controller.abort();
+          if (controller.signal.aborted) break;
+          try {
+            this.options.assertActive();
+            const section = source.sections.find(
+              (section) => section.id === item.id,
+            )!;
+            Object.assign(
+              item,
+              await this.importSection(
+                section,
+                id,
+                controller.signal,
+                async () => {
+                  if (await exists(path.join(dir, 'cancel.json')))
+                    controller.abort();
+                  controller.signal.throwIfAborted();
+                  this.options.assertActive();
+                },
+              ),
+            );
+          } catch {
+            if (controller.signal.aborted) break;
+            item.status = 'failed';
+            item.reason =
+              'Import could not finish. Existing memories were preserved; retry after resolving runtime, model or storage availability.';
+          }
+          task.updatedAt = new Date().toISOString();
+          await writeJson(path.join(dir, 'task.json'), task);
+        }
+        task.status = controller.signal.aborted
+          ? 'cancelled'
+          : task.items.some((item) => item.status === 'failed')
+            ? 'partial'
+            : 'completed';
+        task.updatedAt = new Date().toISOString();
+        await writeJson(path.join(dir, 'task.json'), task);
+      },
+      controller.signal,
+    );
+  }
+  private async snapshot(scope: Scope): Promise<{
+    version: string;
+    existing: MemoryImportModelInput['existing'];
+  }> {
+    const snapshot = await scanAutoMemorySnapshot(this.options.projectRoot, {
+      scopes: [scope],
+      trustedProject: true,
+      uncapped: true,
+    });
+    if (!snapshot.sourceStatus.complete)
+      throw new Error('Existing memory scan is incomplete.');
+    const existing: MemoryImportModelInput['existing'] = [];
+    for (const doc of snapshot.docs)
+      existing.push({
+        ref: `${scope}:${doc.relativePath}`,
+        content: await fs.readFile(doc.filePath, 'utf8'),
+      });
+    existing.sort((a, b) => a.ref.localeCompare(b.ref));
+    return { version: digest(JSON.stringify(existing)), existing };
+  }
+  private async importSection(
+    section: ImportSection & { scope: Scope },
+    batchId: string,
+    signal: AbortSignal,
+    assertCommit: () => Promise<void>,
+  ): Promise<ImportItemResult> {
+    const root =
+      section.scope === 'user'
+        ? getUserAutoMemoryRoot()
+        : getImportedProjectMemoryRoot(this.options.projectRoot);
+    const scopeState = path.join(this.state, 'scopes', digest(root));
+    return this.locked(
+      scopeState,
+      async () => {
+        signal.throwIfAborted();
+        this.options.assertActive();
+        const ledgerPath = path.join(scopeState, 'ledger.json');
+        const ledger: Ledger = (await exists(ledgerPath))
+          ? await this.readState(ledgerPath)
+          : {};
+        const key = digest(section.content);
+        const previous = ledger[key];
+        const outcome = (
+          status: ImportItemResult['status'],
+          reason?: string,
+        ): ImportItemResult => ({
+          id: section.id,
+          scope: section.scope,
+          status,
+          ...(reason ? { reason } : {}),
+        });
+        if (previous) {
+          const stage = path.join(scopeState, previous.stage);
+          const destination = path.join(root, 'imported', key);
+          if (
+            previous.phase === 'intent' &&
+            (await exists(stage)) &&
+            !(await exists(destination))
+          ) {
+            if (
+              (await this.snapshot(section.scope)).version !==
+              previous.memoryVersion
+            )
+              return outcome(
+                'conflict',
+                'Existing memory changed after an interrupted proposal.',
+              );
+            for (const output of previous.outputs) {
+              const file = path.join(stage, path.basename(output.relativePath));
+              if (digest(await fs.readFile(file, 'utf8')) !== output.digest)
+                throw new Error('Invalid staged import.');
+            }
+            signal.throwIfAborted();
+            this.options.assertActive();
+            await privateDirectory(path.join(root, 'imported'), this.base);
+            signal.throwIfAborted();
+            this.options.assertActive();
+            await assertCommit();
+            await fs.rename(stage, destination);
+          }
+          for (const output of previous.outputs) {
+            const file = await resolveTrustedMemoryFile(
+              root,
+              getMemoryRootTrustedAnchor(root),
+              output.relativePath,
+            );
+            if (
+              !file ||
+              digest(await fs.readFile(file, 'utf8')) !== output.digest
+            )
+              return outcome(
+                'conflict',
+                'Previously imported memory was edited or forgotten; it will not be restored.',
+              );
+          }
+          previous.phase = 'committed';
+          await writeJson(ledgerPath, ledger);
+          await rebuildAutoMemoryIndexAtRoot(root, section.scope);
+          if (previous.batchId === batchId)
+            return {
+              ...previous.outcome,
+              id: section.id,
+              scope: section.scope,
+            };
+          return outcome(
+            previous.outcome.status === 'added'
+              ? 'duplicate'
+              : previous.outcome.status,
+            'This source has already been processed.',
+          );
+        }
+        const before = await this.snapshot(section.scope);
+        const proposal = validateMemoryImportProposal(
+          await abortable(signal, () =>
+            this.options.propose(
+              {
+                scope: section.scope,
+                source: section.content,
+                existing: before.existing,
+              },
+              signal,
+            ),
+          ),
+        );
+        signal.throwIfAborted();
+        this.options.assertActive();
+        if ((await this.snapshot(section.scope)).version !== before.version)
+          return outcome(
+            'conflict',
+            'Existing memory changed during consolidation; preview and retry the source.',
+          );
+        await assertCommit();
+        if (proposal.decision === 'conflict')
+          return outcome('conflict', proposal.reason);
+        if (proposal.decision !== 'new') {
+          const result = outcome(
+            proposal.decision === 'skip' ? 'skipped' : 'duplicate',
+            proposal.reason,
+          );
+          ledger[key] = {
+            batchId,
+            phase: 'committed',
+            outputs: [],
+            stage: '',
+            outcome: result,
+          };
+          await writeJson(ledgerPath, ledger);
+          return result;
+        }
+        const documents: string[] = [];
+        for (const content of new Set(proposal.documents)) {
+          const parsed = parseAutoMemoryTopicDocument('import.md', content);
+          if (!parsed) throw new Error('Invalid native memory.');
+          if (
+            section.scope === 'user' &&
+            parsed.type !== 'user' &&
+            parsed.type !== 'feedback'
+          )
+            throw new Error(
+              'Project knowledge cannot be imported into user memory.',
+            );
+          const bodyDigest = digest(parsed.body.trim());
+          for (const record of Object.values(ledger)) {
+            if (
+              record.outputs.some((output) => output.bodyDigest === bodyDigest)
+            ) {
+              for (const output of record.outputs) {
+                const file = await resolveTrustedMemoryFile(
+                  root,
+                  getMemoryRootTrustedAnchor(root),
+                  output.relativePath,
+                );
+                if (
+                  !file ||
+                  digest(await fs.readFile(file, 'utf8')) !== output.digest
+                )
+                  return outcome(
+                    'conflict',
+                    'Previously edited or forgotten imported knowledge cannot be recreated.',
+                  );
+              }
+            }
+          }
+          if (
+            before.existing.some(
+              (existing) =>
+                parseAutoMemoryTopicDocument(
+                  'existing.md',
+                  existing.content,
+                )?.body.trim() === parsed.body.trim(),
+            )
+          )
+            continue;
+          if (
+            !documents.some(
+              (existing) =>
+                parseAutoMemoryTopicDocument(
+                  'new.md',
+                  existing,
+                )?.body.trim() === parsed.body.trim(),
+            )
+          )
+            documents.push(content);
+        }
+        if (!documents.length) {
+          const result = outcome(
+            'duplicate',
+            'All proposed knowledge already exists.',
+          );
+          ledger[key] = {
+            batchId,
+            phase: 'committed',
+            outputs: [],
+            stage: '',
+            outcome: result,
+          };
+          await writeJson(ledgerPath, ledger);
+          return result;
+        }
+        const stageName = `stage-${key}`;
+        const stage = path.join(scopeState, stageName);
+        if (await exists(stage)) {
+          await privateDirectory(stage, this.base);
+          await fs.rm(stage, { recursive: true });
+        }
+        await privateDirectory(stage, this.base);
+        const outputs: LedgerRecord['outputs'] = [];
+        for (const [index, content] of documents.entries()) {
+          const filename = `${index}.md`;
+          await fs.writeFile(path.join(stage, filename), content, {
+            flag: 'wx',
+            mode: 0o600,
+          });
+          outputs.push({
+            relativePath: `imported/${key}/${filename}`,
+            digest: digest(content),
+            bodyDigest: digest(
+              parseAutoMemoryTopicDocument('import.md', content)!.body.trim(),
+            ),
+          });
+        }
+        const result = {
+          ...outcome('added', proposal.reason),
+          refs: outputs.map(
+            (output) => `${section.scope}:${output.relativePath}`,
+          ),
+        };
+        ledger[key] = {
+          batchId,
+          phase: 'intent',
+          outputs,
+          stage: stageName,
+          memoryVersion: before.version,
+          outcome: result,
+        };
+        await writeJson(ledgerPath, ledger);
+        signal.throwIfAborted();
+        this.options.assertActive();
+        await privateDirectory(path.join(root, 'imported'), this.base);
+        signal.throwIfAborted();
+        this.options.assertActive();
+        if ((await this.snapshot(section.scope)).version !== before.version)
+          return outcome(
+            'conflict',
+            'Existing memory changed before publication.',
+          );
+        await assertCommit();
+        await fs.rename(stage, path.join(root, 'imported', key));
+        ledger[key].phase = 'committed';
+        await writeJson(ledgerPath, ledger);
+        await rebuildAutoMemoryIndexAtRoot(root, section.scope);
+        return result;
+      },
+      signal,
+    );
+  }
+}

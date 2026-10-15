@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
+import { getImportedProjectMemoryRoot } from './import-paths.js';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -18,6 +19,7 @@ import {
   renderAutoMemoryBody,
 } from './entries.js';
 import {
+  rebuildAutoMemoryIndexAtRoot,
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
@@ -612,6 +614,10 @@ export async function forgetManagedAutoMemoryMatches(
       await bumpMetadata(projectRoot, now);
       options.abortSignal?.throwIfAborted();
       await rebuildManagedAutoMemoryIndex(projectRoot);
+      await rebuildAutoMemoryIndexAtRoot(
+        getImportedProjectMemoryRoot(projectRoot),
+        'project',
+      );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(

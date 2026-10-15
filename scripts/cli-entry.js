@@ -42,7 +42,7 @@ function hasFlag(flag, alias) {
 
 function isInProcessFastPath() {
   const first = cliArgs[0];
-  if (first === 'serve' || first === 'mcp') {
+  if (first === 'serve' || first === 'mcp' || first === 'memory') {
     return true;
   }
   if (first === undefined || first.startsWith('-')) {
