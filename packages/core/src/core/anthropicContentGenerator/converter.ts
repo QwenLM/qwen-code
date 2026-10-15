@@ -206,8 +206,8 @@ export interface ConvertLlmRequestToAnthropicOptions {
   useGlobalCacheScope?: boolean;
   /**
    * The cross-session-stable prefix of the system prompt (everything the
-   * client assembles before appending volatile tails like git status or
-   * session-start context). When it exactly matches the beginning of the
+   * client assembles before appending the managed auto-memory section).
+   * When it exactly matches the beginning of the
    * request's system text and a suffix follows, the system prompt is split
    * into two text blocks with one cache breakpoint each, making the stable
    * prefix independently cacheable. No match (subagent prompts, stale
@@ -1058,18 +1058,18 @@ export class AnthropicContentConverter {
    * extension they may not recognize.
    *
    * When `staticSystemPrefix` matches the beginning of the system text and
-   * a suffix follows (git status, session-start context — the volatile
-   * tails the client appends after the stable prompt), the text is split
-   * into two blocks carrying one breakpoint each:
+   * a suffix follows (the managed auto-memory section the client appends
+   * after the stable prompt), the text is split into two blocks carrying
+   * one breakpoint each:
    *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
    *      sessions reuse it even though their suffix differs;
    *   2. the end of the full system prompt — always the per-session
-   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      `{ type: 'ephemeral' }` shape. The suffix can vary across sessions,
    *      so a global-scope entry here would churn cache for zero hits
    *      (same reasoning as `addCacheControlToMessages`). Within a session
    *      it still caches the suffix, and when the suffix changes mid-session
-   *      (/cd refreshes git status, session-start context lands) the prefix
-   *      breakpoint keeps the big block from re-billing.
+   *      (a memory recall mode switch) the prefix breakpoint keeps the big
+   *      block from re-billing.
    * The split only shapes the outgoing request; stored history and
    * non-Anthropic transports keep seeing a single system string.
    */
