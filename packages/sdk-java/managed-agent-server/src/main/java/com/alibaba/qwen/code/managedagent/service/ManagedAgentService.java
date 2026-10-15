@@ -221,10 +221,7 @@ public class ManagedAgentService {
 
     public WebShellSessionOptions queryWebShellSessionOptions(
             String tenantId, String actorId, String agentId) {
-        if (actorId == null || actorId.isEmpty()) {
-            throw new ApiException(HttpStatus.UNAUTHORIZED,
-                    "actor_required", "A trusted actor is required.");
-        }
+        requireModelActor(actorId);
         return store.workspaceSessionOptions(tenantId, agentId);
     }
 
