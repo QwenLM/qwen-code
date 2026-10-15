@@ -1,14 +1,16 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import java.util.ArrayList;
-import java.util.UUID;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
+import java.util.ArrayList;
+import java.util.UUID;
 
 /**
  * The collector suite on a real InnoDB engine, where the locking interleavings are observable.

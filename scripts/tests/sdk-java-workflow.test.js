@@ -109,7 +109,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
       );
       expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+        { test: 7, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
       );
       if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
@@ -244,6 +244,10 @@ describe('SDK Java contract version guard', () => {
     expect(step.if).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
+    expect(index).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    expect(
+      names.indexOf('Check Flyway migration versions are unique'),
+    ).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
     expect(index).toBeLessThan(
       parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
     );
@@ -262,6 +266,9 @@ describe('SDK Java contract version guard', () => {
     expect(step.run).toContain(CONTRACT_DOCUMENT);
     expect(parsed.permissions['pull-requests']).toBe('read');
     expect(step.run).toContain('--paginate');
+    expect(step.run).toContain(
+      "--jq '.[] | .filename, .previous_filename // empty'",
+    );
     expect(step.run).toContain(
       'grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"',
     );
