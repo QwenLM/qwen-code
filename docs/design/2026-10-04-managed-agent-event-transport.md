@@ -474,6 +474,16 @@ the source that committed its input, where one exists — there is no generic
 wake scan. The MQ2 design's "Where a missed or burned wake recovers" names
 the ledgers and the gaps they already have.
 
+As run (MQ3): the rows run against two control-plane nodes, a MySQL
+database and a RocketMQ cluster in
+[2026-10-14-managed-agent-event-transport-mq3](2026-10-14-managed-agent-event-transport-mq3.md)
+(the public lane's duplicate and reorder stay with MQ2d's gate, and no epoch
+travels with a wake for the stale-wake row to bump). That design also records
+where the as-built rows differ from the required behavior above: a crash
+with a wake in flight holds the shared bootstrap lane for about two minutes; there is no producer retry buffer, so an envelope sent while the
+broker stays away is dropped; a node restarted during an outage needs the flag
+off to start; the Turn dispatch lease is on the JVM clock.
+
 ## 9. Constraints and risks
 
 - **Nothing here may appear on the synchronous frontend path.** SQL failure

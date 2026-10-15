@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -20,6 +19,7 @@ import java.util.UUID;
 
 /** Durable Session-root protection; elapsed time never closes a physical PUT. */
 public final class ToolPublicationRetentionStore {
+    private static final ObjectMapper JSON = new ObjectMapper();
     static final long READ_BUDGET_MILLIS = 120_000;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -444,8 +444,7 @@ public final class ToolPublicationRetentionStore {
             byte[] bytes, ToolPublicationObjectStore objects) {
         String bodyDigest = ToolPublicationContract.sha256(bytes);
         String request =
-                new ObjectMapper()
-                        .createObjectNode()
+                JSON.createObjectNode()
                         .put("version", 1)
                         .put("objectKey", objectKey)
                         .put("byteLength", bytes.length)
@@ -554,8 +553,7 @@ public final class ToolPublicationRetentionStore {
                 throw unresolvedPut();
             }
             String proof =
-                    new ObjectMapper()
-                            .createObjectNode()
+                    JSON.createObjectNode()
                             .put("version", 1)
                             .put("proof", "original_object")
                             .put("objectKey", objectKey)

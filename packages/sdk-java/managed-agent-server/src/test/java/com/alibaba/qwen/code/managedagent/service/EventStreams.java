@@ -1,11 +1,15 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -16,11 +20,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.LongStream;
-import org.springframework.http.MediaType;
-import org.springframework.mock.web.MockHttpServletResponse;
-import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 /**
  * The harness the event read-path tests share: a RecordingEmitter capturing

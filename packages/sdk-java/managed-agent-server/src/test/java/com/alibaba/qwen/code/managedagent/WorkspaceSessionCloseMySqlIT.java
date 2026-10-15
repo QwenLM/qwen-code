@@ -1,14 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
@@ -16,7 +13,16 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWr
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -30,15 +36,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkspaceSessionCloseMySqlIT {
     private static final String OWNER = "owner";
@@ -299,7 +300,11 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     private static Object outcome(Supplier<Object> operation) {
-        try { return operation.get(); } catch (ApiException rejected) { return rejected; }
+        try {
+            return operation.get();
+        } catch (ApiException rejected) {
+            return rejected;
+        }
     }
 
     private static void assertCode(Object result, String code) {
@@ -312,7 +317,9 @@ class WorkspaceSessionCloseMySqlIT {
 
     private static String required(String name) {
         String value = System.getProperty(name);
-        if (value == null || value.isBlank()) throw new IllegalStateException(name + " is required");
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(name + " is required");
+        }
         return value;
     }
 }

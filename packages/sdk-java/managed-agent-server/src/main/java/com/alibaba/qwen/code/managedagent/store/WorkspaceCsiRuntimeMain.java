@@ -8,14 +8,19 @@ import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -26,9 +31,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /** Explicit one-Session CSI operator; ordinary Spring and Hosted selectors remain closed. */
 public final class WorkspaceCsiRuntimeMain {
@@ -44,7 +46,7 @@ public final class WorkspaceCsiRuntimeMain {
                     || runtimeRequestKey == null || !runtimeRequestKey.matches("[0-9a-f]{64}")
                     || image == null || !image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
                     || command == null || command.isEmpty() || command.size() > 32
-                    || command.stream().anyMatch(value -> value == null || value.isBlank()
+                    || command.stream().anyMatch(value -> StringUtils.isBlank(value)
                             || value.length() > 8192 || value.indexOf('\0') >= 0)
                     || artifacts == null || artifacts.size() > 48
                     || artifacts.stream().anyMatch(java.util.Objects::isNull)
@@ -150,7 +152,7 @@ public final class WorkspaceCsiRuntimeMain {
 
     static String required(String name) {
         String value = System.getenv(name);
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             throw new IllegalStateException("Required private CSI operator setting is unavailable");
         }
         return value;

@@ -1,18 +1,9 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
-import java.net.InetAddress;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.time.Duration;
-import java.util.HexFormat;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
@@ -20,6 +11,17 @@ import org.springframework.core.Ordered;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.util.HexFormat;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class SignatureAuthFilterTest {
     private static final String KEY =
