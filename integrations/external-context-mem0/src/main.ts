@@ -7,12 +7,11 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadRuntimeConfiguration } from './config.js';
 import { createMem0McpServer } from './mcp.js';
-import { builtInPresets } from './presets.js';
 import { createRequestEngine } from './request-engine.js';
 import { ConfigurationError } from './schemas.js';
 
 try {
-  const runtime = await loadRuntimeConfiguration({ presets: builtInPresets });
+  const runtime = await loadRuntimeConfiguration();
   const server = createMem0McpServer({
     instance: runtime.instance,
     search: createRequestEngine(runtime),

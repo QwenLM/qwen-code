@@ -9,6 +9,35 @@ import { SessionGroupSection } from './SessionGroupSection';
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 describe('SessionGroupSection', () => {
+  it('renders a supplied source icon instead of a color dot', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionGroupSection
+            id="scheduled-task:task-1"
+            label="Review PRs"
+            count={1}
+            expanded
+            icon={<svg data-testid="scheduled-task-icon" />}
+            onToggle={() => {}}
+          >
+            <div>Run 1</div>
+          </SessionGroupSection>
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="scheduled-task-icon"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[class*="sessionGroupDot"]')).toBeNull();
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('shows five sessions and resets Show all after collapsing', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

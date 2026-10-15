@@ -67,6 +67,22 @@ async function connectNegotiatingControl(
   return client;
 }
 
+/** Tools discovered from an SDK-typed server without config filters. */
+function discoverSdkTools(
+  serverName: string,
+  client: Awaited<ReturnType<typeof connectNegotiatingControl>>,
+) {
+  return discoverTools(
+    serverName,
+    { type: 'sdk' } as MCPServerConfig,
+    client,
+    {} as Config,
+    { applyConfigFilters: false },
+  );
+}
+
+const cacheHint = { ttlMs: 60_000, cacheScope: 'private' };
+
 describe('configured MCP SDK v2 negotiation', () => {
   it('bounds the auto-negotiation probe below the inherited request timeout', () => {
     expect(MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS).toBe(5_000);
@@ -76,23 +92,22 @@ describe('configured MCP SDK v2 negotiation', () => {
   });
 
   it('keeps defaults, non-stdio, and explicit legacy configs on legacy', () => {
-    expect(
-      mcpVersionNegotiationFor({
-        httpUrl: 'https://example.com/mcp',
-      } as MCPServerConfig),
-    ).toEqual({ mode: 'legacy' });
-    expect(
-      mcpVersionNegotiationFor({ type: 'sdk' } as MCPServerConfig),
-    ).toEqual({ mode: 'legacy' });
-    expect(
-      mcpVersionNegotiationFor({
+    for (const config of [
+      { httpUrl: 'https://example.com/mcp' },
+      { type: 'sdk' },
+      { command: 'node', versionNegotiation: 'legacy' },
+      { command: 'node' },
+      // No probe time left once the fallback headroom is reserved.
+      {
         command: 'node',
-        versionNegotiation: 'legacy',
-      } as MCPServerConfig),
-    ).toEqual({ mode: 'legacy' });
-    expect(
-      mcpVersionNegotiationFor({ command: 'node' } as MCPServerConfig),
-    ).toEqual({ mode: 'legacy' });
+        versionNegotiation: 'auto',
+        discoveryTimeoutMs: 2_000,
+      },
+    ]) {
+      expect(mcpVersionNegotiationFor(config as MCPServerConfig)).toEqual({
+        mode: 'legacy',
+      });
+    }
     expect(
       mcpVersionNegotiationFor({
         command: 'node',
@@ -102,13 +117,6 @@ describe('configured MCP SDK v2 negotiation', () => {
       mode: 'auto',
       probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
     });
-    expect(
-      mcpVersionNegotiationFor({
-        command: 'node',
-        versionNegotiation: 'auto',
-        discoveryTimeoutMs: 2_000,
-      } as MCPServerConfig),
-    ).toEqual({ mode: 'legacy' });
     expect(
       mcpVersionNegotiationFor({
         command: 'node',
@@ -176,8 +184,7 @@ describe('configured MCP SDK v2 negotiation', () => {
           return response(request, {
             supportedVersions: ['2026-07-28'],
             capabilities: { tools: {}, prompts: {}, resources: {} },
-            ttlMs: 60_000,
-            cacheScope: 'private',
+            ...cacheHint,
           });
         case 'tools/list':
           return response(request, {
@@ -190,8 +197,7 @@ describe('configured MCP SDK v2 negotiation', () => {
                 _meta: { ui: { resourceUri: 'ui://demo/dashboard' } },
               },
             ],
-            ttlMs: 60_000,
-            cacheScope: 'private',
+            ...cacheHint,
           });
         case 'tools/call':
           return response(request, {
@@ -202,8 +208,7 @@ describe('configured MCP SDK v2 negotiation', () => {
           return response(request, {
             resultType: 'complete',
             prompts: [{ name: 'modern-prompt' }],
-            ttlMs: 60_000,
-            cacheScope: 'private',
+            ...cacheHint,
           });
         case 'prompts/get':
           return response(request, {
@@ -219,8 +224,7 @@ describe('configured MCP SDK v2 negotiation', () => {
           return response(request, {
             resultType: 'complete',
             resources: [{ uri: 'file:///modern.txt', name: 'modern.txt' }],
-            ttlMs: 60_000,
-            cacheScope: 'private',
+            ...cacheHint,
           });
         default:
           throw new Error(`Unexpected modern MCP method: ${request.method}`);
@@ -237,13 +241,7 @@ describe('configured MCP SDK v2 negotiation', () => {
       await expect(client.listTools()).resolves.toMatchObject({
         tools: [{ name: 'echo' }],
       });
-      const [discoveredTool] = await discoverTools(
-        'modern-only',
-        { type: 'sdk' } as MCPServerConfig,
-        client,
-        {} as Config,
-        { applyConfigFilters: false },
-      );
+      const [discoveredTool] = await discoverSdkTools('modern-only', client);
       expect(discoveredTool?.appResourceUri).toBe('ui://demo/dashboard');
       await expect(
         client.callTool({ name: 'echo', arguments: { text: 'hello' } }),
@@ -324,8 +322,7 @@ describe('configured MCP SDK v2 negotiation', () => {
                 inputSchema: { type: 'object' },
               },
             ],
-            ttlMs: 60_000,
-            cacheScope: 'private',
+            ...cacheHint,
             ...(cursor + 1 < pageCount
               ? { nextCursor: String(cursor + 1) }
               : {}),
@@ -343,13 +340,7 @@ describe('configured MCP SDK v2 negotiation', () => {
       expect(listed.tools.map((tool) => tool.name)).toEqual(
         Array.from({ length: pageCount }, (_, index) => `tool-${index}`),
       );
-      const tools = await discoverTools(
-        'paged',
-        { type: 'sdk' } as MCPServerConfig,
-        client,
-        {} as Config,
-        { applyConfigFilters: false },
-      );
+      const tools = await discoverSdkTools('paged', client);
       expect(tools.map((tool) => tool.serverToolName)).toEqual(
         Array.from({ length: pageCount }, (_, index) => `tool-${index}`),
       );
@@ -517,13 +508,7 @@ describe('configured MCP SDK v2 negotiation', () => {
     try {
       expect(client.getProtocolEra()).toBe('legacy');
       await expect(client.listTools()).resolves.toEqual({ tools: [] });
-      const tools = await discoverTools(
-        'legacy',
-        { type: 'sdk' } as MCPServerConfig,
-        client,
-        {} as Config,
-        { applyConfigFilters: false },
-      );
+      const tools = await discoverSdkTools('legacy', client);
       expect(tools.map((tool) => tool.serverToolName)).toEqual(['echo']);
       await expect(client.callTool({ name: 'echo' })).resolves.toMatchObject({
         content: [{ type: 'text', text: 'legacy-ok' }],
@@ -605,44 +590,24 @@ describe('configured MCP SDK v2 negotiation', () => {
   });
 
   it('accepts nested and legacy MCP Apps tool metadata', () => {
-    expect(
-      getMcpAppResourceUri({
-        _meta: { ui: { resourceUri: 'ui://demo/dashboard' } },
-      }),
-    ).toBe('ui://demo/dashboard');
-    expect(
-      getMcpAppResourceUri({
-        _meta: { 'ui/resourceUri': 'ui://demo/legacy' },
-      }),
-    ).toBe('ui://demo/legacy');
-    expect(
-      getMcpAppResourceUri({
-        _meta: { ui: { resourceUri: 'https://example.com/app' } },
-      }),
-    ).toBeUndefined();
+    for (const [_meta, uri] of [
+      [{ ui: { resourceUri: 'ui://demo/dashboard' } }, 'ui://demo/dashboard'],
+      [{ 'ui/resourceUri': 'ui://demo/legacy' }, 'ui://demo/legacy'],
+      [{ ui: { resourceUri: 'https://example.com/app' } }, undefined],
+    ] as const) {
+      expect(getMcpAppResourceUri({ _meta })).toBe(uri);
+    }
   });
 
   it('hides MCP App tools whose visibility does not include model', () => {
-    expect(isMcpToolVisibleToModel({})).toBe(true);
-    expect(
-      isMcpToolVisibleToModel({
-        _meta: { ui: { resourceUri: 'ui://demo/dashboard' } },
-      }),
-    ).toBe(true);
-    expect(
-      isMcpToolVisibleToModel({
-        _meta: { ui: { visibility: ['model', 'app'] } },
-      }),
-    ).toBe(true);
-    expect(
-      isMcpToolVisibleToModel({
-        _meta: { ui: { visibility: ['app'] } },
-      }),
-    ).toBe(false);
-    expect(
-      isMcpToolVisibleToModel({
-        _meta: { ui: { visibility: null } },
-      }),
-    ).toBe(true);
+    for (const [tool, visible] of [
+      [{}, true],
+      [{ _meta: { ui: { resourceUri: 'ui://demo/dashboard' } } }, true],
+      [{ _meta: { ui: { visibility: ['model', 'app'] } } }, true],
+      [{ _meta: { ui: { visibility: ['app'] } } }, false],
+      [{ _meta: { ui: { visibility: null } } }, false],
+    ] as const) {
+      expect(isMcpToolVisibleToModel(tool)).toBe(visible);
+    }
   });
 });

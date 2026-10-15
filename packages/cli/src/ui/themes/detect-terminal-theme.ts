@@ -17,7 +17,7 @@ export type DetectedTheme = 'dark' | 'light';
 // ---------------------------------------------------------------------------
 
 /** Timeout (ms) for the OSC 11 query. */
-const OSC11_TIMEOUT_MS = 200;
+export const OSC11_TIMEOUT_MS = 200;
 
 interface Rgb {
   r: number;

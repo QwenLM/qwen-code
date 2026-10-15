@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const WEBUI_SESSION_CLIENT_ID_PREFIX = 'qwen-code-webui-client-id:session:';
+// Keep the persisted key stable across the WebUI-to-Web-Shell migration.
+const SESSION_CLIENT_ID_STORAGE_PREFIX = 'qwen-code-webui-client-id:session:';
 
 export function getStableClientId(
   clientId: string | undefined,
   sessionId?: string,
 ): string {
   if (clientId) return clientId;
-  if (typeof window === 'undefined') return createWebuiClientId();
+  if (typeof window === 'undefined') return createWebShellClientId();
   try {
     if (sessionId) {
       const existingSessionClientId = window.sessionStorage.getItem(
@@ -19,9 +20,9 @@ export function getStableClientId(
       );
       if (existingSessionClientId) return existingSessionClientId;
     }
-    return createWebuiClientId();
+    return createWebShellClientId();
   } catch {
-    return createWebuiClientId();
+    return createWebShellClientId();
   }
 }
 
@@ -75,7 +76,7 @@ export async function detachDaemonClient(opts: {
   throw new Error(`Detach client failed (${res.status})`);
 }
 
-function createWebuiClientId(): string {
+function createWebShellClientId(): string {
   const random =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
@@ -84,7 +85,7 @@ function createWebuiClientId(): string {
 }
 
 function sessionClientIdKey(sessionId: string): string {
-  return `${WEBUI_SESSION_CLIENT_ID_PREFIX}${encodeURIComponent(sessionId)}`;
+  return `${SESSION_CLIENT_ID_STORAGE_PREFIX}${encodeURIComponent(sessionId)}`;
 }
 
 function stripTrailingSlashes(url: string): string {

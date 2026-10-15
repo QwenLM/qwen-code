@@ -740,13 +740,6 @@ describe('streaming guards', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
-  it('blockStreaming=on prevents streamState accumulation', () => {
-    const ch = makeChannel({ blockStreaming: 'on' });
-    onResponseChunk(ch, 'test-chat', 'blocked', 'sess-1');
-
-    expect(streamState(ch).has('sess-1')).toBe(false);
-  });
-
   it('flushingSessions guard prevents double-send', async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;

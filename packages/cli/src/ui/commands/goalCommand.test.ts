@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   Config,
   GoalRuntime,
@@ -13,27 +13,11 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   emptyGoalSnapshot,
+  GOAL_PAUSE_REASON_COMMAND,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-
-const mockRegisterGoalHook = vi.hoisted(() => vi.fn());
-const mockGetActiveGoal = vi.hoisted(() => vi.fn());
-const mockGetLastGoalTerminal = vi.hoisted(() => vi.fn());
-const mockUnregisterGoalHook = vi.hoisted(() => vi.fn());
-
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  return {
-    ...actual,
-    registerGoalHook: mockRegisterGoalHook,
-    getActiveGoal: mockGetActiveGoal,
-    getLastGoalTerminal: mockGetLastGoalTerminal,
-    unregisterGoalHook: mockUnregisterGoalHook,
-  };
-});
 
 function goalSnapshot(
   overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
@@ -142,13 +126,6 @@ describe('parseGoalCommand', () => {
 });
 
 describe('goalCommand', () => {
-  beforeEach(() => {
-    mockRegisterGoalHook.mockReset();
-    mockGetActiveGoal.mockReset();
-    mockGetLastGoalTerminal.mockReset();
-    mockUnregisterGoalHook.mockReset();
-  });
-
   it('is available in interactive, non-interactive, and ACP modes', () => {
     expect(goalCommand.supportedModes).toEqual([
       'interactive',
@@ -173,6 +150,7 @@ describe('goalCommand', () => {
         action: 'pause',
         expectedGoalId: 'goal-1',
         expectedRevision: 4,
+        reason: GOAL_PAUSE_REASON_COMMAND,
       },
     ],
     [
@@ -195,7 +173,6 @@ describe('goalCommand', () => {
 
       expect(dispatch).toHaveBeenCalledWith(expectedRequest);
       expect(result).toMatchObject({ type: 'goal_control' });
-      expect(mockRegisterGoalHook).not.toHaveBeenCalled();
     },
   );
 
@@ -210,7 +187,11 @@ describe('goalCommand', () => {
       { action: 'edit', objective: 'revised' },
       { kind: 'edit', objective: 'revised' },
     ],
-    ['pause', { action: 'pause' }, { kind: 'pause' }],
+    [
+      'pause',
+      { action: 'pause', reason: GOAL_PAUSE_REASON_COMMAND },
+      { kind: 'pause' },
+    ],
     ['resume', { action: 'resume' }, { kind: 'resume' }],
     ['clear', { action: 'clear' }, { kind: 'clear' }],
   ] as const)(
@@ -236,8 +217,6 @@ describe('goalCommand', () => {
         cause: request.action,
       });
       expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
-      expect(mockRegisterGoalHook).not.toHaveBeenCalled();
-      expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
     },
   );
 
@@ -343,6 +322,7 @@ describe('goalCommand', () => {
           action: 'pause',
           expectedGoalId: 'goal-1',
           expectedRevision: 4,
+          reason: GOAL_PAUSE_REASON_COMMAND,
         },
       ],
       [

@@ -143,7 +143,7 @@ export function useCommandCompletion(
           }
         }
         const pathStart = i + 1;
-        const partialPath = currentLine.substring(pathStart, end);
+        const partialPath = codePoints.slice(pathStart, end).join('');
         return {
           completionMode: CompletionMode.AT,
           query: partialPath,
@@ -232,7 +232,7 @@ export function useCommandCompletion(
     visibleStartIndex,
     showSuggestions,
     isLoadingSuggestions,
-    isPerfectMatch,
+    isPerfectMatch: publishedIsPerfectMatch,
     dismissed,
 
     setSuggestions,
@@ -271,6 +271,10 @@ export function useCommandCompletion(
     setIsLoadingSuggestions,
     setIsPerfectMatch,
   });
+  const isPerfectMatch =
+    completionMode === CompletionMode.SLASH
+      ? slashCompletionRange.isPerfectMatch
+      : publishedIsPerfectMatch;
 
   useEffect(() => {
     setActiveSuggestionIndex(suggestions.length > 0 ? 0 : -1);

@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isGitIgnored } from './git-ignore.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // git-init honors GIT_DIR/GIT_WORK_TREE/GIT_OBJECT_DIRECTORY as
 // repo-placement selectors (ambient GIT_WORK_TREE without GIT_DIR is a hard
@@ -376,7 +377,7 @@ describe('isGitIgnored', () => {
         // wherever the shim cannot run (a noexec tmpdir, a PATH walk that
         // skips it), so the wiring would ship green unpinned.
         expect(Date.now() - start).toBeGreaterThanOrEqual(400);
-        expect(Date.now() - start).toBeLessThan(2500);
+        expectWithinLatencyBudget(Date.now() - start, 2500);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;
@@ -402,7 +403,7 @@ describe('isGitIgnored', () => {
         expect(isGitIgnored(dir, 'anything.md')).toBe(false);
         const elapsed = Date.now() - start;
         expect(elapsed).toBeGreaterThanOrEqual(4000);
-        expect(elapsed).toBeLessThan(8000);
+        expectWithinLatencyBudget(elapsed, 8000);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;

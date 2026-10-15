@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
 import { AskUserQuestion } from './AskUserQuestion';
+import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -93,6 +94,7 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.unstubAllGlobals();
 });
 
 function rerender(
@@ -948,10 +950,7 @@ describe('AskUserQuestion multiple questions', () => {
       ctrlKey: true,
       cancelable: true,
     });
-    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-      '0': '',
-      '1': 'Small',
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it('submits directly when Enter is pressed on the last question', () => {
@@ -977,7 +976,7 @@ describe('AskUserQuestion multiple questions', () => {
     });
   });
 
-  it('submits incomplete answers with Command/Ctrl+Enter', () => {
+  it('does not submit incomplete answers with Command/Ctrl+Enter', () => {
     render(undefined, multipleQuestionsRequest);
 
     const event = pressKey(optionButtons()[0]!, 'Enter', {
@@ -986,17 +985,14 @@ describe('AskUserQuestion multiple questions', () => {
     });
 
     expect(event.defaultPrevented).toBe(true);
-    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-      '0': 'Red',
-      '1': '',
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it.each([
     ['Control', { ctrlKey: true }],
     ['Command', { metaKey: true }],
   ] as const)(
-    'submits from an intermediate custom input with %s+Enter',
+    'does not submit incomplete answers from custom input with %s+Enter',
     (_modifier, modifierInit) => {
       render(undefined, multipleQuestionsRequest);
       act(() => optionButtons()[2]!.click());
@@ -1015,10 +1011,7 @@ describe('AskUserQuestion multiple questions', () => {
       });
 
       expect(event.defaultPrevented).toBe(true);
-      expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-        '0': 'Purple',
-        '1': '',
-      });
+      expect(onConfirm).not.toHaveBeenCalled();
     },
   );
 
@@ -1098,6 +1091,8 @@ describe('AskUserQuestion multiple questions', () => {
       '[aria-label="Collapse"]',
     )!;
 
+    expect(collapse.textContent).toBe('Collapse');
+    expect(collapse.getAttribute('aria-expanded')).toBe('true');
     act(() => collapse.click());
 
     expect(panel.getAttribute('aria-labelledby')).toBeNull();
@@ -1105,6 +1100,8 @@ describe('AskUserQuestion multiple questions', () => {
     const expand = container!.querySelector<HTMLButtonElement>(
       '[aria-label="Expand"]',
     )!;
+    expect(expand.textContent).toBe('Expand');
+    expect(expand.getAttribute('aria-expanded')).toBe('false');
     act(() => expand.click());
     expect(container!.textContent).toContain('Enter submit');
   });
@@ -1266,7 +1263,7 @@ describe('AskUserQuestion multi-select', () => {
     const opts = optionButtons();
     expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[0]!.tabIndex).toBe(0);
-    expect(submitButton()!.disabled).toBe(false);
+    expect(submitButton()!.disabled).toBe(true);
     expect(opts[0]!.hasAttribute('aria-checked')).toBe(false);
     expect(opts[0]!.getAttribute('role')).not.toBe('radio');
   });
@@ -1292,7 +1289,7 @@ describe('AskUserQuestion multi-select', () => {
     const opts = optionButtons();
     expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[0]!.tabIndex).toBe(0);
-    expect(submitButton()!.disabled).toBe(false);
+    expect(submitButton()!.disabled).toBe(true);
   });
 
   it('toggles options and submits the joined selection', () => {
@@ -1459,7 +1456,7 @@ describe('AskUserQuestion multi-select', () => {
     expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('submits from the final multi-select question when an earlier answer is missing', () => {
+  it('does not submit from the final question when an earlier answer is missing', () => {
     const requestWithMultiFinal: PermissionRequest = {
       ...multipleQuestionsRequest,
       rawInput: {
@@ -1484,10 +1481,108 @@ describe('AskUserQuestion multi-select', () => {
     pressKey(optionButtons()[0]!, 'Enter');
 
     expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
-    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
-      '0': '',
-      '1': 'Option A',
-    });
+    expect(onConfirm).not.toHaveBeenCalled();
     expect(submitButton()!.disabled).toBe(true);
   });
+});
+
+function renderNotificationQuestion() {
+  vi.stubGlobal('isSecureContext', true);
+  vi.stubGlobal(
+    'Notification',
+    Object.assign(vi.fn(), { permission: 'granted' }),
+  );
+  render();
+  act(() =>
+    root!.render(
+      <I18nProvider language="en">
+        <BrowserTurnNotifications language="en">
+          <AskUserQuestion
+            request={request}
+            onConfirm={onConfirm}
+            onError={onError}
+          />
+        </BrowserTurnNotifications>
+      </I18nProvider>,
+    ),
+  );
+  const option = optionButtons()[0];
+  act(() => option.focus());
+  const bell = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Task notifications"]',
+  )!;
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  return { bell, option };
+}
+
+it.each(['Escape', 'Control+Enter'])(
+  'isolates %s from the focused question under hover-opened notification help',
+  (key) => {
+    const { option } = renderNotificationQuestion();
+    expect(document.activeElement).toBe(option);
+    expect(
+      document.querySelector('[data-web-shell-notification-help]'),
+    ).not.toBeNull();
+    pressKey(option, key === 'Escape' ? 'Escape' : 'Enter', {
+      cancelable: true,
+      ctrlKey: key === 'Control+Enter',
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    if (key === 'Escape') {
+      expect(
+        document.querySelector('[data-web-shell-notification-help]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(option);
+    } else {
+      expect(
+        document.querySelector('[data-web-shell-notification-help]'),
+      ).not.toBeNull();
+      expect(document.activeElement).toBe(option);
+    }
+  },
+);
+
+it('preserves navigation and collapse controls under hover-opened notification help', () => {
+  const { bell, option } = renderNotificationQuestion();
+  pressKey(option, 'ArrowDown', { cancelable: true });
+  expect(document.activeElement).toBe(optionButtons()[1]);
+  const collapse = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Collapse"]',
+  )!;
+  act(() => collapse.focus());
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  expect(
+    document.querySelector('[data-web-shell-notification-help]'),
+  ).not.toBeNull();
+  for (const key of ['Enter', ' ']) {
+    expect(pressKey(collapse, key, { cancelable: true }).defaultPrevented).toBe(
+      false,
+    );
+  }
+  act(() => collapse.click());
+  expect(collapse.getAttribute('aria-expanded')).toBe('false');
+  expect(onConfirm).not.toHaveBeenCalled();
+});
+
+it('allows spaces in a custom answer while blocking modifier-Enter under hover-opened help', () => {
+  const { bell, option } = renderNotificationQuestion();
+  pressKey(option, 'Escape', { cancelable: true });
+  act(() => optionButtons().at(-1)!.click());
+  const input = container!.querySelector<HTMLInputElement>('input')!;
+  act(() => input.focus());
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  expect(pressKey(input, ' ', { cancelable: true }).defaultPrevented).toBe(
+    false,
+  );
+  expect(
+    pressKey(input, 'Enter', { ctrlKey: true, cancelable: true })
+      .defaultPrevented,
+  ).toBe(true);
+  expect(onConfirm).not.toHaveBeenCalled();
 });

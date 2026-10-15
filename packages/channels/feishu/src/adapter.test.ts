@@ -110,7 +110,6 @@ function createObservedContactChannel(
   const channel = new ObservedContactFeishuChannel(
     'test',
     createConfig({
-      blockStreaming: 'on',
       groupPolicy: 'open',
       groups: { '*': { requireMention: false } },
     }),
@@ -724,6 +723,493 @@ describe('FeishuChannel', () => {
   });
 
   it.each([
+    { contentType: 'image/png', mimeType: 'image/png' },
+    { contentType: 'image/webp', mimeType: 'image/webp' },
+    { contentType: undefined, mimeType: 'image/jpeg' },
+  ])('dispatches $mimeType media and text', async (testCase) => {
+    const { contentType, mimeType } = testCase;
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (
+      messageId: string,
+      messageType: string,
+      content: Record<string, unknown>,
+    ) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: messageType,
+        content: JSON.stringify(content),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    const image = new Uint8Array([1, 2, 3]);
+    const resourceUrl =
+      'https://open.feishu.cn/open-apis/im/v1/messages/media-image/resources/img_1?type=image';
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/auth/v3/tenant_access_token/internal')) {
+          return jsonResponse({
+            tenant_access_token: 'test_token',
+            expire: 3600,
+          });
+        }
+        if (url === resourceUrl) {
+          return new Response(image, {
+            headers: contentType ? { 'Content-Type': contentType } : {},
+          });
+        }
+        return jsonResponse({ code: 0, data: {} });
+      });
+
+    try {
+      onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      expect(fetchSpy).toHaveBeenCalledWith(
+        resourceUrl,
+        expect.objectContaining({
+          method: 'GET',
+          headers: { Authorization: 'Bearer test_token' },
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        1,
+        'session-1',
+        expect.any(String),
+        expect.objectContaining({
+          images: [
+            {
+              data: Buffer.from(image).toString('base64'),
+              mimeType,
+            },
+          ],
+        }),
+      );
+
+      onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        2,
+        'session-1',
+        expect.stringContaining('inspect this'),
+        expect.not.objectContaining({ images: expect.anything() }),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      failure: 'authentication',
+      authStatus: 401,
+      mediaStatus: 200,
+      cachedToken: false,
+    },
+    {
+      failure: 'media download',
+      authStatus: 200,
+      mediaStatus: 500,
+      cachedToken: false,
+    },
+    {
+      failure: 'media authorization',
+      authStatus: 200,
+      mediaStatus: 401,
+      cachedToken: true,
+    },
+  ])(
+    'dispatches an image as text when $failure fails',
+    async ({ authStatus, mediaStatus, cachedToken }) => {
+      const bridge = createMockBridge();
+      const channel = new FeishuChannel('test', createConfig(), bridge);
+      if (cachedToken) {
+        Object.assign(channel, {
+          tokenCache: {
+            token: 'test_token',
+            expiresAt: Date.now() + 3600_000,
+          },
+        });
+      }
+      const message = feishuDmMessage('failed-image');
+      Object.assign(message['message'] as Record<string, unknown>, {
+        message_type: 'image',
+        content: JSON.stringify({ image_key: 'img_1' }),
+      });
+      const authUrl =
+        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
+      const resourceUrl =
+        'https://open.feishu.cn/open-apis/im/v1/messages/failed-image/resources/img_1?type=image';
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url === authUrl) {
+            return jsonResponse(
+              { tenant_access_token: 'test_token', expire: 3600 },
+              authStatus,
+            );
+          }
+          if (url === resourceUrl) {
+            return jsonResponse('Media unavailable', mediaStatus);
+          }
+          return jsonResponse({ code: 0, data: {} });
+        });
+
+      try {
+        getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+          channel,
+          message,
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          'session-1',
+          expect.stringContaining('(image)'),
+          expect.not.objectContaining({ images: expect.anything() }),
+        );
+        if (cachedToken) {
+          expect(
+            fetchSpy.mock.calls.filter(([input]) => String(input) === authUrl),
+          ).toHaveLength(0);
+        } else {
+          expect(fetchSpy).toHaveBeenCalledWith(authUrl, expect.anything());
+        }
+        const mediaRequests = fetchSpy.mock.calls.filter(
+          ([input]) => String(input) === resourceUrl,
+        );
+        expect(mediaRequests).toHaveLength(authStatus === 200 ? 1 : 0);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            authStatus === 200
+              ? `downloadMedia failed: HTTP ${mediaStatus}`
+              : 'getTenantAccessToken failed: HTTP 401',
+          ),
+        );
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    },
+  );
+
+  it('preserves text after platform-normalized mentions with spaced names', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (messageId: string, text: string) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text }),
+        mentions: [
+          {
+            key: '@_user_1',
+            id: { open_id: 'ou_bot' },
+            name: 'Qwen Bot',
+          },
+          {
+            key: '@_user_2',
+            id: { open_id: 'ou_alice' },
+            name: 'Alice Smith',
+          },
+        ],
+      },
+      sender: {
+        sender_id: { open_id: 'ou_user' },
+        sender_type: 'user',
+      },
+    });
+
+    onMessage(
+      event(
+        'prefixed-spaced-mention',
+        '@_user_1 @_user_2 /review inspect this',
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('inspect this'),
+      expect.anything(),
+    );
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).toContain(
+      '@Alice Smith /review inspect this',
+    );
+
+    onMessage(
+      event(
+        'unprefixed-spaced-mention',
+        '@_user_1 @_user_2 inspect without prefix',
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+  });
+
+  it('preserves a mentioned member whose name extends the bot name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'overlapping-mention-names',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Bot 2',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).toContain('/review');
+  });
+
+  it('removes the structured bot mention without corrupting a longer member name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'member-before-bot',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            {
+              key: '@_user_1',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Fan',
+            },
+            { key: '@_user_2', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).toContain('/review');
+  });
+
+  it('preserves a mentioned member alongside literal at-sign text', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'at-prefix-boundary',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 @bot do X',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'botswana',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('do X');
+    expect(prompt).toContain('@botswana @bot do X');
+  });
+
+  it('keeps a member mention within slash-prefixed text', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'payload-mention',
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '@_user_1 /review please talk to @_user_2',
+        }),
+        mentions: [
+          { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          { key: '@_user_2', id: { open_id: 'ou_alice' }, name: 'Alice Smith' },
+        ],
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('please talk to @Alice Smith');
+    expect(prompt).toContain('/review');
+  });
+
+  it('preserves a rich-text post behind a spaced mention', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'post-prefixed',
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: 'post',
+        content: JSON.stringify({
+          zh_cn: {
+            content: [
+              [
+                { tag: 'at', user_name: 'Qwen Bot' },
+                { tag: 'text', text: ' /review inspect this' },
+              ],
+            ],
+          },
+        }),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(String(vi.mocked(bridge.prompt).mock.calls[0]?.[1])).toContain(
+      'inspect this',
+    );
+  });
+
+  it('keeps a media placeholder out of the next prompt as group history', async () => {
+    // Synthetic media placeholders must not be quoted as user-authored history.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-history-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({
+        groupHistoryLimit: 10,
+        groups: { '*': { requireMention: true } },
+      }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    try {
+      onMessage({
+        message: {
+          message_id: 'history-image',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'image',
+          content: JSON.stringify({ image_key: 'img_1' }),
+        },
+        sender: { sender_id: { open_id: 'ou_alice' }, sender_type: 'user' },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      onMessage({
+        message: {
+          message_id: 'history-trigger',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({ text: '@_user_1 /review summarize' }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      });
+
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled());
+      const prompt = String(
+        vi.mocked(bridge.prompt).mock.calls.at(-1)?.[1] ?? '',
+      );
+      expect(prompt).toContain('summarize');
+      expect(prompt).not.toContain('(image)');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      rmSync(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
     {
       label: 'group pairing with a user parent',
       config: { groupPolicy: 'pairing' as const },
@@ -746,11 +1232,12 @@ describe('FeishuChannel', () => {
       label: 'sender pairing with a bot parent',
       config: { senderPolicy: 'pairing' as const },
       parentType: 'app',
-      expectedSubject: { type: 'user', id: 'ou_user' },
+      expectedSubject: undefined,
+      expectedAllowed: true,
     },
   ])(
-    'defers $label until parent authorship is resolved',
-    async ({ config, parentType, expectedSubject }) => {
+    'resolves parent authorship before admission under $label',
+    async ({ config, parentType, expectedSubject, expectedAllowed }) => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-pairing-'));
       process.env['QWEN_HOME'] = qwenHome;
@@ -794,7 +1281,10 @@ describe('FeishuChannel', () => {
           reply,
         );
 
-        await vi.waitFor(() => expect(preflight).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => {
+          if (expectedAllowed) expect(bridge.prompt).toHaveBeenCalledOnce();
+          else expect(preflight).toHaveBeenCalledTimes(2);
+        });
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         const requests = new PairingStore('test', '/tmp').listPending();
@@ -804,10 +1294,14 @@ describe('FeishuChannel', () => {
           expect(sendMessage).toHaveBeenCalledOnce();
         } else {
           expect(requests).toEqual([]);
-          expect(sendMessage).not.toHaveBeenCalled();
+          if (!expectedAllowed) expect(sendMessage).not.toHaveBeenCalled();
         }
-        expect(fetchSpy).toHaveBeenCalledOnce();
-        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(
+          fetchSpy.mock.calls.filter(([url]) =>
+            String(url).includes('/im/v1/messages/om_parent?'),
+          ),
+        ).toHaveLength(1);
+        expect(bridge.prompt).toHaveBeenCalledTimes(expectedAllowed ? 1 : 0);
       } finally {
         fetchSpy.mockRestore();
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];

@@ -7,11 +7,10 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-import {
-  fireNotificationHook,
-  NotificationType,
-} from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { captureHookExecutionOwner } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+import { fireNotificationHook } from '@qwen-code/qwen-code-core/core/toolHookTriggers.js';
+import { NotificationType } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { TerminalNotification } from './useTerminalNotification.js';
 import type { TrackedToolCall } from './useReactToolScheduler.js';
 import { sendNotification } from '../../services/notificationService.js';
@@ -140,6 +139,8 @@ export const useAttentionNotifications = ({
             'Qwen Code is waiting for your input',
             NotificationType.IdlePrompt,
             'Waiting for input',
+            undefined,
+            captureHookExecutionOwner(config, null),
           )
             .then((hookResult) => {
               if (hookResult.terminalSequence) {

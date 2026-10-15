@@ -294,7 +294,10 @@ export interface WorkspaceFileSystem {
     opts?: ReadBytesOptions,
   ): Promise<ReadBytesOutcome>;
   list(p: ResolvedPath, opts?: ListOptions): Promise<FsEntry[]>;
-  glob(pattern: string, opts?: GlobOptions): Promise<ResolvedPath[]>;
+  glob(
+    pattern: string,
+    opts?: GlobOptions,
+  ): Promise<ResolvedPath[] & { truncated?: boolean }>;
   writeTextAtomic(
     p: ResolvedPath,
     content: string,
@@ -370,6 +373,7 @@ export interface WorkspaceFileSystem {
  * `forRequest` per HTTP route invocation.
  */
 export interface WorkspaceFileSystemFactory {
+  readonly sshWorkspace?: import('@qwen-code/qwen-code-core/services/ssh-workspace.js').SshWorkspace;
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
   assertCanWrite(): void;
   /** Optional so existing custom factories remain workspace-only by default. */
@@ -587,13 +591,13 @@ async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
 
   let leaf: Awaited<ReturnType<typeof fsp.lstat>>;
   try {
-    leaf = await fsp.lstat(input);
+    leaf = await fsp.lstat(input, { bigint: true });
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
       throw err;
     }
     const parent = await fsp.realpath(path.dirname(input));
-    const parentStat = await fsp.lstat(parent);
+    const parentStat = await fsp.lstat(parent, { bigint: true });
     if (!parentStat.isDirectory()) {
       throw new FsError(
         'parse_error',
@@ -614,7 +618,7 @@ async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
     throw new FsError('parse_error', `path is not a regular file: ${input}`);
   }
   const canonical = await fsp.realpath(input);
-  const canonicalStat = await fsp.lstat(canonical);
+  const canonicalStat = await fsp.lstat(canonical, { bigint: true });
   if (!canonicalStat.isFile()) {
     throw new FsError(
       'parse_error',

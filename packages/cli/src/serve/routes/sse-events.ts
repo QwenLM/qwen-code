@@ -35,8 +35,10 @@ import {
 } from '../server/request-helpers.js';
 import { parseEventEpochHeader } from '../sse-last-event-id.js';
 import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
+import { redactWorkflowsFromAvailableCommandsEvent } from '../workflow-session-gate.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
+import type { ResolveSubagentSessionRuntime } from './session.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
@@ -123,13 +125,19 @@ interface RegisterSseEventsRoutesDeps {
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
+  resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
 type OmitId<T> = Omit<T, 'id'>;
 
-function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
-  const shaped = omitSkillDetailsForSdkSurface(event);
+function formatSseFrame(
+  event: BridgeEvent | OmitId<BridgeEvent>,
+  workspaceTrusted = false,
+): string {
+  const shaped = omitSkillDetailsForSdkSurface(
+    workspaceTrusted ? event : redactWorkflowsFromAvailableCommandsEvent(event),
+  );
   // SSE format: id (optional), event (optional), data, blank line.
   // The `id:` line is intentionally omitted when `event.id` is absent —
   // terminal/synthetic frames (e.g. daemon-side `stream_error`) must not
@@ -208,6 +216,8 @@ export function registerSseEventsRoutes(
     };
     let slowWarningCount = 0;
     let eventBusEvictionReason: string | undefined;
+    let closeReason: SseCloseReason | undefined;
+    let terminalEventType: string | undefined;
     const onSubscriberDiagnostic = (
       diagnostic: EventBusSubscriberDiagnostic,
     ): boolean => {
@@ -316,6 +326,23 @@ export function registerSseEventsRoutes(
               : {}),
           },
         );
+        closeReason = 'event_bus_evicted';
+        terminalEventType = 'client_evicted';
+        const evictionData = { ...diagnostic.data };
+        Reflect.deleteProperty(evictionData, 'triggerEventType');
+        Reflect.deleteProperty(evictionData, 'triggerEventBytes');
+        try {
+          res.write(
+            formatSseFrame({
+              v: 1,
+              type: 'client_evicted',
+              data: evictionData,
+            }),
+          );
+        } catch {
+          /* socket already destroyed; reconnect still proceeds. */
+        }
+        res.destroy();
       }
       return handled;
     };
@@ -333,17 +360,25 @@ export function registerSseEventsRoutes(
 
     let iter: AsyncIterator<BridgeEvent> | undefined;
     let busEpoch: string | undefined;
+    let workspaceTrusted = false;
     const abort = new AbortController();
     try {
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
-      const runtime = requireSessionRuntime({
-        sessionId: virtualKey?.parentSessionId ?? sessionId,
-        route: 'GET /session/:id/events',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
+      const runtime = virtualKey
+        ? await deps.resolveSubagentSessionRuntime(
+            res,
+            'GET /session/:id/events',
+            virtualKey.parentSessionId,
+          )
+        : requireSessionRuntime({
+            sessionId,
+            route: 'GET /session/:id/events',
+            res,
+            workspaceRegistry,
+            daemonLog,
+          });
       if (!runtime) return;
+      workspaceTrusted = runtime.trusted;
       const snapshot = req.query['snapshot'] === '1';
       const openSubscription = async (): Promise<
         { iter: AsyncIterator<BridgeEvent>; busEpoch?: string } | undefined
@@ -441,9 +476,7 @@ export function registerSseEventsRoutes(
     }
 
     const openedAt = performance.now();
-    let closeReason: SseCloseReason | undefined;
     let terminalCandidate: SseCloseReason | undefined;
-    let terminalEventType: string | undefined;
     let eventFramesWriteSettled = 0;
     let lastEventIdWritten: number | undefined;
     let backpressureCount = 0;
@@ -981,7 +1014,7 @@ export function registerSseEventsRoutes(
           const liveEvent = liveTimingEnabled;
           const serverTimestamp = next.value._meta?.['serverTimestamp'];
           const outcome = await writeWithBackpressure(
-            formatSseFrame(next.value),
+            formatSseFrame(next.value, workspaceTrusted),
           );
           if (outcome === 'closed') break;
           eventFramesWriteSettled += 1;
@@ -1042,7 +1075,7 @@ export function registerSseEventsRoutes(
         }
       } finally {
         cleanup();
-        if (!res.writableEnded) res.end();
+        if (!res.destroyed && !res.writableEnded) res.end();
       }
     })();
   });

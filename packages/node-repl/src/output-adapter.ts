@@ -189,8 +189,9 @@ function pushText(blocks: OutputBlock[], text: string): void {
 
 /**
  * Converts a kernel execution outcome into an MCP CallToolResult:
- * text + image content blocks, with a ~10k-token text budget, base64/MIME image
- * validation, and status folded into `isError` plus a leading status text block
+ * text + image content blocks, with a ~10k-token prose budget, image metadata
+ * outside that budget, and base64/MIME image validation. Status is folded
+ * into `isError` plus a leading status text block
  * (MCP has no first-class error-type or display/model split).
  */
 export function convertOutcomeToMcpResult(
@@ -211,6 +212,12 @@ export function convertOutcomeToMcpResult(
       message: `node_repl execution ${outcome.status}`,
     };
     errorText = `${capChars(error.name, 1024)}: ${capChars(error.message, MAX_ERROR_CHARS)}`;
+    if (error.code || error.details) {
+      errorText = capChars(errorText, 4096);
+      if (error.code) errorText += `\nCode: ${capChars(error.code, 256)}`;
+      if (error.details)
+        errorText += `\nDetails: ${capChars(error.details, 4096)}`;
+    }
     if (outcome.status === 'error' && error.stack) {
       errorText += `\n${capChars(error.stack, 2048)}`;
     }
@@ -295,6 +302,12 @@ export function convertOutcomeToMcpResult(
     }
     validImages++;
     imageBytesEmitted += verdict.byteLength;
+    if (event.metadata !== undefined) {
+      blocks.push({
+        type: 'text',
+        text: `[image metadata] ${event.metadata}\n`,
+      });
+    }
     blocks.push({ type: 'image', data: event.data, mimeType: event.mimeType });
   }
 

@@ -24,11 +24,10 @@ import type {
 import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
+  lowercaseGroupAllowedUsers,
   PollingChannelBase,
   sanitizeDisplayText,
   sanitizeLogText,
-  sanitizePromptText,
-  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
@@ -523,7 +522,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    config.blockStreaming = 'off';
     config.instructions = [
       config.instructions?.trim(),
       GITHUB_PUBLICATION_INSTRUCTIONS,
@@ -609,22 +607,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       u.toLowerCase(),
     );
     this.config.allowedUsers = allowed;
+    this.gate.replaceAllowedUsers(allowed);
+    lowercaseGroupAllowedUsers(this.config.groups);
     const botUsername = this.botUsername?.toLowerCase();
-    if (
-      this.config.senderPolicy === 'allowlist' &&
-      botUsername &&
-      allowed.includes(botUsername)
-    ) {
-      if (allowed.every((user) => user === botUsername)) {
-        throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
+    for (const [groupId, group] of Object.entries(this.config.groups)) {
+      const defaults = this.config.groups['*'];
+      if ((group.senders ?? defaults?.senders ?? 'open') !== 'allowlist') {
+        continue;
+      }
+      const groupUsers = group.allowedUsers ?? defaults?.allowedUsers ?? [];
+      if (!botUsername || !groupUsers.includes(botUsername)) continue;
+      if (groupUsers.every((user) => user === botUsername)) {
+        process.stderr.write(
+          `[Channel:${this.name}] warning: GitHub group "${groupId}" allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this group because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.\n`,
         );
+        continue;
       }
       process.stderr.write(
-        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted but cannot trigger this channel; use a separate operator account.\n`,
+        `[Channel:${this.name}] warning: authenticated GitHub account "${this.botUsername}" is allowlisted in group "${groupId}" but cannot trigger this channel; use a separate operator account.\n`,
       );
     }
-    this.gate.replaceAllowedUsers(allowed);
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
@@ -1351,13 +1356,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      // Approved paired groups bypass the sender gate in preflight, so the
-      // directed lane must mirror that or follow-ups fail mention gating.
-      const allowed =
-        this.gate.isAllowed(senderId) ||
-        (directed &&
-          this.config.groupPolicy === 'pairing' &&
-          this.groupGate.isGroupApproved(ctx.chatId));
+      // The same per-conversation gate preflight applies, so an approved
+      // paired group admits its members here too.
+      const allowed = this.senderGateFor({
+        isGroup: true,
+        chatId: ctx.chatId,
+      }).isAllowed(senderId);
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1420,7 +1424,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? await this.fetchPrMeta(ctx)
         : await this.fetchIssueMeta(ctx);
     const title = meta.title || ctx.subjectTitle;
-    const displayTitle = truncateCodePoints(sanitizePromptText(title), 500);
     const details =
       reason === 'review_requested'
         ? `Author: ${meta.user?.login || 'unknown'} | State: ${meta.state || 'unknown'} | Draft: ${meta.draft ? 'true' : 'false'} | Branch: ${meta.head?.ref || 'unknown'} → ${meta.base?.ref || 'unknown'}`
@@ -1438,10 +1441,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
           : 'Triage this issue and respond with the next action.',
-      displayText:
-        reason === 'review_requested'
-          ? `Review requested: ${displayTitle}`
-          : `Issue assigned: ${displayTitle}`,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1454,33 +1453,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (
-      this.config.senderPolicy === 'pairing' ||
-      this.config.groupPolicy === 'pairing'
-    ) {
+    if (this.config.groupPolicy === 'pairing') {
       await this.processCommentLane(ctx, false, true);
       return;
     }
-    const allComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const senderGate = this.senderGateFor({
+      isGroup: true,
+      chatId: ctx.chatId,
+    });
+    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        this.gate.isAllowed(sender)
+        senderGate.isAllowed(sender)
       );
     });
-    const comments = allComments.slice(-MAX_AGGREGATE_COMMENTS);
-    if (comments.length === 0) return;
-
-    for (const comment of allComments) {
+    for (const comment of newComments) {
       this.recordDispatchedComment(comment.node_id || String(comment.id));
     }
+    const comments = newComments
+      .map((comment) => ({ comment, body: (comment.body || '').trim() }))
+      .slice(-MAX_AGGREGATE_COMMENTS);
+    if (comments.length === 0) return;
 
-    const first = comments[0]!;
+    const first = comments[0]!.comment;
     const summary = comments
       .map(
-        (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
+        ({ comment, body }) =>
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1491,7 +1492,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: ctx.threadId,
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
-      displayText: summary,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1499,7 +1499,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
 
     await this.dispatchEnvelope(envelope, ctx.issueNumber, {
-      dispatchedComments: allComments.map(
+      dispatchedComments: newComments.map(
         (comment) => comment.node_id || String(comment.id),
       ),
     });

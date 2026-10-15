@@ -14,6 +14,10 @@ function fakeNative(overrides: Partial<NativeAppshot> = {}): NativeAppshot {
     captureAppshot: async () => {
       throw new Error('not used');
     },
+    listDisplays: () => [],
+    captureDisplay: async () => {
+      throw new Error('not used');
+    },
     ...overrides,
   };
 }

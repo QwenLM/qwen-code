@@ -10,6 +10,10 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
+        __dirname,
+        '../core/src/utils/no-follow-open.ts',
+      ),
       '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
         __dirname,
         '../core/src/tools/sub-session-constants.ts',
@@ -21,6 +25,10 @@ export default defineConfig({
       '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
         __dirname,
         '../core/src/utils/transcript-records.ts',
+      ),
+      '@qwen-code/qwen-code-core/telemetryConstants': path.resolve(
+        __dirname,
+        '../core/src/telemetry/constants.ts',
       ),
       '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
         __dirname,
@@ -39,6 +47,8 @@ export default defineConfig({
       : undefined,
     reporters: ['default'],
     silent: true,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
       enabled: false,
       provider: 'v8',

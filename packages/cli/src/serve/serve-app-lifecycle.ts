@@ -6,7 +6,6 @@
 
 import type { Server } from 'node:http';
 import type { Application } from 'express';
-import type { ConversationRuntimeOwnership } from './conversations/conversation-runtime-ownership.js';
 import { conversationRuntimeUnavailableError } from './conversations/conversation-runtime-errors.js';
 
 const SERVE_APP_LIFECYCLE = Symbol('qwen.serveAppLifecycle');
@@ -50,7 +49,6 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
   private listenerClosed = false;
   private sealed = false;
   private closePending?: Promise<void>;
-  private ownership?: ConversationRuntimeOwnership;
   private appDrain?: () => Promise<void>;
   private hostDrain?: () => Promise<void>;
   private bootStarter?: () => Promise<void> | void;
@@ -110,13 +108,6 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
       if (this.closePending === pending) this.closePending = undefined;
     });
     return pending;
-  }
-
-  setOwnership(ownership: ConversationRuntimeOwnership): void {
-    if (this.ownership) {
-      throw new Error('Serve app lifecycle ownership is already configured.');
-    }
-    this.ownership = ownership;
   }
 
   setAppDrain(drain: () => Promise<void>): void {
@@ -222,7 +213,6 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     if (errors.length > 1) {
       throw new AggregateError(errors, 'Serve app shutdown is incomplete.');
     }
-    await this.ownership?.release();
   }
 
   private startDrain(

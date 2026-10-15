@@ -7,7 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { atomicWriteFile, Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
@@ -696,8 +697,9 @@ async function writeJsonFile(
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // noFollow: these files carry the supervisor and worker auth tokens;
-  // refuse to write through a pre-placed symlink at the store path, matching
-  // the other credential write sites (trustedHooks, file-token-storage).
+  // refuse to write through a pre-placed symlink at the store path, like the
+  // other credential writers (the MCP and Qwen token stores and extension git
+  // credentials).
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
     forceMode: true,

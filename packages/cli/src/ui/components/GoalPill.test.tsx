@@ -137,6 +137,55 @@ describe('GoalPill', () => {
     unmount();
   });
 
+  it('shows spend against the budget once a turn has billed', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', {
+        tokensUsed: 1_234,
+        tokenBudget: 30_000_000,
+      }),
+    });
+
+    expect(lastFrame()).toContain('(5s · 1.2k/30.0m)');
+    unmount();
+  });
+
+  it('shows spend alone when the Goal has no budget', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', { tokensUsed: 1_234 }),
+    });
+
+    expect(lastFrame()).toContain('(5s · 1.2k)');
+    unmount();
+  });
+
+  it('shows no figures for a Goal that has not billed a turn', () => {
+    // A fresh Goal reading `0/30.0m` says nothing the status has not, and
+    // the pill sits in a footer with little room to say it.
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('active', 'running', { tokenBudget: 30_000_000 }),
+    });
+
+    expect(lastFrame()).toContain('(5s)');
+    expect(lastFrame()).not.toContain('30.0m');
+    unmount();
+  });
+
+  it('keeps showing what a stopped Goal spent', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame, unmount } = renderPill({
+      snapshot: snapshot('paused', 'idle', {
+        tokensUsed: 2_500_000,
+        tokenBudget: 30_000_000,
+      }),
+    });
+
+    expect(lastFrame()).toContain('(2s · 2.5m/30.0m)');
+    unmount();
+  });
+
   it('keeps paused elapsed time frozen while wall clock advances', () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
