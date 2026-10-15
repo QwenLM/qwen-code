@@ -176,7 +176,12 @@ function split(
     const result: string[] = [];
     let current = '';
     const flush = () => {
-      if (current) result.push(current);
+      if (current) {
+        const becomesCode =
+          /`{3}|~{3}/u.test(current) &&
+          blocks.parse(current).children.some((node) => node.type === 'code');
+        result.push(...(becomesCode ? plain(current, limit) : [current]));
+      }
       current = '';
     };
     for (const child of node.children) {
@@ -249,7 +254,9 @@ function split(
   ): string[] {
     const raw = source(node);
     if (node.type === 'code') {
-      const opener = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)/u.exec(raw);
+      const opener = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)(?:\r\n|[\r\n]|$)/u.exec(
+        raw,
+      );
       const closed =
         !opener ||
         new RegExp(
@@ -257,7 +264,7 @@ function split(
           'u',
         ).test(raw);
       if (closed && size(raw) <= limit) return [raw];
-      const info = `${node.lang ?? ''}${node.meta ? ` ${node.meta}` : ''}`;
+      const info = opener ? opener[2]! : '';
       const marker = fence(node.value, info);
       const opening = marker + (info.startsWith(marker[0]!) ? ' ' : '') + info;
       const wrap = (part: string) =>

@@ -126,6 +126,34 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     ).toBe(true);
     expect(blocks.map((block) => block.value).join('\n')).toBe(body);
   });
+  it.each(['js`&#10;~~~', '&#65; example\\*&#10;meta'])(
+    'preserves source info when re-fencing encoded or escaped metadata: %s',
+    (info) => {
+      for (const newline of ['\n', '\r\n', '\r']) {
+        for (const closed of [false, true]) {
+          const body = '<span> synthetic **text** </span>'.repeat(900);
+          const text = `~~~${info}${newline}${body}${closed ? `${newline}~~~` : ''}`;
+          const original = code(text)[0]!;
+          const parts = split(text);
+          const blocks = parts.flatMap(code);
+          expect(blocks).toHaveLength(parts.length);
+          expect(blocks.every((block) => block.lang === original.lang)).toBe(
+            true,
+          );
+          expect(blocks.every((block) => block.meta === original.meta)).toBe(
+            true,
+          );
+          expect(blocks.map((block) => block.value).join('')).toBe(body);
+          expect(
+            parts.every((part) => part.split('\n')[0]!.endsWith(info)),
+          ).toBe(true);
+          expect(
+            parts.flatMap(nodes).some((node) => node.type === 'html'),
+          ).toBe(false);
+        }
+      }
+    },
+  );
   it('splits an oversized code line and closes an unfinished fence', () => {
     const body = '中😀'.repeat(9000);
     const parts = split('```ts\n' + body);
@@ -348,6 +376,33 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
       expect(parts.filter((part) => part.includes('```'))).toHaveLength(1);
     }
   });
+  it.each(['```', '~~~'])(
+    'keeps prose visible when a continuation begins with %s',
+    (marker) => {
+      const stem = '[a](https://docs.example.com/';
+      const link = stem + 'x'.repeat(3800 - stem.length - 1) + ')';
+      for (const prefix of ['word '.repeat(760), link]) {
+        const text =
+          prefix + marker + ' fences like this. ' + 'tail '.repeat(600);
+        const parts = split(text);
+        const blocks = parts.flatMap(code);
+        expect(blocks.length).toBeGreaterThan(0);
+        expect(blocks.every((block) => block.lang === 'text')).toBe(true);
+        expect(
+          parts
+            .map((part) =>
+              code(part).length
+                ? code(part)
+                    .map((block) => block.value)
+                    .join('')
+                : part,
+            )
+            .join(''),
+        ).toBe(text);
+        expect(parts.flatMap(links)).toEqual(links(text));
+      }
+    },
+  );
   it('reserves reference definitions within the ordinary prose target', () => {
     const definition = '[ref]: https://docs.example.com/' + 'a'.repeat(70);
     const text = 'Ordinary [ref] sentence. '.repeat(600) + '\n\n' + definition;
