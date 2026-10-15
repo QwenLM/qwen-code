@@ -38,6 +38,8 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { helpCommand } from '../commands/helpCommand.js';
 
 const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
   logSlashCommandSpy: vi.fn(),
@@ -229,6 +231,76 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each([
+    ['/compress', 'compress', CommandKind.BUILT_IN, false],
+    ['/summarize', 'compress', CommandKind.BUILT_IN, false],
+    ['/help', 'help', CommandKind.FILE, false],
+    ['/exit', 'quit', CommandKind.FILE, false],
+    ['/alpha /beta work', 'alpha', CommandKind.SKILL, false],
+    ['/help', 'help', CommandKind.BUILT_IN, true],
+    ['/exit', 'quit', CommandKind.BUILT_IN, true],
+  ])(
+    'allows only actual recovery commands after startup failure: %s (%s, %s)',
+    async (input, name, kind, recovery) => {
+      const error = new Error('Config startup failed');
+      const config = {
+        initialize: vi.fn().mockRejectedValue(error),
+        getGeminiClient: () => undefined,
+        getSessionId: () => 'mod-startup-failed',
+      } as unknown as Config;
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          ready: new Promise(() => {}),
+        } as interactiveMods.InteractiveModSession);
+      const action = vi
+        .fn()
+        .mockResolvedValue({ type: 'submit_prompt', content: 'must not run' });
+      const command = recovery
+        ? name === 'help'
+          ? helpCommand
+          : quitCommand
+        : stub({
+            name,
+            kind,
+            altNames:
+              name === 'compress'
+                ? ['summarize']
+                : name === 'quit'
+                  ? ['exit']
+                  : undefined,
+            action,
+          });
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command, stub({ name: 'beta', kind: CommandKind.SKILL, action })],
+      );
+      try {
+        const outcome = await dispatcher.handle(input);
+        expect(action).not.toHaveBeenCalled();
+        if (recovery) {
+          expect(outcome).toMatchObject({
+            kind: name === 'help' ? 'open_dialog' : 'quit',
+          });
+          expect(config.initialize).not.toHaveBeenCalled();
+        } else {
+          expect(outcome).toEqual({ kind: 'handled' });
+          expect(host.items).toContainEqual(
+            expect.objectContaining({
+              type: 'error',
+              text: 'Config startup failed',
+            }),
+          );
+        }
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
   it('returns false for non-slash input and path-like input', async () => {
     const { outcome: plain } = await dispatch('hello world', []);
     expect(plain).toBe(false);

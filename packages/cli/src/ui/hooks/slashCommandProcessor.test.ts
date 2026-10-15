@@ -25,6 +25,9 @@ import { MessageType } from '../types.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { helpCommand } from '../commands/helpCommand.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
@@ -278,6 +281,35 @@ describe('useSlashCommandProcessor', () => {
   };
 
   describe('Initialization and Command Loading', () => {
+    it('retains recovery commands when the Mod loader rejects startup', async () => {
+      const ready = Promise.reject(new Error('Mod startup failed'));
+      void ready.catch(() => {});
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          ready,
+          loadCommands: vi
+            .fn()
+            .mockRejectedValue(new Error('Mod startup failed')),
+        } as unknown as interactiveMods.InteractiveModSession);
+      try {
+        const result = setupProcessorHook([helpCommand, quitCommand]);
+        await waitFor(() =>
+          expect(
+            result.current.slashCommands.map((command) => command.name),
+          ).toEqual(['help', 'quit']),
+        );
+        await act(async () => {
+          await result.current.handleSlashCommand('/help');
+          await result.current.handleSlashCommand('/exit');
+        });
+        expect(mockOpenHelpDialog).toHaveBeenCalledOnce();
+        expect(mockSetQuittingMessages).toHaveBeenCalledOnce();
+      } finally {
+        owner.mockRestore();
+      }
+    });
+
     it('should initialize CommandService with all required loaders', async () => {
       const result = setupProcessorHook();
       await waitFor(() => {
@@ -391,6 +423,60 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('Command Execution Logic', () => {
+    it.each([
+      ['/compress', 'compress', CommandKind.BUILT_IN],
+      ['/summarize', 'compress', CommandKind.BUILT_IN],
+      ['/btw question', 'btw', CommandKind.BUILT_IN],
+      ['/help', 'help', CommandKind.FILE],
+      ['/quit', 'quit', CommandKind.FILE],
+      ['/alpha /beta do work', 'alpha', CommandKind.SKILL],
+    ])(
+      'blocks %s before its action after Mod startup failure',
+      async (input, name, kind) => {
+        const action = vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'must not reach the model',
+        });
+        const commands = [
+          createTestCommand(
+            {
+              name,
+              altNames: name === 'compress' ? ['summarize'] : undefined,
+              action,
+            },
+            kind,
+          ),
+          createTestCommand({ name: 'beta', action }, CommandKind.SKILL),
+        ];
+        const result = setupProcessorHook(commands);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(2),
+        );
+        const ready = Promise.reject(new Error('Mod startup failed'));
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+        try {
+          await act(async () => {
+            expect(await result.current.handleSlashCommand(input)).toEqual({
+              type: 'handled',
+            });
+          });
+          expect(action).not.toHaveBeenCalled();
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: MessageType.ERROR,
+              text: expect.stringContaining('Mod startup failed'),
+            }),
+            expect.any(Number),
+          );
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
+
     it.each(['/quit', '/exit'])(
       'should handle %s while slash commands are still loading',
       async (input) => {

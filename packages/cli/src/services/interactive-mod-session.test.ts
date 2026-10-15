@@ -129,6 +129,25 @@ describe('interactive Mod owner', () => {
     expect(host.presentation()).toEqual({ isFullscreen: true, columns: 120 });
   });
 
+  it('sanitizes plugin labels and startup errors without flattening transcript logs', async () => {
+    const { owner, host, runtime } = setup();
+    const logs = vi.fn();
+    owner.subscribe(logs);
+    host.log(
+      { to: 'transcript', text: 'line one\nline two\tvalue' },
+      'bad\nname\u202e',
+      'old',
+    );
+    expect(logs).toHaveBeenCalledWith(
+      '[Mod bad name] line one\nline two\tvalue',
+    );
+    runtime.initialize.mockRejectedValue(new Error('bad\nconfig\u2066'));
+    await expect(owner.initialize()).rejects.toThrow('bad');
+    expect(logs).toHaveBeenLastCalledWith(
+      'Mods failed to initialize: Error: bad config',
+    );
+  });
+
   it('closing before startup releases pending command loaders and removes the owner', async () => {
     const { config, owner, runtime } = setup();
     const commands = owner.loadCommands(new AbortController().signal);

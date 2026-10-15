@@ -79,7 +79,7 @@ host fields stay pinned. Headless sessions retain `surface: null`,
 
 Interactive transcript logs appear as informational messages and never enter
 model context. Debug-only logs stay in the debug logger. Terminal text is
-control-character sanitized and each transcript log is limited to 2,000
+control-character sanitized, preserving ordinary newlines and tabs, and each transcript log is limited to 2,000
 characters. These UI logs need not survive a restart or resume. Esc cancels
 the current Mod command; the next command waits for worker cancellation to
 settle. Clear, resume and branch retain the loaded modules and their variables,
@@ -90,6 +90,12 @@ Interactive support currently covers commands, lifecycle and logs. Explicit
 a model request. Broad wildcard or negated patterns that also match tool events
 receive a visible diagnostic and apply only to supported events. Tool
 interception below is available only in headless sessions.
+
+If Mod initialization fails in an interactive terminal, the error remains visible
+and the input stays available for the built-in `/help` and `/quit` commands.
+Other commands and model requests remain blocked; fix the Mod configuration and
+restart the session. File or plugin commands named `help` or `quit` do not gain
+this recovery exception.
 
 ## Supported subset
 

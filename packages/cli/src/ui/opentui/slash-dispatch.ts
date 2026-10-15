@@ -54,16 +54,16 @@ export async function loadInteractiveCommands(
   signal?: AbortSignal,
   settings?: LoadedSettings | null,
 ): Promise<readonly SlashCommand[]> {
+  let mods = getInteractiveModSession(config);
   // Skill/MCP/project commands need the config fully initialized (the skill
   // manager is created in initialize()); without this /skills errors and
   // skill commands are missing from /-completion.
   try {
     if (config) await ensureConfigInitialized(config);
-  } catch (error) {
-    if (getInteractiveModSession(config)) throw error;
-    /* proceed with partial commands */
+  } catch {
+    // Native initialization can fail before Mod startup is ever settled.
+    mods = undefined;
   }
-  const mods = getInteractiveModSession(config);
   const loaders = [
     new McpPromptLoader(config),
     new BuiltinCommandLoader(config),

@@ -290,7 +290,7 @@ describe('Mod session ownership', () => {
   it.each([false, true])(
     'preserves headless metadata and sanitizes terminal metadata: terminal=%s',
     async (terminal) => {
-      const { session, runtime } = setup(
+      const { session, runtime, extension } = setup(
         { isInteractive: () => terminal },
         terminal
           ? {
@@ -301,16 +301,24 @@ describe('Mod session ownership', () => {
           : undefined,
       );
       const link = '\u001b]8;;https://invalid.example/mod-description\u0007';
-      const description = `${link}Description\u001b]8;;\u0007`;
-      const argumentHint = '\u001b[31m<argument>\u001b[0m\u0007';
+      const description = `${link}Description\u001b]8;;\u0007\nline\u202e`;
+      const argumentHint = '\u001b[31m<argument>\u001b[0m\u0007\tvalue\u2066';
+      extension.name = 'hello\nmod\u202e';
       runtime.getCommands.mockReturnValue([
         { name: 'hello', description, argumentHint },
       ]);
       const [command] = await session.loadCommands(
         new AbortController().signal,
       );
-      expect(command.description).toBe(terminal ? 'Description' : description);
-      expect(command.argumentHint).toBe(terminal ? '<argument>' : argumentHint);
+      expect(command.description).toBe(
+        terminal ? 'Description line' : description,
+      );
+      expect(command.argumentHint).toBe(
+        terminal ? '<argument> value' : argumentHint,
+      );
+      expect(command.extensionName).toBe(
+        terminal ? 'hello mod' : extension.name,
+      );
     },
   );
 
@@ -405,6 +413,19 @@ describe('Mod session ownership', () => {
         plugin: 'hello-mod',
         sessionId: 'session-1',
       },
+      'hello-mod',
+      'session-1',
+    );
+    log.mockClear();
+    emit(
+      {
+        to: 'transcript',
+        text: '\u001b[31mline one\u001b[0m\nline two\tvalue\u0007\u202e\u2066',
+      },
+      'hello-mod',
+    );
+    expect(log).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'line one\nline two\tvalue' }),
       'hello-mod',
       'session-1',
     );

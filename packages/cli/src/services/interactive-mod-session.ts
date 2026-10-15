@@ -6,13 +6,23 @@
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
-import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import type { LoadedSettings } from '../config/settings.js';
+import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
+import { sanitizeTerminalLine } from '../ui/utils/textUtils.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { ModSession } from './mod-session.js';
 import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
+
+export function isModRecoveryCommand(
+  command: SlashCommand | undefined,
+): boolean {
+  return (
+    command?.kind === CommandKind.BUILT_IN &&
+    (command.name === 'help' || command.name === 'quit')
+  );
+}
 
 export function createInteractiveModSession(
   config: Config,
@@ -62,7 +72,7 @@ export class InteractiveModSession implements ICommandLoader {
       presentation: () => this.presentation,
       log: (entry, plugin, sessionId) =>
         this.emit(
-          `[Mod ${stripAnsiAndControl(plugin)}] ${entry.text}`,
+          `[Mod ${sanitizeTerminalLine(plugin)}] ${entry.text}`,
           sessionId,
         ),
     })!;
@@ -80,7 +90,7 @@ export class InteractiveModSession implements ICommandLoader {
       },
       (error: unknown) => {
         this.emit(
-          `Mods failed to initialize: ${stripAnsiAndControl(String(error)).slice(0, 2000)}`,
+          `Mods failed to initialize: ${sanitizeTerminalLine(String(error)).slice(0, 2000)}`,
           this.config.getSessionId(),
         );
         this.rejectStartup(error);

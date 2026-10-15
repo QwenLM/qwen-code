@@ -51,7 +51,10 @@ import {
 } from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
-import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import {
+  getInteractiveModSession,
+  isModRecoveryCommand,
+} from '../../services/interactive-mod-session.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
@@ -765,10 +768,6 @@ export const useSlashCommandProcessor = (
     const load = async () => {
       try {
         const mods = getInteractiveModSession(config);
-        if (mods) {
-          await mods.ready;
-          if (controller.signal.aborted) return;
-        }
         const loaders = [
           new McpPromptLoader(config),
           new BuiltinCommandLoader(config),
@@ -999,6 +998,11 @@ export const useSlashCommandProcessor = (
       };
 
       try {
+        // Some built-ins invoke models directly, before normal prompt dispatch.
+        const mods = getInteractiveModSession(config);
+        if (mods && !isModRecoveryCommand(commandToExecute)) {
+          await mods.ready;
+        }
         // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
         const stackedResult = parseStackedSlashCommands(trimmed, commands);
         if (stackedResult.skills.length >= 2) {

@@ -73,6 +73,11 @@ import {
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
+  getInteractiveModSession,
+  isModRecoveryCommand,
+} from '../../services/interactive-mod-session.js';
+import { ensureConfigInitialized } from './live-session.js';
+import {
   createOpenTuiCommandContext,
   type OpenTuiCommandHost,
   type OpenTuiCommandServices,
@@ -561,6 +566,14 @@ export class OpenTuiSlashDispatcher {
     };
 
     try {
+      const config = this.services.config;
+      if (
+        config &&
+        getInteractiveModSession(config) &&
+        !isModRecoveryCommand(commandToExecute)
+      ) {
+        await ensureConfigInitialized(config);
+      }
       const stackedResult = parseStackedSlashCommands(
         trimmed,
         this.commandList,

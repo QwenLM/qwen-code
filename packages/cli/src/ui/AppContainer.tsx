@@ -1193,6 +1193,8 @@ export const AppContainer = (props: AppContainerProps) => {
         ),
       );
       profileCheckpoint('config_initialize_end');
+      setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
       // Profile finalize is intentionally NOT here. With PR-A's background
       // MCP discovery, MCP-related events (`mcp_server_ready:*`,
       // `mcp_first_tool_registered`, `mcp_all_servers_settled`,
@@ -1239,7 +1241,15 @@ export const AppContainer = (props: AppContainerProps) => {
             config.getSessionId(),
           ),
         );
+      }
 
+      // Restore the transcript before Mod diagnostics, without making input
+      // or Mod startup wait for asynchronous session recovery.
+      void getInteractiveModSession(config)
+        ?.initialize()
+        .catch(() => {});
+
+      if (resumedSessionData) {
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
         );
@@ -1326,9 +1336,6 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-      await getInteractiveModSession(config)?.initialize();
-      setConfigInitialized(true);
-      profileCheckpoint('input_enabled');
     })();
 
     // Register SessionEnd cleanup for process exit
@@ -3848,18 +3855,30 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Only clone the tail — full structuredClone of a large resumed session
-      // causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = llmClient.getHistoryTail(40, true);
-      generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        // On by default: the schema declares `default: true`, but
-        // `mergeSettings` doesn't apply schema defaults, so an unset value is
-        // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Only an explicit
-        // `false` opts out of cache sharing. This flag does not inherit the
-        // follow-up suggestion runtime gate.
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
-      })
+      const generate = async () => {
+        const mods = getInteractiveModSession(config);
+        if (mods) await mods.ready;
+        ac.signal.throwIfAborted();
+        // Only clone the tail — full structuredClone of a large resumed session
+        // causes transient heap peaks that trigger OOM (#4624).
+        const conversationHistory = llmClient.getHistoryTail(40, true);
+        return generatePromptSuggestion(
+          config,
+          conversationHistory,
+          ac.signal,
+          {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value is
+            // `undefined` and a `=== true` gate left the cache-aware fork as dead
+            // code unless the flag was explicitly set (#9230). Only an explicit
+            // `false` opts out of cache sharing. This flag does not inherit the
+            // follow-up suggestion runtime gate.
+            enableCacheSharing:
+              settings.merged.ui?.enableCacheSharing !== false,
+          },
+        );
+      };
+      void generate()
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {

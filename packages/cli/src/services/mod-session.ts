@@ -31,6 +31,7 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { ICommandLoader } from '../services/types.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 import {
+  sanitizeTerminalLine,
   sanitizeTerminalText,
   stripUnsafeCharacters,
 } from '../ui/utils/textUtils.js';
@@ -259,17 +260,17 @@ export class ModSession implements ICommandLoader {
         (command): SlashCommand => ({
           name: command.name,
           description: this.terminal
-            ? stripAnsiAndControl(command.description)
+            ? sanitizeTerminalLine(command.description)
             : command.description,
           kind: CommandKind.FILE,
           source: 'plugin-command' as const,
           extensionName: this.terminal
-            ? stripAnsiAndControl(mod.name)
+            ? sanitizeTerminalLine(mod.name)
             : mod.name,
           supportedModes: [this.terminal ? 'interactive' : 'non_interactive'],
           argumentHint:
             this.terminal && command.argumentHint !== undefined
-              ? stripAnsiAndControl(command.argumentHint)
+              ? sanitizeTerminalLine(command.argumentHint)
               : command.argumentHint,
           modelInvocable: false,
           action: async (context, args) => {
@@ -385,7 +386,9 @@ export class ModSession implements ICommandLoader {
     for (const entry of this.pendingLogs.splice(0)) {
       logger.debug(`[${entry.plugin}] ${entry.text}`);
       if (entry.to === 'debug') continue;
-      const text = stripAnsiAndControl(entry.text);
+      const text = this.terminal
+        ? sanitizeTerminalText(stripUnsafeCharacters(entry.text))
+        : stripAnsiAndControl(entry.text);
       if ('surface' in this.output) {
         this.output.log(
           { ...entry, text: text.slice(0, 2000) },
