@@ -1053,13 +1053,17 @@ for (const { name, logs, jobs, coverage } of [
     coverage:
       '- Job logs analyzed: 1 of 2 failed-job logs (incomplete coverage).',
   },
+  {
+    name: 'more logs than recorded failed jobs',
+    logs: [VITEST_LOG, VITEST_LOG, VITEST_LOG],
+    jobs: [WINDOWS_JOB],
+    coverage:
+      '- Job logs analyzed: 3 of 1 failed-job logs (incomplete coverage).',
+  },
 ]) {
   test(`analyze and plan preserve diagnostic uncertainty for ${name}`, (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'sig-log-coverage-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const helper = fileURLToPath(
-      new URL('./main-failure-signature.mjs', import.meta.url),
-    );
     const jobsPath = join(dir, 'jobs.tsv');
     const analysisPath = join(dir, 'analysis.json');
     writeFileSync(
@@ -1071,41 +1075,47 @@ for (const { name, logs, jobs, coverage } of [
       writeFileSync(path, log);
       return path;
     });
-    const analyzed = spawnSync(
-      process.execPath,
-      [
-        helper,
-        'analyze',
-        '--workflow',
-        'Qwen Code CI',
-        '--jobs',
-        jobsPath,
-        ...logPaths,
-      ],
-      { encoding: 'utf8' },
-    );
-    assert.equal(analyzed.status, 0, analyzed.stderr);
-    writeFileSync(analysisPath, analyzed.stdout);
-    const planned = spawnSync(
-      process.execPath,
-      [
-        helper,
-        'plan',
-        '--analysis',
-        analysisPath,
-        '--sha',
-        OCCURRENCE.sha,
-        '--run-url',
-        OCCURRENCE.runUrl,
-        '--run-id',
-        OCCURRENCE.runId,
-        '--at',
-        OCCURRENCE.at,
-      ],
-      { encoding: 'utf8' },
-    );
-    assert.equal(planned.status, 0, planned.stderr);
-    const { body, searchMarkers } = JSON.parse(planned.stdout);
+    const analyzeArgs = [
+      'analyze',
+      '--workflow',
+      'Qwen Code CI',
+      '--jobs',
+      jobsPath,
+      ...logPaths,
+    ];
+    const planArgs = [
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      OCCURRENCE.runId,
+      '--at',
+      OCCURRENCE.at,
+    ];
+    let plannedOutput;
+    if (name === 'partial logs with identified failures') {
+      const helper = fileURLToPath(
+        new URL('./main-failure-signature.mjs', import.meta.url),
+      );
+      const analyzed = spawnSync(process.execPath, [helper, ...analyzeArgs], {
+        encoding: 'utf8',
+      });
+      assert.equal(analyzed.status, 0, analyzed.stderr);
+      writeFileSync(analysisPath, analyzed.stdout);
+      const planned = spawnSync(process.execPath, [helper, ...planArgs], {
+        encoding: 'utf8',
+      });
+      assert.equal(planned.status, 0, planned.stderr);
+      plannedOutput = planned.stdout;
+    } else {
+      writeFileSync(analysisPath, captureStdout(analyzeArgs));
+      plannedOutput = captureStdout(planArgs);
+    }
+    const { body, searchMarkers } = JSON.parse(plannedOutput);
     assert.ok(!body.includes('before any test result was'));
     assert.ok(body.includes(coverage));
     assert.ok(body.includes(OCCURRENCE.runUrl));
@@ -1152,6 +1162,32 @@ test('recurrences replace log coverage and retain investigation notes', () => {
   assert.equal(body.split('- Job logs analyzed:').length - 1, 1);
   assert.ok(body.includes('Investigation: check the Windows job first.'));
   assert.equal(occurrenceLines(body).length, 2);
+});
+
+test('recurrences preserve human notes starting with the log coverage prefix', () => {
+  const failedJobs = [WINDOWS_JOB];
+  const analysis = analyzeLogs('Qwen Code CI', [VITEST_LOG], failedJobs);
+  const humanNote =
+    '- Job logs analyzed: triage note: keep runner evidence until reviewed.';
+  const otherNote = 'Investigation: check the Windows job first.';
+  let body =
+    renderIssueBody({ analysis, occurrence: OCCURRENCE }) +
+    `\n${humanNote}\n${otherNote}\n`;
+
+  for (const runId of ['302', '303']) {
+    body = renderIssueBody({
+      analysis,
+      occurrence: { ...OCCURRENCE, runId },
+      existingBody: body,
+    });
+    assert.ok(body.includes(humanNote), `human note survives run ${runId}`);
+    assert.ok(body.includes(otherNote));
+  }
+  assert.equal(
+    body.split('<!-- qwen-main-ci-failure-coverage -->').length - 1,
+    1,
+  );
+  assert.equal(occurrenceLines(body).length, 3);
 });
 
 function captureStdout(argv) {

@@ -312,7 +312,9 @@ const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
 // two-space ones failedJobLines emits — the strip stops at the first line
 // that is not one, never consuming a human bullet that starts with `- `.
 const FAILED_JOBS_BLOCK = /\n*- Failed jobs:\n(?: {2}- [^\n]*\n?)+/;
-const JOB_LOG_COVERAGE_LINE = /^- Job logs analyzed:[^\n]*\n?/m;
+// Only refresh marked machine lines; human notes can quote the visible text.
+const JOB_LOG_COVERAGE_LINE =
+  /^- Job logs analyzed:[^\n]*<!-- qwen-main-ci-failure-coverage -->\n?/gm;
 
 // The same split/merge contract — head / recorded occurrences / tail around
 // the marker, human text kept verbatim, occurrences newest-first and capped —
@@ -352,11 +354,11 @@ function failedJobLines(failedJobs) {
 function jobLogCoverageLine(analysis) {
   const { logCount, failedJobs } = analysis;
   if (!failedJobs.length) {
-    return `- Job logs analyzed: ${logCount}; failed-job count unavailable.`;
+    return `- Job logs analyzed: ${logCount}; failed-job count unavailable. <!-- qwen-main-ci-failure-coverage -->`;
   }
   const incomplete =
-    logCount < failedJobs.length ? ' (incomplete coverage)' : '';
-  return `- Job logs analyzed: ${logCount} of ${failedJobs.length} failed-job logs${incomplete}.`;
+    logCount === failedJobs.length ? '' : ' (incomplete coverage)';
+  return `- Job logs analyzed: ${logCount} of ${failedJobs.length} failed-job logs${incomplete}. <!-- qwen-main-ci-failure-coverage -->`;
 }
 
 /**
