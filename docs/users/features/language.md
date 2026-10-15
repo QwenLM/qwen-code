@@ -22,6 +22,7 @@ Use the `/language ui` command:
 
 ```bash
 /language ui zh-CN    # Chinese
+/language ui zh-TW    # Traditional Chinese
 /language ui en-US    # English
 /language ui ru-RU    # Russian
 /language ui de-DE    # German
@@ -29,6 +30,7 @@ Use the `/language ui` command:
 /language ui pt-BR    # Portuguese (Brazil)
 /language ui fr-FR    # French
 /language ui ca-ES    # Catalan
+/language ui az-AZ    # Azerbaijani
 ```
 
 Aliases are also supported:
@@ -42,6 +44,7 @@ Aliases are also supported:
 /language ui pt       # Portuguese
 /language ui fr       # French
 /language ui ca       # Catalan
+/language ui az       # Azerbaijani
 ```
 
 ### Auto-detection
@@ -57,24 +60,15 @@ Detection priority:
 
 ## LLM Output Language
 
-The LLM output language controls what language the AI assistant responds in, regardless of what language you type your questions in.
+The LLM output language determines how the AI assistant chooses a response language. By default, it follows the language of your input; you can set a fixed preference.
 
 ### How It Works
 
 The LLM output language is controlled by a rule file at `~/.qwen/output-language.md`. This file is automatically included in the LLM's context during startup, instructing it to respond in the specified language.
 
-### Auto-detection
+### Default Output Language
 
-On first startup, if no `output-language.md` file exists, Qwen Code automatically creates one based on your system locale. For example:
-
-- System locale `zh` creates a rule for Chinese responses
-- System locale `en` creates a rule for English responses
-- System locale `ru` creates a rule for Russian responses
-- System locale `de` creates a rule for German responses
-- System locale `ja` creates a rule for Japanese responses
-- System locale `pt` creates a rule for Portuguese responses
-- System locale `fr` creates a rule for French responses
-- System locale `ca` creates a rule for Catalan responses
+On first startup, if no `output-language.md` file exists, Qwen Code creates a rule based on `general.outputLanguage`. The default value, `auto`, instructs the AI to respond in the same language as your input, regardless of your system locale. Set an explicit output language to create a fixed-language rule.
 
 ### Manual Setting
 
