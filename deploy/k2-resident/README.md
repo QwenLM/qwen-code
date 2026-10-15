@@ -35,10 +35,11 @@ java -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistra
   render-protection /absolute/path/registration.json resident-protection resident-binding
 ```
 
-After separately authorized
-installation, pin its actual namespace/policy/binding UIDs and generations. The configured
-image must include the built CLI and its Linux CSI mount helper and be selected
-by an immutable digest. The command contains only the executable and CLI path;
+After separately authorized installation, pin its actual namespace/policy/binding
+UIDs and generations. Select an immutable image digest containing Node.js 22 or
+later and the built CLI. The CSI file path uses Node filesystem APIs and reads
+Linux `/proc/self/mountinfo`, `/proc/self/fd` and the volume's
+`/sys/dev/block/<major>:<minor>/device/serial`; these must be available to UID 1000. The command contains only the executable and CLI path;
 the provisioner appends `managed-runtime-worker --container-boot` and the boot
 file path. Optional artifact ConfigMaps must be immutable and explicitly pinned.
 

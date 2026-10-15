@@ -7,14 +7,14 @@ qwen:
       workspace-shell-enabled: false
     runtime-broker:
       enabled: true
-      provisioner: kubernetes-workspace
-      isolation-class: workspace
+      provisioner: 'kubernetes-workspace'
+      isolation-class: 'workspace'
       trusted-local-reboot-recovery: false
       verified-workspace-recovery-enabled: false
       child-workspaces-enabled: false
       workspace-mounts: []
-      workspace-id: resident-default
-      workspace-cwd: /workspace
+      workspace-id: 'resident-default'
+      workspace-cwd: '/workspace'
       resident-kubernetes-api-url: '${RESIDENT_KUBERNETES_API_URL}'
       resident-kubernetes-token-file: '${RESIDENT_KUBERNETES_TOKEN_FILE}'
       resident-kubernetes-ca-file: '${RESIDENT_KUBERNETES_CA_FILE}'
@@ -34,7 +34,7 @@ qwen:
             volume-handle: '${RESIDENT_VOLUME_HANDLE}'
             backend-domain: '${RESIDENT_BACKEND_DOMAIN}'
             disk-serial: '${RESIDENT_DISK_SERIAL}'
-            mount-root: /workspace
+            mount-root: '/workspace'
             revision: 1
           protection:
             namespace-uid: '${RESIDENT_NAMESPACE_UID}'

@@ -29,9 +29,11 @@ java -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistra
   render-protection /absolute/path/registration.json resident-protection resident-binding
 ```
 
-在另外授权安装后，钉住实际
-namespace、policy、binding 的 UID 和代数。配置的镜像必须包含构建后的 CLI 和 Linux CSI
-挂载 helper，并使用不可变摘要。command 只包含执行程序和 CLI 路径；provisioner
+在另外授权安装后，钉住实际 namespace、policy、binding 的 UID 和代数。使用不可变
+镜像摘要，镜像包含 Node.js 22 或更新版本及构建后的 CLI。CSI 文件路径使用 Node
+文件系统 API，并读取 Linux `/proc/self/mountinfo`、`/proc/self/fd` 和卷的
+`/sys/dev/block/<major>:<minor>/device/serial`；UID 1000 必须能够访问这些位置。
+command 只包含执行程序和 CLI 路径；provisioner
 会追加 `managed-runtime-worker --container-boot` 和 boot 文件路径。可选产物
 ConfigMap 必须不可变并显式钉住身份。
 

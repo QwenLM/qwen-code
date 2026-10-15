@@ -92,6 +92,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
@@ -405,6 +406,14 @@ function expectFullStreamedAnswer(
 }
 
 const listeners = new Set<Server>();
+
+beforeEach(() => {
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'capabilityDigest',
+    'get',
+  ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+});
 
 afterEach(async () => {
   await Promise.all(

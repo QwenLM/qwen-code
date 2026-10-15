@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { inspectOriginalFileCheckpointCoverage } from './original-file-checkpoint.js';
 import {
@@ -45,7 +46,23 @@ describe('original native file settlement proof', () => {
     const coveredSequence = f.session.authority.committedSequence;
     const resultRef = await f.resources.publish(
       'managed-turn-result',
-      Buffer.from('{}'),
+      Buffer.from(
+        JSON.stringify({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: f.session.authority.sessionHeader.sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: f.promptId,
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+      ),
     );
     await f.session.authority.commitTurnComplete(
       {
