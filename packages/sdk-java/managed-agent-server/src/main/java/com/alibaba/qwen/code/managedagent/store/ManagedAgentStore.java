@@ -381,6 +381,20 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public Optional<Admission> findWorkspaceCreateReplay(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest) {
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                actorId, idempotencyKey);
+        if (existing.isEmpty()) {
+            return Optional.empty();
+        }
+        // The pre-gate probe re-runs the sibling's re-checks — a replay must
+        // not outlive the Workspace binding or the caller's read grant.
+        return Optional.of(replayWorkspaceCommand(tenantId, actorId,
+                requestDigest, existing.getFirst(), false));
+    }
+
+    @Override
     @Transactional
     public Admission replayWorkspaceSessionCommand(String tenantId,
             String actorId, String idempotencyKey, String requestDigest) {
@@ -959,6 +973,18 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
+        return insertTurnCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, input, payloadDigest, null);
+    }
+
+    // The actor-carrying variant records the caller on the command
+    // receipt, so the receipt's replay answers the actor who recorded it —
+    // an OPERATOR's own retry of his own key — and not only the creator.
+    @Transactional
+    public Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            String actorId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
@@ -1013,7 +1039,8 @@ public class ManagedAgentStore implements AgentStateStore {
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, now);
+                sessionId, turnId, "COMPLETED", null,
+                commandActorKey(tenantId, actorId), now);
         appendEvent(tenantId, sessionId, turnId, "turn.accepted",
                 acceptedData(turnId, input), false, null, now);
         return new Admission(sessionId, turnId, false, true);
@@ -1023,6 +1050,15 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
+        return insertCancelCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, turnId, null);
+    }
+
+    // The actor-carrying twin of insertTurnCommand's overload.
+    @Transactional
+    public Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, String actorId) {
         if (requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null
                 && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
@@ -1030,7 +1066,8 @@ public class ManagedAgentStore implements AgentStateStore {
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, now);
+                sessionId, turnId, "COMPLETED", null,
+                commandActorKey(tenantId, actorId), now);
         boolean commandEffect = ACTIVE_TURN_STATES.contains(turn.status())
                 && !"CANCELLING".equals(turn.status());
         if (commandEffect) {
@@ -1054,8 +1091,22 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title) {
+        return beginSessionRename(tenantId, key, digest, sessionId, title,
+                null);
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionRename(String tenantId, String key,
+            String digest, String sessionId, String title, String actorId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        // Tenant and Session locks serialize admission without gap-locking missing index entries.
+        Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
+        if (previous.isPresent()
+                && sessionId.equals(previous.get().sessionId())) {
+            requireRenameReplayOwner(session, previous.get(), actorId);
+        }
         var retained =
                 jdbc.queryForList(
                         "SELECT * FROM ma_operation WHERE operation_kind = 'RENAME' AND target_key"
@@ -1100,7 +1151,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         key,
                         digest,
                         sessionId,
-                        SessionMutationKind.RENAME);
+                        SessionMutationKind.RENAME,
+                        actorId);
         if ("COMPLETED".equals(command.status())) {
             return command;
         }
@@ -1148,6 +1200,33 @@ public class ManagedAgentStore implements AgentStateStore {
                 now,
                 now);
         return new SessionMutationCommand(sessionId, "PENDING", command.replayed(), next);
+    }
+
+    // The discovery arm of the replay's recorder/creator rule: once this
+    // method finds an existing RENAME command receipt under the Session
+    // lock, the request may only reuse it when the caller is its recorder
+    // (the receipt's actor) or the Session's creator. The alternatives —
+    // claiming a still-claimable delivery for the recorder, or failing a
+    // digest comparison against a different title — would hand the
+    // recorder's pending work to the racer or name the live key before
+    // authorization. A receipt recorded before the recorder stamp keeps the
+    // role-gated replay it was recorded under (CommandRecord.admitsReplayBy).
+    // A legacy Session has no per-actor mutation gate at all; its key's
+    // outcome stays answerable through the same contract as the pre-read
+    // probe. A tombstoned Session answers the reads' 404 instead of the
+    // live-Session refusal.
+    private void requireRenameReplayOwner(SessionRecord session,
+            CommandRecord previous, String actorId) {
+        if (!previous.admitsReplayBy(actorId) && session.workspace() != null
+                && !workspaces.createdSession(session.tenantId(), actorId,
+                        session.sessionId())) {
+            if ("DELETED".equals(session.status())) {
+                throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
+                        "The Session was not found.");
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
     }
 
     @Override
@@ -1399,6 +1478,15 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
+        return beginSessionMutation(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, kind, null);
+    }
+
+    // The actor-carrying twin of insertTurnCommand's overload.
+    @Transactional
+    public SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
@@ -1439,7 +1527,8 @@ public class ManagedAgentStore implements AgentStateStore {
         validateMutationStatus(session, kind);
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, null, "PENDING", session.status(), now);
+                sessionId, null, "PENDING", session.status(),
+                commandActorKey(tenantId, actorId), now);
         jdbc.update("UPDATE ma_request_receipt SET mutation_attempt_sequence"
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
                 session.lastSequence(), ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
@@ -1632,16 +1721,9 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
-        if ("DELETED".equals(session.status())) {
-            throw new ApiException(
-                    HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
-        }
-        if (WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
-                && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
-                        || !List.of("CLOSED", "ARCHIVED").contains(session.status()))) {
-            throw workspaceExecutionUnavailable();
-        }
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
+        // Replay first, like every other mutation path: a recorded success
+        // must not 404 after a later delete.
         Optional<CommandRecord> existing = findCommand(tenantId, namespace, scopedKey, true);
         if (existing.isPresent()) {
             if (!existing.get().requestDigest().equals(requestDigest) || !existing.get().sessionId().equals(sessionId)) {
@@ -1649,6 +1731,17 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new SessionMutation(session, true);
+        }
+        // The tombstone 404 precedes the migration fence and the shell
+        // refusal: a fresh key against a deleted Session must not answer
+        // a retryable 409 for a Session that will never come back.
+        if ("DELETED".equals(session.status())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        if (WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
+                        || !List.of("CLOSED", "ARCHIVED").contains(session.status()))) {
+            throw workspaceExecutionUnavailable();
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ARCHIVED");
@@ -1666,6 +1759,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 null,
                 "COMPLETED",
                 "ARCHIVED",
+                null,
                 now);
         Map<String, Object> data = Map.of("sessionId", sessionId);
         appendEvent(tenantId, sessionId, null, "session.unarchive.requested", data, false,
@@ -2980,6 +3074,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         (String) row.get("turn_id"),
                         (String) row.get("state"),
                         (String) row.get("session_status_before"),
+                        (byte[]) row.get("actor_id"),
                         ((Number) row.get("created_at")).longValue(),
                         ((Number) row.get("updated_at")).longValue()));
     }
@@ -3005,17 +3100,20 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeUpdatedAt, String beforeSessionId, int limit) {
+            Long beforeCreatedAt, String beforeSessionId, int limit) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
                 : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        // Keyset on the immutable created_at: updated_at moves on every
+        // event append, so a row can slide backwards into already-visited
+        // pages and silently vanish from a paged listing.
         String cursorClause = "";
-        if (beforeUpdatedAt != null && beforeSessionId != null) {
-            cursorClause = " AND (ma_session.updated_at < ? OR (ma_session.updated_at = ?"
+        if (beforeCreatedAt != null && beforeSessionId != null) {
+            cursorClause = " AND (ma_session.created_at < ? OR (ma_session.created_at = ?"
                     + " AND ma_session.session_id < ?))";
-            arguments.add(beforeUpdatedAt);
-            arguments.add(beforeUpdatedAt);
+            arguments.add(beforeCreatedAt);
+            arguments.add(beforeCreatedAt);
             arguments.add(beforeSessionId);
         }
         arguments.add(limit + 1);
@@ -3033,7 +3131,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
                             + " 'OWNER')))"
                                 + cursorClause
-                                + " ORDER BY ma_session.updated_at DESC, ma_session.session_id DESC"
+                                + " ORDER BY ma_session.created_at DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
                         sessionListMapper,
                         arguments.toArray());
@@ -3542,6 +3640,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, turnId, owner);
     }
 
+    @Override
+    @Transactional
+    public void deferTurnRetry(String tenantId, String sessionId,
+            String turnId, String owner, long retryAfter) {
+        scheduleTurnRetry(tenantId, sessionId, turnId, owner, retryAfter);
+    }
+
     @Transactional
     public void scheduleTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
@@ -3661,7 +3766,10 @@ public class ManagedAgentStore implements AgentStateStore {
     public void recordAdmission(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long lastEventId) {
-        requireLegacyMutation(tenantId, sessionId);
+        // Lock the session row before the turn row: every writer must take
+        // the two in this order or InnoDB deadlocks against the
+        // session-first paths (e.g. insertCancelCommand).
+        requireLegacySessionForUpdate(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
@@ -4193,7 +4301,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void cancelBeforeAdmission(String tenantId, String sessionId,
             String turnId, String owner) {
-        requireLegacyMutation(tenantId, sessionId);
+        // Session-row lock first; see recordAdmission.
+        requireLegacySessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || turn.harnessEventEpoch() != null
@@ -4221,7 +4330,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
-        requireLegacyMutation(tenantId, sessionId);
+        // Session-row lock first; see recordAdmission.
+        requireLegacySessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || !ACTIVE_TURN_STATES.contains(turn.status())) {
@@ -4277,6 +4387,20 @@ public class ManagedAgentStore implements AgentStateStore {
             appendEvent(tenantId, sessionId, null, type, data, false,
                     sourceKey, clock.millis());
         }
+    }
+
+    @Override
+    public Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
+            String sessionId) {
+        return jdbc.query("SELECT session_status_before FROM ma_operation"
+                        + " WHERE scope_key = ? AND operation_kind = 'DELETE'"
+                        + " AND target_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " AND session_status_before IS NOT NULL"
+                        + " ORDER BY created_at DESC LIMIT 1",
+                (rows, row) -> rows.getString(1),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                sessionOperationTarget(sessionId), tenantId, sessionId)
+                .stream().findFirst();
     }
 
     public SessionRecord requireSession(String tenantId, String sessionId) {
@@ -4409,8 +4533,10 @@ public class ManagedAgentStore implements AgentStateStore {
         String itemId = EventIdentity.toolItemId(event.turnId(),
                 event.sequence(), event.data());
         String sourceStatus = string(event.data().get("status"));
+        // Protocol tokens must fold with Locale.ROOT: under a tr_TR default
+        // locale "FAILED" becomes "faıled" and misses these arms.
         String status = switch (sourceStatus == null ? ""
-                : sourceStatus.toLowerCase()) {
+                : sourceStatus.toLowerCase(Locale.ROOT)) {
             case "completed", "success" -> "completed";
             case "failed" -> "failed";
             case "cancelled" -> "cancelled";
@@ -4811,14 +4937,29 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, long now) {
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, status, null, now);
+                sessionId, turnId, status, null, null, now);
     }
 
     private void insertCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
-            String turnId, String status, String sessionStatusBefore, long now) {
+            String turnId, String status, String sessionStatusBefore,
+            byte[] actorKey, long now) {
         ManagedReceipts.insertCommand(jdbc, tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, status, sessionStatusBefore, now);
+                sessionId, turnId, status, sessionStatusBefore, actorKey, now);
+    }
+
+    // null for an actor id the registry key cannot encode: ManagedReceipts
+    // stamps the receipt UNATTRIBUTED, which answers to the creator gate
+    // alone.
+    private static byte[] commandActorKey(String tenantId, String actorId) {
+        if (actorId == null) {
+            return null;
+        }
+        try {
+            return ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return null;
+        }
     }
 
     // A mutation leaves the status unchanged until it completes.
@@ -4975,7 +5116,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private static ApiException sessionStateConflict(String status) {
         return new ApiException(HttpStatus.CONFLICT,
                 "session_state_conflict",
-                "The Session is " + status.toLowerCase()
+                "The Session is " + status.toLowerCase(Locale.ROOT)
                         + " and cannot perform this operation.");
     }
 
