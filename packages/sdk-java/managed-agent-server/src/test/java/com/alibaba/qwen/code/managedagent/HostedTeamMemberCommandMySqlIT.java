@@ -177,7 +177,7 @@ class HostedTeamMemberCommandMySqlIT {
         // Every member's command did the full pass: handover → execute →
         // answered → consumed, never left pending.
         int stalled = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_session_extension_record"
+                "SELECT COUNT(*) FROM ma_session_record"
                         + " WHERE tenant_id = ? AND domain = 'session_command'"
                         + " AND delivery_state IN ('planned', 'accepting')",
                 Integer.class, tenant);
@@ -287,7 +287,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** The writer generation of a Session's journal head. */
     private long writerGeneration(String session) {
         Long generation = jdbc.queryForObject(
-                "SELECT writer_generation FROM qwen_managed_session_journal_head"
+                "SELECT writer_generation FROM ma_session_head"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 Long.class, tenant, session);
         return generation == null ? 0 : generation;
@@ -349,7 +349,7 @@ class HostedTeamMemberCommandMySqlIT {
                 .pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
                     assertThat(jdbc.queryForList(
                             "SELECT operation_kind, state, delivery_state FROM"
-                                    + " managed_agent_operation WHERE tenant_id"
+                                    + " ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id"
                                     + " = ? AND delivery_state IN ('PENDING',"
                                     + " 'LEASED', 'BLOCKED')", tenant))
                             .isEmpty();
@@ -359,13 +359,13 @@ class HostedTeamMemberCommandMySqlIT {
                     // fixture's runtime broker keeps workspace execution
                     // off, macOS and CI alike.
                     assertThat(jdbc.queryForList(
-                            "SELECT child_run_id, state FROM"
-                                    + " qwen_managed_child_result_relay WHERE"
+                            "SELECT operation_id AS child_run_id, state FROM"
+                                    + " ma_operation WHERE operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') AND"
                                     + " tenant_id = ? AND state NOT IN"
                                     + " ('done','orphaned','unknown',"
                                     + " 'close_debt')", tenant)).isEmpty();
                     assertThat(jdbc.queryForList(
-                            "SELECT session_id, status FROM managed_agent_turn"
+                            "SELECT session_id, status FROM ma_turn"
                                     + " WHERE tenant_id = ? AND status NOT IN"
                                     + " ('COMPLETED', 'FAILED', 'CANCELLED')",
                             tenant)).isEmpty();
@@ -626,7 +626,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** Every command chain a member committed, newest revision each. */
     private List<JsonNode> commandsOf(String lead, String member) {
         List<String> children = jdbc.queryForList(
-                "SELECT session_id FROM managed_agent_session"
+                "SELECT session_id FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?",
                 String.class, tenant, lead);
         for (String child : children) {
@@ -650,8 +650,8 @@ class HostedTeamMemberCommandMySqlIT {
         return jdbc.queryForList(
                 "SELECT r.record_id, r.revision, CAST(res.inline_bytes AS CHAR)"
                         + " AS body FROM"
-                        + " qwen_managed_session_extension_record r"
-                        + " JOIN qwen_managed_session_resource res ON"
+                        + " ma_session_record r"
+                        + " JOIN ma_resource res ON"
                         + " res.session_scope_key = r.session_scope_key"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
@@ -697,7 +697,7 @@ class HostedTeamMemberCommandMySqlIT {
 
     private void assertNoFailedTurn(String session) {
         List<Map<String, Object>> failed = jdbc.queryForList(
-                "SELECT turn_id, error_code FROM managed_agent_turn"
+                "SELECT turn_id, error_code FROM ma_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND status = 'FAILED'",
                 tenant, session);
@@ -712,7 +712,7 @@ class HostedTeamMemberCommandMySqlIT {
      */
     private List<Map<String, Object>> openTurns(String session) {
         return jdbc.queryForList(
-                "SELECT turn_id, status FROM managed_agent_turn"
+                "SELECT turn_id, status FROM ma_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND completed_at IS NULL",
                 tenant, session);
@@ -721,7 +721,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** The restart fixture's single member: the lead's only child. */
     private String onlyChildOf(String lead) {
         List<String> children = jdbc.queryForList(
-                "SELECT session_id FROM managed_agent_session"
+                "SELECT session_id FROM ma_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?",
                 String.class, tenant, lead);
         if (children.size() != 1) {
@@ -734,7 +734,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** Whether the lead's journal accepted a member result durably. */
     private boolean childResultAccepted(String lead) {
         Integer accepted = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+                "SELECT COUNT(*) FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND operation = 'acceptChildResult'",
                 Integer.class, tenant, lead);
@@ -744,7 +744,7 @@ class HostedTeamMemberCommandMySqlIT {
     /** Whether the Session parks a Turn on an `await_command` checkpoint. */
     private boolean parkedOnCommand(String session) {
         Integer parked = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_managed_session_resource"
+                "SELECT COUNT(*) FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND kind = 'managed-checkpoint'"
                         + " AND CAST(inline_bytes AS CHAR) LIKE"
@@ -785,7 +785,7 @@ class HostedTeamMemberCommandMySqlIT {
         model.start();
         startSpring(cli, node, workspace);
         jdbc.update(
-                "INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+                "INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state) VALUES (?,"
                         + " 'workspace-0', 1, 'storage-0', 'H4e-b3', ?, ?,"
@@ -793,7 +793,7 @@ class HostedTeamMemberCommandMySqlIT {
                 tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update(
-                "INSERT INTO managed_workspace_access (tenant_id, workspace_id,"
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id,"
                         + " actor_id, role) VALUES (?, 'workspace-0', ?,"
                         + " 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));

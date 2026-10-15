@@ -51,6 +51,11 @@ class WorkspaceRecoveryMySqlIT {
     }
 
     @Test
+    void recoveryAdmissionIgnoresOtherOperationKindsButBlocksUnresolvedSessionEffects() {
+        fixture.recoveryAdmissionIgnoresOtherOperationKindsButBlocksUnresolvedSessionEffects();
+    }
+
+    @Test
     void pinsRetainedRetirementWithoutReopeningItsCheckpointOrWriter() {
         fixture.pinsRetainedRetirementWithoutReopeningItsCheckpointOrWriter();
     }
@@ -63,6 +68,31 @@ class WorkspaceRecoveryMySqlIT {
     @Test
     void leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones() {
         fixture.leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones();
+    }
+
+    @Test
+    void registrationRejectsExistingPhysicalDeleteIntentAndRollsBackItsProtection() {
+        fixture.registrationRejectsExistingPhysicalDeleteIntentAndRollsBackItsProtection();
+    }
+
+    @Test
+    void registrationRejectsAPrivateClosureResourceDeleteIntent() {
+        fixture.registrationRejectsAPrivateClosureResourceDeleteIntent();
+    }
+
+    @Test
+    void registrationReadsDeleteIntentAfterWaitingForTheSessionRoot() throws Exception {
+        fixture.registrationReadsDeleteIntentAfterWaitingForTheSessionRoot();
+    }
+
+    @Test
+    void completedGcRetirementExportsItsAuthorityAndVerifiesWithoutResettingCounters() throws Exception {
+        fixture.completedGcRetirementExportsItsAuthorityAndVerifiesWithoutResettingCounters();
+    }
+
+    @Test
+    void partialOrUnknownGcCannotBePresentedAsACollectedRetirement() {
+        fixture.partialOrUnknownGcCannotBePresentedAsACollectedRetirement();
     }
 
     @AfterEach

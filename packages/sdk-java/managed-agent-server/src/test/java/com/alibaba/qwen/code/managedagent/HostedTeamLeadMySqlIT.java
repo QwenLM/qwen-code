@@ -17,6 +17,7 @@ import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -26,6 +27,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
@@ -99,7 +101,7 @@ class HostedTeamLeadMySqlIT {
     private int port;
     private boolean approvals;
 
-    // Wake Turns leave no managed_agent_turn row, so the Harness log is the
+    // Wake Turns leave no ma_turn row, so the Harness log is the
     // only place a failed one shows; CI keeps a failed case's output.
     @RegisterExtension
     final AfterTestExecutionCallback harnessLogOnFailure = context -> {
@@ -181,9 +183,9 @@ class HostedTeamLeadMySqlIT {
         // as completed; the refused open ownership wrote nothing.
         assertThat(((Number) tasks.get(0).get("revision")).longValue()).isEqualTo(3);
         assertThat(((Number) tasks.get(1).get("revision")).longValue()).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
                 + " AND parent_session_id = ?", Integer.class, tenant, lead)).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record"
                 + " WHERE tenant_id = ? AND session_id <> ? AND domain IN ('team_state', 'team_task',"
                 + " 'team_message', 'team_plan')", Integer.class, tenant, lead)).isZero();
         closeAndSettle(lead);
@@ -208,7 +210,7 @@ class HostedTeamLeadMySqlIT {
             assertThat(requestsOf("H4EB1_MEMBER_carol_HOLD")).isNotEmpty();
         });
         awaitIdle(lead);
-        String child = jdbc.queryForObject("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
+        String child = jdbc.queryForObject("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                 + " AND parent_session_id = ?", String.class, tenant, lead);
         long stateRevision = revision(lead, "team_state");
         int leadRequests = requestsOf("H4EB1_LEAD_CLOSE").size();
@@ -565,7 +567,7 @@ class HostedTeamLeadMySqlIT {
 
     private List<Map<String, Object>> rows(String session, String domain) {
         return jdbc.queryForList("SELECT r.record_id, r.revision, CAST(res.inline_bytes AS CHAR) AS body"
-                + " FROM qwen_managed_session_extension_record r JOIN qwen_managed_session_resource res"
+                + " FROM ma_session_record r JOIN ma_resource res"
                 + " ON res.session_scope_key = r.session_scope_key AND res.resource_id = r.record_resource_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? ORDER BY r.record_id",
                 tenant, session, domain);
@@ -590,12 +592,12 @@ class HostedTeamLeadMySqlIT {
     }
 
     private String sessionStatus(String session) {
-        return jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+        return jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, session);
     }
 
     private String childTurnStatus(String child) {
-        return jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?",
+        return jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, child);
     }
 
@@ -631,12 +633,12 @@ class HostedTeamLeadMySqlIT {
     }
 
     private int closeAttempts(String operation) {
-        return jdbc.queryForObject("SELECT attempt_count FROM managed_agent_operation WHERE tenant_id = ?"
+        return jdbc.queryForObject("SELECT attempt_count FROM ma_operation WHERE tenant_id = ?"
                 + " AND operation_id = ?", Integer.class, tenant, operation);
     }
 
     private void assertNoFailedTurn(String session) {
-        List<Map<String, Object>> failed = jdbc.queryForList("SELECT turn_id, error_code FROM managed_agent_turn"
+        List<Map<String, Object>> failed = jdbc.queryForList("SELECT turn_id, error_code FROM ma_turn"
                 + " WHERE tenant_id = ? AND session_id = ? AND status = 'FAILED'", tenant, session);
         if (!failed.isEmpty()) throw new IllegalStateException("Turns failed: " + failed);
     }
@@ -674,7 +676,7 @@ class HostedTeamLeadMySqlIT {
         waiting().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
             assertNoModelFailure();
             assertNoFailedTurn(session);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?"
                     + " AND session_id = ? AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')",
                     Integer.class, tenant, session)).isZero();
         });
@@ -708,18 +710,18 @@ class HostedTeamLeadMySqlIT {
 
     private void awaitTenantSettled() {
         waiting().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
-            assertThat(jdbc.queryForList("SELECT operation_kind, state, delivery_state FROM managed_agent_operation"
-                    + " WHERE tenant_id = ? AND delivery_state IN ('PENDING', 'LEASED', 'BLOCKED')", tenant)).isEmpty();
-            assertThat(jdbc.queryForList("SELECT child_run_id, state FROM qwen_managed_child_result_relay"
-                    + " WHERE tenant_id = ? AND state NOT IN ('done', 'orphaned', 'unknown', 'close_debt')",
+            assertThat(jdbc.queryForList("SELECT operation_kind, state, delivery_state FROM ma_operation"
+                    + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id = ? AND delivery_state IN ('PENDING', 'LEASED', 'BLOCKED')", tenant)).isEmpty();
+            assertThat(jdbc.queryForList("SELECT operation_id AS child_run_id, state FROM ma_operation WHERE operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE')"
+                    + " AND tenant_id = ? AND state NOT IN ('done', 'orphaned', 'unknown', 'close_debt')",
                     tenant)).isEmpty();
             // A child run the relay has not yet picked up has no ledger row.
-            assertThat(jdbc.queryForList("SELECT r.record_id FROM qwen_managed_session_extension_record r"
-                    + " LEFT JOIN qwen_managed_child_result_relay l ON l.parent_session_id = r.session_id"
-                    + " AND l.child_run_id = r.record_id WHERE r.tenant_id = ? AND r.domain = 'child_run'"
+            assertThat(jdbc.queryForList("SELECT r.record_id FROM ma_session_record r"
+                    + " LEFT JOIN ma_operation l ON l.session_id = r.session_id AND l.tenant_id = r.tenant_id"
+                    + " AND l.operation_kind = 'CHILD_SESSION_START' AND l.operation_id = r.record_id WHERE r.tenant_id = ? AND r.domain = 'child_run'"
                     + " AND r.delivery_state IN ('planned', 'accepting', 'unknown') AND l.state IS NULL", tenant))
                     .isEmpty();
-            assertThat(jdbc.queryForList("SELECT session_id, status FROM managed_agent_turn WHERE tenant_id = ?"
+            assertThat(jdbc.queryForList("SELECT session_id, status FROM ma_turn WHERE tenant_id = ?"
                     + " AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')", tenant)).isEmpty();
         });
     }
@@ -746,7 +748,8 @@ class HostedTeamLeadMySqlIT {
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         Path workspace = Files.createDirectory(temporary.resolve("workspace-a"));
         Files.createDirectory(workspace.resolve("child"));
-        port = freePort();
+        // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+        Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
         int harnessPort = freePort();
         int brokerPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -755,12 +758,27 @@ class HostedTeamLeadMySqlIT {
         model.setExecutor(modelThreads);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        startSpring(cli, node, decoy, workspace, harnessPort, brokerPort);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+        // freePort() lets the port go before the Spring server and the embedded
+        // broker bind to it, and a contended CI runner can hand the port out
+        // again in that gap: boot with fresh ports when the bind loses the race.
+        for (int attempt = 0; ; attempt++) {
+            port = freePort();
+            try {
+                startSpring(cli, node, decoy, workspace, harnessPort, brokerPort);
+                break;
+            } catch (RuntimeException error) {
+                if (attempt >= 2 || !bindConflict(error)) {
+                    throw error;
+                }
+                harnessPort = freePort();
+                brokerPort = freePort();
+            }
+        }
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
                 + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace-0', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         startHarness(cli, node, decoy, harnessPort, brokerPort);
     }
@@ -793,6 +811,8 @@ class HostedTeamLeadMySqlIT {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                + "Linux".equals(System.getProperty("os.name")));
         // The broker's durable local-process mode only exists on Linux;
         // elsewhere it must be opted out, which starts the broker without
         // workspace execution (workspace closes then keep answering the
@@ -804,6 +824,10 @@ class HostedTeamLeadMySqlIT {
                         authentication()))
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
+                    .register(tenant, "storage-0", UUID.randomUUID().toString());
+        }
     }
 
     private void startHarness(Path cli, String node, Path decoy, int harnessPort, int brokerPort) throws Exception {
@@ -885,6 +909,16 @@ class HostedTeamLeadMySqlIT {
         }
     }
 
+    private static boolean bindConflict(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof BindException
+                    || String.valueOf(cause.getMessage()).contains("Address already in use")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @AfterEach
     void stop() throws Exception {
         releases.values().forEach(CountDownLatch::countDown);
@@ -900,11 +934,11 @@ class HostedTeamLeadMySqlIT {
                     // A failed case leaves its tenant's work owed, and the
                     // next Spring context in the fork scans every tenant;
                     // end that work here (a settled case matches nothing).
-                    jdbc.update("UPDATE managed_agent_operation SET delivery_state = 'CONFIRMED' WHERE tenant_id = ?"
+                    jdbc.update("UPDATE ma_operation SET delivery_state = 'CONFIRMED' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'ACTION_RESPONSE', 'TASK_CANCEL') AND tenant_id = ?"
                             + " AND delivery_state IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
-                    jdbc.update("UPDATE qwen_managed_child_result_relay SET state = 'orphaned' WHERE tenant_id = ?"
+                    jdbc.update("UPDATE ma_operation SET state = 'orphaned' WHERE operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') AND tenant_id = ?"
                             + " AND state NOT IN ('done', 'orphaned', 'unknown')", tenant);
-                    jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED' WHERE tenant_id = ?"
+                    jdbc.update("UPDATE ma_turn SET status = 'FAILED' WHERE tenant_id = ?"
                             + " AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
                 }
             } finally {
