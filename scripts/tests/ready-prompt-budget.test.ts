@@ -27,6 +27,15 @@ describe('readyPromptBudgetMs', () => {
         QWEN_SANDBOX: 'docker',
       }),
     ).toBe(180_000);
+    // The self-hosted no-sandbox legs (e2e.yml's sandbox:none matrix and the
+    // release sandbox:none legs) export QWEN_SANDBOX=false, not an unset
+    // variable: a truthiness check instead of === 'docker' would widen them.
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'self-hosted',
+        QWEN_SANDBOX: 'false',
+      }),
+    ).toBe(90_000);
   });
 
   it('keeps the tight 30s budget in every other runner state', () => {
