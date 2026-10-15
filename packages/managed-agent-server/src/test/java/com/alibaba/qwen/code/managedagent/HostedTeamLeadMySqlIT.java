@@ -194,12 +194,12 @@ class HostedTeamLeadMySqlIT {
 
     /**
      * Closing the lead cancels its running member through the H4b cascade.
-     * The close waits for the member's Turn in flight, leaves the team's
+     * The close cancels the member's Turn in flight, leaves the team's
      * records as they were and never revives the lead.
      */
     @Test
     @Timeout(80)
-    void leadCloseWaitsForItsRunningMember() throws Exception {
+    void leadCloseCancelsItsRunningMember() throws Exception {
         boot();
         releases.put("carol", new CountDownLatch(1));
         String lead = createLead("H4EB1_LEAD_CLOSE");
@@ -231,17 +231,8 @@ class HostedTeamLeadMySqlIT {
         String closeOperation = operation;
         waiting().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(200)).untilAsserted(() ->
                 assertThat(body(rows(lead, "child_run").get(0)).path("stopRequested").asBoolean()).isTrue());
-        // The stop is recorded, but for as long as the member's Turn runs the
-        // close stays owed: the cascade's retries (1, 2 and 4 s apart) are
-        // refused, and nothing interrupts that Turn or closes its Session.
-        waiting().atMost(Duration.ofSeconds(25)).pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
-            assertCloseOwed(lead, closeOperation, child);
-            assertThat(closeAttempts(closeOperation)).isGreaterThanOrEqualTo(4);
-        });
-
-        releases.get("carol").countDown();
-        // The next attempt settles once the relay has closed the member; if
-        // the relay misses it, the attempt after waits out a 16 s backoff.
+        // The close must cancel the in-flight Turn without waiting for the
+        // model's held response to finish naturally.
         waiting().atMost(Duration.ofSeconds(45)).pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
             assertNoModelFailure();
             String status = operationStatus(lead, closeOperation);
@@ -256,8 +247,9 @@ class HostedTeamLeadMySqlIT {
             assertThat(run.path("stopReason").asText()).isEqualTo("stop_requested");
             assertThat(sessionStatus(child)).isEqualTo("CLOSED");
         });
-        // The member's Turn ran to its own end.
-        assertThat(childTurnStatus(child)).isEqualTo("COMPLETED");
+        assertThat(releases.get("carol").getCount()).isEqualTo(1);
+        assertThat(childTurnStatus(child)).isEqualTo("CANCELLED");
+        releases.get("carol").countDown();
         assertThat(revision(lead, "team_state")).isEqualTo(stateRevision);
         assertThat(team(lead).path("lifecycle").asText()).isEqualTo("active");
         awaitTenantSettled();
@@ -654,23 +646,6 @@ class HostedTeamLeadMySqlIT {
                 throw new IllegalStateException("A member failed: " + run);
             }
         }
-    }
-
-            /** The lead's close stays owed while its member's Turn runs. */
-    private void assertCloseOwed(String lead, String operation, String child) throws Exception {
-        String status = operationStatus(lead, operation);
-        String session = sessionStatus(child);
-        String turn = childTurnStatus(child);
-        if (List.of("completed", "failed", "recovery_blocked").contains(status) || !"ACTIVE".equals(session)
-                || !List.of("ACCEPTED", "RUNNING").contains(turn)) {
-            throw new IllegalStateException("The close did not wait for the member: close " + status
-            + ", member Session " + session + ", member Turn " + turn);
-        }
-    }
-
-    private int closeAttempts(String operation) {
-        return jdbc.queryForObject("SELECT attempt_count FROM ma_operation WHERE tenant_id = ?"
-        + " AND operation_id = ?", Integer.class, tenant, operation);
     }
 
     private void assertNoFailedTurn(String session) {

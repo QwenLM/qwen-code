@@ -218,7 +218,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                                 + " ma_resource WHERE"
                                 + " tenant_id = ? AND session_id = ? AND kind"
                                 + " LIKE 'managed-tool-result-%' ORDER BY"
-                                + " created_at, resource_id", tenant,
+                                + " gmt_create, resource_id", tenant,
                         sessionId),
                 "relayAlive", relay != null && !relay.isDone(),
                 "relayFailure", relayFailure == null ? ""
@@ -231,7 +231,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                     "SELECT record_id, record_resource_id FROM"
                             + " ma_session_record WHERE"
                             + " tenant_id = ? AND session_id = ? AND domain"
-                            + " = ? ORDER BY created_at, record_id", tenant,
+                            + " = ? ORDER BY gmt_create, record_id", tenant,
                     sessionId, domain);
             var records = new java.util.ArrayList<JsonNode>();
             for (var row : rows) {

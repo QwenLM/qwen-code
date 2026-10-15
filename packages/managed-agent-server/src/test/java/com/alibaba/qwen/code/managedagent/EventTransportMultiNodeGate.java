@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDa
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -811,7 +812,7 @@ class EventTransportMultiNodeGate {
         node.crash();
         await().atMost(SETTLE).pollInterval(Duration.ofMillis(250)).until(() ->
                 Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until"
-                        + " <= CURRENT_TIMESTAMP(6) FROM ma_session_head WHERE"
+                        + " <= " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE"
                         + " tenant_id = ? AND session_id = ? AND head_kind ="
                         + " 'MANAGED_SESSION'", Boolean.class, tenant, session)));
     }
@@ -1081,7 +1082,7 @@ class EventTransportMultiNodeGate {
 
     private boolean leaseLive(String session) {
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until >"
-                + " CURRENT_TIMESTAMP(6) FROM ma_session_head WHERE tenant_id = ? AND"
+                + " " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND"
                 + " session_id = ? AND head_kind = 'MANAGED_SESSION'", Boolean.class,
                 tenant, session));
     }
