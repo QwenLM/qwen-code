@@ -83,6 +83,8 @@ class HostedPublicWorkspaceIT {
     private String shellDecision = "allow";
     private boolean durableClose;
     private boolean resident;
+    private boolean residentRestart;
+    private com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.Placement retainedPlacement;
     private boolean shellLifecycleV2;
     private Map<String, byte[]> publicationObjects;
     private String shellFault;
@@ -715,8 +717,20 @@ class HostedPublicWorkspaceIT {
     @EnabledOnOs(OS.MAC)
     @Timeout(180)
     void residentPublicCloseHandsRetainedFilesToTheNextSession() throws Exception {
+        residentPublicHandoff(false);
+    }
+
+    @Test
+    @EnabledOnOs(OS.MAC)
+    @Timeout(180)
+    void residentPublicHandoffReconstructsTheApplicationAndBroker() throws Exception {
+        residentPublicHandoff(true);
+    }
+
+    private void residentPublicHandoff(boolean reconstruct) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
         resident = true;
+        residentRestart = reconstruct;
         var roots = boot();
         register("workspace-0", "storage-0");
         var fixture = spring.getBean(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.class);
@@ -724,6 +738,7 @@ class HostedPublicWorkspaceIT {
         var runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
         var state = spring.getBean(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
         String first = residentSession("G0_RESIDENT_FIRST", "resident-first");
+        saveResidentOwnership("after-first-turn");
         assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
         var context = state.requireSession(tenant, first).workspace();
         var residentMapping = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(
@@ -749,6 +764,7 @@ class HostedPublicWorkspaceIT {
         assertThat(request("POST", "/v1/agents/sessions", nextBody, "busy-before-close", "actor", 409)
                 .path("error").path("code").asText()).isEqualTo("workspace_busy");
         String operation = closeResidentSession(first, "resident-close");
+        saveResidentOwnership("after-first-close");
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?", String.class, tenant, first)).isEqualTo("CLOSED");
         assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
                 Integer.class, tenant, first, operation)).isEqualTo(1);
@@ -771,7 +787,31 @@ class HostedPublicWorkspaceIT {
         com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.assertConflict(() -> spring.getBean(EmbeddedRuntimeBroker.class).service()
                 .acquire(first, oldContexts.getFirst().getRuntimeSessionId(), oldContexts.getFirst().getSession().getTurnKind())
                 .toCompletableFuture().join());
+        if (reconstruct) {
+            var previousApplication = spring;
+            var previousBroker = spring.getBean(EmbeddedRuntimeBroker.class);
+            var previousSource = jdbc.getDataSource();
+            var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+            int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
+            int brokerPort = properties.getRuntimeBroker().getPort();
+            spring.close();
+            assertThat(previousApplication.isActive()).isFalse();
+            assertThat(fixture.workerAlive()).isTrue();
+            startSpring(Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath(),
+                    roots, harnessPort, brokerPort);
+            assertThat(spring).isNotSameAs(previousApplication);
+            assertThat(spring.getBean(EmbeddedRuntimeBroker.class)).isNotSameAs(previousBroker);
+            assertThat(jdbc.getDataSource()).isNotSameAs(previousSource);
+            fixture = spring.getBean(com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.class);
+            bindingRepository = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+            runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
+            state = spring.getBean(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
+            assertThat(fixture.workerAlive()).isTrue();
+            assertThat(fixture.starts).hasValue(1);
+            saveResidentOwnership("after-application-reconstruction");
+        }
         String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
+        saveResidentOwnership("after-second-turn");
         assertThat(second).isNotEqualTo(first);
         var retained = bindingRepository.findActive(residentMapping.request(state.requireSession(tenant, second).workspace()));
         assertThat(retained.getBindingId()).isEqualTo(original.getBindingId());
@@ -788,6 +828,7 @@ class HostedPublicWorkspaceIT {
         JsonNode bindingBeforeSecondClose = com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.snapshot(jdbc,
                 "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
         closeResidentSession(second, "resident-second-close");
+        saveResidentOwnership("after-second-close");
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, second)).isEqualTo("CLOSED");
         assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
@@ -808,6 +849,19 @@ class HostedPublicWorkspaceIT {
         assertThat(fixture.physicalReleases).hasValue(0);
         assertThat(fixture.workerAlive()).isTrue();
         assertThat(modelFailure.get()).isNull();
+    }
+
+    private void saveResidentOwnership(String stage) throws IOException {
+        var mapping = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
+                .getRuntimeBroker().getResidentWorkspaces().getFirst();
+        var reader = new com.alibaba.qwen.code.managedagent.service.ResidentAcceptanceSnapshot(jdbc,
+                spring.getBean(org.springframework.transaction.PlatformTransactionManager.class), mapping, json);
+        var snapshot = reader.capture();
+        assertThat(snapshot.path("tables").path("ma_runtime_binding")).hasSize(1);
+        assertThat(snapshot.path("tables").path("ma_runtime_slot")).hasSize(1);
+        assertThat(snapshot.path("tables").path("ma_storage_owner")).hasSize(1);
+        Files.writeString(temporary.resolve(stage + "-ownership.json"), json.writeValueAsString(snapshot) + "\n",
+                java.nio.file.StandardOpenOption.CREATE_NEW);
     }
 
     private String closeResidentSession(String session, String key) throws Exception {
@@ -883,6 +937,10 @@ class HostedPublicWorkspaceIT {
                 storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
                 storeRelay.start();
             }
+        }
+        if (residentRestart) {
+            retainedPlacement = new com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.Placement(
+                    List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"));
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
@@ -1283,7 +1341,8 @@ class HostedPublicWorkspaceIT {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
                     if (resident) {
                         com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.install(context,
-                                List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"));
+                                List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"),
+                                retainedPlacement);
                     }
                     if (shellLifecycleV2) {
                         publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
@@ -1667,6 +1726,9 @@ class HostedPublicWorkspaceIT {
                 } },
                 () -> { if (spring != null) {
                     spring.close();
+                } },
+                () -> { if (retainedPlacement != null) {
+                    retainedPlacement.close();
                 } },
                 () -> { if (storeRelay != null) {
                     storeRelay.stop(0);

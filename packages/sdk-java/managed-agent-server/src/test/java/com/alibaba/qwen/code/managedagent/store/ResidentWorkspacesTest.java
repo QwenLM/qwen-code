@@ -113,11 +113,10 @@ class ResidentWorkspacesTest {
 
     @Test
     void concurrentPublicCreationHasOneWinnerUnderTheWorkspaceLock() throws Exception {
-        var start = new java.util.concurrent.CountDownLatch(1);
+        var start = new java.util.concurrent.CyclicBarrier(2);
         try (var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             var first = pool.submit(() -> concurrentCreate(start, "race-first"));
             var second = pool.submit(() -> concurrentCreate(start, "race-second"));
-            start.countDown();
             assertThat(List.of(first.get(10, java.util.concurrent.TimeUnit.SECONDS),
                     second.get(10, java.util.concurrent.TimeUnit.SECONDS))).containsExactlyInAnyOrder(true, false);
         }
@@ -125,15 +124,72 @@ class ResidentWorkspacesTest {
                 + " AND session_kind = 'PUBLIC'", Long.class, "tenant")).isEqualTo(1);
     }
 
-    private boolean concurrentCreate(java.util.concurrent.CountDownLatch start, String key) throws InterruptedException {
-        start.await();
+    private boolean concurrentCreate(java.util.concurrent.CyclicBarrier start, String key) throws Exception {
         try {
-            create(key);
+            independentCreate(start, key);
             return true;
         }
         catch (RuntimeBrokerException refusal) {
+            assertThat(refusal.getStatusCode()).isEqualTo(409);
+            assertThat(refusal.getCode()).isEqualTo("workspace_busy");
             return false;
         }
+    }
+
+    @Test
+    void independentStoresReplayTheSameConcurrentAdmission() throws Exception {
+        var start = new java.util.concurrent.CyclicBarrier(2);
+        try (var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = pool.submit(() -> independentCreate(start, "same-key").sessionId());
+            var second = pool.submit(() -> independentCreate(start, "same-key").sessionId());
+            assertThat(first.get(10, java.util.concurrent.TimeUnit.SECONDS))
+                    .isEqualTo(second.get(10, java.util.concurrent.TimeUnit.SECONDS));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
+                + " AND session_kind = 'PUBLIC'", Long.class, "tenant")).isEqualTo(1);
+    }
+
+    private StoreModels.Admission independentCreate(java.util.concurrent.CyclicBarrier start, String key)
+            throws Exception {
+        var source = new DriverManagerDataSource(
+                ((DriverManagerDataSource) jdbc.getDataSource()).getUrl(), "sa", "");
+        var peerJdbc = new ManagedSchemaJdbcTemplate(source);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
+        var peer = new ManagedAgentStore(peerJdbc, new ObjectMapper(), Clock.systemUTC(),
+                mock(CommittedEventPublisher.class), new ManagedWorkspaceRegistry(peerJdbc), properties);
+        var peerTransaction = new TransactionTemplate(new DataSourceTransactionManager(source));
+        start.await(10, java.util.concurrent.TimeUnit.SECONDS);
+        return peerTransaction.execute(status -> peer.insertWorkspaceSessionCommand("tenant", "owner", key,
+                "digest-" + key, "qwen-code", null, "Session", List.of(), null,
+                new WorkspaceSelection("workspace", ".")));
+    }
+
+    @Test
+    void ownershipEvidenceUsesTheOriginalSourceAndDoesNotChangeTheReservation() {
+        var session = create("snapshot").sessionId();
+        var original = ready(residents.request(context));
+        active(original, session);
+        var before = storage.inspect(mapping.registration());
+        var source = jdbc.getDataSource();
+        var reader = new com.alibaba.qwen.code.managedagent.service.ResidentAcceptanceSnapshot(jdbc,
+                new DataSourceTransactionManager(source), mapping, new ObjectMapper());
+        var snapshot = reader.capture();
+        assertThat(snapshot.path("tables").path("ma_session")).hasSize(1);
+        assertThat(snapshot.path("tables").path("ma_runtime_binding")).hasSize(1);
+        assertThat(snapshot.path("tables").path("ma_runtime_session")).hasSize(1);
+        assertThat(snapshot.path("tables").path("ma_storage_owner")).hasSize(1);
+        assertThat(snapshot.path("tables").path("ma_runtime_binding").get(0)
+                .path("provision_seed_ciphertext").path("type").asText()).isEqualTo("sha256");
+        assertThat(snapshot.toString()).doesNotContain(original.getProvisionSeed().getToken());
+        assertThat(reader.capture()).isEqualTo(snapshot);
+        assertThat(storage.inspect(mapping.registration())).isEqualTo(before);
+        assertThatThrownBy(() -> transaction.execute(status -> reader.capture()))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> new com.alibaba.qwen.code.managedagent.service.ResidentAcceptanceSnapshot(jdbc,
+                new DataSourceTransactionManager(new DriverManagerDataSource("jdbc:h2:mem:foreign", "sa", "")), mapping, new ObjectMapper()))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

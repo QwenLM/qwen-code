@@ -45,15 +45,28 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
     private final ResidentWorkspaces residents;
     private final WorkspaceCsiReservationStore storage;
     private final JdbcRuntimeBindingRepository bindings;
-    private final LocalProcessRuntimeProvisioner delegate;
-    private final RuntimeResourceHandle handle = new RuntimeResourceHandle("kubernetes-workspace", 1,
-            Map.of("fixture", "ordinary-darwin-boot2", "fixtureId", UUID.randomUUID().toString()));
-    private RuntimeProvisionRequest request;
-    private RuntimeProvisionSeed seed;
-    private volatile RuntimeLease lease;
-    private CompletionStage<RuntimeLease> started;
-    public final AtomicInteger starts = new AtomicInteger();
-    public final AtomicInteger physicalReleases = new AtomicInteger();
+    private final Placement placement;
+    private final boolean ownsPlacement;
+    public final AtomicInteger starts;
+    public final AtomicInteger physicalReleases;
+
+    public static final class Placement implements AutoCloseable {
+        private final LocalProcessRuntimeProvisioner delegate;
+        private final RuntimeResourceHandle handle = new RuntimeResourceHandle("kubernetes-workspace", 1,
+                Map.of("fixture", "ordinary-darwin-boot2", "fixtureId", UUID.randomUUID().toString()));
+        private RuntimeProvisionRequest request;
+        private RuntimeProvisionSeed seed;
+        private volatile RuntimeLease lease;
+        private CompletionStage<RuntimeLease> started;
+        private final AtomicInteger starts = new AtomicInteger();
+        private final AtomicInteger physicalReleases = new AtomicInteger();
+
+        public Placement(List<String> command, Path processDirectory) {
+            delegate = new LocalProcessRuntimeProvisioner(command, processDirectory, new HttpRuntimeTransport());
+        }
+
+        @Override public void close() { delegate.close(); }
+    }
 
     public static void arguments(List<String> arguments, String tenant, Path root) {
         String p = "--qwen.managed-agent.runtime-broker.";
@@ -99,6 +112,11 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
     }
 
     public static void install(ConfigurableApplicationContext context, List<String> command, Path processDirectory) {
+        install(context, command, processDirectory, null);
+    }
+
+    public static void install(ConfigurableApplicationContext context, List<String> command, Path processDirectory,
+            Placement retainedPlacement) {
         context.addBeanFactoryPostProcessor(factory -> {
             var definition = (AbstractBeanDefinition) factory.getBeanDefinition("embeddedRuntimeBroker");
             if (!"embeddedRuntimeBroker".equals(definition.getFactoryMethodName())) {
@@ -114,7 +132,8 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
                 if (!bindings.usesDataSource(jdbc.getDataSource())) {
                     throw new IllegalStateException("Original DataSource required");
                 }
-                var fixture = new ResidentHostedRuntimeFixture(properties, jdbc, manager, bindings, command, processDirectory);
+                var fixture = new ResidentHostedRuntimeFixture(properties, jdbc, manager, bindings, command,
+                        processDirectory, retainedPlacement);
                 factory.registerSingleton("residentHostedFixture", fixture);
                 return new EmbeddedRuntimeBroker(factory.getBean(AgentStateStore.class), properties, bindings,
                         factory.getBean(RuntimeSessionRepository.class), factory.getBean(ToolExecutionRepository.class),
@@ -126,7 +145,7 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
 
     private ResidentHostedRuntimeFixture(ManagedAgentProperties properties, JdbcTemplate jdbc,
             PlatformTransactionManager manager, JdbcRuntimeBindingRepository bindings,
-            List<String> command, Path processDirectory) {
+            List<String> command, Path processDirectory, Placement retainedPlacement) {
         var configured = properties.getRuntimeBroker().getResidentWorkspaces();
         if (configured.size() != 1) {
             throw new IllegalArgumentException("One fixture Workspace required");
@@ -137,7 +156,10 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
         storage = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
         storage.register(mapping.registration());
         ResidentWorkspaces.requireRegistration(jdbc, mapping);
-        delegate = new LocalProcessRuntimeProvisioner(command, processDirectory, new HttpRuntimeTransport());
+        ownsPlacement = retainedPlacement == null;
+        placement = ownsPlacement ? new Placement(command, processDirectory) : retainedPlacement;
+        starts = placement.starts;
+        physicalReleases = placement.physicalReleases;
     }
 
     public static com.fasterxml.jackson.databind.JsonNode snapshot(JdbcTemplate jdbc, String sql, Object... args) {
@@ -198,62 +220,74 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
         storage.reserve(mapping.registration(), bindings, original,
                 UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString());
     }
-    private synchronized void remember(RuntimeProvisionRequest actual, RuntimeProvisionSeed actualSeed) {
+    private void remember(RuntimeProvisionRequest actual, RuntimeProvisionSeed actualSeed) {
         residents.require(actual.getScope());
-        if (!ResidentWorkspaceProfile.selects(actual) || !mapping.registration().storageId().equals(actual.getStorageId())
-                || request != null && (!request.equals(actual) || !seed.equals(actualSeed))) {
-            throw new IllegalStateException("Fixture cannot replace its original request or seed");
+        synchronized (placement) {
+            if (!ResidentWorkspaceProfile.selects(actual) || !mapping.registration().storageId().equals(actual.getStorageId())
+                    || placement.request != null && (!placement.request.equals(actual) || !placement.seed.equals(actualSeed))) {
+                throw new IllegalStateException("Fixture cannot replace its original request or seed");
+            }
+            placement.request = actual;
+            placement.seed = actualSeed;
         }
-        request = actual;
-        seed = actualSeed;
     }
     @Override public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
         remember(request, seed);
-        if (knownHandle != null && !handle.equals(knownHandle)) {
+        if (knownHandle != null && !placement.handle.equals(knownHandle)) {
             throw new IllegalStateException("Fixture handle differs");
         }
-        return CompletableFuture.completedFuture(handle);
+        return CompletableFuture.completedFuture(placement.handle);
     }
     @Override public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
         return CompletableFuture.failedFuture(new IllegalStateException("Persisted seed required"));
     }
-    @Override public synchronized CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+    @Override public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         remember(request, seed);
-        if (started == null) {
-            starts.incrementAndGet();
-            started = delegate.provision(request, seed).thenApply(actual -> {
-                lease = actual;
-                return actual;
-            });
+        synchronized (placement) {
+            if (placement.started == null) {
+                starts.incrementAndGet();
+                placement.started = placement.delegate.provision(request, seed).thenApply(actual -> {
+                    placement.lease = actual;
+                    return actual;
+                });
+            }
+            return placement.started;
         }
-        return started;
     }
     @Override public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, RuntimeLease lastLease) {
         remember(request, seed);
-        if (!this.handle.equals(handle) || !sameLease(lease, lastLease) || !delegate.isUsable(lease)) {
+        if (!placement.handle.equals(handle) || !sameLease(placement.lease, lastLease)
+                || !placement.delegate.isUsable(placement.lease)) {
             return CompletableFuture.completedFuture(RuntimeObservation.unknown(handle));
         }
-        return delegate.confirm(request, lease).thenApply(ignored -> RuntimeObservation.ready(handle,
-                lease.getEndpoint(), lease.getRuntimeInstanceId(), lease.getLeaseId(), lease.getEpoch()));
+        return placement.delegate.confirm(request, placement.lease).thenApply(ignored -> RuntimeObservation.ready(handle,
+                placement.lease.getEndpoint(), placement.lease.getRuntimeInstanceId(), placement.lease.getLeaseId(),
+                placement.lease.getEpoch()));
     }
     @Override public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
-        if (!this.request.equals(request) || !sameLease(this.lease, lease)) {
+        if (!placement.request.equals(request) || !sameLease(placement.lease, lease)) {
             throw new IllegalStateException("Original lease required");
         }
-        return delegate.confirm(request, lease);
+        return placement.delegate.confirm(request, lease);
     }
-    @Override public boolean isUsable(RuntimeLease lease) { return sameLease(this.lease, lease) && delegate.isUsable(lease); }
+    @Override public boolean isUsable(RuntimeLease lease) {
+        return sameLease(placement.lease, lease) && placement.delegate.isUsable(lease);
+    }
     @Override public CompletionStage<Void> release(RuntimeProvisionRequest request, RuntimeLease lease) {
         physicalReleases.incrementAndGet();
         return CompletableFuture.failedFuture(new AssertionError("Public resident lifecycle must not stop placement"));
     }
-    public boolean workerAlive() { return lease != null && delegate.isUsable(lease); }
+    public boolean workerAlive() { return placement.lease != null && placement.delegate.isUsable(placement.lease); }
     private static boolean sameLease(RuntimeLease a, RuntimeLease b) {
         return a != null && b != null && a.getRuntimeInstanceId().equals(b.getRuntimeInstanceId())
                 && a.getEndpoint().equals(b.getEndpoint()) && a.getToken().equals(b.getToken())
                 && a.getLeaseId().equals(b.getLeaseId()) && a.getEpoch() == b.getEpoch();
     }
-    @Override public void close() { delegate.close(); }
+    @Override public void close() {
+        if (ownsPlacement) {
+            placement.close();
+        }
+    }
 }

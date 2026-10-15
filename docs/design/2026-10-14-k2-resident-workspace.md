@@ -158,6 +158,31 @@ those results and the original binding/generation and physical reservation rows.
 Ordinary cleanup does not qualify physical retirement or volume reuse; MySQL
 concurrency, restart recovery and shipping review remain separate checks.
 
+The remaining acceptance work keeps evidence collection inside the experiment.
+The model fixture saves only the selected run's actual tool calls and replies,
+with bounded text results and exact read-byte comparisons. A test-only reader of
+the original application DataSource exports scoped, consistent ownership
+snapshots; it will expose no public SQL route or write lifecycle state. Admission
+tests use independent DataSources and stores. Application reconstruction
+tests must preserve the original placement while creating fresh application and
+Broker instances; retaining an old Broker object does not prove recovery.
+The model fixture's three unit tests cover bounded capture, exact read bytes,
+identity refusal and immutable retries; these tests use synthetic replies.
+
+Independent local validation on 2026-10-16 passed 15 H2 store tests and both
+ordinary public handoff tests, with no skips. Each public test retained six
+actual tool replies; the second Session's initial read exactly matched the first
+Session's file bytes. Four ownership snapshots were saved for the original
+handoff and five for application reconstruction. The original slot, storage and
+CSI reservation rows stayed identical. Both logical closes left the complete
+binding unchanged; reconstruction preserved all eight captured tables while
+creating fresh Spring, Broker, DataSource and repository instances. The original
+placement and worker stayed alive, with one start and no physical release.
+Runtime Sessions were already released after each completed Turn; public close
+retained that state. This is same-JVM reconstruction with in-memory H2 and an
+ordinary boot-2 placement. File-backed database reopening, a new application JVM
+and these additional evidence captures on ACK remain separate acceptance work.
+
 The Session lock-order canary includes the resident store's Session locks and
 the CSI inventory's Turn reads in its exact source boundary. It resolves calls
 on a final method-body local only when that local directly constructs one unique

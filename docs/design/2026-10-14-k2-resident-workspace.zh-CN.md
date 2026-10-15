@@ -128,6 +128,23 @@ Linux CSI 挂载或 ACK 部署。此前拒绝的 native 验收操作不借架构
 普通清理不资格化物理退役或卷复用；MySQL 并发、重启恢复和 shipping review
 仍分别验证。
 
+剩余验收的采集仅放在实验夹具中。模型夹具只保存选中 run 的实际工具调用
+和回复，限制文本结果大小，并精确比对读取字节。测试专用 reader 从原应用的
+DataSource 导出限定范围、一致的归属快照，不开放公开 SQL 路由，也不写生命周期
+状态。准入测试采用独立 DataSource 和 store。应用重建测试必须保留原放置、
+重新创建应用及 Broker 实例；保留旧 Broker 对象不能证明恢复。模型夹具的三项
+单元测试覆盖有界采集、精确读取字节、身份拒绝及不可变重试，使用的是合成回复。
+
+2026-10-16 的独立本地验证通过了 15 项 H2 store 测试和两个普通公开交接用例，
+零跳过。两个公开用例各保留了六条实际工具回复，第二个 Session 的首次读取与
+第一个 Session 留下的文件字节完全相同。原交接保存四份归属快照，应用重建保存
+五份。原 slot、storage 和 CSI reservation 完整行始终一致；两次逻辑关闭均不改变
+完整 binding；重建前后八张被采集表完全相同，同时 Spring、Broker、DataSource
+和 repository 实例均重新创建。原 placement 和 worker 保持存活，只启动一次，
+没有物理释放。Runtime Session 在每个 Turn 完成后已释放，公开关闭保留该状态。
+这只验证同 JVM、内存 H2 和普通 boot-2 放置下的应用重建；文件数据库重开、
+新应用 JVM 以及在 ACK 上补采这些证据，仍需单独验收。
+
 Session 锁顺序 canary 的精确源码边界包含常驻 store 的 Session 锁和 CSI inventory
 的 Turn 读取。只有方法体顶层的 final 局部变量直接构造调用者类内直接声明的
 private static final 嵌套类型，且没有重赋值、遮蔽或逃逸时，才解析它的成员调用。
