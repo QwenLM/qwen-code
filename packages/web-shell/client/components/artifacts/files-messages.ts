@@ -16,6 +16,7 @@ export const FILES_MESSAGES_EN = {
   'files.destination': 'Create in',
   'files.invalidName':
     'Enter a single name without slashes or control characters. “.” and “..” are not allowed.',
+  'files.uploadTo': 'Drop files to upload into',
   'files.description': 'Browse workspace files',
   'files.filter': 'Filter files…',
   'files.noMatches': 'No matches in loaded paths',
@@ -49,6 +50,7 @@ export const FILES_MESSAGES_ZH = {
   'files.destination': '创建位置',
   'files.invalidName':
     '请输入单个名称，不可包含斜杠或控制字符，也不能为“.”或“..”。',
+  'files.uploadTo': '拖放文件上传至',
   'files.description': '浏览工作区文件',
   'files.filter': '筛选文件…',
   'files.noMatches': '已加载路径内无匹配',

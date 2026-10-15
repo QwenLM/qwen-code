@@ -1,14 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.List;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The Stage H5 channel contract must exist in the OpenAPI resource above all
@@ -19,7 +20,6 @@ import org.junit.jupiter.api.Test;
  * with their H5-owned shapes, by the channel controller.
  */
 class ChannelContractTest {
-
     private static final JsonNode CONTRACT = loadSpec();
 
     private static JsonNode loadSpec() {

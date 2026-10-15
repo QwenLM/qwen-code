@@ -529,6 +529,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       'writeWorkspaceFile',
       'createWorkspaceDirectory',
       'deleteWorkspaceDirectory',
+      'uploadWorkspaceFile',
     ]) {
       expect(packaged).toContain(method);
       expect(transcript).not.toContain(method);

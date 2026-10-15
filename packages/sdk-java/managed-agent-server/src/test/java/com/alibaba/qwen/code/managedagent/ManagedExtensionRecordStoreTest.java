@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
@@ -11,7 +8,6 @@ import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -19,10 +15,16 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -30,16 +32,12 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
-import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-extension-records;"
@@ -966,14 +964,17 @@ class ManagedExtensionRecordStoreTest {
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         var route = journal.requestDomain("route-race", "channel_route", channelRoute(templates, policy), List.of(policy), 1000);
-        journal.commit(route); journal.committed(route);
+        journal.commit(route);
+        journal.committed(route);
         ObjectNode delivery = channelDelivery(templates, result, segment1, segment2);
         var planned = journal.requestDomain("planned-race", "channel_delivery", delivery, List.of(result, segment1, segment2), 2000);
-        journal.commit(planned); journal.committed(planned);
+        journal.commit(planned);
+        journal.committed(planned);
         ((ObjectNode) delivery.path("run")).put("state", "running");
         ((ObjectNode) delivery.path("run").path("delivery")).put("state", "sending");
         var sending = journal.requestDomain("sending-race", "channel_delivery", delivery, List.of(), 3000);
-        journal.commit(sending); journal.committed(sending);
+        journal.commit(sending);
+        journal.committed(sending);
         var instances = new com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore(jdbc);
         var ledger = new com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository(jdbc);
         String deliveryId = delivery.path("deliveryId").asText();
@@ -997,7 +998,8 @@ class ManagedExtensionRecordStoreTest {
         assertThat(instances.reserveReconciliation(newClaim)).isTrue();
         var current = journal.requestDomain(com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore.reconciliationOperationId(newClaim),
                 "channel_delivery", unknown, List.of(), 4000);
-        journal.commit(current); journal.committed(current);
+        journal.commit(current);
+        journal.committed(current);
         assertThat(records.listRecords(TENANT, sessionId, "channel_delivery").getFirst().path("run").path("delivery").path("state").asText()).isEqualTo("unknown");
     }
 
@@ -1175,8 +1177,7 @@ class ManagedExtensionRecordStoreTest {
                     () -> journal.commit(journal.request(operation,
                             commandId, ExtensionRecordJournal.bytes(
                                     reject.required("next")), occurredAt,
-                            event -> {
-                            }, records -> records)));
+                            event -> {}, records -> records)));
         }
     }
 
@@ -1197,7 +1198,7 @@ class ManagedExtensionRecordStoreTest {
     void refusesAMonitorRunCitingAResourceOutsideItsCommit() throws Exception {
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
-        byte[] decoyBytes = { 0 };
+        byte[] decoyBytes = {0};
         CommitResource decoy = new CommitResource(UUID.randomUUID()
                 .toString(), "managed-note", 1, decoyBytes.length,
                 ExtensionRecordJournal.sha256(decoyBytes),
@@ -1279,12 +1280,10 @@ class ManagedExtensionRecordStoreTest {
         }
         refuse("a body with trailing content", "The Stage H record is not a"
                 + " JSON object the Session authority can read", trailing,
-                event -> {
-                }, records -> records);
+                event -> {}, records -> records);
         refuse("no commit marker", "has the unknown subtype"
                 + " managed_session_note after the Managed header", start,
-                event -> {
-                }, records -> records.substring(0, records.indexOf('\n')
+                event -> {}, records -> records.substring(0, records.indexOf('\n')
                         + 1) + "{\"subtype\":\"managed_session_note\"}\n");
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
@@ -1294,8 +1293,7 @@ class ManagedExtensionRecordStoreTest {
                         + " Managed header",
                 () -> journal.commit(journal.request(
                         ExtensionRecordJournal.OPERATION, "refused", start,
-                        1_000, event -> {
-                        }, records -> records.replaceFirst("\n",
+                        1_000, event -> {}, records -> records.replaceFirst("\n",
                                 "\n{\"subtype\":\"managed_session_note\"}\n"),
                         1)));
     }
@@ -1323,16 +1321,14 @@ class ManagedExtensionRecordStoreTest {
                             + " can read",
                     () -> journal.commit(journal.request(
                             ExtensionRecordJournal.OPERATION, "refused",
-                            start, 1_000, event -> {
-                            }, edit.getValue())));
+                            start, 1_000, event -> {}, edit.getValue())));
         }
         // The deepest line the authority reads is still accepted, on a line
         // the Stage H rules do not otherwise look at.
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         journal.commit(journal.request(ExtensionRecordJournal.OPERATION,
-                "deepest", start, 1_000, event -> {
-                }, records -> records.replaceFirst(
+                "deepest", start, 1_000, event -> {}, records -> records.replaceFirst(
                         "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
                         "{\"deep\":" + nested(63) + ",\"uuid\"")));
         assertThat(revisions(sessionId)).isEqualTo(1);
@@ -1378,31 +1374,24 @@ class ManagedExtensionRecordStoreTest {
         String accepted = UUID.randomUUID().toString();
         ExtensionRecordJournal live = journal(accepted);
         live.commit(live.requestOrdinary("ordinary", "goal_state", goal,
-                event -> {
-                }, records -> records, 0));
+                event -> {}, records -> records, 0));
 
         refuseOrdinary("an event line without its body", goal,
-                "event must be an object with exactly", event -> {
-                }, records -> records.replaceFirst(
+                "event must be an object with exactly", event -> {}, records -> records.replaceFirst(
                         "\\{\"uuid\"[^\\n]*\n",
                         "{\"subtype\":\"managed_session_event_v1\"}\n"), 0);
         refuseOrdinary("a second event line out of sequence", goal,
-                "event.sequence must be an integer from 2 to 2.", event -> {
-                }, records -> records, 5);
+                "event.sequence must be an integer from 2 to 2.", event -> {}, records -> records, 5);
         refuseOrdinary("a second event line with a reserved event id", goal,
                 "event id monitor_run:1 is reserved for Stage H records",
-                event -> {
-                }, records -> records, -1);
+                event -> {}, records -> records, -1);
         refuseOrdinary("a second event line of an unknown kind", goal,
-                "event.kind must be one of", event -> {
-                }, records -> records, -2);
+                "event.kind must be one of", event -> {}, records -> records, -2);
         refuseOrdinary("a second event line for another Session", goal,
-                "The event names another Session", event -> {
-                }, records -> records, -3);
+                "The event names another Session", event -> {}, records -> records, -3);
         refuseOrdinary("a line of an unknown subtype after a Managed line",
                 goal, "has the unknown subtype not_a_subtype after the"
-                        + " Managed header", event -> {
-                }, records -> records.replaceFirst("\n",
+                        + " Managed header", event -> {}, records -> records.replaceFirst("\n",
                         "\n{\"subtype\":\"not_a_subtype\"}\n"), 1);
         refuseOrdinary("an event line with an extra envelope field", goal,
                 "event must be an object with exactly",
@@ -1423,12 +1412,10 @@ class ManagedExtensionRecordStoreTest {
                         event.get("sequence").asLong() + 1),
                 records -> "{\"subtype\":\"not_a_subtype\"}\n" + records, 1);
         refuseOrdinary("a stray commit marker among the events", goal,
-                "is not an event line", event -> {
-                }, records -> records.replaceFirst("\n",
+                "is not an event line", event -> {}, records -> records.replaceFirst("\n",
                         "\n{\"subtype\":\"managed_session_commit_v1\"}\n"), 1);
         refuseOrdinary("a repeated Managed header among the events", goal,
-                "is not an event line", event -> {
-                }, records -> records.replaceFirst("\n",
+                "is not an event line", event -> {}, records -> records.replaceFirst("\n",
                         "\n{\"subtype\":\"managed_session_header_v1\"}\n"), 1);
         refuseOrdinary("a body-less domain.committed with a fifth payload"
                         + " field", goal,
@@ -1441,8 +1428,7 @@ class ManagedExtensionRecordStoreTest {
                         .put("version", 2), records -> records, 0);
         refuseOrdinary("a domain.committed naming a domain without an index"
                         + " entry", goal, "event.payload.domain must be one"
-                        + " of", event -> {
-                }, records -> records, 0, "not_a_domain", 0);
+                        + " of", event -> {}, records -> records, 0, "not_a_domain", 0);
         refuseOrdinary("a domain.committed without a textual domain", goal,
                 "event.payload must be an object with exactly",
                 event -> ((ObjectNode) event.get("payload"))
@@ -1455,8 +1441,7 @@ class ManagedExtensionRecordStoreTest {
                 + "\"managedSession\":{\"commandId\":\"big\","
                 + "\"padding\":\"" + "x".repeat(100_000) + "\"}}\n";
         refuseOrdinary("a commit marker past its byte cap", goal,
-                "exceeds 65536 UTF-8 bytes", event -> {
-                }, records -> records.substring(0, records.indexOf('\n')
+                "exceeds 65536 UTF-8 bytes", event -> {}, records -> records.substring(0, records.indexOf('\n')
                         + 1) + marker, 0);
 
         String sessionId = UUID.randomUUID().toString();
@@ -1469,8 +1454,7 @@ class ManagedExtensionRecordStoreTest {
                 "A transaction carries at most one Stage H record",
                 () -> journal.commit(journal.request(
                         ExtensionRecordJournal.OPERATION, "refused", start,
-                        1_000, event -> {
-                        }, records -> {
+                        1_000, event -> {}, records -> {
                             String first = records.substring(0,
                                     records.indexOf('\n'));
                             String second = first.replaceFirst(
@@ -1635,7 +1619,9 @@ class ManagedExtensionRecordStoreTest {
         List<String> parts = new ArrayList<>();
         for (String encoded : jdbc.queryForList("SELECT parts_json FROM ma_message WHERE tenant_id=? AND session_id=?", String.class, TENANT, sessionId)) {
             for (JsonNode part : new com.fasterxml.jackson.databind.ObjectMapper().readTree(encoded)) {
-                if ("output_text".equals(part.path("type").asText())) parts.add(part.path("text").asText());
+                if ("output_text".equals(part.path("type").asText())) {
+                    parts.add(part.path("text").asText());
+                }
             }
         }
         assertThat(parts).containsExactly("onetwo");
@@ -1668,7 +1654,8 @@ class ManagedExtensionRecordStoreTest {
                 assertThat(page.hasMore()).as("limit %d", limit)
                         .isEqualTo(seen.size() < 3);
                 cursor = page.nextCursor();
-            } while (cursor != null);
+            }
+            while (cursor != null);
             assertThat(seen).as("limit %d", limit).hasSize(3)
                     .doesNotHaveDuplicates()
                     .isSortedAccordingTo((left, right) -> right.compareTo(
@@ -1971,12 +1958,15 @@ class ManagedExtensionRecordStoreTest {
         for (boolean mismatchPart : List.of(false, true)) {
             ObjectNode badPlanBody = planBody.deepCopy();
             ObjectNode badManifestBody = manifestBody.deepCopy();
-            if (mismatchPart)
+            if (mismatchPart) {
                 ((ObjectNode) badManifestBody.get("parts").get(1)).put("digest", "c".repeat(64));
+            }
             CommitResource badManifest = hookResource("messages", "managed-hook-message-chunks",
                     ExtensionRecordJournal.bytes(badManifestBody));
             badPlanBody.set("messagesRef", hookRef(badManifest));
-            if (!mismatchPart) badPlanBody.withObject("/messagesRef").put("digest", "c".repeat(64));
+            if (!mismatchPart) {
+                badPlanBody.withObject("/messagesRef").put("digest", "c".repeat(64));
+            }
             CommitResource badPlan = hookResource("plan", "managed-hook-plan", ExtensionRecordJournal.bytes(badPlanBody));
             ObjectNode invalid = execution.deepCopy();
             invalid.set("planRef", hookRef(badPlan));
@@ -1992,9 +1982,10 @@ class ManagedExtensionRecordStoreTest {
         assertThat(sessionStore.readResource(TENANT, WORKSPACE, sessionId, manifest.resourceId(),
                 "extension-writer-token-0123456789").bytes()).isEqualTo(ExtensionRecordJournal.bytes(manifestBody));
         ByteArrayOutputStream restored = new ByteArrayOutputStream();
-        for (CommitResource part : List.of(first, second))
+        for (CommitResource part : List.of(first, second)) {
             restored.write(sessionStore.readResource(TENANT, WORKSPACE, sessionId, part.resourceId(),
                     "extension-writer-token-0123456789").bytes());
+        }
         assertThat(restored.toByteArray()).isEqualTo(messages);
 
         CommitResource small = hookResource("small-messages", "managed-hook-messages", "[]".getBytes(StandardCharsets.UTF_8));

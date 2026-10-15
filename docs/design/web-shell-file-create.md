@@ -99,3 +99,16 @@ exclusive recreation at a loaded directory path discards its stale subtree,
 cached listings and descendant preview before adding the new empty directory.
 Test late ancestor listings, failed creates without phantom entries, capability
 menus with positive controls, and preservation of unrelated previews.
+
+## File-tree upload integration
+
+Retain main's drag-and-drop uploads alongside creation and confirmed folder
+deletion. Uploaded files join the confirmed-entry overlay without expanding
+their parent, so late empty listings cannot hide them. Keep upload capability
+checks independent from local-only creation/deletion, preserving SSH upload
+support, and exclude all mutation actions from the transcript build.
+
+Folder deletion confirmation waits for uploads to finish; pending deletion
+rejects new file drops. This prevents same-pane uploads from recreating a folder
+after its deletion. Existing filesystem concurrency limitations still apply
+to other clients and external processes.

@@ -1,5 +1,20 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.api.*;
+import com.alibaba.qwen.code.managedagent.service.*;
+import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -11,22 +26,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
-import com.alibaba.qwen.code.managedagent.api.*;
-import com.alibaba.qwen.code.managedagent.service.*;
-import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import org.junit.jupiter.api.Test;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.Base64;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 class ManagedArtifactReadIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -46,15 +45,20 @@ class ManagedArtifactReadIntegrationTest {
                 return (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
                         getClass().getClassLoader(), new Class<?>[] {java.sql.Connection.class},
                         (proxy, method, arguments) -> {
-                            if (method.getName().equals("createStatement")) { statements.incrementAndGet(); }
+                            if (method.getName().equals("createStatement")) {
+                                statements.incrementAndGet();
+                            }
                             if (method.getName().equals("prepareStatement")) {
                                 statements.incrementAndGet();
                                 if (((String) arguments[0]).startsWith("INSERT INTO ma_read_lease")) {
                                     admissions.incrementAndGet();
                                 }
                             }
-                            try { return method.invoke(connection, arguments); }
-                            catch (java.lang.reflect.InvocationTargetException error) { throw error.getCause(); }
+                            try {
+                                return method.invoke(connection, arguments);
+                            } catch (java.lang.reflect.InvocationTargetException error) {
+                                throw error.getCause();
+                            }
                         });
             }
         };

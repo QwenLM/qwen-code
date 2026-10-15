@@ -9,10 +9,22 @@ import {
   StickyNotePlusIcon,
   FolderPlusIcon,
   SearchIcon,
+  XIcon,
 } from 'lucide-react';
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type DragEvent,
+} from 'react';
 import { useI18n } from '../../i18n';
 import { useTheme } from '../../themeContext';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useWebShellCustomization } from '../../customization';
+import { useFileUpload } from '../../hooks/useFileUpload';
 import type { DaemonDirectoryEntry } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ArtifactWorkspaceActions } from './useArtifactWorkspaceTarget';
 import { Button } from '../ui/button';
@@ -70,6 +82,11 @@ interface WorkspaceFileBrowserProps {
   renderPreview: (path: string, source: boolean, version: number) => ReactNode;
 }
 
+function parentDirectory(path: string): string {
+  const normalized = path.replace(/\/$/, '');
+  return normalized.slice(0, Math.max(0, normalized.lastIndexOf('/')));
+}
+
 export function WorkspaceFileBrowser({
   workspaceCwd,
   actions,
@@ -79,6 +96,29 @@ export function WorkspaceFileBrowser({
 }: WorkspaceFileBrowserProps) {
   const { t } = useI18n();
   const theme = useTheme();
+  const workspace = useWorkspace();
+  const { fileUploadEnabled } = useWebShellCustomization();
+  const uploadClient = useMemo(
+    () =>
+      fileUploadEnabled !== false && actions.uploadWorkspaceFile
+        ? { uploadWorkspaceFile: actions.uploadWorkspaceFile }
+        : undefined,
+    [actions, fileUploadEnabled],
+  );
+  const maxUploadBytes =
+    workspace.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
+    50 * 1024 * 1024;
+  const { uploads, isBusy, uploadFiles, removeUpload } = useFileUpload({
+    client: uploadClient,
+    maxBytes: maxUploadBytes,
+    targetKey: `${workspaceCwd}:${uploadClient ? 'enabled' : 'disabled'}`,
+  });
+  const progressRef = useRef(
+    new Map<string, { size: number; progress: number }>(),
+  );
+  const previousDoneRef = useRef(new Set<string>());
+  const [dropDirectory, setDropDirectory] = useState<string>();
+  const uploadedRef = useRef<((path: string) => void) | undefined>(undefined);
   const treePanelRef = usePanelRef();
   const contentPanelRef = usePanelRef();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -256,10 +296,11 @@ export function WorkspaceFileBrowser({
           empty: listedEntries.length === 0,
           truncated: listing.truncated,
         });
-        const added = listedEntries.map((entry) => {
+        const added = listedEntries.flatMap((entry) => {
           const child = `${path ? `${path}/` : ''}${entry.name}${entry.kind === 'directory' ? '/' : ''}`;
+          const exists = entries.has(child);
           entries.set(child, entry);
-          return { type: 'add' as const, path: child };
+          return exists ? [] : [{ type: 'add' as const, path: child }];
         });
         const missing = added.filter((entry) => !tree.getItem(entry.path));
         if (missing.length) tree.batch(missing);
@@ -342,6 +383,25 @@ export function WorkspaceFileBrowser({
         });
       publish();
     };
+    uploadedRef.current = (path) => {
+      if ([...deletedPaths].some((deleted) => path.startsWith(`${deleted}/`)))
+        return;
+      deletedPaths.delete(path);
+      const parent = parentDirectory(path);
+      if (!entries.has(path)) {
+        const entry: DaemonDirectoryEntry = {
+          name: path.split('/').at(-1)!,
+          kind: 'file',
+          ignored: false,
+        };
+        createdEntries.set(path, entry);
+        entries.set(path, entry);
+        if (!tree.getItem(path)) tree.add(path);
+      }
+      const directory = cache.get(parent);
+      if (directory) cache.set(parent, { ...directory, empty: false });
+      publish();
+    };
     void load('');
     return () => {
       disposed = true;
@@ -354,6 +414,7 @@ export function WorkspaceFileBrowser({
       retryRef.current = undefined;
       createdRef.current = undefined;
       deletedRef.current = undefined;
+      uploadedRef.current = undefined;
     };
   }, [actions, version]);
 
@@ -367,6 +428,107 @@ export function WorkspaceFileBrowser({
       ?.shadowRoot?.querySelector('[role="tree"]')
       ?.setAttribute('aria-label', t('files.title'));
   }, [t]);
+
+  const dropTarget = (event: DragEvent<HTMLDivElement>) => {
+    const row = event.nativeEvent
+      .composedPath()
+      .find(
+        (node) =>
+          node instanceof HTMLElement &&
+          node.getAttribute('role') === 'treeitem',
+      );
+    const path =
+      row instanceof HTMLElement
+        ? row.getAttribute('data-item-path')
+        : undefined;
+    if (!path) return '.';
+    if (treeRef.current?.getItem(path)?.isDirectory())
+      return path.replace(/\/$/, '');
+    return parentDirectory(path) || '.';
+  };
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = uploadClient && !deleting ? 'copy' : 'none';
+    if (uploadClient && !deleting) setDropDirectory(dropTarget(event));
+  };
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setDropDirectory(undefined);
+    if (!uploadClient || deleting) return;
+    const items = Array.from(event.dataTransfer.items ?? []);
+    const files = items.length
+      ? items.flatMap((item) => {
+          if (item.kind !== 'file' || item.webkitGetAsEntry?.()?.isDirectory)
+            return [];
+          const file = item.getAsFile();
+          return file ? [file] : [];
+        })
+      : Array.from(event.dataTransfer.files);
+    uploadFiles(files, dropTarget(event), (path) =>
+      uploadedRef.current?.(path),
+    );
+  };
+  const failedUploads = uploads.filter((upload) => upload.status === 'error');
+  // Success notices expire after three seconds; byte accounting lasts until idle.
+  if (!isBusy) {
+    progressRef.current.clear();
+    previousDoneRef.current = new Set(
+      uploads
+        .filter((upload) => upload.status === 'done')
+        .map((upload) => upload.id),
+    );
+  } else {
+    for (const upload of uploads) {
+      if (upload.status === 'error') progressRef.current.delete(upload.id);
+      else if (!previousDoneRef.current.has(upload.id))
+        progressRef.current.set(upload.id, {
+          size: Math.max(1, upload.file.size),
+          progress: upload.progress,
+        });
+    }
+  }
+  const progressItems = [...progressRef.current.values()];
+  const totalBytes = progressItems.reduce((sum, item) => sum + item.size, 0);
+  const progress = totalBytes
+    ? progressItems.reduce((sum, item) => sum + item.size * item.progress, 0) /
+      totalBytes
+    : 0;
+  const uploadErrorText = (upload: (typeof uploads)[number]) =>
+    `${safeDisplayText(upload.file.name)}: ${
+      upload.error ??
+      (upload.errorCode === 'tooLarge'
+        ? t('composer.upload.error.tooLarge', {
+            limit: `${Math.round(maxUploadBytes / (1024 * 1024))} MiB`,
+          })
+        : upload.errorCode === 'tooManyFiles'
+          ? t('composer.upload.error.tooManyFiles', {
+              count: upload.skippedCount ?? 0,
+            })
+          : t('composer.upload.error.noDaemon'))
+    }`;
+  const uploadProgress = isBusy && (
+    <div
+      className={styles.uploadProgress}
+      role="progressbar"
+      aria-label={t('composer.upload.uploading')}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(progress * 100)}
+    >
+      <div style={{ width: `${Math.max(2, progress * 100)}%` }} />
+    </div>
+  );
+  const preventFileDrop = (event: DragEvent<HTMLElement>) => {
+    if (event.dataTransfer.types.includes('Files')) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'none';
+    }
+  };
 
   const runMenuAction = async (
     action: () => void | Promise<void>,
@@ -448,7 +610,7 @@ export function WorkspaceFileBrowser({
   };
 
   const confirmDelete = async () => {
-    if (!deletePath || deleting || !actions.deleteDirectory) return;
+    if (!deletePath || deleting || isBusy || !actions.deleteDirectory) return;
     const path = deletePath;
     const lifetime = lifetimeRef.current;
     setDeleting(true);
@@ -474,6 +636,9 @@ export function WorkspaceFileBrowser({
     path
       ? `${workspaceCwd.replace(separator === '\\' ? /[\\/]+$/ : /\/+$/, '')}${separator}${path.replaceAll('/', separator)}`
       : workspaceCwd;
+  const workspaceName = safeDisplayText(
+    workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1) ?? workspaceCwd,
+  );
   const absoluteMenuPath = absolutePath(menu?.path ?? '');
   const canPreview =
     selectedPath && /\.(?:md|markdown|html?)$/i.test(selectedPath);
@@ -485,6 +650,8 @@ export function WorkspaceFileBrowser({
       className={styles.browser}
       data-testid="workspace-file-browser"
       style={{ colorScheme: theme }}
+      onDragOver={preventFileDrop}
+      onDrop={preventFileDrop}
     >
       {menu && (
         <DropdownMenu
@@ -735,7 +902,7 @@ export function WorkspaceFileBrowser({
             </AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              disabled={deleting}
+              disabled={deleting || isBusy}
               onClick={(event) => {
                 event.preventDefault();
                 void confirmDelete();
@@ -751,7 +918,7 @@ export function WorkspaceFileBrowser({
           className={styles.path}
           title={safeDisplayText(absolutePath(selectedPath ?? ''))}
         >
-          {safeDisplayText(workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1))}
+          {workspaceName}
           {selectedPath && <> / {safeDisplayText(selectedPath)}</>}
         </span>
         {canPreview && (
@@ -817,6 +984,39 @@ export function WorkspaceFileBrowser({
           {actionError}
         </div>
       )}
+      <div
+        className="sr-only"
+        role="status"
+        data-testid="workspace-file-upload-status"
+      >
+        {uploads
+          .filter(
+            (upload) => upload.status === 'done' || upload.status === 'error',
+          )
+          .map((upload) =>
+            upload.status === 'done'
+              ? `${t('composer.upload.done')}: ${safeDisplayText(upload.resultPath)}`
+              : uploadErrorText(upload),
+          )
+          .join('; ')}
+      </div>
+      {failedUploads.length > 0 && (
+        <div className={styles.notices}>
+          {failedUploads.map((upload) => (
+            <div className={styles.uploadError} key={upload.id}>
+              <span>{uploadErrorText(upload)}</span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t('composer.upload.dismiss')}
+                onClick={() => removeUpload(upload.id)}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
       <ResizablePanelGroup
         className={styles.columns}
         orientation="horizontal"
@@ -854,7 +1054,25 @@ export function WorkspaceFileBrowser({
             className={styles.sidebar}
             hidden={!treeVisible}
             data-testid="workspace-file-sidebar"
+            onDragOverCapture={handleDragOver}
+            onDropCapture={handleDrop}
+            onDragLeaveCapture={(event) => {
+              if (
+                !(event.relatedTarget instanceof Node) ||
+                !event.currentTarget.contains(event.relatedTarget)
+              ) {
+                setDropDirectory(undefined);
+              }
+            }}
           >
+            {dropDirectory !== undefined && uploadClient && (
+              <div className={styles.dropHint}>
+                {t('files.uploadTo')}:{' '}
+                {dropDirectory === '.'
+                  ? workspaceName
+                  : safeDisplayText(dropDirectory)}
+              </div>
+            )}
             <div className={styles.search}>
               <SearchIcon aria-hidden />
               <Input
@@ -958,9 +1176,11 @@ export function WorkspaceFileBrowser({
                 ))}
               </div>
             )}
+            {treeVisible && uploadProgress}
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+      {!treeVisible && uploadProgress}
     </section>
   );
 }
