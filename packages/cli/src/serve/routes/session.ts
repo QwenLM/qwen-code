@@ -841,10 +841,16 @@ function parseRequestedSessionSource(
   return source;
 }
 
+export type ResolveSubagentSessionRuntime = (
+  res: Response,
+  route: string,
+  parentSessionId: string,
+) => Promise<WorkspaceRuntime | undefined>;
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
-): void {
+): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -2343,6 +2349,44 @@ export function registerSessionRoutes(
     return throwMissingActiveTranscript();
   };
 
+  const resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime = async (
+    res,
+    route,
+    parentSessionId,
+  ) => {
+    const owner = workspaceRegistry.resolveLiveSessionOwner(parentSessionId);
+    if (owner.kind !== 'not_found') {
+      return requireSessionRuntime({
+        sessionId: parentSessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+    }
+    try {
+      return await resolveTranscriptSessionRuntime(
+        res,
+        route,
+        parentSessionId,
+        false,
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found' &&
+        (workspaceRegistry.primaryEntry.state !== 'active' ||
+          !workspaceRegistry.primaryEntry.current)
+      ) {
+        logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
+          sessionId: parentSessionId,
+        });
+        return requirePrimarySessionRuntime(workspaceRegistry, res);
+      }
+      throw error;
+    }
+  };
+
   const resolveSessionAnyStateRuntime = async (
     res: Response,
     route: string,
@@ -3794,17 +3838,15 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const runtime = requireSessionRuntime({
-          sessionId: virtualKey.parentSessionId,
-          route,
-          res,
-          workspaceRegistry,
-          daemonLog,
-        });
-        if (!runtime) return;
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         try {
+          const runtime = await resolveSubagentSessionRuntime(
+            res,
+            route,
+            virtualKey.parentSessionId,
+          );
+          if (!runtime) return;
           const session = await runOwnerRuntimeActivity(runtime, () =>
             virtualSubagentSessions.load(runtime, sessionId, clientId),
           );
@@ -5406,15 +5448,13 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const runtime = requireSessionRuntime({
-      sessionId,
-      route,
-      res,
-      workspaceRegistry,
-      daemonLog,
-    });
-    if (!runtime) return;
     try {
+      const runtime = await resolveSubagentSessionRuntime(
+        res,
+        route,
+        sessionId,
+      );
+      if (!runtime) return;
       await runOwnerRuntimeActivity(runtime, async () => {
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
@@ -6869,15 +6909,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/context',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/context',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -6941,15 +6979,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/supported-commands',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/supported-commands',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -8248,17 +8284,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/heartbeat',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/heartbeat',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             sessionId,
@@ -8299,17 +8333,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/detach',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/detach',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(204).end();
         });
@@ -10400,4 +10432,5 @@ export function registerSessionRoutes(
       { cwdBound: 'sync-output-language' },
     ),
   );
+  return { resolveSubagentSessionRuntime };
 }

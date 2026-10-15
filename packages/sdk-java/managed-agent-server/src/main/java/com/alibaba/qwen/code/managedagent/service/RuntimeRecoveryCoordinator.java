@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import org.slf4j.Logger;
@@ -28,7 +29,7 @@ final class RuntimeRecoveryCoordinator implements AutoCloseable {
             return;
         }
         try {
-            var candidates = bindings.findRecoveryCandidates("local-process", cursor, BATCH_SIZE);
+            var candidates = bindings.findRecoveryCandidates(LocalProcessRuntimeProvisioner.KIND, cursor, BATCH_SIZE);
             cursor = candidates.size() < BATCH_SIZE ? null : candidates.getLast().getBindingId();
             CompletableFuture<?>[] operations = candidates.stream().map(binding -> {
                 try {
