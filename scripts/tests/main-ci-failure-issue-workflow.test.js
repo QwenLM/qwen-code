@@ -85,6 +85,15 @@ describe('main CI failure issue workflow', () => {
         "(github.event.workflow_run.event == 'schedule' && " +
         'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow_run.name))) }}',
     );
+    // Only a watched workflow ever raises the event, so a schedule-arm name
+    // missing from the watch list is dead — and the pin above, updated in
+    // the same edit, would not notice.
+    const scheduledNames = JSON.parse(
+      /fromJSON\('(\[[^']*\])'\)/.exec(jobs.analyze.if)[1],
+    );
+    for (const name of scheduledNames) {
+      expect(Object.keys(watchedFiles), name).toContain(name);
+    }
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
     );
