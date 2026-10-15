@@ -50,7 +50,7 @@ public final class WorkspaceRecoveryCommand {
                     ManagedAgentProperties.class).getRuntimeBroker();
             if (!options.isOperatorRecoveryEnabled()
                     || !options.isDurableLocalProcess()
-                    || !"local-process".equals(options.getProvisioner())
+                    || !LocalProcessRuntimeProvisioner.KIND.equals(options.getProvisioner())
                     || options.getStateDirectory() == null || options.getStateDirectory().isBlank()) {
                 throw new IllegalStateException("Operator recovery requires enabled durable local workers.");
             }
