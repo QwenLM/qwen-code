@@ -414,7 +414,7 @@ Allow 保留原 Action、prepare key、request digest 和 Runtime binding，产�
 
 集成回归证明：模型请求准备失败时，普通 prompt 路由和 wake driver 均保留已准入、未结算的输入；渠道中断结算仅在终态与 file-history 退役之后确认原清理 owner。首次释放失败时保留清理 fence，随后 passive resident attachment 释放相同 binding/generation，只新增一次确认，不重复终态。独立 Spring/H2 probe 通过有界撤回与 replay floor 的组合：snapshot 重建期间 reader 保持可用，覆盖范围追平后旧 cursor 再次过期。这项 probe 不属于 MySQL 或进程接管验收。
 
-机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。自[可替换 Harness 设计 D11](2026-10-02-hosted-replaceable-harness.zh-CN.md#d11--残留门禁step-3-进-ci模型轮支路q2-的-binding-半边) 起，它们作为 Hosted MySQL CI 步骤运行；同时进 CI 的还有一条模型轮支路，把无工具 Session 的 B1 与 B2 的主要观察项做成打包门禁，但不覆盖它们的 attempt 与 stream 身份、实时 SSE 视图以及准入次数。部分 prepare 崩溃、响应丢失、损坏/外部 ref、快照超限与清理崩溃，仅有定向测试或故障探针覆盖，或仍属于更广的打包验收工作。两侧 owner 重启、真实 provider 和真实混版本集群仍独立处理。Q2 的 binding 半边有 D11 的冻结控制面支路覆盖醒来的旧 Spring 的过期 claim，并有 store 测试钉住 bind 守卫；两个存活控制面仍属后续阶段。
+机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。自[可替换 Harness 设计 D11](2026-10-02-hosted-replaceable-harness.zh-CN.md#d11--残留门禁step-3-进-ci模型轮支路q2-的-binding-半边) 起，它们是 Hosted MySQL CI 任务的步骤（该任务何时执行到它们见 D11）；同一任务里还有一条模型轮支路，把无工具 Session 的 B1 与 B2 的主要观察项做成打包门禁，但不覆盖它们的 attempt 与 stream 身份、实时 SSE 视图以及准入次数。部分 prepare 崩溃、响应丢失、损坏/外部 ref、快照超限与清理崩溃，仅有定向测试或故障探针覆盖，或仍属于更广的打包验收工作。两侧 owner 重启、真实 provider 和真实混版本集群仍独立处理。Q2 的 binding 半边有 D11 的冻结控制面支路覆盖醒来的旧 Spring 的过期 claim，并有 store 测试钉住 bind 守卫；两个存活控制面仍属后续阶段。
 
 ## 10. 实现范围
 

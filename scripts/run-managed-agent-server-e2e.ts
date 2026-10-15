@@ -693,7 +693,7 @@ async function waitUntil(
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     for (const each of watched) {
       if (childExited(each.child)) {
-        throw new Error(`${name} exited early\n${each.log()}`);
+        throw new Error(`${name} exited early: ${each.name}\n${each.log()}`);
       }
     }
     try {
@@ -761,7 +761,7 @@ async function waitUntil(
     cause = `: predicate stalled; last error before the stall${cause}`;
   }
   throw new Error(
-    `${name} did not become ready${cause}\n${child?.log() ?? ''}`,
+    `${name} did not become ready${cause}\n${watched.map((each) => each.log()).join('\n')}`,
   );
 }
 
@@ -3017,6 +3017,9 @@ try {
         // the wake window would otherwise read as a stale mutation.
         // The window matches the wait after the wake, so a replacement-side
         // writer slower than the window cannot pass here and fail there.
+        // A dead owner would hold every snapshot still as well, so each wait
+        // from here on watches the replacement pair, and so does the verdict.
+        const owners = [replacementSpring, finishingHarness];
         let beforeWake = fencedState();
         await waitUntil(
           'Replacement quiet before the wake',
@@ -3038,6 +3041,7 @@ try {
             return true;
           },
           90_000,
+          owners,
         );
         if (beforeWake.session.split('\t')[0] !== boots[boots.length - 1]) {
           throw new Error(
@@ -3113,6 +3117,7 @@ try {
               await Promise.all(formerProbes.map(([url]) => answers(url)))
             ).every(Boolean),
           30_000,
+          owners,
         );
         // The witness is a renewal or retry the woken coordinator still sends
         // on its stale claim; a coordinator that stopped sending a write it
@@ -3129,15 +3134,24 @@ try {
           'Woken control plane exercises its stale claim',
           (remainingMs) => staleClaimUpdates(remainingMs) > 0,
           30_000,
+          owners,
         );
         await waitUntil(
           'Woken Harness meets the writer fence',
           () => staleWriterRefusals() > 0,
           30_000,
+          owners,
         );
         // Several lease periods for anything the wake set in motion.
         await new Promise((resolve) => setTimeout(resolve, 6_000));
         const afterWake = fencedState();
+        for (const owner of owners) {
+          if (childExited(owner.child)) {
+            throw new Error(
+              `${owner.name} exited inside the wake window\n${owner.log()}`,
+            );
+          }
+        }
         const moved = (
           Object.keys(afterWake) as Array<keyof typeof afterWake>
         ).filter((key) => !isDeepStrictEqual(beforeWake[key], afterWake[key]));

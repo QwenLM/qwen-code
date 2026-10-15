@@ -337,6 +337,30 @@ describe('managed-agent-server e2e runner', () => {
     ]) {
       expect(source).toMatch(new RegExp(`await waitUntil\\(\\s*'${label}'`));
     }
+    // A dead replacement would hold every snapshot still: each wait in the
+    // window watches the pair, and the verdict checks it once more.
+    expect(source).toContain(
+      'const owners = [replacementSpring, finishingHarness];',
+    );
+    for (const label of [
+      'Replacement quiet before the wake',
+      'Former control plane wake',
+      'Woken control plane exercises its stale claim',
+      'Woken Harness meets the writer fence',
+    ]) {
+      const at = source.indexOf(`'${label}'`);
+      const end = source.indexOf('\n        );', at);
+      expect(at, label).toBeGreaterThan(-1);
+      expect(source.slice(at, end), label).toMatch(/\n {10}owners,$/);
+    }
+    const ownersAlive = source.indexOf(
+      'for (const owner of owners) {',
+      compare,
+    );
+    expect(ownersAlive).toBeGreaterThan(compare);
+    expect(ownersAlive).toBeLessThan(
+      source.indexOf('const moved = (', compare),
+    );
     // The baseline the comparison uses is the snapshot the quiet poll
     // settled on, taken before the wake.
     const settle = source.indexOf('beforeWake = settled;', quiet);
@@ -781,38 +805,54 @@ describe('managed-agent-server e2e runner', () => {
       waitUntil('probe', () => new Promise(() => {}), 300, {
         child: { exitCode: 1, signalCode: null },
         log: () => '',
+        name: 'Only',
       }),
-    ).rejects.toThrow(/exited early/);
+    ).rejects.toThrow(/exited early: Only\n/);
   });
 
   // A child killed BY signal (OOM-kill, segfault) keeps exitCode null and
   // sets signalCode: an exitCode-only early-exit guard never trips, the
   // poll burns its whole site budget, and the failure reads "did not
   // become ready" — pointing at the dependency instead of the dead child.
-  // The model-round terminal wait watches the control plane and the Harness
-  // generation finishing the round; either one dying must end the wait.
-  it('waitUntil watches every child it is given', async () => {
-    const { waitUntil } = loadWaitUntil();
-    await expect(
-      waitUntil('probe', () => false, 300, [
-        { child: { exitCode: null, signalCode: null }, log: () => '' },
-        { child: { exitCode: 1, signalCode: null }, log: () => 'second' },
-      ]),
-    ).rejects.toThrow(/exited early\nsecond/);
-    const source = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(source).toMatch(
-      /waitForTerminal\(\s*replacementSpringUrl,\s*tenant,\s*session\.id,\s*0,\s*\[replacementSpring, finishingHarness\],/,
-    );
-  });
-
   it('waitUntil reports a child that died by signal as exited early', async () => {
     const { waitUntil } = loadWaitUntil();
     await expect(
       waitUntil('probe', () => false, 300, {
         child: { exitCode: null, signalCode: 'SIGKILL' },
         log: () => '',
+        name: 'Only',
       }),
-    ).rejects.toThrow(/exited early/);
+    ).rejects.toThrow(/exited early: Only\n/);
+  });
+
+  // The model-round terminal wait watches the control plane and the Harness
+  // generation finishing the round; either one dying must end the wait and
+  // say which one died, and a deadline must still report both tails.
+  it('waitUntil watches every child it is given', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const live = (name) => ({
+      child: { exitCode: null, signalCode: null },
+      log: () => `${name} log`,
+      name,
+    });
+    const dead = (name) => ({
+      child: { exitCode: 1, signalCode: null },
+      log: () => `${name} log`,
+      name,
+    });
+    await expect(
+      waitUntil('probe', () => false, 300, [dead('First'), live('Second')]),
+    ).rejects.toThrow(/exited early: First\nFirst log/);
+    await expect(
+      waitUntil('probe', () => false, 300, [live('First'), dead('Second')]),
+    ).rejects.toThrow(/exited early: Second\nSecond log/);
+    await expect(
+      waitUntil('probe', () => false, 300, [live('First'), live('Second')]),
+    ).rejects.toThrow(/did not become ready\nFirst log\nSecond log$/);
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toMatch(
+      /waitForTerminal\(\s*replacementSpringUrl,\s*tenant,\s*session\.id,\s*0,\s*\[replacementSpring, finishingHarness\],/,
+    );
   });
 
   // A rejecting-then-hanging predicate must keep both facts: the deadline

@@ -4,7 +4,8 @@
 
 状态：Step 1 与 Step 2 已实现（D1-D9）。Step 3 的限定原生文件审批与
 主模型切片已实现（#13777）；它的打包门禁、模型轮支路和 Q2 binding 半边
-支路都已进 CI（D11）。更广的验收矩阵仍未完成，详见
+支路都已是 Hosted MySQL CI 任务的步骤（D11），但该任务尚未实际运行过它们。
+更广的验收矩阵仍未完成，详见
 [Step 3 设计](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
 `728c13de21` 为准，除非某个决策注明了更晚的修正。本设计按 issue 评论
 中的提案回答了 #12952 的 Q2 与 Q3，并修正了该提案中一处机制描述
@@ -458,8 +459,8 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 
 ### D11 —— 残留门禁：Step 3 进 CI、模型轮支路、Q2 的 binding 半边
 
-runner 新增三项，补上前面各切片留成手工或未证明的门禁。三项都在
-`hosted-harness-mysql` 里对打包后的栈运行，使用现有的假模型。
+runner 新增三项，补上前面各切片留成手工或未证明的门禁。三项都是
+`hosted-harness-mysql` 的步骤，对打包后的栈运行，使用现有的假模型。
 
 1. **Step 3 打包门禁进 CI。** Step 3 设计里的 Allow、Deny、Cancel、过期
    与 continuation 收尾五个门禁此前只能手工跑，用 `G3_VERIFY_MODE` 选模式。
@@ -495,8 +496,9 @@ runner 新增三项，补上前面各切片留成手工或未证明的门禁。�
    - 逐行的公开事件，含每行载荷与文本的哈希以及 item 与 part 身份；
    - 该 Session 的 operation；
    - journal head 的状态、存储版本、writer、checkpoint 与恢复相关列；
-   - 除 activation 续约之外的全部 journal 事务——存活 writer 会把每次续约
-     记入 journal，推动 head 的 revision；
+   - 按 writer 代数与 operation 分组的 journal 事务数和最大 revision，
+     不含 activation 续约——存活 writer 会把每次续约记入 journal，推动
+     head 的 revision。原地改写已有行不会在这里体现；
    - 更早代数的事务数，续约也计入在内。
 
    它先等相隔六秒的两次快照一致，确认替代方已经静止。然后打开 MySQL
@@ -525,6 +527,11 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 
 新增的七个步骤各占 10 分钟上限，步骤上限之和因此为 275（45 + 16×10 + 20 + 50），
 任务上限从 220 分钟调到 290 分钟。
+
+自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行；
+新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 之后，只有该步骤
+通过才会执行。加入这些门禁时，该步骤在 `main` 上是失败的，因此还没有任何一次
+CI 运行执行过它们；目前的证据来自在 CI 之外运行同样的 `package.json` 脚本。
 
 ## 改动与属主
 

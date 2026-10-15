@@ -4,7 +4,8 @@
 
 Status: Steps 1 and 2 are implemented (D1-D9). Step 3's bounded native-file
 approval and main-model slices are implemented (#13777). Its packaged gates,
-the model-round arm and the Q2 binding-half arm run in CI (D11). The broader
+the model-round arm and the Q2 binding-half arm are steps of the Hosted MySQL
+CI job (D11), which has not run them yet. The broader
 acceptance matrix remains open, as recorded in the [Step 3 design](2026-10-09-hosted-g3-step3-recovery.md). Issue tracker: #12952 (Stage G). Code references are to
 `main` @ `728c13de21` unless a decision notes a later refinement. This
 design answers Q2 and Q3 of #12952 following the proposal in its comments,
@@ -547,8 +548,8 @@ idempotency and the parked-input refusal as specified in D4 above.
 ### D11 — Residual gates: Step 3 in CI, the model-round arm and Q2's binding half
 
 Three runner additions close the gates the slices above left manual or
-unproven. All three run in `hosted-harness-mysql` against the packaged
-stack and use the existing fake model.
+unproven. All three are steps of `hosted-harness-mysql`; they run against
+the packaged stack and use the existing fake model.
 
 1. **Step 3 packaged gates in CI.** The Allow, Deny, Cancel, expiry and
    continuation-closeout gates from the Step 3 design ran only by hand,
@@ -598,8 +599,10 @@ stack and use the existing fake model.
    - the Session's operations;
    - the journal head's state, storage version, writer, checkpoint and
      recovery columns;
-   - every journal transaction except activation renewals, which the live
-     writer journals and which move the head's revision;
+   - for each writer generation and operation, the count and highest
+     revision of journal transactions, leaving out activation renewals,
+     which the live writer journals and which move the head's revision. A
+     rewrite of an existing row in place would not show here;
    - the count of older-generation transactions, renewals included.
 
    It waits until two snapshots six seconds apart agree, so the
@@ -637,6 +640,12 @@ remains unsupported (see Boundaries).
 The seven new steps are capped at 10 minutes each, so the step ceilings sum
 to 275 (45 + 16×10 + 20 + 50) and the job ceiling moves from 220 to 290
 minutes.
+
+Since #14205 the job runs daily or on demand, never on a pull request, and
+the new steps come after `Verify Hosted Java, Spring and MySQL processes`,
+so they run only once that step passes. When these gates were added that
+step was failing on `main`, so no CI run had executed them; their evidence
+so far comes from running the same `package.json` scripts outside CI.
 
 ## Changes and ownership
 
