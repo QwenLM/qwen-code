@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
@@ -97,10 +99,7 @@ public final class JdbcToolExecutionRepository
         List<ToolExecutionRecord> result = new ArrayList<>();
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT e.*, b.isolation_class, b.isolation_key FROM ma_tool_execution e"
-                                + " JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE"
-                                + " b.tenant_id = ? AND e.harness_session_id = ? ORDER BY"
-                                + " e.execution_call_id_hash FOR UPDATE")) {
+                        "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns("e") + ", b.isolation_class, b.isolation_key FROM ma_tool_execution e JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet rows = statement.executeQuery()) {

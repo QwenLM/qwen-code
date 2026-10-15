@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -119,10 +120,7 @@ final class ManagedSessionRetirementStore {
         }
         if (!revisions.isEmpty()) {
             jdbc.update(
-                    "UPDATE ma_session_head SET compacted_through_revision ="
-                            + " GREATEST(compacted_through_revision, ?) WHERE tenant_key = ? AND"
-                            + " harness_key = ? AND tenant_id = ? AND session_id = ? AND state ="
-                            + " 'DELETED'",
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", compacted_through_revision = GREATEST(compacted_through_revision, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'DELETED'",
                     revisions.getLast(),
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
                     JdbcRuntimeBindingRepository.harnessDrainKey(session),
@@ -284,8 +282,7 @@ final class ManagedSessionRetirementStore {
             throw new IllegalStateException("Session collection is not settled");
         }
         if (jdbc.update(
-                        "UPDATE ma_session SET resource_gc_completed = TRUE WHERE tenant_id = ? AND"
-                                + " session_id = ? AND retired_at IS NOT NULL",
+                        "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", resource_gc_completed = TRUE WHERE tenant_id = ? AND session_id = ? AND retired_at IS NOT NULL",
                         tenant,
                         session)
                 != 1) {
