@@ -86,7 +86,7 @@ describe('qwencloudStandardProvider', () => {
       'glm-5.3',
     ]);
     expect(
-      qwencloudStandardProvider.models.find(
+      qwencloudStandardProvider.models?.find(
         (model) => model.id === 'qwen3.7-plus',
       )?.modalities,
     ).toEqual({ image: true, video: true });
