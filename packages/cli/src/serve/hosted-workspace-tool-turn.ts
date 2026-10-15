@@ -9,6 +9,7 @@ import {
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
+import { rejectionDetail } from './hosted-never-started-reconcile.js';
 
 import {
   readHostedFileHistory,
@@ -4455,13 +4456,23 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      await Promise.allSettled(
-        [...reserved.values()].map((id) => this.broker.cancel(id)),
+      const cancellationBarriers = new Set<string>();
+      const reservedIds = [...reserved.values()];
+      const cancellationResults = await Promise.allSettled(
+        reservedIds.map((id) => this.broker.cancel(id)),
       );
+      cancellationResults.forEach((result, index) => {
+        if (result.status === 'fulfilled')
+          cancellationBarriers.add(reservedIds[index]!);
+      });
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
         let proven = false;
+        let grantOwnerState: unknown;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -4475,11 +4486,9 @@ export class HostedWorkspaceToolTurn {
             },
             saved.publicationToken,
           );
-          if (
-            typeof closed !== 'object' ||
-            closed === null ||
-            (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
-          )
+          if (typeof closed === 'object' && closed !== null)
+            grantOwnerState = (closed as Record<string, unknown>)['state'];
+          if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
           proven = true;
         } catch (closeCause) {
@@ -4488,15 +4497,26 @@ export class HostedWorkspaceToolTurn {
               String(closeCause),
           );
         }
+        if (
+          !proven &&
+          grantOwnerState === undefined &&
+          request?.background &&
+          cancellationBarriers.has(executionCallId)
+        ) {
+          try {
+            proven =
+              (await this.broker.backgroundProcessStatus(executionCallId)) ===
+              undefined;
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${rejectionDetail(cause)}).`,
+            );
+          }
+        }
         if (!proven) continue;
-        // The grant owner proved this start never happened, yet the run
-        // record admitted for the same execution was already committed
-        // dispatch_started — and nothing beyond this catch can ever settle
-        // it again. Settle it under the same proof so the projection stops
-        // reporting a run that never started.
-        const request = requests.find(
-          (_, index) => reserved.get(index) === executionCallId,
-        );
+        // The grant owner proved a Shell or Monitor start never happened,
+        // or the original process ledger proved it for a background Shell.
+        // Publication absence alone proves nothing.
         if (request?.background)
           await this.childRuns
             ?.settleFailed(executionCallId, {
