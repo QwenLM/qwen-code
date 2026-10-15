@@ -25,10 +25,16 @@ same-tool failure/recovery or accepted mid-turn steer; or at least 20 accepted
 completed calls plus substantive work. No new setting is introduced.
 
 The client retains small completion records by call ID until their tool results
-are accepted into chat history. Acceptance uses the existing request-owned
-history-push snapshot, including the first stream event, normal commit and
-finally path. Direct `addHistory` also consumes matching records. Re-submitted
-results cannot count twice. Rejected inputs do not advance the review window.
+are accepted into chat history. Acceptance uses a request-owned receipt of the
+submitted parts still resident after setup and inline repair. Parts are tracked
+by object identity, not just call ID: a late real result dropped in favor of an
+older synthetic response does not count, while a result hoisted to an earlier
+turn still counts. Capture follows output-budget rewriting. The first stream
+event, normal commit and finally path consume this receipt. Setup rollback
+leaves no receipt, so another send's push cannot credit rejected results or steer
+evidence. Provider errors following a confirmed push still preserve acceptance.
+Direct `addHistory` also consumes matching records. Re-submitted results cannot
+count twice. Rejected inputs do not advance the review window.
 Skill-file modification protection still updates at local execution completion,
 even if a PostToolUse hook subsequently denies the result or the call settles
 cancelled after execution started. Denied and cancelled results remain excluded

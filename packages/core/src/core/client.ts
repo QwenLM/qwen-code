@@ -71,6 +71,7 @@ import {
   LlmChat,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
+  userContentPushAcceptedKey,
 } from './llm-chat.js';
 import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
@@ -3805,12 +3806,6 @@ export class LlmClient {
           pushCountBefore !== undefined &&
           currentPushCount() > pushCountBefore
         ) {
-          if (
-            steerInput.parts.length > 0 &&
-            this.config.getSessionId() === experienceSessionId
-          ) {
-            this.experienceSignals.userSteer = true;
-          }
           steerInput.accept();
         } else {
           steerInput.restore();
@@ -3847,18 +3842,24 @@ export class LlmClient {
     let experienceInputRecorded = false;
     const experienceSessionId = this.config.getSessionId();
     const recordAcceptedExperienceInput = () => {
-      const snapshot = attachedPushSnapshot();
+      const acceptedParts = attachedSnapshotSource
+        ? (attachedSnapshotSource as unknown as Record<PropertyKey, unknown>)[
+            userContentPushAcceptedKey
+          ]
+        : undefined;
       if (
         !experienceInputRecorded &&
         this.config.getSessionId() === experienceSessionId &&
-        snapshot !== undefined &&
-        currentPushCount() > snapshot
+        Array.isArray(acceptedParts)
       ) {
         experienceInputRecorded = true;
-        if (messageType === SendMessageType.Steer) {
+        if (
+          messageType === SendMessageType.Steer ||
+          (attachedSteerInput?.parts.length ?? 0) > 0
+        ) {
           this.experienceSignals.userSteer = true;
         }
-        this.acceptCompletedToolResults(attachedSnapshotSource ?? []);
+        this.acceptCompletedToolResults(acceptedParts);
       }
     };
 
