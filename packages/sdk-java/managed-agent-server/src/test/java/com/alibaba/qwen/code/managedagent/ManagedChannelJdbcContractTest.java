@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
 
 /**
  * Runs the shared H5 channel persistence contract against the Flyway schema

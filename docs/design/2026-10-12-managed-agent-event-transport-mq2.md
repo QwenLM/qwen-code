@@ -289,7 +289,8 @@ the transport.
 
 - No enablement by default anywhere; the flag is off in every shipped
   configuration.
-- No multi-node fault matrix (that is MQ3).
+- No multi-node fault matrix (that is MQ3:
+  [2026-10-14-managed-agent-event-transport-mq3](2026-10-14-managed-agent-event-transport-mq3.md)).
 - No change to the commit path's transaction shape; the publication point is
   after-commit only, and publication failure never blocks the local
   post-commit SSE (#12380 constraint).

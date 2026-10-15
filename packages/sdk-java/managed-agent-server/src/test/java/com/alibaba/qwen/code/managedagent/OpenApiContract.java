@@ -9,6 +9,7 @@ import com.networknt.schema.SchemaLocation;
 import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion.VersionFlag;
 import com.networknt.schema.ValidationMessage;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
