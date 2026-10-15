@@ -22,10 +22,17 @@ import { useContextMenu } from './ContextMenuContext.js';
  * menu has no provider requirements at all — the inner component (and its
  * `useKeypress`, which needs KeypressProvider) mounts only while open.
  *
- * Keyboard: ↑/↓ move the highlight, Enter executes, Esc closes. Mouse
- * hover / click are handled by {@link ContentMouseController}, which
- * hit-tests with `contextMenuSize` — the border/padding encoded below must
- * stay in sync with that helper.
+ * Keyboard: ↑/↓ move the highlight, Enter executes, Esc closes. Any other key
+ * also dismisses the menu (click-away parity), but that key is the user's, not
+ * the menu's — it must keep flowing through the normal pipeline (typing "x"
+ * dismisses and types "x"; returning early would drop it into the bare
+ * readline layer). Dismissal is therefore reported back to KeypressContext so
+ * the same dispatch falls through to the ordinary handlers the moment the menu
+ * is gone. While the menu is open the subscription is exclusive: keys are
+ * routed here only, so the composer, approval dialogs, and tab bars cannot act
+ * on the same keystroke. Mouse hover / click are handled by
+ * {@link ContentMouseController}, which hit-tests with `contextMenuSize` —
+ * the border/padding encoded below must stay in sync with that helper.
  */
 export const ContextMenuOverlay: React.FC = () => {
   const { menu } = useContextMenu();
@@ -40,29 +47,39 @@ const ActiveContextMenu: React.FC = () => {
     useContextMenu();
 
   const handleKeypress = useCallback(
-    (key: Key) => {
-      if (!menu) return;
+    (key: Key): boolean => {
+      if (!menu) return true;
       if (key.name === 'escape') {
         closeMenu();
-        return;
+        return true;
       }
-      if (key.name === 'up') {
+      // Claim the menu's keys only without modifiers: a modified Return or
+      // arrow belongs to a composer binding (Shift+Enter / Ctrl+Enter are
+      // Command.NEWLINE in keyBindings.ts), and consuming it here would
+      // drop the newline while still firing the highlighted item.
+      const unmodified = !key.ctrl && !key.shift && !key.meta;
+      if (key.name === 'up' && unmodified) {
         setSelectedIndex(Math.max(0, selectedIndex - 1));
-        return;
+        return true;
       }
-      if (key.name === 'down') {
+      if (key.name === 'down' && unmodified) {
         setSelectedIndex(Math.min(menu.items.length - 1, selectedIndex + 1));
-        return;
+        return true;
       }
-      if (key.name === 'return') {
+      if (key.name === 'return' && unmodified) {
         executeIndex(selectedIndex);
-        return;
+        return true;
       }
+      // Any other key dismisses the menu. Return false so this same
+      // keystroke falls through to ordinary handlers — the key was aimed at
+      // the app, not the menu, and swallowing it here would lose it.
+      closeMenu();
+      return false;
     },
     [menu, selectedIndex, closeMenu, setSelectedIndex, executeIndex],
   );
 
-  useKeypress(handleKeypress, { isActive: menu !== null });
+  useKeypress(handleKeypress, { isActive: menu !== null, exclusive: true });
 
   if (!menu) {
     return null;
