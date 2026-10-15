@@ -54,6 +54,53 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
   }
 });
 
+test('uses github_ci_only, not docs_only, for CODEOWNERS changes', () => {
+  assert.equal(classifyChangedFiles(['.github/CODEOWNERS']), 'github_ci_only');
+  assert.equal(
+    classifyChangedFiles([
+      { filename: '.github/CODEOWNERS', status: 'modified' },
+    ]),
+    'github_ci_only',
+  );
+});
+
+test('keeps CODEOWNERS lookalikes and mixed changes on the full profile', () => {
+  for (const files of [
+    ['.github/codeowners'],
+    ['.GITHUB/CODEOWNERS'],
+    ['.github/CODEOWNERS.js'],
+    ['.github/CODEOWNERS/src/index.ts'],
+    ['.github/ISSUE_TEMPLATE/bug_report.yml'],
+    ['.github/CODEOWNERS', 'packages/core/src/runtime.ts'],
+    ['.github/CODEOWNERS', '.github/workflows/ci.yml'],
+    ['.github/CODEOWNERS', 'README.md'],
+  ]) {
+    assert.equal(classifyChangedFiles(files), 'full', files.join(', '));
+  }
+});
+
+test('keeps cross-profile renames involving CODEOWNERS on the full profile', () => {
+  for (const path of ['packages/core/src/runtime.ts', 'docs/old.md']) {
+    for (const [filename, previous_filename] of [
+      ['.github/CODEOWNERS', path],
+      [path, '.github/CODEOWNERS'],
+    ]) {
+      assert.equal(
+        classifyChangedFiles([
+          { filename, previous_filename, status: 'renamed' },
+        ]),
+        'full',
+      );
+    }
+  }
+  assert.equal(
+    classifyChangedFiles([
+      { filename: '.github/CODEOWNERS', status: 'renamed' },
+    ]),
+    'full',
+  );
+});
+
 test('keeps yaml-dependent helper suites on the full profile', () => {
   // web-shell-visuals-publish.test.mjs statically imports `yaml`, so the
   // dependency-free github_ci_only lane can never execute it; downgrading a

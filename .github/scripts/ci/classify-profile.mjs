@@ -8,6 +8,7 @@ export const CI_PROFILES = {
 };
 
 export const GITHUB_CI_ONLY_FILES = new Set([
+  '.github/CODEOWNERS',
   '.github/actionlint.yaml',
   '.github/scripts/pr-safety-precheck.mjs',
   '.github/scripts/pr-safety-precheck.test.mjs',
