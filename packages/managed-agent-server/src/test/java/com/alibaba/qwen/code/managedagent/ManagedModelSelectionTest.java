@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -95,6 +96,24 @@ class ManagedModelSelectionTest {
         assertThat(summary.capabilities().modelChange()).isTrue();
         assertThat(service.listWebShellSessions(tenant, "actor", null, 100).data()).singleElement()
                 .satisfies(row -> assertThat(row.modelSelection()).isEqualTo(changed.modelSelection()));
+    }
+
+    @Test
+    void workflowChildFirstTurnDoesNotInheritTheParentsSelectedModel() {
+        change("actor", "selected-parent", "model-a", 0);
+        var input = List.<Map<String, Object>>of(Map.of("type", "workflow_launch"));
+        var child = transaction().execute(status -> store.insertChildSessionCommand(
+                tenant, session, "workflow-child", "child-digest", "Workflow", input,
+                SubmitHarnessTurn.computePayloadDigest(input),
+                new SessionLineage(session, session, "workflow-run", 1)));
+        assertThat(child.turnId()).isNotNull();
+        var firstTurn = store.findTurn(tenant, child.sessionId(), child.turnId()).orElseThrow();
+        assertThat(jdbc.queryForMap("SELECT model_id, model_revision FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, child.sessionId()))
+                .containsEntry("model_id", null).containsEntry("model_revision", 0L);
+        assertThat(store.findTurnModelSelection(tenant, child.sessionId(), firstTurn.promptId())).isNull();
+        assertThat(store.findModelSelections(tenant, List.of(session)))
+                .containsEntry(session, new WebShellModelSelection("model-a", 1));
     }
 
     @Test
