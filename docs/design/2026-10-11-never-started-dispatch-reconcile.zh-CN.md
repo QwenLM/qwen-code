@@ -137,8 +137,10 @@ started: false })` → 经 `commitExtensionRecord` 提交
 ### 回合内后台失败取证（#13937）
 
 tool-turn 的 catch 处理 publication 行尚未创建时失败的后台 Shell 预留。
-保留 grant owner 的 `NOT_STARTED` 证明；该证明不可得时，通过
-`backgroundProcessStatus(executionCallId)` 查询同一原 Broker。只有带类型的
+保留 grant owner 的 `NOT_STARTED` 证明。close 请求失败或没有返回状态时，
+才通过 `backgroundProcessStatus(executionCallId)` 查询同一原 Broker。任何
+非 `NOT_STARTED` 的明确状态都是反证，不得被后备查询覆盖。因此 publication
+缺失时，也必须由独立进程账本返回确定性的 404，才允许结算。只有带类型的
 `runtime_execution_not_found` 应答解析为行缺失，才允许在存活回合内执行
 `settleFailed(..., { stopReason: 'start_failed', started: false })`。
 行存在、unknown、身份不匹配或查询被拒绝时，记录继续未结算；publication

@@ -150,9 +150,12 @@ started: false })` → commits `state: failed`,
 ### In-turn background failure proof (#13937)
 
 The tool-turn catch handles a failed background Shell reservation before a
-publication row exists. It retains the grant owner's `NOT_STARTED` proof; if
-that proof is unavailable, it probes the same original Broker through
-`backgroundProcessStatus(executionCallId)`. Only the typed
+publication row exists. It retains the grant owner's `NOT_STARTED` proof. If
+the close request fails or returns no state, it probes the same original Broker
+through `backgroundProcessStatus(executionCallId)`. A returned state other than
+`NOT_STARTED` is affirmative counter-evidence and is never overridden by the
+fallback. A missing publication can therefore settle only when the independent
+process ledger also returns its definitive 404. Only the typed
 `runtime_execution_not_found` response resolves to absence and permits
 `settleFailed(..., { stopReason: 'start_failed', started: false })` in the live
 Turn. A present row, unknown result, wrong identity or rejected probe leaves

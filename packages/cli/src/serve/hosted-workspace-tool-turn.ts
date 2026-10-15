@@ -4466,6 +4466,7 @@ export class HostedWorkspaceToolTurn {
           (_, index) => reserved.get(index) === executionCallId,
         );
         let proven = false;
+        let grantOwnerState: unknown;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -4479,11 +4480,9 @@ export class HostedWorkspaceToolTurn {
             },
             saved.publicationToken,
           );
-          if (
-            typeof closed !== 'object' ||
-            closed === null ||
-            (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
-          )
+          if (typeof closed === 'object' && closed !== null)
+            grantOwnerState = (closed as Record<string, unknown>)['state'];
+          if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
           proven = true;
         } catch (closeCause) {
@@ -4492,7 +4491,7 @@ export class HostedWorkspaceToolTurn {
               String(closeCause),
           );
         }
-        if (!proven && request?.background) {
+        if (!proven && grantOwnerState === undefined && request?.background) {
           try {
             proven =
               (await this.broker.backgroundProcessStatus(executionCallId)) ===

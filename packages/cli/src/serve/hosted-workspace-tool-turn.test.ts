@@ -5499,7 +5499,7 @@ describe('hosted Monitor admission arm', () => {
     );
   });
 
-  it('rejects an unproven not_started refuse before settling the Shell record', async () => {
+  it('does not override a grant owner that reports the Shell started', async () => {
     const { call, parts } = backgroundCall();
     const rejectedStart: ToolResultEnvelope = {
       executionStatus: 'not_started',
@@ -5512,9 +5512,11 @@ describe('hosted Monitor admission arm', () => {
     };
     const rig = backgroundTurnRig(rejectedStart, { notStartedProven: false });
     turn = rig.turn;
+    broker.backgroundProcessStatus.mockResolvedValue(undefined);
     await expect(
       rig.turn.execute([call], parts, 'model', new AbortController().signal),
     ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
     expect(
       rig.orchestrator.calls.some(([name]) => name === 'settleFailed'),
     ).toBe(false);
