@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,11 +17,8 @@ import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 
@@ -290,11 +288,7 @@ public final class ToolPublicationContract {
     }
 
     public static String sha256(byte[] bytes) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return DigestUtils.sha256Hex(bytes);
     }
 
     private static JsonNode canonical(JsonNode node) {

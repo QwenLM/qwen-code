@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -105,13 +106,13 @@ class WorkspaceStorageGuardTest {
         guard().register("tenant", "storage", UUID.randomUUID().toString());
         guard().register("tenant", "other", UUID.randomUUID().toString());
         guard().verifyProbe(binding);
-        var registrations = jdbc.queryForList("SELECT * FROM ma_storage_owner ORDER BY storage_key");
+        var registrations = jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY storage_key");
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?",
                 UUID.randomUUID().toString(), JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"));
         assertUnavailable(() -> guard().verify(binding));
         assertUnavailable(() -> guard().verifyProbe(binding));
         guard().verifyProbe(new ContextBinding("tenant", "other-workspace", 1, "other", ".", "config", 1));
-        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner ORDER BY storage_key"))
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY storage_key"))
                 .isEqualTo(registrations);
     }
 
@@ -123,12 +124,12 @@ class WorkspaceStorageGuardTest {
                 WorkspaceOperations.values("storage_id", "storage", "state", "COMPLETED", "history_identity_json",
                         "{\"root\":\"" + temp.resolve("missing-history") + "\",\"hostId\":\"test-host\",\"device\":\"test-device\",\"inode\":\"missing\",\"birthTime\":\"missing\"}",
                         "target_registration_id", UUID.randomUUID().toString()));
-        var registration = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        var migration = jdbc.queryForMap("SELECT * FROM ma_operation");
+        var registration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
+        var migration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation");
         assertUnavailable(() -> guard().verify(binding));
         assertUnavailable(() -> guard().verifyProbe(binding));
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(registration);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_operation")).isEqualTo(migration);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(registration);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation")).isEqualTo(migration);
     }
 
     @Test
@@ -171,8 +172,8 @@ class WorkspaceStorageGuardTest {
                         "target_registration_id", UUID.randomUUID().toString()));
         stable.verifyProbe(fixture.binding);
         stable.verify(fixture.binding);
-        var lease = fixture.jdbc.queryForList("SELECT * FROM ma_storage_owner");
-        var migration = fixture.jdbc.queryForList("SELECT * FROM ma_operation");
+        var lease = fixture.jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
+        var migration = fixture.jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation");
         IOException fault = new IOException("Input/output error");
         var transientHistory = new WorkspaceStorageGuard(fixture.jdbc, new DataSourceTransactionManager(fixture.dataSource),
                 fixture.properties, path -> {
@@ -189,8 +190,8 @@ class WorkspaceStorageGuardTest {
                 });
         assertThatThrownBy(() -> transientHistory.verify(fixture.binding))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.isRetryable()).isFalse());
-        assertThat(fixture.jdbc.queryForList("SELECT * FROM ma_storage_owner")).isEqualTo(lease);
-        assertThat(fixture.jdbc.queryForList("SELECT * FROM ma_operation")).isEqualTo(migration);
+        assertThat(fixture.jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(lease);
+        assertThat(fixture.jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation")).isEqualTo(migration);
         for (String invalid : List.of(identity.replace("test-host", "mismatched-host"), "{broken")) {
             migrationOperations.update(WorkspaceOperations.Kind.STORAGE_MIGRATION, migrationId, WorkspaceOperations.values("history_identity_json", invalid));
             assertThatThrownBy(() -> stable.verifyProbe(fixture.binding))
@@ -210,7 +211,7 @@ class WorkspaceStorageGuardTest {
         original.verify(binding);
         Path marker = root.resolve(".qwen-managed-storage.json");
         byte[] backup = Files.readAllBytes(marker);
-        var registration = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var registration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         Files.delete(marker);
         Files.delete(root.resolve("child"));
         Files.delete(root);
@@ -224,7 +225,7 @@ class WorkspaceStorageGuardTest {
         assertUnavailable(() -> restarted.verify(binding));
         assertUnavailable(() -> restarted.register("tenant", "storage", operation));
         assertUnavailable(() -> restarted.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner"))
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner"))
                 .isEqualTo(registration);
     }
 
@@ -318,7 +319,7 @@ class WorkspaceStorageGuardTest {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
-                + " created_at, updated_at, workspace_id, workspace_generation, workspace_storage_id,"
+                + " gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id,"
                 + " cwd_relative, context_config_ref, context_revision, workspace_config_ref,"
                 + " workspace_policy_ref) VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 0, 0,"
                 + " 'workspace', 1, 'storage', 'child', ?, 1, ?, ?)",
@@ -406,7 +407,7 @@ class WorkspaceStorageGuardTest {
     void refusesDirectoryAndSymlinkMarkersWithoutChangingRegistration() throws Exception {
         String operation = UUID.randomUUID().toString();
         guard().register("tenant", "storage", operation);
-        var registration = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var registration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         Path marker = root.resolve(".qwen-managed-storage.json");
         Path saved = temp.resolve("marker-backup");
         Files.move(marker, saved);
@@ -420,7 +421,7 @@ class WorkspaceStorageGuardTest {
         assertUnavailable(() -> guard().verify(binding));
         assertThat(guard().inspect("tenant", "storage")).contains("marker=unavailable");
         assertUnavailable(() -> guard().register("tenant", "storage", operation));
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner"))
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner"))
                 .isEqualTo(registration);
         Files.delete(marker);
         Files.move(saved, marker);
@@ -531,10 +532,10 @@ class WorkspaceStorageGuardTest {
         String operation = UUID.randomUUID().toString();
         assertThatThrownBy(() -> guard(manager).register("tenant", "storage", operation))
                 .isInstanceOf(IllegalStateException.class);
-        var committed = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var committed = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         assertThat(committed.get("mount_state")).isEqualTo("READY");
         guard().register("tenant", "storage", operation);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(committed);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(committed);
         guard().verify(binding);
     }
 
@@ -545,9 +546,9 @@ class WorkspaceStorageGuardTest {
         guard().fence("tenant", "storage", 1, operation);
         guard().restoreOriginal("tenant", "storage", 1, operation);
         jdbc.update("UPDATE ma_storage_owner SET holder_key = 'new-holder'");
-        var committed = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var committed = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         guard().restoreOriginal("tenant", "storage", 1, operation);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(committed);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(committed);
         Path marker = root.resolve(".qwen-managed-storage.json");
         byte[] original = Files.readAllBytes(marker);
         Files.delete(marker);
@@ -557,7 +558,7 @@ class WorkspaceStorageGuardTest {
         Files.createDirectory(root);
         Files.write(root.resolve(".qwen-managed-storage.json"), original);
         assertUnavailable(() -> guard().restoreOriginal("tenant", "storage", 1, operation));
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(committed);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(committed);
     }
 
     @Test
@@ -568,11 +569,11 @@ class WorkspaceStorageGuardTest {
         jdbc.update("UPDATE ma_storage_owner SET holder_key = 'retained-owner'");
         Files.move(root, temp.resolve("old-root"));
         Files.createDirectory(root);
-        var committed = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var committed = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         assertThat(guard().inspect("tenant", "storage"))
                 .contains("state=fenced revision=1", "operation=" + operation,
                         "holder=true", "identity=mismatch", "marker=unavailable");
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(committed);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(committed);
         assertThat(Files.exists(root.resolve(".qwen-managed-storage.json"))).isFalse();
     }
 

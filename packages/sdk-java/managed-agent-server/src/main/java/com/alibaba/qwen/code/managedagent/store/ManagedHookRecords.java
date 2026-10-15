@@ -3,11 +3,9 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -59,12 +57,7 @@ public final class ManagedHookRecords {
     }
 
     private static String sha256(String value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
+        return DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
     }
 
     public static void requireRegistration(JsonNode record) {

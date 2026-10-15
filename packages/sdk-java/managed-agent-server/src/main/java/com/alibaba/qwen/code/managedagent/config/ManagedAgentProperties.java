@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import jakarta.annotation.PostConstruct;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -615,7 +616,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // A blank value comes from an unset template variable; both the
         // startup guard and the connector must read it as the default.
         public String getAddress() {
-            return address == null || address.isBlank() ? "127.0.0.1"
+            return StringUtils.isBlank(address) ? "127.0.0.1"
                     : address;
         }
 

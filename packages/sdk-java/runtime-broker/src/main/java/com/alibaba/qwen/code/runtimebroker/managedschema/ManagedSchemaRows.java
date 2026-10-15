@@ -6,6 +6,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -13,6 +14,12 @@ import java.util.Set;
 
 /** Reads raw SQL rows while decoding only declared UTF-8 identity columns. */
 public final class ManagedSchemaRows {
+    private static final Set<String> BOOLEANS = Set.of(
+            "recovery_protected", "resource_gc_completed", "submission_attempted",
+            "o3_backfill_pending", "projection_pending", "terminal", "truncated",
+            "archived", "quarantined", "write_evidence", "accepted_complete",
+            "workspace_bound", "verification_ready", "is_default", "provision_seeded",
+            "drain_requested", "cancel_requested", "enabled", "csi_guard");
     private static final Set<String> IDENTITIES =
             Set.of(
                     "tenant_id",
@@ -129,16 +136,14 @@ public final class ManagedSchemaRows {
         Map<String, Object> row = new LinkedHashMap<>();
         for (int index = 1; index <= columns.getColumnCount(); index++) {
             String label = columns.getColumnLabel(index).toLowerCase(Locale.ROOT);
-            Object value = result.getObject(index);
-            if (value instanceof java.sql.Blob) {
-                value = result.getBytes(index);
-            } else if (value instanceof java.sql.Clob) {
-                value = result.getString(index);
-            }
+            Object value = value(result, index, columns.getColumnType(index), label);
             if (value instanceof byte[] bytes && IDENTITIES.contains(label)) {
                 value = utf8(bytes, label);
             } else if (value instanceof java.time.LocalDateTime timestamp) {
                 value = java.sql.Timestamp.valueOf(timestamp);
+            }
+            if ("csi_guard".equals(label) && value instanceof Number number) {
+                value = number.longValue() != 0;
             }
             row.put(label, value);
         }
@@ -148,6 +153,36 @@ public final class ManagedSchemaRows {
     public static String identity(ResultSet result, String label) throws SQLException {
         byte[] bytes = result.getBytes(label);
         return bytes == null ? null : utf8(bytes, label);
+    }
+
+    private static Object value(ResultSet result, int index, int type, String label)
+            throws SQLException {
+        Object value;
+        if (type == Types.TINYINT && BOOLEANS.contains(label)) {
+            value = result.getBoolean(index);
+        } else {
+            value = switch (type) {
+                case Types.BOOLEAN, Types.BIT -> result.getBoolean(index);
+                case Types.BIGINT -> result.getLong(index);
+                case Types.INTEGER, Types.SMALLINT, Types.TINYINT -> result.getInt(index);
+                case Types.DECIMAL, Types.NUMERIC -> result.getBigDecimal(index);
+                case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB ->
+                        result.getBytes(index);
+                case Types.CHAR, Types.VARCHAR, Types.LONGVARCHAR, Types.CLOB ->
+                        result.getString(index);
+                case Types.TIMESTAMP -> timestamp(result, index);
+                default -> result.getObject(index);
+            };
+        }
+        return result.wasNull() ? null : value;
+    }
+
+    private static java.sql.Timestamp timestamp(ResultSet result, int index) throws SQLException {
+        if ("DATETIME".equalsIgnoreCase(result.getMetaData().getColumnTypeName(index))) {
+            var local = result.getObject(index, java.time.LocalDateTime.class);
+            return local == null ? null : java.sql.Timestamp.valueOf(local);
+        }
+        return result.getTimestamp(index);
     }
 
     private static String utf8(byte[] bytes, String label) throws SQLException {
