@@ -131,4 +131,6 @@ source reactor 完成 SDK 249 例 unit（跳过 9 例）、Broker 1,005 例（�
 
 随后合并 main，保留其子 Turn 取消行为，为 SSH 专用生命周期 fixture 补齐新增依赖。八处继承的 SQL fixture 插入改用规范时间列，其中 journal 使用数据库毫秒时钟。合并后的树通过 247 例聚焦 Java unit/H2、全部 72 例 MySQL 8.4 集成测试、Checkstyle 和 SpotBugs；完整 build、typecheck、bundle，以及 54 例模型/prompt/环境测试、21 例原生 bootstrap/目录 storage 测试和 34 例 WebShell 产物测试均通过。
 
+随后完整 SDK Java CI 发现了从 main 继承的旧故障门槛预期：已移除的 SQL 时间列、SSE 证据仍读取旧时间字段、租约探针将毫秒值与 SQL 日期比较，以及团队关闭 fixture 仍要求子 Turn 自然完成。本次续修仅调整这些测试 fixture，保留 SSE 投影的精确比较，使用共享数据库毫秒时钟，并要求模型响应仍被阻塞时，子 Turn 已取消且子 Session 已关闭。原生 macOS 检查与完整 Linux 生命周期及多节点 CI 分别记录；原有 local-process 能力检查保持有效。
+
 尚未执行 Linux 和跨物理机器验收，也未运行完整部署的 WebShell → Java → MySQL → 远端 Shell publication 链路；各组件已分别验证。没有配置或修改生产节点。这些缺口意味着当前不能宣称已通过生产验收。
