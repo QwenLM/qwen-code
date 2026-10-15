@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import jakarta.validation.Valid;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -288,7 +289,7 @@ public class PublicAgentController {
     }
 
     private static long parseSequence(String header, long fallback) {
-        if (header == null || header.isBlank()) {
+        if (StringUtils.isBlank(header)) {
             return fallback;
         }
         try {

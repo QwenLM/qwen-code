@@ -2,12 +2,12 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -33,7 +33,7 @@ public class WriterCredentialPolicy {
     }
 
     private WriterCredentialPolicy(String bindingKey) {
-        byte[] key = bindingKey == null || bindingKey.isBlank()
+        byte[] key = StringUtils.isBlank(bindingKey)
                 ? null : bindingKey.getBytes(StandardCharsets.UTF_8);
         // A weak key can be brute-forced from one observed token.
         if (key != null && key.length < MIN_BINDING_KEY_BYTES) {
@@ -86,9 +86,8 @@ public class WriterCredentialPolicy {
         String canonical = "qwen-managed-writer/v1\0" + tenantId + "\0"
                 + workspaceId + "\0" + sessionId;
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(bindingKey, "HmacSHA256"));
-            return mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8));
+            return new HmacUtils(HmacAlgorithms.HMAC_SHA_256, bindingKey)
+                    .hmac(canonical.getBytes(StandardCharsets.UTF_8));
         } catch (Exception error) {
             throw new IllegalStateException("HmacSHA256 is unavailable",
                     error);
