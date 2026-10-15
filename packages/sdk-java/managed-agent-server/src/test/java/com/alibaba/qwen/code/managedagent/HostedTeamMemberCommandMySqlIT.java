@@ -5,9 +5,6 @@
 
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -21,6 +18,23 @@ import com.sun.net.httpserver.HttpServer;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.awaitility.core.ConditionFactory;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -49,22 +63,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.awaitility.core.ConditionFactory;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
-import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.io.CleanupMode;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * H4e-b3: the member board commands end to end. A real Spring server on
@@ -129,9 +130,15 @@ class HostedTeamMemberCommandMySqlIT {
             harness.destroy();
             harness.waitFor(20, TimeUnit.SECONDS);
         }
-        if (spring != null) spring.close();
-        if (model != null) model.stop(0);
-        if (modelThreads != null) modelThreads.shutdownNow();
+        if (spring != null) {
+            spring.close();
+        }
+        if (model != null) {
+            model.stop(0);
+        }
+        if (modelThreads != null) {
+            modelThreads.shutdownNow();
+        }
     }
 
     /**
@@ -465,7 +472,9 @@ class HostedTeamMemberCommandMySqlIT {
     private static Set<String> reportedIn(JsonNode body) {
         Set<String> names = new LinkedHashSet<>();
         for (JsonNode message : body.path("messages")) {
-            if (!"user".equals(message.path("role").asText())) continue;
+            if (!"user".equals(message.path("role").asText())) {
+                continue;
+            }
             names.addAll(teammates(message.toString()));
         }
         return names;
@@ -521,20 +530,25 @@ class HostedTeamMemberCommandMySqlIT {
     /** A tool answer as plain text, whatever JSON escaping carried it. */
     private static String plain(String text) {
         String out = text;
-        for (int pass = 0; pass < 4; pass++)
+        for (int pass = 0; pass < 4; pass++) {
             out = out.replace("\\\\", "\\").replace("\\\"", "\"")
-                    .replace("\\n", "\n");
+            .replace("\\n", "\n");
+        }
         return out;
     }
 
     /** The number a member's own task_create opened, from its reply. */
     private String createdNumber(JsonNode body) {
         for (JsonNode message : body.path("messages")) {
-            if (!"tool".equals(message.path("role").asText())) continue;
+            if (!"tool".equals(message.path("role").asText())) {
+                continue;
+            }
             String text = plain(message.path("content").toString());
             Matcher number = Pattern.compile(
                     "Task #(\\d+) created").matcher(text);
-            if (number.find()) return number.group(1);
+            if (number.find()) {
+                return number.group(1);
+            }
         }
         throw new AssertionError("member task_create reply lacks its number");
     }
@@ -546,8 +560,11 @@ class HostedTeamMemberCommandMySqlIT {
 
     private static long countRoleTool(JsonNode body) {
         long results = 0;
-        for (JsonNode message : body.path("messages"))
-            if ("tool".equals(message.path("role").asText())) results += 1;
+        for (JsonNode message : body.path("messages")) {
+            if ("tool".equals(message.path("role").asText())) {
+                results += 1;
+            }
+        }
         return results;
     }
 
@@ -606,11 +623,15 @@ class HostedTeamMemberCommandMySqlIT {
 
     private static String firstUserText(JsonNode body) {
         for (JsonNode message : body.path("messages")) {
-            if (!"user".equals(message.path("role").asText())) continue;
+            if (!"user".equals(message.path("role").asText())) {
+                continue;
+            }
             String text = message.path("content").isTextual()
                     ? message.path("content").asText()
                     : message.path("content").toString();
-            if (text.contains("H4EB3_")) return text;
+            if (text.contains("H4EB3_")) {
+                return text;
+            }
         }
         return "";
     }
@@ -619,7 +640,9 @@ class HostedTeamMemberCommandMySqlIT {
         Set<String> names = new LinkedHashSet<>();
         Matcher matcher = TEAMMATE.matcher(text.replace("\\u003c", "<")
                 .replace("\\u003e", ">"));
-        while (matcher.find()) names.add(matcher.group(1));
+        while (matcher.find()) {
+            names.add(matcher.group(1));
+        }
         return names;
     }
 
@@ -637,8 +660,9 @@ class HostedTeamMemberCommandMySqlIT {
                 if (task != null && task.toString().contains("\"" + member
                         + "\"")) {
                     List<JsonNode> out = new ArrayList<>();
-                    for (Map<String, Object> row : commands)
+                    for (Map<String, Object> row : commands) {
                         out.add(body(row));
+                    }
                     return out;
                 }
             }
@@ -884,25 +908,27 @@ class HostedTeamMemberCommandMySqlIT {
                 .redirectErrorStream(true).redirectOutput(log.toFile());
         Map<String, String> environment = builder.environment();
         environment.clear();
-        if (System.getenv("PATH") != null)
+        if (System.getenv("PATH") != null) {
             environment.put("PATH", System.getenv("PATH"));
+        }
         environment.putAll(Map.of(
-                "HOME", home.toString(),
-                "USERPROFILE", home.toString(),
-                "QWEN_HOME", config.toString(),
-                "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(),
-                "OPENAI_API_KEY", "fake-local-key",
-                "OPENAI_BASE_URL", modelUrl,
-                "QWEN_SERVER_TOKEN", TOKEN,
-                "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+                    "HOME", home.toString(),
+                    "USERPROFILE", home.toString(),
+                    "QWEN_HOME", config.toString(),
+                    "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(),
+                    "OPENAI_API_KEY", "fake-local-key",
+                    "OPENAI_BASE_URL", modelUrl,
+                    "QWEN_SERVER_TOKEN", TOKEN,
+                    "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
         for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH",
                 "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                "QWEN_CODE_TRUSTED_FOLDERS_PATH"))
+                "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
             environment.put(name,
-                    temporary.resolve(name + ".json").toString());
+                        temporary.resolve(name + ".json").toString());
+        }
         harness = builder.start();
         waiting().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             if (!harness.isAlive()) {
@@ -940,7 +966,9 @@ class HostedTeamMemberCommandMySqlIT {
                         body == null ? HttpRequest.BodyPublishers.noBody()
                                 : HttpRequest.BodyPublishers.ofString(
                                         json.writeValueAsString(body)));
-        if (key != null) request.header("Idempotency-Key", key);
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
         HttpResponse<String> response = http.send(request.build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode())
