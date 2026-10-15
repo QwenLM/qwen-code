@@ -415,6 +415,64 @@ describe('Storage – getTodosDir', () => {
     );
   });
 
+  it('allows project subdirectories whose names start with two dots', () => {
+    expect(Storage.getTodosDir(projectRoot, './..todos')).toBe(
+      path.join(projectRoot, '..todos'),
+    );
+  });
+
+  it('expands tilde in configured todosDirectory values inside the project root', () => {
+    const projectInHome = underHome('workspace', 'project');
+    expect(
+      Storage.getTodosDir(projectInHome, '~/workspace/project/todos'),
+    ).toBe(path.join(projectInHome, 'todos'));
+  });
+
+  it('rejects a tilde todosDirectory that expands outside the project root', () => {
+    // `~/todos` expands to the home directory, not `<projectRoot>/~/todos`,
+    // so containment must reject it rather than create a literal `~` dir.
+    const projectInHome = underHome('workspace', 'project');
+    expect(() => Storage.getTodosDir(projectInHome, '~/todos')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('allows absolute todosDirectory values inside the project root', () => {
+    const todosDir = path.join(projectRoot, 'nested', 'todos');
+    expect(Storage.getTodosDir(projectRoot, todosDir)).toBe(todosDir);
+  });
+
+  it('rejects absolute todosDirectory values outside the project root', () => {
+    const outsideProject = path.join(path.dirname(projectRoot), 'todos');
+    expect(() => Storage.getTodosDir(projectRoot, outsideProject)).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('rejects Windows-style absolute path outside the project root', () => {
+    // Project root on the C: drive, todosDirectory on D:.
+    const projectOnC = path.resolve('C:', 'work', 'project');
+    const todosOnD = path.resolve('D:', 'todos');
+    expect(() => Storage.getTodosDir(projectOnC, todosOnD)).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('rejects path with mixed separators that escapes project root', () => {
+    // Windows-only: path.resolve treats backslashes as separators there,
+    // while on POSIX they are literal characters and cannot traverse.
+    if (process.platform !== 'win32') {
+      return;
+    }
+    expect(() => Storage.getTodosDir(projectRoot, '..\\..\\todos')).toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+  });
+
+  it('sanitizes session IDs used as todo file names', () => {
+    expect(Storage.sanitizeTodoSessionId('../../../escape')).toBe('escape');
+  });
+
   it('rejects symlink pointing outside the project root', () => {
     const project = path.resolve('tmp', 'project');
     const outside = path.resolve('tmp', 'outside');

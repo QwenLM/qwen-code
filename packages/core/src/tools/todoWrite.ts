@@ -99,10 +99,6 @@ function getTodoFilePath(todoDir: string, sessionId?: string): string {
   return path.join(todoDir, filename);
 }
 
-function isConfiguredTodoDir(todoDir: string): boolean {
-  return path.resolve(todoDir) !== path.resolve(Storage.getTodosDir());
-}
-
 function isConfig(value: unknown): value is Config {
   return (
     typeof value === 'object' &&
@@ -117,25 +113,10 @@ function getTodoDirectoryContext(source?: string | Config): {
   configured: boolean;
 } {
   if (isConfig(source)) {
-    const todoDir = source.getTodosDir();
-    const configured = (
-      source as Config & {
-        isTodosDirectoryConfigured?: () => boolean;
-      }
-    ).isTodosDirectoryConfigured;
-    const anchorTargetDir = (
-      source as Config & {
-        getTodosAnchorTargetDir?: () => string;
-      }
-    ).getTodosAnchorTargetDir;
     return {
-      todoDir,
-      projectRoot: anchorTargetDir
-        ? anchorTargetDir.call(source)
-        : source.getTargetDir?.(),
-      configured: configured
-        ? configured.call(source)
-        : isConfiguredTodoDir(todoDir),
+      todoDir: source.getTodosDir(),
+      projectRoot: source.getTodosAnchorTargetDir(),
+      configured: source.isTodosDirectoryConfigured(),
     };
   }
 

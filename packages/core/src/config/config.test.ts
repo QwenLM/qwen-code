@@ -11044,6 +11044,67 @@ describe('setApprovalMode with folder trust', () => {
       }
     });
 
+    it('should write todos from a derived agent config whose cwd differs from the project root', async () => {
+      const targetDir = await mkdtemp(path.join(os.tmpdir(), 'todos-derived-'));
+      const agentCwd = await mkdtemp(
+        path.join(os.tmpdir(), 'todos-derived-agent-'),
+      );
+      try {
+        const config = new Config({
+          ...baseParams,
+          targetDir,
+          todosDirectory: './project-todos',
+        });
+        // The agent's workspace is outside the base project root. Its todos
+        // still belong to the base's configured directory, so containment
+        // must anchor at the base Config (inherited through the prototype
+        // chain), not at the derived workspace.
+        const { config: agentConfig } = deriveAgentConfig(config, agentCwd);
+        expect(agentConfig.getTargetDir()).toBe(agentCwd);
+        expect(Object.hasOwn(agentConfig, 'todosAnchorTargetDir')).toBe(false);
+
+        const result = await new TodoWriteTool(agentConfig)
+          .build({
+            todos: [{ id: '1', content: 'Agent task', status: 'pending' }],
+          })
+          .execute(new AbortController().signal);
+
+        expect(result.returnDisplay).toEqual(
+          expect.objectContaining({
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Agent task', status: 'pending' }],
+          }),
+        );
+        expect(agentConfig.getTodosAnchorTargetDir()).toBe(targetDir);
+        const written = JSON.parse(
+          await readFile(
+            path.join(
+              targetDir,
+              'project-todos',
+              `${agentConfig.getSessionId()}.json`,
+            ),
+            'utf-8',
+          ),
+        ) as { todos: Array<{ id: string; content: string; status: string }> };
+        expect(written.todos).toEqual([
+          { id: '1', content: 'Agent task', status: 'pending' },
+        ]);
+        await expect(
+          readFile(
+            path.join(
+              agentCwd,
+              'project-todos',
+              `${agentConfig.getSessionId()}.json`,
+            ),
+            'utf-8',
+          ),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await rm(targetDir, { recursive: true, force: true });
+        await rm(agentCwd, { recursive: true, force: true });
+      }
+    });
+
     it('should reject configured todosDirectory symlink outside targetDir', () => {
       const targetDir = path.resolve(baseParams.targetDir);
       const todosDir = path.join(targetDir, 'project-todos');

@@ -9634,6 +9634,18 @@ export class Config {
     return this.todosDir;
   }
 
+  /**
+   * The project root a configured `todosDirectory` must stay inside: the
+   * canonical Config's `targetDir`, frozen at construction beside `todosDir`.
+   * It deliberately is not the live `getTargetDir()`, for two reasons:
+   * - `relocateWorkingDirectory()` (`/cd`, ACP `session/cd`) moves
+   *   `targetDir` but never recomputes `todosDir`, so a live anchor would
+   *   reject every later todo write.
+   * - Derived agent/worktree Configs (`Object.create(base)`) rebind
+   *   `getTargetDir()` to their own workspace but write to the base's todos
+   *   directory; they reach this field through the prototype chain and must
+   *   never own it.
+   */
   getTodosAnchorTargetDir(): string {
     return this.todosAnchorTargetDir;
   }

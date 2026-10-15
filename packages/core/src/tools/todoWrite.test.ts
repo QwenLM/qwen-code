@@ -147,6 +147,8 @@ describe('TodoWriteTool', () => {
     mockConfig = {
       getSessionId: () => 'test-session-123',
       getTodosDir: () => Storage.getTodosDir(),
+      getTodosAnchorTargetDir: () => path.resolve('workspace', 'project'),
+      isTodosDirectoryConfigured: () => false,
       ...methods,
     } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
@@ -1138,6 +1140,8 @@ describe('TodoWriteTool – runtime output directory', () => {
     mockConfig = {
       getSessionId: () => 'runtime-session',
       getTodosDir: () => Storage.getTodosDir(),
+      getTodosAnchorTargetDir: () => path.resolve('workspace', 'project'),
+      isTodosDirectoryConfigured: () => false,
       getHookSystem: () => undefined,
     } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
@@ -1184,6 +1188,8 @@ describe('TodoWriteTool – runtime output directory', () => {
       getSessionId: () => 'configured-session',
       getHookSystem: () => undefined,
       getTodosDir: () => configuredTodoDir,
+      getTodosAnchorTargetDir: () => path.dirname(configuredTodoDir),
+      isTodosDirectoryConfigured: () => true,
     } as Config;
     tool = new TodoWriteTool(mockConfig);
 
@@ -1266,6 +1272,8 @@ describe('TodoWriteTool – runtime output directory', () => {
     );
     mockConfig = {
       getTodosDir: () => configuredTodoDir,
+      getTodosAnchorTargetDir: () => path.dirname(configuredTodoDir),
+      isTodosDirectoryConfigured: () => true,
     } as Config;
 
     const result = await readTodosForSession(mockConfig, 'configured-session');
@@ -1282,7 +1290,7 @@ describe('TodoWriteTool – runtime output directory', () => {
     const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
     mockConfig = {
       getTodosDir: () => outsideTodoDir,
-      getTargetDir: () => projectRoot,
+      getTodosAnchorTargetDir: () => projectRoot,
       isTodosDirectoryConfigured: () => true,
     } as Config;
 
@@ -1307,7 +1315,7 @@ describe('TodoWriteTool – runtime output directory', () => {
     );
     mockConfig = {
       getTodosDir: () => todoDir,
-      getTargetDir: () => projectRoot,
+      getTodosAnchorTargetDir: () => projectRoot,
       isTodosDirectoryConfigured: () => true,
     } as Config;
 
@@ -1324,7 +1332,8 @@ describe('TodoWriteTool – runtime output directory', () => {
       getSessionId: () => 'configured-session',
       getHookSystem: () => undefined,
       getTodosDir: () => outsideTodoDir,
-      getTargetDir: () => projectRoot,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     const params: TodoWriteParams = {
@@ -1359,7 +1368,8 @@ describe('TodoWriteTool – runtime output directory', () => {
       getSessionId: () => 'configured-session',
       getHookSystem: () => undefined,
       getTodosDir: () => todoDir,
-      getTargetDir: () => projectRoot,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     const params: TodoWriteParams = {
@@ -1399,7 +1409,8 @@ describe('TodoWriteTool – runtime output directory', () => {
       getSessionId: () => 'configured-session',
       getHookSystem: () => undefined,
       getTodosDir: () => todoDir,
-      getTargetDir: () => projectRoot,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
     } as Config;
     tool = new TodoWriteTool(mockConfig);
     const params: TodoWriteParams = {
@@ -1486,11 +1497,42 @@ describe('TodoWriteTool – runtime output directory', () => {
     ] as never);
     mockConfig = {
       getTodosDir: () => configuredTodoDir,
+      getTodosAnchorTargetDir: () => path.dirname(configuredTodoDir),
+      isTodosDirectoryConfigured: () => true,
     } as Config;
 
     const sessions = await listTodoSessions(mockConfig);
 
     expect(mockFs.readdir).toHaveBeenCalledWith(configuredTodoDir);
     expect(sessions).toEqual(['configured', 'other']);
+  });
+
+  it('should reject listing a configured todosDirectory outside the project root', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    mockFs.readdir.mockResolvedValue(['leaked-session.json'] as never);
+    mockConfig = {
+      getTodosDir: () => path.resolve(projectRoot, '..', 'outside-todos'),
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(listTodoSessions(mockConfig)).rejects.toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockFs.readdir).not.toHaveBeenCalled();
+  });
+
+  it('should list a configured todosDirectory inside the project root that is not under .qwen', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, 'project-todos');
+    mockFs.readdir.mockResolvedValue(['in-root.json'] as never);
+    mockConfig = {
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(listTodoSessions(mockConfig)).resolves.toEqual(['in-root']);
+    expect(mockFs.readdir).toHaveBeenCalledWith(todoDir);
   });
 });
