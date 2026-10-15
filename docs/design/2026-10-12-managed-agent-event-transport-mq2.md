@@ -234,6 +234,24 @@ with only the Harness stood in for. The rows:
   local runs (macOS, 300 rounds each) the transport added 13–186 µs at p95
   and the journal hand-off measured 0.35–1.5 ms; CI writes its own figures
   to `target/event-transport-latency.json`.
+  Diagnostics run in a separate 300-round burst after the uninstrumented
+  latency gate, including when that gate fails. They retain the original
+  on-before-off order without per-round broker drains. The gate keeps its
+  existing 1 ms local / 20 ms CI allowance and original aggregate report.
+  `event-transport-latency-diagnostics.json` contains the instrumented
+  aggregate; `event-transport-latency-samples.json` retains publish, hub-read
+  and journal wall/CPU samples, including warm-up sequences 1–75.
+  `event-transport-latency-stages.json` contains hub and transport timings
+  inside the production publisher, correlated by session, sequence, thread
+  and transport count. `event-transport-latency.jfr` records those events,
+  execution samples, lock waits and GC pauses. Production events are disabled
+  by default. Instrumented figures describe a diagnostic run and are never
+  used for the latency assertions; subscriber delivery includes the whole
+  publish call and subsequent read, not the instant the hub became ready.
+  Separate percentiles must not be subtracted to attribute individual stages.
+  Evidence is saved even when assertions fail, and diagnostic errors do not
+  replace the original gate failure. The workflow runs daily or by manual
+  dispatch against the selected branch; opening a PR does not run this suite.
 - **Misconfiguration fails startup.** A NORMAL (not LITE) topic, which the
   subscription probe alone passes, is refused by a new send probe — one
   synchronous message to the probe's own lite topic — before any envelope

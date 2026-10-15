@@ -522,19 +522,25 @@ export class HostedChildAgentSession {
    * Every child Session run one owner scope launched, ended or not. The
    * quotas count child Sessions, so both child Session kinds count.
    */
-  launchedChildRunsOf(ownerScopeId: string): readonly ChildSessionRun[] {
-    return this.store.authority
-      .extensionRecordsInDomain('child_run')
-      .map((entry) => parseChildRun(entry.record))
-      .filter(
-        (record): record is ChildSessionRun =>
-          isChildSessionRun(record) && record.ownerScopeId === ownerScopeId,
-      );
+  launchedChildRunsOf(
+    ownerScopeId: string,
+    chains?: HostedChildChains,
+  ): readonly ChildSessionRun[] {
+    const runs =
+      chains?.runs() ??
+      this.store.authority
+        .extensionRecordsInDomain('child_run')
+        .map((entry) => parseChildRun(entry.record))
+        .filter(isChildSessionRun);
+    return runs.filter((record) => record.ownerScopeId === ownerScopeId);
   }
 
   /** The non-terminal child Session runs of one owner scope. */
-  activeChildRunsOf(ownerScopeId: string): readonly ChildSessionRun[] {
-    return this.launchedChildRunsOf(ownerScopeId).filter(
+  activeChildRunsOf(
+    ownerScopeId: string,
+    chains?: HostedChildChains,
+  ): readonly ChildSessionRun[] {
+    return this.launchedChildRunsOf(ownerScopeId, chains).filter(
       (record) => !isTerminalRunState(record.run.state),
     );
   }
@@ -545,11 +551,16 @@ export class HostedChildAgentSession {
   }
 
   /** The child agent run one task id names, of any chain generation. */
-  runForTask(taskId: string): ChildAgentRun | undefined {
-    for (const entry of this.store.authority.extensionRecordsInDomain(
-      'child_run',
-    )) {
-      const record = parseChildRun(entry.record);
+  runForTask(
+    taskId: string,
+    chains?: HostedChildChains,
+  ): ChildAgentRun | undefined {
+    const runs =
+      chains?.runs() ??
+      this.store.authority
+        .extensionRecordsInDomain('child_run')
+        .map((entry) => parseChildRun(entry.record));
+    for (const record of runs) {
       if (
         record.kind === 'child_agent' &&
         this.taskIdOf(record.childRunId) === taskId
@@ -688,7 +699,10 @@ export class HostedChildAgentSession {
           predecessorChildRunId: continued.predecessorChildRunId,
         });
       }
-      const run = this.runForTask(params.taskId);
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      const run = this.runForTask(params.taskId, chains);
       if (run === undefined) {
         // A workflow child's task id is a real task — the refusal says why
         // it takes no message instead of denying it exists.
@@ -711,9 +725,6 @@ export class HostedChildAgentSession {
       // predecessor untouched (H4d-a decision 9), so its task id routes
       // from that predecessor: an answer that named it must still reach
       // the chain, never read as an ended child.
-      const chains = new HostedChildChains(
-        this.store.authority.extensionRecordsInDomain('child_run'),
-      );
       let from = run;
       while (
         from.run.execution === 'not_started_proven' &&
@@ -910,6 +921,7 @@ export class HostedChildAgentSession {
         return this.routed(
           { kind: 'message', childRunId: head.childRunId },
           params.messageId,
+          chains,
         );
       }
       if (head.stopReason !== 'completed' || head.stopRequested) {
@@ -943,8 +955,9 @@ export class HostedChildAgentSession {
         childSnapshots: params.childSnapshots === true,
         sameDefinition: true,
         closing: params.closing,
-        activeInScope: this.activeChildRunsOf(head.ownerScopeId).length,
-        launchedInScope: this.launchedChildRunsOf(head.ownerScopeId).length,
+        activeInScope: this.activeChildRunsOf(head.ownerScopeId, chains).length,
+        launchedInScope: this.launchedChildRunsOf(head.ownerScopeId, chains)
+          .length,
         envelopeBytes: envelope.byteLength,
       });
       if (!admission.admitted) {
@@ -957,11 +970,15 @@ export class HostedChildAgentSession {
         };
       }
       if (params.preflight) {
-        return this.routed({
-          kind: 'continuation',
-          childRunId: head.childRunId,
-          predecessorChildRunId: head.childRunId,
-        });
+        return this.routed(
+          {
+            kind: 'continuation',
+            childRunId: head.childRunId,
+            predecessorChildRunId: head.childRunId,
+          },
+          undefined,
+          chains,
+        );
       }
       const inputRef = await this.store.resources.publish(
         'managed-input',
@@ -983,11 +1000,16 @@ export class HostedChildAgentSession {
         { domain: 'child_run', record: body },
         TRUSTED,
       );
-      return this.routed({
-        kind: 'continuation',
-        childRunId: params.continuationRunId,
-        predecessorChildRunId: head.childRunId,
-      });
+      chains.add(body);
+      return this.routed(
+        {
+          kind: 'continuation',
+          childRunId: params.continuationRunId,
+          predecessorChildRunId: head.childRunId,
+        },
+        undefined,
+        chains,
+      );
     });
   }
 
@@ -997,10 +1019,14 @@ export class HostedChildAgentSession {
       readonly kind: 'message' | 'continuation';
       readonly childRunId: string;
     },
-  >(route: Route, messageId?: string): Route & HostedRouteDetails {
+  >(
+    route: Route,
+    messageId?: string,
+    chains?: HostedChildChains,
+  ): Route & HostedRouteDetails {
     return {
       ...route,
-      ...hostedRouteDetails(this.store.authority, route, messageId),
+      ...hostedRouteDetails(this.store.authority, route, messageId, chains),
     };
   }
 

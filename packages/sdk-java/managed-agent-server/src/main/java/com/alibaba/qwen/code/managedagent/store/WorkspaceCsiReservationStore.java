@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceUtils;
@@ -364,8 +365,8 @@ public final class WorkspaceCsiReservationStore {
             byte[] identity = json.writeValueAsBytes(List.of("qwen-csi-retirement-lease/1",
                     lease.getRuntimeInstanceId(), lease.getEndpoint().toString(), lease.getToken(),
                     lease.getLeaseId(), Long.toString(lease.getEpoch())));
-            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(identity));
-        } catch (JsonProcessingException | java.security.NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex(identity);
+        } catch (JsonProcessingException | IllegalArgumentException error) {
             throw unavailable();
         }
     }
