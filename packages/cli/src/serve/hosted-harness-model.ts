@@ -16,6 +16,7 @@ import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { Content, Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
@@ -389,6 +390,7 @@ export async function runHostedHarnessTextTurn(input: {
     // the context slot instead of the Harness host's filesystem. The loop below
     // injects them before the first request too.
     let injectedContext: string | undefined;
+    let injectedTools: ReadonlySet<string> | undefined;
     const historyRecords = input.resumeFromToolResults
       ? input.history.slice(
           0,
@@ -453,32 +455,48 @@ export async function runHostedHarnessTextTurn(input: {
     ) {
       input.toolTurn?.setModelRound?.(round);
       input.signal.throwIfAborted();
-      const contextAvailable = input.workspaceContext?.read();
-      if (
-        !preparedRecovery &&
-        contextAvailable &&
-        contextAvailable !== injectedContext
-      ) {
-        // setUserMemory alone never reaches the wire: the system instruction
-        // was assembled during initialize() and is cached on the chat.
-        config.setUserMemory(contextWithInstructions(contextAvailable));
-        await client.refreshSystemInstruction();
-        injectedContext = contextAvailable;
-      }
       if (input.hooks?.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {
         const text = input.toolTurn.hookStopReason;
         return { text, parts: [{ text }], model: config.getModel() };
       }
-      if (input.toolTurn)
-        client.getChat().setTools([
-          {
-            functionDeclarations: await input.toolTurn.declarations(
-              input.signal,
-            ),
-          },
-        ]);
+      const declarations =
+        (await input.toolTurn?.declarations(input.signal)) ?? [];
+      client
+        .getChat()
+        .setTools(
+          declarations.length ? [{ functionDeclarations: declarations }] : [],
+        );
+      if (!preparedRecovery) {
+        const toolNames = new Set(
+          declarations
+            .map(({ name }) => name)
+            .filter((name): name is string => Boolean(name)),
+        );
+        const previousTools = injectedTools;
+        const toolsChanged =
+          !previousTools ||
+          toolNames.size !== previousTools.size ||
+          [...toolNames].some((name) => !previousTools.has(name));
+        const contextAvailable = input.workspaceContext?.read();
+        const contextChanged =
+          contextAvailable !== undefined &&
+          contextAvailable !== injectedContext;
+        if (toolsChanged) {
+          config.setPromptToolSnapshot(toolNames);
+          // Hosted does not expose the local deferred-tool bridge.
+          config.setPromptAgentReachable(toolNames.has(ToolNames.AGENT));
+          injectedTools = toolNames;
+        }
+        if (contextChanged) {
+          config.setUserMemory(contextWithInstructions(contextAvailable));
+          injectedContext = contextAvailable;
+        }
+        // Config changes alone do not update the chat's cached instruction.
+        if (toolsChanged || contextChanged)
+          await client.refreshSystemInstruction();
+      }
       let calls: ToolCallRequestInfo[] = [];
       let text = '';
       let finished = false;

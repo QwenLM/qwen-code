@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -57,16 +58,14 @@ class HostedWorkspaceStorageGuardMySqlIT {
             assertUnavailable(() -> guard.verify(binding));
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
-            var original = jdbc.queryForMap("SELECT * FROM ma_storage_owner"
-                    + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
+            var original = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
             guard.verify(binding);
             assertThat(original.get("mount_birth_time")).isEqualTo(Files.readAttributes(root,
                     java.nio.file.attribute.BasicFileAttributes.class).creationTime().toInstant().toString());
             assertThat(original.get("mount_host_id")).isNotEqualTo(Files.readString(Path.of("/etc/machine-id")).strip());
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner"
-                    + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage)).isEqualTo(original);
+            assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE tenant_id = ? AND storage_id = ?", tenant, storage)).isEqualTo(original);
             String operation = UUID.randomUUID().toString();
             try (var executor = Executors.newFixedThreadPool(2)) {
                 var first = executor.submit(() -> guard.fence(tenant, storage, 1, operation));

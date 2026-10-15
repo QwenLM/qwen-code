@@ -26,6 +26,7 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.lang3.StringUtils;
 
 import java.net.URI;
 import java.time.Duration;
@@ -132,14 +133,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (sessionStore.isEnabled()
                 && (sessionStore.getBaseUrl() == null
                         || sessionStore.getBaseUrl().isBlank()
-                        || workspaceId == null || workspaceId.isBlank())) {
+                        || StringUtils.isBlank(workspaceId))) {
             throw new IllegalStateException("Enabled Managed Session Store"
                     + " requires base URL and Runtime workspace ID");
         }
         String runtimeWorkspaceId = properties.getRuntimeBroker()
                 .getWorkspaceId();
-        if (sessionStore.isEnabled() && runtimeWorkspaceId != null
-                && !runtimeWorkspaceId.isBlank()
+        if (sessionStore.isEnabled() && StringUtils.isNotBlank(runtimeWorkspaceId)
                 && !workspaceId.equals(runtimeWorkspaceId)) {
             throw new IllegalStateException("Managed Session Store and"
                     + " Runtime Broker workspace IDs must match");
@@ -1301,7 +1301,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private static DaemonApprovalMode parseApprovalMode(String value) {
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             return DaemonApprovalMode.YOLO;
         }
         try {
