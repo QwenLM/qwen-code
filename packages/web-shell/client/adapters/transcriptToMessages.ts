@@ -440,10 +440,6 @@ type AssistantSystemNotice =
       source: 'background_notification';
       data: Record<string, unknown> | undefined;
     }
-  | {
-      source: 'teammate_activity';
-      data: Record<string, unknown> | undefined;
-    }
   | { source: 'vision_bridge_notice'; data: unknown }
   | {
       source: 'context_compression';
@@ -459,13 +455,6 @@ function classifyAssistantSystemNotice(
   if (isBackgroundNotificationBlock(block)) {
     return {
       source: 'background_notification',
-      data: getBackgroundNotificationData(block),
-    };
-  }
-  const activityMeta = getRecord(block.meta);
-  if (activityMeta?.['source'] === 'teammate_activity') {
-    return {
-      source: 'teammate_activity',
       data: getBackgroundNotificationData(block),
     };
   }
@@ -688,9 +677,6 @@ export function transcriptBlocksToDaemonMessages(
           loadedToolIds.has(getString(task, 'toolUseId') ?? ''))
       )
         continue;
-      const teammate = teammateOfAgent(
-        (block as DaemonTextTranscriptBlock).agent,
-      );
       messages.push({
         id: block.id,
         role: 'system',
@@ -701,7 +687,7 @@ export function transcriptBlocksToDaemonMessages(
           ...task,
           awaitingProcessing,
         },
-        ...(teammate ? { teammate } : {}),
+        ...(blockTeammate ? { teammate: blockTeammate } : {}),
         timestamp: blockTime,
         sourceBlockIds: [block.id],
       });
@@ -730,7 +716,6 @@ export function transcriptBlocksToDaemonMessages(
           currentAssistantIdx = null;
           currentThinkingIdx = null;
           needsNewContentMessage = true;
-          const teammate = teammateOfAgent(textBlock.agent);
           messages.push({
             id: block.id,
             role: 'system',
@@ -738,7 +723,7 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
-            ...(teammate ? { teammate } : {}),
+            ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
@@ -820,11 +805,7 @@ export function transcriptBlocksToDaemonMessages(
           currentThinkingIdx = null;
           needsNewContentMessage = true;
         }
-        if (
-          notice?.source === 'background_notification' ||
-          notice?.source === 'teammate_activity'
-        ) {
-          const teammate = teammateOfAgent(textBlock.agent);
+        if (notice?.source === 'background_notification') {
           messages.push({
             id: block.id,
             role: 'system',
@@ -832,7 +813,7 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: notice.source,
             data: notice.data,
-            ...(teammate ? { teammate } : {}),
+            ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
