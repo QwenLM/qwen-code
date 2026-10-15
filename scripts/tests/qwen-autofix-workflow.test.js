@@ -30,6 +30,7 @@ import {
   count as countTestSurface,
   measure as measureTestSurface,
 } from '../../.github/scripts/count-test-surface.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 // A hung-runner bound, not a performance budget, so it rides the suite's own
 // knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
@@ -25150,13 +25151,22 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Two siblings a main merge added went ungated and turned the revived
     // macOS lane red; the pin keeps a dropped gate from doing it again.
     const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
-    for (const title of [
-      'keeps the green path intact',
-      'rejects a conflict verdict whose round completed as fixed',
-      'locks the runner file-command backing files against env plants',
+    for (const [title, guard] of [
+      ['keeps the green path intact', '!hasBashMapfile'],
+      [
+        'rejects a conflict verdict whose round completed as fixed',
+        '!hasBashMapfile',
+      ],
+      [
+        'locks the runner file-command backing files against env plants',
+        // Its read-only lock also needs permission bits to bind.
+        '!hasBashMapfile || !arePermissionBitsEnforced()',
+      ],
     ]) {
+      const exact = guard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       expect(self).toMatch(
-        new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
+        // However Prettier wraps the guard.
+        new RegExp(`it\\.skipIf\\(\\s*${exact},?\\s*\\)\\(\\s*'${title}'`),
       );
     }
   });
@@ -25763,7 +25773,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('kiss_audit=true');
   });
 
-  it.skipIf(!hasBashMapfile)(
+  // The lock is a read-only mode, which only binds where permission bits do:
+  // root with its DAC capabilities appends to the backing file anyway.
+  it.skipIf(!hasBashMapfile || !arePermissionBitsEnforced())(
     'locks the runner file-command backing files against env plants',
     () => {
       // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
@@ -28303,8 +28315,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // measurement that quietly went UNAVAILABLE.
       [{ dropCounter: true }, 'removed after staging'],
       [{ dropParser: true }, 'removed after staging'],
-      // ...and so is one that can no longer be read.
-      [{ unreadableCounter: true }, 'made unreadable after staging'],
     ]) {
       const r = runGate({ weaken: 'assert', ...knob });
       expect(r.status).toBe(1);
@@ -28313,6 +28323,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(r.rejection).toContain(reason);
     }
   });
+
+  // An unreadable mode only binds where permission bits do: not for root
+  // with its DAC capabilities.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'refuses an instrument made unreadable after staging',
+    () => {
+      // One that can no longer be read is tampering too.
+      const r = runGate({ weaken: 'assert', unreadableCounter: true });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('retryable=true');
+      expect(r.rejection).toContain('made unreadable after staging');
+    },
+  );
 
   it.skipIf(!hasBashMapfile)(
     'does not charge non-test files or non-JS test edits',

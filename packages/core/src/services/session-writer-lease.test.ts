@@ -50,6 +50,7 @@ import type {
   SessionWriterLeaseTestCommandInput,
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
@@ -1320,17 +1321,22 @@ describe('SessionWriterLease', () => {
     await fs.unlink(targetPath);
   });
 
-  itPosix('classifies an unreadable owned lock as unavailable', async () => {
-    const { lease, lockPath } = await leaseFor();
-    await fs.chmod(lockPath, 0o000);
+  // Needs permission bits to bind: root with its DAC capabilities reads the
+  // mode-000 lock anyway, and Windows ignores the mode.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'classifies an unreadable owned lock as unavailable',
+    async () => {
+      const { lease, lockPath } = await leaseFor();
+      await fs.chmod(lockPath, 0o000);
 
-    try {
-      await expectUnavailable(lease.assertOwnedAndUnchanged());
-    } finally {
-      await fs.chmod(lockPath, 0o600);
-      await lease.release();
-    }
-  });
+      try {
+        await expectUnavailable(lease.assertOwnedAndUnchanged());
+      } finally {
+        await fs.chmod(lockPath, 0o600);
+        await lease.release();
+      }
+    },
+  );
 
   it('fails closed on a malformed lock', async () => {
     const fixture = await createFixture();
