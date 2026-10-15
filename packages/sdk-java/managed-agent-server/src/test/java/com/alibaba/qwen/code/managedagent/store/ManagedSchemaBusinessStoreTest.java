@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,12 +11,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import javax.sql.DataSource;
+
 import java.io.InputStream;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 
-import javax.sql.DataSource;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Business stores run directly against the canonical schema, with no old-table fixtures. */
 public class ManagedSchemaBusinessStoreTest {
@@ -249,7 +249,10 @@ public class ManagedSchemaBusinessStoreTest {
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
         var writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore unknown = new ToolPublicationObjectStore() {
-            @Override public void putIfAbsent(String object, byte[] bytes) { writes.incrementAndGet(); throw new IllegalStateException("connection lost"); }
+            @Override public void putIfAbsent(String object, byte[] bytes) {
+                writes.incrementAndGet();
+                throw new IllegalStateException("connection lost");
+            }
             @Override public InputStream open(String object) { throw new UnsupportedOperationException(); }
             @Override public void requireUnversioned() { }
         };
@@ -430,11 +433,14 @@ public class ManagedSchemaBusinessStoreTest {
         ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
             @Override public void putIfAbsent(String object, byte[] bytes) {
                 assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-                writes.incrementAndGet(); body.set(bytes.clone()); throw new IllegalStateException("reply lost");
+                writes.incrementAndGet();
+                body.set(bytes.clone());
+                throw new IllegalStateException("reply lost");
             }
             @Override public InputStream open(String object) {
                 assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-                assertThat(object).isEqualTo("original-key"); reads.incrementAndGet();
+                assertThat(object).isEqualTo("original-key");
+                reads.incrementAndGet();
                 if (staleProof.getAndSet(false)) {
                     jdbc.update(
                                     "UPDATE ma_operation SET claim_generation = claim_generation +"
@@ -448,7 +454,8 @@ public class ManagedSchemaBusinessStoreTest {
         assertThatThrownBy(() -> retention.put(key, scope, "capture", "original-key", expected, objects)).hasMessageContaining("reply lost");
         body.set(new byte[] {1});
         assertThatThrownBy(() -> retention.put(key, scope, "capture", "original-key", expected, objects)).hasMessageContaining("unresolved");
-        body.set(expected); staleProof.set(true);
+        body.set(expected);
+        staleProof.set(true);
         assertThatThrownBy(() -> retention.put(key, scope, "capture", "original-key", expected, objects)).hasMessageContaining("unresolved");
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_operation WHERE tenant_id = ? AND"
@@ -456,7 +463,8 @@ public class ManagedSchemaBusinessStoreTest {
                 String.class, tenant)).isEqualTo("UNKNOWN");
         retention.put(key, scope, "capture", "original-key", expected, objects);
         retention.put(key, scope, "capture", "original-key", expected, objects);
-        assertThat(writes).hasValue(1); assertThat(reads).hasValue(3);
+        assertThat(writes).hasValue(1);
+        assertThat(reads).hasValue(3);
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_operation WHERE tenant_id = ? AND"
                                         + " operation_kind = 'OBJECT_PUT'",
@@ -481,5 +489,4 @@ public class ManagedSchemaBusinessStoreTest {
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
         return key;
     }
-
 }
