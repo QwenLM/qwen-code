@@ -3373,6 +3373,87 @@ describe('HTTP Managed Session store', () => {
     ).rejects.toThrow(/OSS storage is not enabled/);
   });
 
+  it('commits and reuses every part of a private outcome manifest after reopen', async () => {
+    const server = new FakeManagedSessionStore();
+    const open = await createSessionOpener(server);
+    const first = await open('harness-a', TOKEN_A);
+    const parts = [
+      await first.resources.publish(
+        'managed-tool-outcome-part',
+        Buffer.alloc(60 * 1024, 0x61),
+      ),
+      await first.resources.publish(
+        'managed-tool-outcome-part',
+        Buffer.alloc(20 * 1024, 0x62),
+      ),
+    ];
+    const ref = await first.resources.publish(
+      'managed-tool-outcome-chunks',
+      Buffer.from(JSON.stringify({ parts })),
+    );
+    async function receipt(session: typeof first, call: string) {
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: call,
+          sessionKey: SESSION_KEY,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${call}`,
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: call,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+    }
+    try {
+      await receipt(first, 'first-call');
+      const uploaded = server.commits.at(-1)?.['resources'] as Array<
+        ManagedSessionDurableRef & { bytesBase64?: string }
+      >;
+      expect(uploaded.map((item) => item.resourceId).sort()).toEqual(
+        [ref, ...parts].map((item) => item.resourceId).sort(),
+      );
+      expect(
+        uploaded.every(
+          (item) =>
+            item.bytesBase64 !== undefined && item.byteLength <= 64 * 1024,
+        ),
+      ).toBe(true);
+    } finally {
+      await first.close();
+    }
+    const reopened = await open('harness-b', TOKEN_B);
+    try {
+      await receipt(reopened, 'second-call');
+      const reused = server.commits.at(-1)?.['resources'] as Array<
+        ManagedSessionDurableRef & { bytesBase64?: string }
+      >;
+      expect(reused.map((item) => item.resourceId).sort()).toEqual(
+        [ref, ...parts].map((item) => item.resourceId).sort(),
+      );
+      expect(reused.every((item) => item.bytesBase64 === undefined)).toBe(true);
+      for (const part of parts) {
+        expect((await reopened.resources.read(part)).byteLength).toBe(
+          part.byteLength,
+        );
+      }
+    } finally {
+      await reopened.close();
+    }
+  });
+
   it('commits an oversized message as chunks and projects it after a cold reopen', async () => {
     const server = new FakeManagedSessionStore();
     const open = await createSessionOpener(server);
@@ -3811,6 +3892,28 @@ describe('collectNestedResourceRefs', () => {
       digest: createHash('sha256').update(bytes).digest('hex'),
     };
   }
+
+  it('closes over every private outcome part and rejects malformed manifests', () => {
+    const ref = closureRef('managed-tool-outcome-chunks', 'manifest');
+    const parts = [
+      closureRef('managed-tool-outcome-part', 'first'),
+      closureRef('managed-tool-outcome-part', 'second'),
+    ];
+    expect(
+      collectNestedResourceRefs(ref, Buffer.from(JSON.stringify({ parts }))),
+    ).toEqual(parts);
+    for (const manifest of [
+      { parts: [] },
+      { parts: [parts[0]] },
+      { parts: Array(70).fill(parts[0]) },
+      { parts, foreign: true },
+      { parts: [parts[0], { ...parts[1], kind: 'managed-message-part' }] },
+    ]) {
+      expect(() =>
+        collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(manifest))),
+      ).toThrow();
+    }
+  });
 
   it('closes over attachment refs embedded in a managed-input envelope (R8 P1)', () => {
     // The leak: the commit uploaded the envelope but never the attachment
