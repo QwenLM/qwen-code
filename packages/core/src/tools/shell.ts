@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
@@ -62,6 +63,7 @@ import type {
   ShellOutputEvent,
   ShellPostPromoteHandlers,
   ShellPostPromoteSettleInfo,
+  ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
@@ -77,6 +79,7 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   detectSelfKillCommand,
   getCommandRoot,
@@ -2181,8 +2184,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return description;
   }
 
+  private isDirectoryOutsideWorkspace(): boolean {
+    return (
+      !!this.params.directory &&
+      !this.config
+        .getWorkspaceContext()
+        .isPathWithinWorkspace(this.params.directory)
+    );
+  }
+
   /**
    * AST-based permission check for the shell command.
+   * - An explicit `directory` outside the workspace → 'ask'
    * - Substitution-bearing commands (any form, including inside an
    *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
    * - Read-only commands (via AST analysis) → 'allow'
@@ -2190,6 +2203,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    // Like read_file outside the workspace: ask rather than reject at build
+    // time, so an approval (or YOLO) can let it run.
+    if (this.isDirectoryOutsideWorkspace()) return 'ask';
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for
@@ -2345,6 +2361,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const warnings = [
       ...(buildShellExecWarnings(command, this.params.command) ?? []),
       ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
+        : []),
     ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
@@ -2373,6 +2392,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     setPidCallback?: (pid: number) => void,
     setPromoteAbortControllerCallback?: (ac: AbortController) => void,
     canPromoteForegroundShell?: () => boolean,
+    rawCapture?: ShellRawCaptureSink,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -2776,9 +2796,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
         cwd,
         onShellOutputEvent,
         combinedSignal,
-        this.config.getShouldUseNodePtyShell(),
-        shellExecutionConfig ?? {},
-        { postPromote },
+        rawCapture ? false : this.config.getShouldUseNodePtyShell(),
+        {
+          ...shellExecutionConfig,
+          ...(rawCapture ? { maxBufferedOutputBytes: 64 * 1024 } : {}),
+        },
+        { postPromote, ...(rawCapture ? { rawCapture } : {}) },
       );
     } catch (err) {
       // ShellExecutionService.execute() can throw before resolving (e.g.
@@ -2792,6 +2815,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw err;
     }
     const { result: resultPromise, pid } = executionHandle;
+
+    if (pid) rawCapture?.setStarted(pid);
 
     if (pid && setPidCallback) {
       setPidCallback(pid);
@@ -2857,6 +2882,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let result;
     try {
       result = await resultPromise;
+      rawCapture?.setProcessResult(result);
     } finally {
       // Cancel any pending trailing flush — the command has settled (or
       // threw) and either the final ToolResult carries the complete output
@@ -3165,8 +3191,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       0,
     );
 
-    // Truncate large output and save full content to a temp file.
-    if (typeof llmContent === 'string') {
+    // Raw capture owns full output; result.output is only a bounded preview.
+    // Otherwise truncate large output and save full content to a temp file.
+    if (!rawCapture && typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
       const outputThreshold = getShellOutputThreshold(this.config);
       // Clamp at 1: truncateToolOutput returns the body untouched on
@@ -5599,13 +5626,13 @@ function getShellCommandSequencingGuidance({
   shell,
 }: ShellConfiguration): string {
   const independentGuidance =
-    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
+    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message.';
 
   switch (shell) {
     case 'bash':
       return `- When issuing multiple commands:
   ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
   - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
     case 'cmd':
@@ -5654,9 +5681,7 @@ function getShellToolDescription(
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
 **Usage notes**:
-- The command argument is required.
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
-- It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
 - Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
   - File search: Use ${ToolNames.GLOB} (NOT find or ls)
@@ -5684,12 +5709,7 @@ ${getShellCommandSequencingGuidance(shellConfiguration)}
   - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
   - Any command expected to run indefinitely until manually stopped
 ${processGroupNote}${processStopNote}
-- Use foreground execution (is_background: false) for:
-  - One-time commands: \`ls\`, \`cat\`, \`grep\`
-  - Build commands: \`npm run build\`, \`make\`
-  - Installation commands: \`npm install\`, \`pip install\`
-  - Git operations: \`git commit\`, \`git push\`
-  - Test runs: \`npm test\`, \`pytest\`
+- Use foreground execution (the default) for commands that finish on their own, such as builds, installs, git operations, and test runs.
 `;
 }
 
@@ -5755,7 +5775,7 @@ export class ShellTool extends BaseDeclarativeTool<
           directory: {
             type: 'string',
             description:
-              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
+              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must already exist. A directory outside the workspace requires approval.',
           },
         },
         required: ['command'],
@@ -5817,9 +5837,15 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
-      const workspaceContext = this.config.getWorkspaceContext();
-      if (!workspaceContext.isPathWithinWorkspace(params.directory)) {
-        return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      // The sandbox refuses any other cwd at run time, so reject now rather
+      // than ask for approval of a command that cannot start.
+      const sandbox = this.config.getShellExecutionSandbox?.();
+      if (sandbox) {
+        try {
+          assertShellSandboxCwd(sandbox, params.directory);
+        } catch {
+          return `Directory '${params.directory}' must be an existing directory inside the execution sandbox workspace.`;
+        }
       }
     }
     // Sleep interception: block sleep >= 2s in foreground, suggest Monitor.

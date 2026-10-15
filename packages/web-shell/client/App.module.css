@@ -75,6 +75,7 @@
 }
 
 .appShell {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -157,6 +158,10 @@
   width: var(--artifact-panel-dock-width);
   min-width: 0;
   display: flex;
+  /* The dock portals into a display:contents slot, so it is a direct
+     .appShell child, not a .contextShell descendant — apply the same macOS
+     overlay-titlebar inset here or the drag strip covers the panel toolbar. */
+  padding-top: var(--web-shell-desktop-titlebar-height, 0);
   animation: artifactPanelDockOpen 200ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
@@ -236,7 +241,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 20px;
+  min-height: 46px;
+  padding: 10px 20px;
   border-bottom: 1px solid var(--border);
 }
 /* Non-blocking banner shown at the top of the split when the outer (main)
@@ -273,8 +279,8 @@
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: 8px;
   display: inline-flex;
   align-items: center;
@@ -285,9 +291,16 @@
   color: var(--foreground);
 }
 .fullPageTitle {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 1.35;
   color: var(--foreground);
+}
+/* Portal target for the Live voice trigger when the sidebar's own slot is
+   hidden (collapsed rail, closed compact drawer): keeps call controls
+   reachable from the Live page header. */
+.liveVoicePageSlot {
+  margin-left: auto;
 }
 .fullPageBody {
   flex: 1 1 auto;
@@ -314,10 +327,6 @@
   z-index: 50;
   pointer-events: auto;
   visibility: visible;
-  padding-top: env(safe-area-inset-top);
-  padding-right: env(safe-area-inset-right);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: env(safe-area-inset-left);
 }
 
 .mobileDrawerForced .mobileBackdrop {
@@ -365,65 +374,54 @@
   }
 }
 
-@media (max-width: 760px) {
-  .mobileDrawer {
-    display: block;
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 50;
-    pointer-events: none;
-    visibility: hidden;
-    /* Keep the panel visible until the backdrop finishes fading out so they
+.app[data-compact-sidebar] .mobileDrawer {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  pointer-events: none;
+  visibility: hidden;
+  /* Keep the panel visible until the backdrop finishes fading out so they
        disappear together instead of the panel vanishing a frame early. */
-    transition: visibility 0s linear 200ms;
-  }
-
-  .mobileDrawerOpen {
-    visibility: visible;
-    pointer-events: auto;
-    /* Show immediately on open; only the close path needs the delay above. */
-    transition-delay: 0s;
-    /* With `viewport-fit=cover`, the fixed drawer extends behind the status
-       bar, home indicator, and landscape notch. Push the sidebar content
-       into the safe area while keeping the backdrop full-screen (it is a
-       sibling, not a child). */
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
-  }
-
-  .mobileBackdrop {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 49;
-    background: rgba(0, 0, 0, 0.5);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 200ms ease;
-  }
-
-  .mobileDrawerOpen .mobileBackdrop {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .hamburgerButton {
-    display: flex;
-  }
-
-  .hamburgerButtonFloating {
-    position: fixed;
-    top: calc(env(safe-area-inset-top) + 12px);
-    left: calc(env(safe-area-inset-left) + 12px);
-    z-index: 10;
-  }
+  transition: visibility 0s linear 200ms;
 }
 
+.app[data-compact-sidebar] .mobileDrawerOpen {
+  visibility: visible;
+  pointer-events: auto;
+  /* Show immediately on open; only the close path needs the delay above. */
+  transition-delay: 0s;
+}
+
+.app[data-compact-sidebar] .mobileBackdrop {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 49;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+
+.app[data-compact-sidebar] .mobileDrawerOpen .mobileBackdrop {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app[data-compact-sidebar] .hamburgerButton {
+  display: flex;
+}
+
+.app[data-compact-sidebar] .hamburgerButtonFloating {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+}
 .appChatEmpty.appWithSidebar {
   justify-content: flex-start;
   overflow: hidden;
@@ -716,6 +714,10 @@
   padding: 16px 20px;
 }
 
+.managedPanelBody {
+  overflow: hidden;
+}
+
 /* The chat view (message list + composer) stays mounted while a panel is shown,
    just hidden — so the composer keeps its unsent draft and attachments instead
    of losing them on unmount. */
@@ -954,74 +956,83 @@
   display: contents;
 }
 
-@media (max-width: 760px) {
-  .appChatEmpty .chatPaneWithMobileComposerBottom {
-    position: relative;
-    overflow: hidden;
-  }
+/* The empty-chat welcome chrome follows the shell container (the same
+   data-compact-sidebar signal as the drawer chrome), not the viewport, so an
+   embedded host narrower than its window cannot mix desktop welcome layout
+   with the compact drawer. */
+.appChatEmpty[data-compact-sidebar] .chatPaneWithMobileComposerBottom {
+  position: relative;
+  overflow: hidden;
+}
 
-  /* The custom-footer variant renders the composer footer `display: contents`,
-     so this wrap stays the containing block for the absolutely-positioned
-     bottom panels (status panel) anchored above it. */
-  .appChatEmpty
-    .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
-    position: relative;
-  }
+/* The custom-footer variant renders the composer footer `display: contents`,
+   so this wrap stays the containing block for the absolutely-positioned
+   bottom panels (status panel) anchored above it. */
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
+  position: relative;
+}
 
-  .appChatEmpty .chatViewWithMobileComposerBottom .footer {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    margin-top: 0;
-  }
+.appChatEmpty[data-compact-sidebar] .chatViewWithMobileComposerBottom .footer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  margin-top: 0;
+}
 
-  .appChatEmpty .mobileWelcomeGroup {
-    display: flex;
-    flex-direction: column;
-  }
+.appChatEmpty[data-compact-sidebar] .mobileWelcomeGroup {
+  display: flex;
+  flex-direction: column;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
-    display: contents;
-  }
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithWelcomeMiddle
+  .footerWithCustomFooter {
+  display: contents;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter .composer {
-    order: 2;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
-  }
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithWelcomeMiddle
+  .footerWithCustomFooter
+  .composer {
+  order: 2;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .mobileWelcomeFooterMiddle {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: flex-start;
-    justify-content: center;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
-  }
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithWelcomeMiddle
+  .mobileWelcomeFooterMiddle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: center;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .customFooter {
-    order: 1;
-    display: flex;
-    flex: 0 0 auto;
-    align-items: flex-start;
-    justify-content: center;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
-  }
-  .desktopWelcomeFooter {
-    display: none;
-  }
+.appChatEmpty[data-compact-sidebar] .chatViewWithWelcomeMiddle .customFooter {
+  order: 1;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: center;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+}
+.appChatEmpty[data-compact-sidebar] .desktopWelcomeFooter {
+  display: none;
+}
 
-  .emptyWelcomeFooter {
-    text-align: center;
-  }
+.appChatEmpty[data-compact-sidebar] .emptyWelcomeFooter {
+  text-align: center;
 }
 
 .queuedPrompts {

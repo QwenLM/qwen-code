@@ -169,26 +169,41 @@ describe('POST /session/:id/load prompt terminals', () => {
     archiveMocks.assertSessionLoadable.mockResolvedValue('active');
   });
 
-  it.each(['load', 'resume'] as const)(
-    'validates summary modes on %s before restore',
-    async (action) => {
-      const fixture = makeFixture();
-      const app = makeApp(fixture);
-      for (const field of ['compactedReplayMode', 'liveReplayMode'] as const) {
-        const response = await request(app)
-          .post(`/session/${fixture.sessionId}/${action}`)
-          .send({ [field]: 'invalid' });
-        expect(response.status).toBe(400);
-        expect(response.body.code).toBe(
-          field === 'compactedReplayMode'
-            ? 'invalid_compacted_replay_mode'
-            : 'invalid_live_replay_mode',
-        );
-      }
-      expect(fixture.runtime.bridge.loadSession).not.toHaveBeenCalled();
-      expect(fixture.runtime.bridge.resumeSession).not.toHaveBeenCalled();
-    },
-  );
+  it('validates summary modes on load before restore', async () => {
+    const fixture = makeFixture();
+    const app = makeApp(fixture);
+    for (const field of ['compactedReplayMode', 'liveReplayMode'] as const) {
+      const response = await request(app)
+        .post(`/session/${fixture.sessionId}/load`)
+        .send({ [field]: 'invalid' });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe(
+        field === 'compactedReplayMode'
+          ? 'invalid_compacted_replay_mode'
+          : 'invalid_live_replay_mode',
+      );
+    }
+    expect(fixture.runtime.bridge.loadSession).not.toHaveBeenCalled();
+    expect(fixture.runtime.bridge.resumeSession).not.toHaveBeenCalled();
+  });
+
+  it('ignores load-only replay fields on resume, even invalid ones', async () => {
+    const fixture = makeFixture();
+    writeTranscript(fixture, [chatRecord(fixture, 'u1', null, 'question')]);
+    const response = await request(makeApp(fixture))
+      .post(`/session/${fixture.sessionId}/resume`)
+      .send({
+        historyPageSize: -5,
+        liveReplayMode: 'invalid',
+        compactedReplayMode: 'invalid',
+      });
+    expect(response.status).toBe(200);
+    const params = vi.mocked(fixture.runtime.bridge.resumeSession).mock
+      .calls[0]?.[0];
+    expect(params).not.toHaveProperty('historyPageSize');
+    expect(params).not.toHaveProperty('liveReplayMode');
+    expect(params).not.toHaveProperty('compactedReplayMode');
+  });
 
   it.each(['load', 'resume'] as const)(
     'forwards load-only summary fields only on load: %s',

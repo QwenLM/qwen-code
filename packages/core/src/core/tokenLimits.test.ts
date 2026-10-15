@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   normalize,
   tokenLimit,
   knownTokenLimit,
+  hasExplicitOutputLimit,
   clampOutputTokensToWindow,
   outputClampMargin,
   defaultOutputCeiling,
@@ -13,6 +14,26 @@ import {
   MIN_CLAMPED_OUTPUT_TOKENS,
   OUTPUT_TOKEN_CEILING,
 } from './tokenLimits.js';
+
+vi.mock('../models/model-catalog.js', async (importOriginal) => {
+  const entries: Record<string, { context?: number; output?: number }> = {
+    'catalog-model': { context: 123_456, output: 7_890 },
+    'qwen-catalog-context-only': { context: 50_000 },
+    'qwen-catalog-tiny': { context: 5 },
+    // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
+    // other spelling only when this one matched no row.
+    'glm-4-7': { context: 200_000, output: 131_072 },
+    'qwen3-8-max': { context: 262_144, output: 131_072 },
+  };
+  // Only the catalog read is stubbed; versionSpellingAlias is a pure string
+  // rewrite, so the twin fallback sees the real rule.
+  const { versionSpellingAlias } =
+    await importOriginal<typeof import('../models/model-catalog.js')>();
+  return {
+    lookupModelCatalog: (model: string) => entries[model],
+    versionSpellingAlias,
+  };
+});
 
 describe('normalize', () => {
   it('keeps unrecognized batch routing tags out of token lookup', () => {
@@ -555,15 +576,65 @@ describe('clampOutputTokensToWindow', () => {
     expect(clamped).toBe(window - prompt - outputClampMargin(window));
   });
 
-  it('floors at MIN_CLAMPED_OUTPUT_TOKENS when no room is left', () => {
-    // Prompt at/above the window: never send max_tokens ≤ 0; compaction /
-    // hard-rescue owns this regime.
-    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(
+  it('floors at MIN_CLAMPED_OUTPUT_TOKENS when the window can hold it', () => {
+    // 40K window, 30K prompt: room = 40K − 30K − 10K = 0, so the floor binds —
+    // and 30K + 4K still fits, which is the only case where it may.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 30_000)).toBe(
       MIN_CLAMPED_OUTPUT_TOKENS,
     );
-    expect(clampOutputTokensToWindow(32_000, 40_000, 60_000)).toBe(
-      MIN_CLAMPED_OUTPUT_TOKENS,
-    );
+  });
+
+  it('caps the floor by the room the window has left (issue #13252)', () => {
+    // 8192 window, 5000 prompt: the 10K margin floor pushes room to −6808, so
+    // an uncapped 4K floor returned 4000 and 5000 + 4000 = 9000 > 8192 — the
+    // exact invariant this function promises. Capping the floor by
+    // `window − prompt` keeps the request inside the window. 3192 is also what
+    // the side-query path already asserts for this same input (#13244, 'keeps
+    // prompt + max_tokens inside a window smaller than the output floor').
+    expect(clampOutputTokensToWindow(32_000, 8_192, 5_000)).toBe(3_192);
+    expect(
+      5_000 + clampOutputTokensToWindow(32_000, 8_192, 5_000),
+    ).toBeLessThanOrEqual(8_192);
+  });
+
+  it('keeps prompt + max_tokens within the window across small windows', () => {
+    // Below ≈26.7K the 10K margin floor plus the 4K output floor exceed the
+    // window, so this is the whole reachable region — including the un-gated
+    // (4192, 6963] band on an 8192 window that #13252 reports.
+    for (const window of [8_192, 16_384, 26_000, 32_768]) {
+      for (let prompt = 1; prompt < window; prompt += 997) {
+        const maxTokens = clampOutputTokensToWindow(64_000, window, prompt);
+        expect(prompt + maxTokens).toBeLessThanOrEqual(window);
+        expect(maxTokens).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
+
+  it('is unchanged wherever room already reaches the floor', () => {
+    // Regression guard: capping the floor must not move a single window that
+    // had room for it. Each expectation is the pre-cap formula.
+    const cases: Array<[ceiling: number, window: number, prompt: number]> = [
+      [32_000, 200_000, 50_000],
+      [32_000, 200_000, 170_000],
+      [64_000, 131_072, 71_349],
+      [64_000, 1_000_000, 500_000],
+      [8_000, 40_000, 10_000],
+    ];
+    for (const [ceiling, window, prompt] of cases) {
+      const room = window - prompt - outputClampMargin(window);
+      expect(room).toBeGreaterThanOrEqual(MIN_CLAMPED_OUTPUT_TOKENS);
+      expect(clampOutputTokensToWindow(ceiling, window, prompt)).toBe(
+        Math.min(ceiling, room),
+      );
+    }
+  });
+
+  it('never sends max_tokens below 1 when the prompt fills the window', () => {
+    // Prompt at/above the window: no valid max_tokens exists, so return the
+    // smallest provider-valid value instead of ≤ 0 — compaction / hard-rescue
+    // owns this regime. Same shape as computeCompactionOutputBudget.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(1_000);
+    expect(clampOutputTokensToWindow(32_000, 40_000, 60_000)).toBe(1);
   });
 
   it('scales the margin at 5% for huge windows', () => {
@@ -583,8 +654,12 @@ describe('clampOutputTokensToWindow', () => {
     // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend:
     // the floor applies to the ROOM, not to the user's explicit ceiling.
     expect(clampOutputTokensToWindow(2_000, 200_000, 50_000)).toBe(2_000);
-    // Even with no room left, a tiny explicit ceiling is preserved.
-    expect(clampOutputTokensToWindow(2_000, 40_000, 39_000)).toBe(2_000);
+    // Even with no room left, a ceiling below the (capped) floor is preserved:
+    // 40_000 − 39_000 leaves 1_000, and 500 < 1_000 still wins.
+    expect(clampOutputTokensToWindow(500, 40_000, 39_000)).toBe(500);
+    // The ceiling remains an upper bound on a tight window, and a larger one
+    // does not lift the result past the capped floor.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(1_000);
   });
 
   it('keeps OUTPUT_TOKEN_CEILING aligned with the escalation target', () => {
@@ -647,5 +722,51 @@ describe('reconcileMaxTokens', () => {
     expect(reconcileMaxTokens(8_000, undefined)).toBeUndefined();
     expect(reconcileMaxTokens(undefined, 8_000)).toBeUndefined();
     expect(reconcileMaxTokens(null, null)).toBeUndefined();
+  });
+});
+
+describe('models.dev catalog', () => {
+  it('takes limits from the catalog before the regex tables', () => {
+    expect(tokenLimit('catalog-model', 'input')).toBe(123_456);
+    expect(tokenLimit('catalog-model', 'output')).toBe(7_890);
+    expect(knownTokenLimit('catalog-model', 'output')).toBe(7_890);
+    expect(hasExplicitOutputLimit('catalog-model')).toBe(false);
+  });
+
+  it('falls back per field when the catalog entry is partial', () => {
+    expect(tokenLimit('qwen-catalog-context-only', 'input')).toBe(50_000);
+    expect(tokenLimit('qwen-catalog-context-only', 'output')).toBe(32_768);
+    expect(hasExplicitOutputLimit('qwen-catalog-context-only')).toBe(true);
+  });
+
+  it('lets a curated row on the other spelling outrank the catalog output', () => {
+    // OUTPUT_PATTERNS is written against one spelling of a version while the
+    // catalog commits both, so the spelling no row names fell through to
+    // models.dev's unadjusted `output` (131,072) and outranked the 16,384
+    // `/^glm-4\.7/` pins its twin to. `hasExplicitOutputLimit` reads the same
+    // rule, or a limit this curated would not clamp an explicit max_tokens.
+    expect(tokenLimit('glm-4-7', 'output')).toBe(16_384);
+    expect(defaultOutputCeiling('glm-4-7')).toBe(16_384);
+    expect(hasExplicitOutputLimit('glm-4-7')).toBe(true);
+    // The twin is a fallback, not an override: `qwen3-8-max` keeps the 32,768
+    // `/^qwen/` family row even though `qwen3.8-max` matches the more specific
+    // `/^qwen3\.\d/` row at 65,536. That two-spelling gap predates the alias
+    // pass (`/^qwen3\.\d/` has always been written dot-only) and closing it is
+    // a curated-row decision, not something the fallback should settle.
+    expect(tokenLimit('qwen3-8-max', 'output')).toBe(32_768);
+  });
+
+  it('ignores catalog windows too small for the agent loop', () => {
+    expect(tokenLimit('qwen-catalog-tiny', 'input')).toBe(262_144);
+  });
+
+  it('looks the catalog up by normalized id', () => {
+    expect(tokenLimit('provider/Catalog-Model:free', 'input')).toBe(123_456);
+  });
+
+  it('keeps the regex tables and defaults for models the catalog lacks', () => {
+    expect(tokenLimit('gpt-5', 'input')).toBe(272_000);
+    expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT);
+    expect(hasExplicitOutputLimit('unknown-model')).toBe(false);
   });
 });

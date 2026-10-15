@@ -32,6 +32,7 @@ import {
   ApprovalMode,
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
+  computeInitialTurnFromHistory,
   CoreToolScheduler,
   didWriteProjectContextFile,
   formatFullTurnVisionNotice,
@@ -194,7 +195,16 @@ export function resetPromptCountForTesting(): void {
  * file checkpoints are recorded under.
  */
 export function nextLivePromptId(config: Config): string {
-  const id = `${config.getSessionId()}########${promptCount}`;
+  const sessionId = config.getSessionId();
+  const resumedRecords =
+    config.getResumedSessionData?.()?.conversation.messages;
+  if (resumedRecords?.length) {
+    promptCount = Math.max(
+      promptCount,
+      computeInitialTurnFromHistory(resumedRecords, sessionId) + 1,
+    );
+  }
+  const id = `${sessionId}########${promptCount}`;
   promptCount += 1;
   return id;
 }
@@ -868,6 +878,19 @@ export async function* livePromptEvents(
           const invocation = 'invocation' in c ? c.invocation : undefined;
           if (!invocation) continue;
           descriptionSeen.add(callId);
+          if (
+            'modelFacingName' in c.request &&
+            c.request.modelFacingName === ToolNames.TOOL_CALL &&
+            'tool' in c &&
+            c.tool
+          ) {
+            live.push({
+              type: 'tool-start',
+              id: callId,
+              tool: c.tool.name,
+              title: c.tool.displayName,
+            });
+          }
           live.push({
             type: 'tool-description',
             id: callId,

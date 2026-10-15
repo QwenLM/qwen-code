@@ -7,14 +7,14 @@ point.
 
 ## Enabling the sidebar
 
-The sidebar is **disabled by default**. Pass the `sidebar` prop to enable:
+The sidebar defaults to **Home only**: a 300px session column with a bottom collapse control. Omitting `sidebar`, passing `true`, or passing `{}` uses this default. Pass `sidebar={false}` or `{ enabled: false }` to hide it.
 
 ```tsx
 import { WebShellWithProviders } from '@qwen-code/web-shell';
 
 <WebShellWithProviders
   baseUrl="http://localhost:4170"
-  sidebar={true} // simple enable
+  sidebar={true} // Home-only default
   // or with fine-grained options:
   // sidebar={{ enabled: true, defaultCollapsed: false, ... }}
 />;
@@ -22,26 +22,9 @@ import { WebShellWithProviders } from '@qwen-code/web-shell';
 
 ## Layout overview
 
-```
-┌─────────────────────────────────────┐
-│ ① Branding (topRow)                 │  ✅ customizable
-├─────────────────────────────────────┤
-│ ② Primary navigation                │  ✅ customizable
-│    [＋ New task]  [🧩 Plugins]      │
-│    [📅 Scheduled] [🎯 Goals]        │
-│    [custom render...]               │
-├─────────────────────────────────────┤
-│ ③ Project header                    │  ✅ show/hide
-│    📁 Projects ▼ [🔍] [＋]          │
-│    Session list entries...          │
-│    📦 Archived sessions             │
-├─────────────────────────────────────┤
-│ ④ Footer action bar                 │  ✅ customizable
-│    [⚙ Settings] v0.19 [☀] [▦] [◧] │
-├─────────────────────────────────────┤
-│ ⑤ Resize handle                     │  ❌ not customizable
-└─────────────────────────────────────┘
-```
+Home-only hosts show branding, New task, projects, archived sessions and the collapse control in one column. Configuring another available primary entry or footer action adds a 56px icon rail beside the default 300px secondary column. Primary entries live in the rail; footer actions and version live in More. Custom renderers remain in the wide Home column. There is no public layout option.
+
+**Breaking change:** previously an omitted `sidebar` hid the sidebar, and omitted navigation/footer item lists exposed all built-ins when the sidebar was enabled. Hosts must now pass `sidebar={false}` to retain the former hidden default, or explicitly list the entries they need. Standalone Web Shell explicitly configures its full menu. `branding.hideWhenCompact` now defaults to `false`; set it to `true` to preserve a hidden brand in the compact drawer.
 
 ## Customizable areas
 
@@ -50,7 +33,7 @@ import { WebShellWithProviders } from '@qwen-code/web-shell';
 ```ts
 interface WebShellSidebarBranding {
   render?: () => ReactNode; // replace the entire branding row
-  hideWhenCompact?: boolean; // hide when sidebar is collapsed (default: true)
+  hideWhenCompact?: boolean; // hide branding in the compact drawer (default: false)
 }
 ```
 
@@ -59,7 +42,7 @@ interface WebShellSidebarBranding {
 | `undefined` (default)            | Resolved brand: `brand` prop → daemon `GET /brand` → built-in Qwen logo + "Qwen Code" text |
 | `false`                          | Branding row hidden entirely                                                               |
 | `{ render: () => <MyHeader /> }` | Full replacement with custom content                                                       |
-| `{ hideWhenCompact: false }`     | Keep branding visible in collapsed icon-rail mode                                          |
+| `{ hideWhenCompact: false }`     | Keep branding visible in the compact drawer (the default)                                  |
 
 The default row is data-driven, not fixed: a daemon that serves a `ui.brand`
 configuration renames the text and swaps the mark, and an embedding host can
@@ -87,27 +70,31 @@ sidebar={{
 type WebShellSidebarPrimaryNavItem =
   | 'newTask' // ✏️ New Task button
   | 'plugins' // 🧩 Plugins button
+  | 'channels' // Channel sessions and settings
+  | 'live' // Live sessions and settings; requires showLive
+  | 'workflows' // Requires workflow support
+  | 'managed' // Requires a managed-agent provider
   | 'scheduledTasks' // 📅 Scheduled Tasks button
   | 'goals'; // 🎯 Goals button
 
 interface WebShellSidebarPrimaryNavOptions {
-  items?: readonly WebShellSidebarPrimaryNavItem[]; // which built-in buttons to show (default: all)
+  items?: readonly WebShellSidebarPrimaryNavItem[]; // which built-in buttons to show (default: ['newTask'])
   render?: () => ReactNode; // additional custom content after built-in buttons
 }
 ```
 
 The primary navigation area contains built-in buttons controlled by `items`:
 
-- All buttons are shown by default when `items` is not specified
+- Only New task is shown when `items` is not specified; Home always exists
 - Only the listed buttons are shown when `items` is provided
 - Custom content can be added via `render()` after the built-in buttons
 
-| Value                                      | Effect                                 |
-| ------------------------------------------ | -------------------------------------- |
-| `undefined` (default)                      | All built-in buttons shown             |
-| `{ items: ['plugins'] }`                   | Only Plugins button                    |
-| `{ items: ['plugins', 'scheduledTasks'] }` | Plugins + Scheduled Tasks              |
-| `{ items: [], render: () => ... }`         | Hide all built-in, only custom content |
+| Value                                      | Effect                                                |
+| ------------------------------------------ | ----------------------------------------------------- |
+| `undefined` (default)                      | Home with New task                                    |
+| `{ items: ['plugins'] }`                   | Home and Plugins; no New task button                  |
+| `{ items: ['plugins', 'scheduledTasks'] }` | Home + Plugins + Scheduled Tasks                      |
+| `{ items: [], render: () => ... }`         | Home with custom content; no built-in primary buttons |
 
 ```tsx
 sidebar={{
@@ -127,27 +114,30 @@ sidebar={{
 ```ts
 type WebShellSidebarFooterItem =
   | 'settings' // ⚙ Settings panel
+  | 'update' // Update action when supported
+  | 'localFiles' // Local-files bridge when available
+  | 'desktopRelay' // Use this computer through the existing desktop relay
+  | 'workspacesOverview' // Workspace management when unlocked
   | 'version' // version label (e.g. "v0.19.10")
   | 'theme' // ☀/🌙 light/dark toggle
   | 'sessionsOverview' // ▦ session overview panel
-  | 'splitView' // ◧ split view (large screens only)
+  | 'splitView' // ◧ split view (shell containers at least 1024px wide)
   | 'daemonStatus' // 📊 daemon status panel
   | 'collapse'; // ◁/▷ collapse/expand toggle
 
 interface WebShellSidebarFooterOptions {
-  items?: readonly WebShellSidebarFooterItem[]; // which built-in items to show (default: all)
-  render?: () => ReactNode; // custom content rendered on the left side, before built-in items
+  items?: readonly WebShellSidebarFooterItem[]; // which built-in items to show (default: ['collapse'])
+  render?: () => ReactNode; // custom content in the Home footer
 }
 ```
 
 | Value                                          | Effect                                                                    |
 | ---------------------------------------------- | ------------------------------------------------------------------------- |
-| `undefined` (default)                          | All items shown                                                           |
+| `undefined` (default)                          | Only collapse/expand                                                      |
 | `false`                                        | Footer hidden; the mobile drawer keeps only its close control             |
 | `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown; the mobile drawer always keeps its close control |
 
-The footer auto-adapts to narrow widths: labels are hidden and version is
-dropped below certain thresholds.
+In rail layout, footer actions and version appear in More; only the collapse/expand control stays at the rail bottom. Home-only mode retains the existing compact footer behavior.
 
 ```tsx
 sidebar={{
@@ -155,8 +145,7 @@ sidebar={{
 }}
 ```
 
-Custom content via `render()` appears on the left side of the footer, before
-the built-in items:
+Custom content via `render()` appears in the wide Home footer:
 
 ```tsx
 sidebar={{
@@ -172,14 +161,14 @@ sidebar={{
 ```
 
 **Note:** `'scheduledTasks'` and `'goals'` have been moved to the primary
-navigation area (②) and are shown by default. They are controlled by `primaryNav.items` instead of
+navigation area (②) and require explicit configuration in embedded hosts. They are controlled by `primaryNav.items` instead of
 `footer.items`.
 
 ### Other top-level options
 
 ```ts
 interface WebShellSidebarOptions {
-  enabled?: boolean; // show/hide sidebar (default: true when passed)
+  enabled?: boolean; // show/hide sidebar (default: true, including when sidebar is omitted)
   defaultCollapsed?: boolean; // initial collapsed state (persisted in localStorage)
   showCompactToggle?: boolean; // show the collapse button in the chat area (default: true)
   showSessionSourceSwitch?: boolean; // show the Tasks/Channels switch (default: true)
@@ -205,12 +194,12 @@ sidebar={{
 
 This removes the Tasks/Channels switch and fixes every active, archived, primary,
 and secondary session query to `sourceType: "default"`. Omitting the option keeps
-the current switch and channel-session access unchanged.
+channel-session access. When a dedicated Channels rail entry is available, it replaces the source tabs; otherwise the tabs remain.
 
 ### Live conversations — `showLive`
 
 Live conversations are hidden from embedded hosts by default. Opt in when the
-host should expose the daemon-owned Live group:
+host should expose daemon-owned Live conversations:
 
 Previous releases displayed this group without an explicit option, so hosts
 that rely on it must set `showLive: true` when upgrading.
@@ -218,8 +207,11 @@ that rely on it must set `showLive: true` when upgrading.
 ```tsx
 sidebar={{
   showLive: true,
+  primaryNav: { items: ['newTask', 'live'] },
 }}
 ```
+
+Without the `live` primary entry, `showLive: true` retains the existing Live group in Home and settings under Experimental. With the entry, Live opens its own session column and settings page.
 
 ### ③ Project Header — `hideProjectHeader`
 
@@ -309,7 +301,8 @@ When the session list is visible, the following sub-areas are rendered but
 ### ⑤ Resize handle
 
 - Drag handle on the right edge for resizing sidebar width
-- Width is persisted in localStorage
+- Width is persisted in localStorage as the total sidebar width. Defaults are 300px Home-only and 356px with the rail. Restored widths are clamped to at least 220px Home-only or 276px with the rail; old values are not blindly increased by 56px. Dragging below the collapse threshold still folds the sidebar.
+- The environment panel's dock breakpoint ignores the rail's 56px (the message area yields them), so the panel keeps docking at the same window widths as a Home-only sidebar — e.g. a 1440px window.
 - Not configurable
 
 ## Runtime behavior props
@@ -327,14 +320,16 @@ These `WebShellProps` affect sidebar behavior indirectly:
 
 ## Collapsed and mobile states
 
-| State     | Behavior                                                                                       |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| Expanded  | Full sidebar with text labels                                                                  |
-| Collapsed | Icon-rail mode (logo, pen icon, action icons only)                                             |
-| Mobile    | Drawer uses 70% of its container, within width limits, with backdrop and footer close controls |
+| State     | Behavior                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------- |
+| Expanded  | Full sidebar with text labels                                                                                        |
+| Collapsed | Home-only: existing 56px strip and hover sessions; with rail: only the 56px primary rail                             |
+| Mobile    | Drawer uses 70% of its container, within width limits, with backdrop and a close control at the owning column bottom |
 
 Collapse state is persisted in `localStorage` under the key
 `qwen-code-web-shell-sidebar-collapsed`.
+
+The sidebar, its compact drawer, and the empty-chat welcome chrome follow the shell container width (compact at 760px); chat message content keeps viewport-based breakpoints. Split availability uses 1024px and split-sidebar room uses 1200px. Keyboard collapse moves focus out of the hidden secondary column to the rail control.
 
 The resized desktop width is restored only in expanded layouts. Opening or
 closing the mobile drawer does not overwrite that width or the persisted
@@ -342,11 +337,11 @@ desktop collapse preference.
 
 ## Source locations
 
-| Component           | File                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------- |
-| WebShellSidebar     | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                  |
-| SessionGroupSection | `packages/web-shell/client/components/sidebar/SessionGroupSection.tsx`              |
-| WorkspaceSection    | `packages/web-shell/client/components/sidebar/WorkspaceSection.tsx`                 |
-| Sidebar styles      | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`           |
-| App integration     | `packages/web-shell/client/App.tsx` (search `WebShellSidebar`)                      |
-| Entry point (dev)   | `packages/web-shell/client/main.tsx` (`sidebar: { enabled: true, showLive: true }`) |
+| Component           | File                                                                          |
+| ------------------- | ----------------------------------------------------------------------------- |
+| WebShellSidebar     | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`            |
+| SessionGroupSection | `packages/web-shell/client/components/sidebar/SessionGroupSection.tsx`        |
+| WorkspaceSection    | `packages/web-shell/client/components/sidebar/WorkspaceSection.tsx`           |
+| Sidebar styles      | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`     |
+| App integration     | `packages/web-shell/client/App.tsx` (search `WebShellSidebar`)                |
+| Entry point (dev)   | `packages/web-shell/client/main.tsx` (explicit primary and footer item lists) |

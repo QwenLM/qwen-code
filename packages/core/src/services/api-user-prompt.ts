@@ -8,8 +8,53 @@ import type { Content } from '@google/genai';
 import {
   getStartupContextLength,
   isSystemReminderContent,
+  SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
 } from '../core/environmentContext.js';
 import { isClearedMediaPlaceholder } from './microcompaction/microcompact.js';
+
+// Envelope the background registries wrap a notification's `modelText` in
+// (agents, monitors, shells, workflows, the dropped-notification tally).
+// Same shape `turn-interruption.ts` keys on; see that file for the envelope's
+// trust model (role-gated, emitter escaping not uniform).
+const TASK_NOTIFICATION_OPEN = '<task-notification>';
+const TASK_NOTIFICATION_CLOSE = '</task-notification>';
+
+function isWrappedText(text: string, open: string, close: string): boolean {
+  return text.startsWith(open) && text.trimEnd().endsWith(close);
+}
+
+/**
+ * Whether `content` is a delivered automatic notification turn: every text
+ * part is a per-turn `<system-reminder>` or a `<task-notification>` envelope,
+ * and at least one part is an envelope.
+ *
+ * The reminder allowance is what separates this from the cold-projection trim
+ * in `turn-interruption.ts`: a DELIVERED ACP notification turn lands in
+ * history as one entry (`[...systemReminders, ...notificationParts]`), so
+ * requiring bare envelopes only would miss every notification delivered while
+ * plan mode / an output style / an active todo chain had a reminder attached.
+ *
+ * `excludeTextPart`'s any-part semantics cannot substitute here: a mid-turn
+ * notification drain merges envelope parts into a GENUINE user message, and
+ * that mixed entry must keep its rewind ordinal.
+ */
+function isDeliveredNotificationTurn(content: Content): boolean {
+  let sawEnvelope = false;
+  for (const part of content.parts ?? []) {
+    if (!('text' in part) || typeof part.text !== 'string') return false;
+    if (
+      isWrappedText(part.text, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE)
+    ) {
+      sawEnvelope = true;
+    } else if (
+      !isWrappedText(part.text, SYSTEM_REMINDER_OPEN, SYSTEM_REMINDER_CLOSE)
+    ) {
+      return false;
+    }
+  }
+  return sawEnvelope;
+}
 
 /**
  * Options for {@link isApiUserPrompt}.
@@ -58,6 +103,35 @@ export interface ApiUserPromptOptions {
    * client can rewind to, so counting them would shift every ordinal.
    */
   excludeTextPart?: (text: string) => boolean;
+
+  /**
+   * Exclude delivered background-notification turns: user entries whose text
+   * parts are all per-turn `<system-reminder>`s or `<task-notification>`
+   * envelopes, with at least one envelope (#9608).
+   *
+   * ACP rewind sets this: the daemon's notification drain sends
+   * `[...systemReminders, ...notificationParts]` as one user entry that never
+   * produced a client-visible turn or a per-prompt file-history snapshot, so
+   * counting it inflates the rewindable count and shifts every cut point
+   * after it.
+   *
+   * The TUI must NOT set it: there, queued notifications ride into history
+   * inside the next genuine user message's parts, and such a mixed entry
+   * fails the every-part predicate and stays counted — matching the visible
+   * UI turn count.
+   *
+   * Residual, shape-only: a genuine prompt whose entire text IS a bare
+   * envelope (the user pasted one) is indistinguishable once serialized and
+   * gets dropped — the same accepted limitation `turn-interruption.ts`
+   * documents for its shape-based fallback. Dropping fails closed only at the
+   * tail, where `findApiRewindCutPoint` walks off the end and rewind refuses
+   * to resolve the turn; mid-history every later ordinal shifts down one, so
+   * turn N resolves to turn N+1's entry — a silently late boundary that
+   * leaves the targeted turn in place. Cron/loop turns carry user-authored
+   * prompt text with no envelope, so shape cannot separate them from real
+   * prompts; they keep counting pending #9608's marking design call.
+   */
+  excludeTaskNotifications?: boolean;
 }
 
 /**
@@ -82,6 +156,13 @@ export function isApiUserPrompt(
   // mid-history MCP added-tool reminders. Counting them would shift the
   // truncation index and silently drop a real turn's context.
   if (isSystemReminderContent(content)) return false;
+
+  if (
+    options?.excludeTaskNotifications &&
+    isDeliveredNotificationTurn(content)
+  ) {
+    return false;
+  }
 
   const excludeTextPart = options?.excludeTextPart;
   if (

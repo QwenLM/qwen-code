@@ -28,6 +28,7 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
+import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -205,8 +206,8 @@ export interface ConvertLlmRequestToAnthropicOptions {
   useGlobalCacheScope?: boolean;
   /**
    * The cross-session-stable prefix of the system prompt (everything the
-   * client assembles before appending volatile tails like git status or
-   * session-start context). When it exactly matches the beginning of the
+   * client assembles before appending the managed auto-memory section).
+   * When it exactly matches the beginning of the
    * request's system text and a suffix follows, the system prompt is split
    * into two text blocks with one cache breakpoint each, making the stable
    * prefix independently cacheable. No match (subagent prompts, stale
@@ -379,6 +380,7 @@ export class AnthropicContentConverter {
           cacheRetention,
           cacheRetentionByBlock,
         ),
+        trailingReattachPartCount(request.contents),
       );
     }
 
@@ -1056,18 +1058,18 @@ export class AnthropicContentConverter {
    * extension they may not recognize.
    *
    * When `staticSystemPrefix` matches the beginning of the system text and
-   * a suffix follows (git status, session-start context — the volatile
-   * tails the client appends after the stable prompt), the text is split
-   * into two blocks carrying one breakpoint each:
+   * a suffix follows (the managed auto-memory section the client appends
+   * after the stable prompt), the text is split into two blocks carrying
+   * one breakpoint each:
    *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
    *      sessions reuse it even though their suffix differs;
    *   2. the end of the full system prompt — always the per-session
-   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      `{ type: 'ephemeral' }` shape. The suffix can vary across sessions,
    *      so a global-scope entry here would churn cache for zero hits
    *      (same reasoning as `addCacheControlToMessages`). Within a session
    *      it still caches the suffix, and when the suffix changes mid-session
-   *      (/cd refreshes git status, session-start context lands) the prefix
-   *      breakpoint keeps the big block from re-billing.
+   *      (a memory recall mode switch) the prefix breakpoint keeps the big
+   *      block from re-billing.
    * The split only shapes the outgoing request; stored history and
    * non-Anthropic transports keep seeing a single system string.
    */
@@ -1385,6 +1387,7 @@ export class AnthropicContentConverter {
   private addCacheControlToMessages(
     messages: Anthropic.MessageParam[],
     cacheRetention: CacheRetention = 'ephemeral',
+    volatileTailBlockCount = 0,
   ): void {
     // Find the last user message to add cache_control. The Anthropic docs
     // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
@@ -1402,7 +1405,17 @@ export class AnthropicContentConverter {
           : [{ type: 'text' as const, text: msg.content }];
 
         if (content.length > 0) {
-          const lastContent = content[content.length - 1];
+          // Skip the trailing volatile blocks (reattached images, the
+          // request-only auto-memory catalog): stored history never reproduces
+          // them, so a breakpoint there writes an entry no later request can
+          // read back (issue #11627). If the whole message is volatile, use
+          // an earlier user message; without one, omit the message breakpoint.
+          const anchorIndex = content.length - 1 - volatileTailBlockCount;
+          if (anchorIndex < 0) {
+            volatileTailBlockCount = 0;
+            continue;
+          }
+          const lastContent = content[anchorIndex];
           if (typeof lastContent === 'object' && 'type' in lastContent) {
             const type = lastContent.type;
             // Empty text blocks cannot be cached (per Anthropic docs).

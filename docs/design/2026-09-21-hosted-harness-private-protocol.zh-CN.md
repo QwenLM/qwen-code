@@ -4,7 +4,7 @@
 
 ## 状态
 
-本文定义已经实现的协议基础。在 `qwen serve` 部署中启用它、通过 `/capabilities` 发布它，以及连接 Java Runtime Broker，仍属于后续工作。
+本文定义已经实现的协议基础及其 Java 客户端（`qwen` Java SDK 中的 `HostedHarnessClient`）。在 `qwen serve` 部署中启用该协议、通过 `/capabilities` 发布它，以及连接 Java Runtime Broker，仍属于后续工作。
 
 ## 问题
 
@@ -60,6 +60,10 @@ Boot ID 是进程代际 fence，不是认证 secret 或公共标识。后续 Hos
 ## 集成边界
 
 本基础层导出协议创建、digest 校验和 Express request handler。本次变更刻意不增加 production caller。下一条 Hosted Harness profile 变更必须在 listener 接受流量前只创建一次协议对象，在 bootstrap 与 steady-state capabilities 中复用同一对象，并且只在 bearer authentication 之后为私有 Session 路由挂载 handler。普通 `qwen serve` 部署必须保持不变。
+
+## Java 客户端
+
+`qwen` Java SDK 为本协议提供 `HostedHarnessClient`。构造时完成 capability 协商，把对端发布的 capability digest 与配置的部署 digest 校验，并固定进程 boot ID；之后的每个请求自动携带协议与 boot ID fence，`hosted_harness_generation_mismatch` 以不可重试冲突而非可重试错误呈现。Session 的创建、加载、心跳、提交、事件流与取消都通过类型化请求对象进行，提交轮次携带预先计算的 payload digest，事件流复用 daemon SSE 读取器并支持续传游标。`HostedHarnessClientTest` 在 stub HTTP 服务器上验证协商、fence、流式与错误映射；`ManagedHostedRuntimeE2ETest` 以 `QWEN_MANAGED_HOSTED_E2E_BASE_URL` 为开关，验证真实 hosted profile。
 
 ## 验证
 

@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,11 +17,16 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import * as fs from 'node:fs';
+import * as runnerPaths from './landlock-runner-path.js';
 import os from 'node:os';
 import path from 'node:path';
-import type { ProcessLaunch } from '../services/shellExecutionService.js';
+import type {
+  ProcessLaunch,
+  ShellPostPromoteSettleInfo,
+} from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
-import { executeBwrap } from './bwrap-execution.js';
+import { executeBwrap, type BwrapPolicy } from './bwrap-execution.js';
 
 const mockDebugWarn = vi.hoisted(() => vi.fn());
 
@@ -104,6 +110,22 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     },
   });
 
+  /** The relay's launch handle, settled with `exitCode`. */
+  const launchHandle = (exitCode: number | null, promoted?: true) => ({
+    pid: 123,
+    result: Promise.resolve({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      exitCode,
+      signal: null,
+      error: null,
+      aborted: false,
+      ...(promoted ? { promoted } : {}),
+      pid: 123,
+      executionMethod: 'child_process' as const,
+    }),
+  });
+
   const mockLaunch = (receipt: Record<string, unknown> | null) =>
     vi
       .spyOn(ShellExecutionService, 'executeLaunch')
@@ -115,30 +137,23 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
         ) as Record<string, string>;
         capturedPayloadEnvMode = statSync(payloadEnvPath).mode & 0o777;
         if (receipt) writeFileSync(statusPath, JSON.stringify(receipt));
-        return {
-          pid: 123,
-          result: Promise.resolve({
-            rawOutput: Buffer.alloc(0),
-            output: '',
-            exitCode: receipt?.['exitCode'] === 0 ? 0 : 1,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 123,
-            executionMethod: 'child_process' as const,
-          }),
-        };
+        return launchHandle(receipt?.['exitCode'] === 0 ? 0 : 1);
       });
+
+  /** Runs the adapter with a no-op output sink and a fresh abort signal. */
+  const run = (bwrapPolicy: BwrapPolicy = policy(), launch = payload()) =>
+    executeBwrap(bwrapPolicy, launch, () => {}, new AbortController().signal);
+
+  /** Runs the adapter and waits for its result. */
+  const runToResult = async (
+    bwrapPolicy: BwrapPolicy = policy(),
+    launch = payload(),
+  ) => (await run(bwrapPolicy, launch)).result;
 
   it('builds a literal launch, transports the payload env privately, and prepares writable masks', async () => {
     const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
-    const handle = await executeBwrap(
-      { ...policy(), maskedPaths: [maskedPath] },
-      payload(),
-      () => {},
-      new AbortController().signal,
-    );
+    const handle = await run({ ...policy(), maskedPaths: [maskedPath] });
     await expect(handle.result).resolves.toMatchObject({
       sandboxStatus: { state: 'confirmed', exitCode: 0 },
     });
@@ -183,25 +198,83 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
 
   it('inherits redirected stdin through the relay launch', async () => {
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
-    const handle = await executeBwrap(
-      policy(),
-      { ...payload(), inheritStdin: true },
-      () => {},
-      new AbortController().signal,
-    );
-    await handle.result;
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
     expect(launch.mock.calls[0][0].inheritStdin).toBe(true);
+  });
+
+  it('retains bwrap admission on architectures without a bundled input helper', async () => {
+    vi.spyOn(process, 'arch', 'get').mockReturnValue('arm');
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await expect(
+      runToResult(policy(), { ...payload(), inheritStdin: true }),
+    ).resolves.toMatchObject({
+      sandboxStatus: { state: 'confirmed', exitCode: 0 },
+    });
+    expect(launch.mock.calls[0][0].args.slice(4, 6)).toEqual([
+      '',
+      realpathSync(bwrap),
+    ]);
+  });
+
+  it('avoids input-helper resolution for launches without inherited stdin', async () => {
+    const bridge = vi
+      .spyOn(runnerPaths, 'resolveStdinBridge')
+      .mockImplementation(() => {
+        throw new Error('must not resolve');
+      });
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult();
+    expect(bridge).not.toHaveBeenCalled();
+    expect(launch.mock.calls[0][0].args[4]).toBe('');
+  });
+
+  it('passes the resolved input helper for inherited stdin', async () => {
+    const helper = path.join(installation, 'input-helper');
+    writeFileSync(helper, 'fixture');
+    vi.spyOn(runnerPaths, 'resolveStdinBridge').mockReturnValue(helper);
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
+    expect(launch.mock.calls[0][0].args.slice(4, 6)).toEqual([
+      helper,
+      realpathSync(bwrap),
+    ]);
+  });
+
+  it('keeps bwrap available when the optional input helper is missing', async () => {
+    const originalExists = fs.existsSync;
+    vi.spyOn(fs, 'existsSync').mockImplementation((value) =>
+      String(value).includes('vendor/landlock-run/')
+        ? false
+        : originalExists(value),
+    );
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
+    expect(launch.mock.calls[0][0].args[4]).toBe('');
+  });
+
+  it('keeps bwrap available when the optional helper cannot be chmodded', async () => {
+    const helper = path.join(installation, 'input-helper');
+    writeFileSync(helper, 'fixture');
+    chmodSync(helper, 0o644);
+    const originalRealpath = fs.realpathSync;
+    vi.spyOn(fs, 'realpathSync').mockImplementation((value) =>
+      String(value).includes('vendor/landlock-run/')
+        ? helper
+        : originalRealpath(value),
+    );
+    vi.spyOn(fs, 'chmodSync').mockImplementation(() => {
+      throw new Error('EROFS');
+    });
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
+    expect(launch.mock.calls[0][0].args[4]).toBe('');
+    expect(statSync(helper).mode & 0o777).toBe(0o644);
   });
 
   it('rejects conflicting stdin modes before creating control state', async () => {
     const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
     await expect(
-      executeBwrap(
-        policy(),
-        { ...payload(), stdin: 'input', inheritStdin: true },
-        () => {},
-        new AbortController().signal,
-      ),
+      run(policy(), { ...payload(), stdin: 'input', inheritStdin: true }),
     ).rejects.toThrow('both piped and inherited');
     expect(launch).not.toHaveBeenCalled();
     expect(readdirSync(state)).toEqual([]);
@@ -210,54 +283,62 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   it('skips absent masks without mutating a read-only workspace', async () => {
     const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
-    const handle = await executeBwrap(
-      {
-        ...policy(),
-        filesystem: 'read-only',
-        maskedPaths: [maskedPath],
-      },
-      payload(),
-      () => {},
-      new AbortController().signal,
-    );
-    await handle.result;
+    await runToResult({
+      ...policy(),
+      filesystem: 'read-only',
+      maskedPaths: [maskedPath],
+    });
     expect(launch.mock.calls[0][0].args).not.toContain('--tmpfs');
     expect(existsSync(maskedPath)).toBe(false);
   });
 
   it('rejects mask paths outside the workspace', async () => {
-    await expect(
-      executeBwrap(
-        { ...policy(), maskedPaths: [state] },
-        payload(),
-        () => {},
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow('inside the workspace');
+    await expect(run({ ...policy(), maskedPaths: [state] })).rejects.toThrow(
+      'inside the workspace',
+    );
   });
 
   it('uses an absolute scratch root for a relative TMPDIR without leaking it', async () => {
     process.env['TMPDIR'] = 'relative-tmp';
     mockLaunch({ state: 'confirmed', exitCode: 0 });
-    const handle = await executeBwrap(
-      policy(),
-      payload(),
-      () => {},
-      new AbortController().signal,
-    );
-    await handle.result;
+    await runToResult();
     const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.dirname(scratch)).toBe(realpathSync('/tmp'));
     expect(existsSync(scratch)).toBe(false);
     expect(existsSync(path.join(process.cwd(), 'relative-tmp'))).toBe(false);
   });
 
+  it('snapshots the admitted policy and payload before asynchronous setup', async () => {
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    const admitted = policy();
+    const command = payload();
+    const pending = executeBwrap(
+      admitted,
+      command,
+      () => {},
+      new AbortController().signal,
+    );
+    Object.assign(admitted, { filesystem: 'read-only', network: 'open' });
+    command.executable = '/bin/false';
+    Object.assign(command, { args: ['--mutated'] });
+
+    const handle = await pending;
+    await handle.result;
+    const argv = launch.mock.calls[0][0].args;
+    expect(argv).toContain('--unshare-net');
+    expect(argv).toContain(realpathSync(workspace));
+    expect(argv).toContain(process.execPath);
+    expect(argv).toContain('--version');
+    expect(argv).not.toContain('/bin/false');
+    expect(argv).not.toContain('--mutated');
+  });
+
   it('rejects an overlapping temporary root before launching or leaking control state', async () => {
     process.env['TMPDIR'] = state;
     const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
-    await expect(
-      executeBwrap(policy(), payload(), () => {}, new AbortController().signal),
-    ).rejects.toThrow(`Temporary root ${realpathSync(state)} overlaps`);
+    await expect(run()).rejects.toThrow(
+      `Temporary root ${realpathSync(state)} overlaps`,
+    );
     expect(launch).not.toHaveBeenCalled();
     expect(readdirSync(state)).toEqual([]);
   });
@@ -265,13 +346,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   it('allows a temporary root that contains disjoint sandbox roots', async () => {
     process.env['TMPDIR'] = root;
     mockLaunch({ state: 'confirmed', exitCode: 0 });
-    const handle = await executeBwrap(
-      policy(),
-      payload(),
-      () => {},
-      new AbortController().signal,
-    );
-    await handle.result;
+    await runToResult();
     const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.dirname(scratch)).toBe(realpathSync(root));
     expect(existsSync(scratch)).toBe(false);
@@ -279,12 +354,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
 
   it('retains evidence only when an existing receipt leaves execution uncertain', async () => {
     const launch = mockLaunch({ state: 'unconfirmed' });
-    const handle = await executeBwrap(
-      policy(),
-      payload(),
-      () => {},
-      new AbortController().signal,
-    );
+    const handle = await run();
     await expect(handle.result).resolves.toMatchObject({
       sandboxStatus: { state: 'unconfirmed' },
     });
@@ -298,14 +368,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   });
 
   it('reports a throwing post-promote settle callback', async () => {
-    let settle:
-      | ((info: {
-          exitCode: number | null;
-          signal: number | NodeJS.Signals | null;
-          error?: Error;
-          endTime: number;
-        }) => void)
-      | undefined;
+    let settle: ((info: ShellPostPromoteSettleInfo) => void) | undefined;
     vi.spyOn(ShellExecutionService, 'executeLaunch').mockImplementation(
       async (launch, _onOutput, _signal, _usePty, _config, options) => {
         writeFileSync(
@@ -313,20 +376,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
           JSON.stringify({ state: 'confirmed', exitCode: 0 }),
         );
         settle = options?.postPromote?.onSettle;
-        return {
-          pid: 123,
-          result: Promise.resolve({
-            rawOutput: Buffer.alloc(0),
-            output: '',
-            exitCode: null,
-            signal: null,
-            error: null,
-            aborted: false,
-            promoted: true,
-            pid: 123,
-            executionMethod: 'child_process' as const,
-          }),
-        };
+        return launchHandle(null, true);
       },
     );
     const handle = await executeBwrap(

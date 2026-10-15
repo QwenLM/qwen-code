@@ -220,7 +220,7 @@ export class SubagentValidator {
 
     if (tools.length === 0) {
       warnings.push(
-        'Empty tools array - subagent will inherit all available tools',
+        'Empty tools array - subagent will inherit all available tools (any disallowedTools still apply)',
       );
       return { isValid: true, errors, warnings };
     }

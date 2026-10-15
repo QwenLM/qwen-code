@@ -29,7 +29,7 @@ CLI 会在父进程下重新启动自身，以应用 Node 内存参数。shell �
 
 对于 ACP、stream-json 输入、prompt-interactive、文件输入和文件描述符输出模式之外的明确 prompt，内存参数 relaunch 会在可用时调用 `process.execve`。它会保留相同的可执行文件、Node 参数、脚本参数、环境来源和 `QWEN_CODE_NO_RELAUNCH` 防重入标记，同时不再保留已加载的父进程。文件描述符输出会保留监督进程，因为进程替换会关闭标准输入、输出和错误之外的描述符。不支持 `process.execve` 的运行时继续使用现有的受监督 spawn 路径，`process.execve` 调用抛异常的运行时同样如此。
 
-如果这次 relaunch 既不会追加 Node 参数也不会追加脚本参数（默认如此，因为 `advanced.autoConfigureMemory` 默认关闭），并且启动后 `.env` 文件和 `settings.env` 都没有注入任何值（更早加载的模块，以及读取 `NODE_EXTRA_CA_CERTS` 等变量的 Node 本身，只有在新镜像里才能看到这些值），那么替换后的镜像只是把同一个进程再启动一遍。此时 CLI 设置 `QWEN_CODE_NO_RELAUNCH` 并原地继续，不再调用 `execve`，每次单次运行因此省掉一整轮模块加载和 settings 处理。
+如果这次 relaunch 既不会追加 Node 参数也不会追加脚本参数（默认如此，因为 `advanced.autoConfigureMemory` 默认关闭），并且 `.env` 文件和 `settings.env` 都没有注入任何会在这些文件加载之前被读取的值（更早加载的模块，以及读取 `NODE_EXTRA_CA_CERTS` 等变量的 Node 本身，只有在新镜像里才能看到这些值），那么替换后的镜像只是把同一个进程再启动一遍。模型凭据与端点不算在内：文档中各认证类型对应的变量，以及每个已配置模型 provider 的 `envKey`（即 `/auth` 写入的内容），都是在发请求时才读取，继续运行的进程同样能看到。此时 CLI 设置 `QWEN_CODE_NO_RELAUNCH` 并原地继续，不再调用 `execve`，每次单次运行因此省掉一整轮模块加载和 settings 处理。
 
 去掉监督进程也意味着去掉它的 update-relaunch 处理逻辑：`onUpdateRelaunch` 不会触发，也没有父进程能根据退出码重新启动。这是有意为之。会请求 relaunch 的退出码来自交互式信任对话框（`RELAUNCH_EXIT_CODE`）和 `/update` 命令（`UPDATE_RELAUNCH_EXIT_CODE`），单次 prompt 到不了这些路径；而在没有 IPC 通道可发送请求时，`requestUpdateOnExit()` 本身就返回 `false`。
 

@@ -1,6 +1,6 @@
 ---
 name: batch
-description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern.
+description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern. For many independent single-turn transforms (translate/rewrite/extract each file into a new file) that can wait minutes to hours, you may suggest the user type `/batch-api` themselves for the half-price asynchronous Batch API — you cannot invoke it, and it is not suited to in-place edits or tasks needing tool feedback.
 argument-hint: '<operation> <file-pattern>'
 allowedTools:
   - task

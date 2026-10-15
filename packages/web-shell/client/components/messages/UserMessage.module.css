@@ -52,6 +52,26 @@
   align-items: flex-end;
 }
 
+/* An agent's post in the session: named like an agent reply, but kept on the
+   message's own side. */
+.author {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 4px;
+}
+
+.authorName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chatBubble {
   display: inline-block;
   max-width: 100%;

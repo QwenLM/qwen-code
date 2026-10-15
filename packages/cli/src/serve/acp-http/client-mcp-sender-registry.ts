@@ -90,6 +90,7 @@ export class ClientMcpSenderRegistry {
         sender: (payload: unknown) => Promise<unknown>;
         owner: string;
         registration?: object;
+        release?: () => void;
       }
     >
   >();
@@ -126,13 +127,15 @@ export class ClientMcpSenderRegistry {
     sender: (payload: unknown) => Promise<unknown>,
     owner: string,
     registration?: object,
+    release?: () => void,
   ): void {
     let bySession = this.sessionSenders.get(serverName);
     if (!bySession) {
       bySession = new Map();
       this.sessionSenders.set(serverName, bySession);
     }
-    bySession.set(sessionId, { sender, owner, registration });
+    bySession.get(sessionId)?.release?.();
+    bySession.set(sessionId, { sender, owner, registration, release });
     this.sessionScopedServerNames.add(serverName);
   }
 
@@ -161,6 +164,7 @@ export class ClientMcpSenderRegistry {
       return false;
     }
     bySession!.delete(sessionId);
+    entry.release?.();
     if (bySession!.size === 0) {
       this.sessionSenders.delete(serverName);
       // Release the reservation too: keeping it would reject every later
@@ -227,6 +231,11 @@ export class ClientMcpSenderRegistry {
  * bridge surface (and easy to fake in tests).
  */
 export interface ClientMcpBridge {
+  subscribeEvents?(
+    sessionId: string,
+    options: { signal: AbortSignal },
+  ): AsyncIterable<unknown>;
+  detachClient?(sessionId: string): Promise<void>;
   addRuntimeMcpServer(
     name: string,
     config: Record<string, unknown>,
@@ -281,12 +290,19 @@ async function registerSessionScopedClientMcpServer(
   serverName: string,
   sendSdkMcpMessage: WsClientMcpSender,
   sessionId: string,
+  onSessionClosed?: () => void,
 ): Promise<{ toolCount: number }> {
   // Identity of THIS registration attempt, so the rollback below cannot tear
   // down a newer registration of the same (server, session) on this
   // connection: register frames dispatch off-queue, so a slow add can reject
   // after a reconnect's register already re-installed the route.
   const registration = {};
+  const controller = new AbortController();
+  // A subscriber holds this live session without becoming a permission voter.
+  // Keep the hold with the sender owner so supersession releases the old one.
+  const events = bridge.subscribeEvents?.(sessionId, {
+    signal: controller.signal,
+  });
   registry.setSession(
     serverName,
     sessionId,
@@ -297,7 +313,69 @@ async function registerSessionScopedClientMcpServer(
       ) as Promise<unknown>,
     originatorClientId,
     registration,
+    () => {
+      controller.abort();
+      void bridge.detachClient?.(sessionId).catch(() => {});
+    },
   );
+  if (events) {
+    void (async () => {
+      let current = events;
+      let sessionClosed = false;
+      try {
+        while (!controller.signal.aborted) {
+          let evicted = false;
+          for await (const event of current) {
+            const type =
+              event !== null && typeof event === 'object'
+                ? (event as { type?: unknown }).type
+                : undefined;
+            if (type === 'session_closed') {
+              sessionClosed = true;
+              break;
+            }
+            if (type === 'client_evicted') evicted = true;
+          }
+          if (sessionClosed || controller.signal.aborted) break;
+          if (!evicted) {
+            sessionClosed = true;
+            break;
+          }
+          let replacement: typeof current | undefined;
+          try {
+            replacement = bridge.subscribeEvents?.(sessionId, {
+              signal: controller.signal,
+            });
+          } catch {
+            sessionClosed = true;
+            break;
+          }
+          if (!replacement) break;
+          current = replacement;
+        }
+      } finally {
+        if (
+          sessionClosed &&
+          !controller.signal.aborted &&
+          registry.deleteSession(
+            serverName,
+            sessionId,
+            originatorClientId,
+            registration,
+          )
+        ) {
+          onSessionClosed?.();
+          await bridge
+            .removeSessionRuntimeMcpServer(
+              sessionId,
+              serverName,
+              originatorClientId,
+            )
+            .catch(() => {});
+        }
+      }
+    })().catch(() => {});
+  }
   try {
     const runtimeConfig: ClientMcpOverWsRuntimeConfig = {
       type: 'sdk',
@@ -388,7 +466,12 @@ export function createClientMcpServerProvider(
   originatorClientId: string,
 ): ClientMcpServerProvider {
   return {
-    async registerClientMcpServer(serverName, sendSdkMcpMessage, scope) {
+    async registerClientMcpServer(
+      serverName,
+      sendSdkMcpMessage,
+      scope,
+      onSessionClosed,
+    ) {
       if (scope?.sessionId !== undefined) {
         return registerSessionScopedClientMcpServer(
           registry,
@@ -397,6 +480,7 @@ export function createClientMcpServerProvider(
           serverName,
           sendSdkMcpMessage,
           scope.sessionId,
+          onSessionClosed,
         );
       }
       // Record the sender FIRST so the child's discovery handshake — which the
