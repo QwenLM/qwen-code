@@ -119,8 +119,8 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
                 var rows = super.query(sql, mapper, args);
                 if (sql.startsWith("SELECT * FROM ma_output_capture")
-                {
-                    && !rows.isEmpty() && rows.getFirst() instanceof java.util.Map<?, ?> row && "RETIRING".equals(row.get("retention_state"))) { evaluations.incrementAndGet(); }
+                        && !rows.isEmpty() && rows.getFirst() instanceof java.util.Map<?, ?> row && "RETIRING".equals(row.get("retention_state"))) {
+                    evaluations.incrementAndGet();
                 }
                 return rows;
             }
@@ -219,9 +219,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             assertThat(collector(objects).runOnce()).isFalse();
             assertThat(held()).isEqualTo(3000);
             assertThat(objects.deleted).isEmpty();
-            assertThat(objects.bytes.get("failed-prefix/exact-key")).containsExactly((byte) {
-                7);
-            }
+            assertThat(objects.bytes.get("failed-prefix/exact-key")).containsExactly((byte) 7);
             assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                     + " WHERE scope_key = ? AND slot_key = X'696e6c696e65'", byte[].class, scope)).containsExactly((byte) 8);
             return;
@@ -418,9 +416,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                             + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
                             + " VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
                     ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
-                    resource.equals("message-1") {
-                        ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
-                    }
+                    resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
         }
         long used = jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = X'7075622d31'", Long.class, scope);
@@ -626,9 +622,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) {
-                        WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
-                    }
+                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };
@@ -659,9 +653,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public void deleteIfPresent(String key) {
                 super.deleteIfPresent(key);
                 if (expire.getAndSet(false)) {
-                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) {
-                        WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
-                    }
+                    jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(0) WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
                 }
             }
         };

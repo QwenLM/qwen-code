@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
+import com.alibaba.qwen.code.managedagent.api.ApiModels;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
@@ -50,7 +51,6 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
-import com.alibaba.qwen.code.managedagent.api.ApiModels;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
@@ -307,9 +307,7 @@ class ManagedAgentApiContractTest {
                 "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"fenced-web\",\"input\":[],\"workspace\":{\"workspaceId\":\"workspace\"}}");
         assertThat(drift).isEmpty();
         for (String body : List.of(publicBody, webBody)) {
-            ObjectNode envelope = (ObjectNode) {
-                json(body);
-            }
+            ObjectNode envelope = (ObjectNode) json(body);
             assertThat(envelope.at("/error/code").asText()).isEqualTo("workspace_unavailable");
             assertThat(envelope.at("/error/retryable").isBoolean()).isTrue();
             assertThat(envelope.at("/error/retryable").booleanValue()).isFalse();
@@ -472,9 +470,7 @@ class ManagedAgentApiContractTest {
                 if (API_PREFIXES.stream().anyMatch(pattern::startsWith)) {
                     for (RequestMethod method
                             : info.getMethodsCondition().getMethods()) {
-                        mapped.add(method.name() {
-                            + " " + pattern);
-                        }
+                        mapped.add(method.name() + " " + pattern);
                     }
                 }
             }
@@ -2744,9 +2740,7 @@ class ManagedAgentApiContractTest {
                 int colon = line.indexOf(':');
                 if (colon > 0) {
                     fields.merge(line.substring(0, colon),
-                            line.substring(colon + 1), (a, b) {
-                                -> a + "\n" + b);
-                            }
+                            line.substring(colon + 1), (a, b) -> a + "\n" + b);
                 }
             }
             if (!fields.containsKey("data")) {

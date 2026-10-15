@@ -169,9 +169,7 @@ class WorkspaceLifecycleStoreTest {
     private static void hookState(ObjectNode record, String execution, JsonNode result) {
         var run = record.withObject("/run").put("execution", execution).putNull("reason");
         if (List.of("outcome_unknown", "corrupt").contains(execution)) {
-            run.put("state", "recovery_blocked").put("reason", "corrupt".equals(execution) {
-                ? "execution_corrupt" : execution);
-            }
+            run.put("state", "recovery_blocked").put("reason", "corrupt".equals(execution) ? "execution_corrupt" : execution);
         } else if ("settled".equals(execution)) {
             run.put("state", "settled");
             record.set("resultRef", result);
@@ -297,9 +295,7 @@ class WorkspaceLifecycleStoreTest {
         for (String event : kind == OperationKind.CLOSE ? List.of("SessionEnd") : List.of("SessionEnd", "SessionDelete")) {
             // These bytes are JSON.stringify([event, operationId]) on the Harness wire.
             String id = "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
-                    ("[\"" + event + "\",\"" + operation.operationId() {
-                        + "\"]").getBytes(StandardCharsets.UTF_8)));
-                    }
+                    ("[\"" + event + "\",\"" + operation.operationId() + "\"]").getBytes(StandardCharsets.UTF_8)));
             var plan = fixture.json.createObjectNode();
             plan.putObject("input").put("hook_event_name", event).put("session_id", fixture.session);
             var planRef = fixture.resource(event + "-plan", "hook-data", plan);

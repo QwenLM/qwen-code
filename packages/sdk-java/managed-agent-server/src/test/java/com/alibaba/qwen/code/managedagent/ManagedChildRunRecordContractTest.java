@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -64,9 +64,7 @@ class ManagedChildRunRecordContractTest {
         for (JsonNode fixture : fixtures.get("cases")) {
             String domain = fixture.get("domain").textValue();
             String template = fixture.hasNonNull("template")
-                    ? fixture.get("template").textValue() {
-                        : domain;
-                    }
+                    ? fixture.get("template").textValue() : domain;
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
             JsonNode base = java.util.Objects.requireNonNull(
@@ -101,9 +99,7 @@ class ManagedChildRunRecordContractTest {
         for (JsonNode fixture : fixtures.get("successors")) {
             String domain = fixture.get("domain").textValue();
             String template = fixture.hasNonNull("template")
-                    ? fixture.get("template").textValue() {
-                        : domain;
-                    }
+                    ? fixture.get("template").textValue() : domain;
             JsonNode base = java.util.Objects.requireNonNull(
                     fixtures.get("templates").get(template),
                     () -> "successor " + fixture.get("id").textValue()

@@ -61,9 +61,7 @@ class BackfillWitnessesTest {
             var jdbc = new JdbcTemplate(source);
             jdbc.execute("CREATE TABLE " + table + " (witness INT)");
             jdbc.update("INSERT INTO " + table + " VALUES (42)");
-            assertThatThrownBy(() {
-                -> activate(source)).isInstanceOf(IllegalStateException.class);
-            }
+            assertThatThrownBy(() -> activate(source)).isInstanceOf(IllegalStateException.class);
             assertThat(jdbc.queryForObject("SELECT witness FROM " + table, Integer.class))
                     .isEqualTo(42);
             assertThat(

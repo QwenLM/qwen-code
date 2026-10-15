@@ -215,9 +215,7 @@ public class SessionLifecycleService {
             admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
                     idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session.toolProfile())
                             : kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose(),
-                    activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) {
-                        : 0);
-                    }
+                    activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
         } else {
             sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
             admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);

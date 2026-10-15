@@ -150,9 +150,7 @@ class QwenHostedHarnessConnectorTest {
                 Map.of("operationId", "delete-1", "claimGeneration", 2L));
         QwenHostedHarnessConnector successor = connector(client);
         if (status == 404) {
-            assertThatCode(() {
-                -> successor.detachLifecycle(operation)).doesNotThrowAnyException();
-            }
+            assertThatCode(() -> successor.detachLifecycle(operation)).doesNotThrowAnyException();
         } else {
             assertThatThrownBy(() -> successor.detachLifecycle(operation)).isSameAs(failure);
         }
@@ -496,7 +494,7 @@ class QwenHostedHarnessConnectorTest {
 
     @ParameterizedTest
     @NullAndEmptySource
-    @ValueSource(strings = {" "})
+    @ValueSource(strings = " ")
     void missingBoundProfileNeverLetsTheHarnessInferItsTools(String profile) {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
@@ -642,7 +640,7 @@ class QwenHostedHarnessConnectorTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.NullSource
-    @ValueSource(strings = {"hosted-workspace-files/1"})
+    @ValueSource(strings = "hosted-workspace-files/1")
     void loadsAnExistingSessionWithoutCreatingIt(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =

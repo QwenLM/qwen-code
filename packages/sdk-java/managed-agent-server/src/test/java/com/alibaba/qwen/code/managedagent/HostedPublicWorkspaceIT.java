@@ -153,18 +153,20 @@ class HostedPublicWorkspaceIT {
                     String.class, session)).isEqualTo("hosted-workspace-shell/1");
             assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_session WHERE session_id = ?",
                     String.class, session)).isEqualTo("deny".equals(decision) ? "auto-edit" : "default");
-            if (web) request("POST", "/api/agent/web-shell/v1/turns/submit",
-                    Map.of("sessionId", session, "idempotencyKey", "shell-turn", "input", List.of(input)),
-                    "shell-turn", "actor", 202);
+            if (web) {
+                request("POST", "/api/agent/web-shell/v1/turns/submit",
+                        Map.of("sessionId", session, "idempotencyKey", "shell-turn", "input", List.of(input)),
+                        "shell-turn", "actor", 202);
+            }
             await().atMost(Duration.ofSeconds(35)).failFast(() -> {
-                        if (modelFailure.get() != null) {
-                            throw new AssertionError("Model fixture failed", modelFailure.get());
-                        }
-                    }).untilAsserted(() -> {
-                        answerActions(session, web);
-                        assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
+                if (modelFailure.get() != null) {
+                    throw new AssertionError("Model fixture failed", modelFailure.get());
+                }
+            }).untilAsserted(() -> {
+                answerActions(session, web);
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
                                 String.class, session)).isEqualTo("COMPLETED");
-                    });
+            });
             Path marker = roots.get(index).resolve("child/shell-proof.txt");
             if ("allow".equals(decision)) {
                 assertThat(Files.readString(marker)).isEqualTo("once\n");
@@ -183,9 +185,7 @@ class HostedPublicWorkspaceIT {
                     boolean restDelete = !web && "delete".equals(kind);
                     String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
                             : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
-                    Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) {
-                        : null;
-                    }
+                    Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
                     assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE session_id = ?"
@@ -217,9 +217,7 @@ class HostedPublicWorkspaceIT {
         for (var object : output) {
             assertThat(object.get("state")).isEqualTo("VERIFIED");
             byte[] bytes = publicationObjects.get(object.get("object_key").toString());
-            assertThat(bytes).hasSize(((Number) {
-                object.get("byte_length")).intValue());
-            }
+            assertThat(bytes).hasSize(((Number) object.get("byte_length")).intValue());
             assertThat(java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)))
                     .isEqualTo(object.get("sha256"));
             stdout |= object.get("slot_key").toString().startsWith("segment:stdout:")
@@ -391,9 +389,7 @@ class HostedPublicWorkspaceIT {
                     + " AND isolation_key = ?", String.class, tenant, session);
             JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM ma_runtime_binding"
                     + " WHERE binding_id = ?", String.class, binding));
-            Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() {
-                + ".json");
-            }
+            Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json");
             long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
             var worker = ProcessHandle.of(pid).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
@@ -1111,10 +1107,10 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
-        if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode="
-                + (shell && "deny".equals(shellDecision) {
-                    ? "auto-edit" : "default"));
-                }
+        if (approvals) {
+            arguments.add("--qwen.managed-agent.harness.approval-mode="
+                    + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
+        }
         if (shell) {
             arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         }
@@ -1156,9 +1152,7 @@ class HostedPublicWorkspaceIT {
                             case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
                             case "getBucketAcl" -> acl;
                             case "putObject" -> {
-                                var put = (com.aliyun.oss.model.PutObjectRequest) {
-                                    invocation.getArgument(0);
-                                }
+                                var put = (com.aliyun.oss.model.PutObjectRequest) invocation.getArgument(0);
                                 byte[] bytes = put.getInputStream().readAllBytes();
                                 if (publicationObjects.putIfAbsent(put.getKey(), bytes) != null) {
                                     throw new com.aliyun.oss.OSSException("Object already exists", "FileAlreadyExists",
@@ -1321,8 +1315,8 @@ class HostedPublicWorkspaceIT {
         environment.put("TEMP", temporary.toString());
         for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
                 "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
-                    environment.put(name, temporary.resolve(name + ".json").toString());
-                }
+            environment.put(name, temporary.resolve(name + ".json").toString());
+        }
         harness = builder.start();
         await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> {
             if (!harness.isAlive()) {
@@ -1402,9 +1396,7 @@ class HostedPublicWorkspaceIT {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
-                    args = Map.of("command", shellQuote(node) {
-                        + " -e " + shellQuote(producer), "timeout", 60000);
-                    }
+                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
                 }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
@@ -1450,16 +1442,13 @@ class HostedPublicWorkspaceIT {
                     .timeout(Duration.ofSeconds(15)).method(exchange.getRequestMethod(), body.length == 0
                             ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body));
             exchange.getRequestHeaders().forEach((name, values) -> {
-                if (!List.of("host", "connection", "content-length", "upgrade", "expect").contains(name.toLowerCase(java.util.Locale.ROOT)))
-                {
+                if (!List.of("host", "connection", "content-length", "upgrade", "expect").contains(name.toLowerCase(java.util.Locale.ROOT))) {
                     values.forEach(value -> forwarded.header(name, value));
                 }
             });
             var response = http.send(forwarded.build(), HttpResponse.BodyHandlers.ofByteArray());
             if (receipt) {
-                assertThat(response.statusCode()).isEqualTo("receipt-failure".equals(shellFault) {
-                    ? 500 : 200);
-                }
+                assertThat(response.statusCode()).isEqualTo("receipt-failure".equals(shellFault) ? 500 : 200);
                 if ("receipt-reply".equals(shellFault)) {
                     return;
                 }
@@ -1522,12 +1511,24 @@ class HostedPublicWorkspaceIT {
                         harness.waitFor(10, TimeUnit.SECONDS);
                     }
                 },
-                () -> { if (shellProbe != null) shellProbe.close(); },
-                () -> { if (spring != null) spring.close(); },
-                () -> { if (storeRelay != null) storeRelay.stop(0); },
-                () -> { if (relayExecutor != null) relayExecutor.close(); },
-                () -> { if (durableClose) HostedDurableWorkers.stop(temporary.resolve("broker"), json); },
-                () -> { if (model != null) model.stop(0); });
+                () -> { if (shellProbe != null) {
+                    shellProbe.close();
+                } },
+                () -> { if (spring != null) {
+                    spring.close();
+                } },
+                () -> { if (storeRelay != null) {
+                    storeRelay.stop(0);
+                } },
+                () -> { if (relayExecutor != null) {
+                    relayExecutor.close();
+                } },
+                () -> { if (durableClose) {
+                    HostedDurableWorkers.stop(temporary.resolve("broker"), json);
+                } },
+                () -> { if (model != null) {
+                    model.stop(0);
+                } });
         for (var step : cleanup) {
             try {
                 step.execute();

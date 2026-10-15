@@ -166,9 +166,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
                     "UPDATE ma_workspace SET storage_id = X'7265706c6163656d656e742d73746f72616765' WHERE tenant_id = ?")) {
                 jdbc.update(change, tenant);
                 clearInvocations(client);
-                ((Map<?, ?>) {
-                    ReflectionTestUtils.getField(connector, "attachments")).clear();
-                }
+                ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
                 coordinator.cancel(tenant, session, turn);
                 verify(client).cancelTurn(attached);
             }
@@ -206,7 +204,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
         ManagedAgentStore store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored ->{}, registry, properties);
+                ignored -> {}, registry, properties);
         String session = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest",
                 "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."))
                 .sessionId();

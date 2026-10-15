@@ -318,9 +318,7 @@ public class ManagedExtensionRecordStore {
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
             JsonNode record =
-                    nativeRecords == null ? parse(lines[index]) {
-                        : nativeRecords.get(index);
-                    }
+                    nativeRecords == null ? parse(lines[index]) : nativeRecords.get(index);
             if (record == null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
@@ -403,9 +401,7 @@ public class ManagedExtensionRecordStore {
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
                         firstSequence + index, occurredAt, resources,
-                        () {
-                            -> transactionInputIds(lines, eventCount), committedAt);
-                        }
+                        () -> transactionInputIds(lines, eventCount), committedAt);
                 applied++;
             }
         }
@@ -939,9 +935,7 @@ public class ManagedExtensionRecordStore {
             List<String> configurations = jdbc.query("SELECT record_resource_id FROM"
                             + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                             + " session_scope_key = ? AND domain = 'mcp_configuration'",
-                    (result, row) {
-                        -> result.getString("record_resource_id"), scopeKey);
-                    }
+                    (result, row) -> result.getString("record_resource_id"), scopeKey);
             for (String configuration : configurations) {
                 require(ManagedExtensionRecords.isDefinitionPinConsistent(
                         readBody(resources.apply(configuration)).get("run").get("definition"),
@@ -1770,9 +1764,7 @@ public class ManagedExtensionRecordStore {
         if (eventId == null || !eventId.startsWith(domain + ":")) {
             return false;
         }
-        for (int index = domain.length() {
-            + 1; index < eventId.length();
-        }
+        for (int index = domain.length() + 1; index < eventId.length();
                 index++) {
             if (!Character.isDigit(eventId.charAt(index))) {
                 return false;

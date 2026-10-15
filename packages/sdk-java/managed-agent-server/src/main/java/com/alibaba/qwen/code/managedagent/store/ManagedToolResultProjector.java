@@ -248,17 +248,13 @@ public class ManagedToolResultProjector {
             Artifact selected = artifacts.stream().filter(artifact -> artifact.descriptor().path("byte_length").asLong() > 0)
                     .findFirst().orElse(artifacts.getFirst());
             long size = selected.descriptor().path("byte_length").asLong();
-            int length = (int) {
-                Math.min(8192, size);
-            }
+            int length = (int) Math.min(8192, size);
             var stream = verified.get(selected.descriptor().path("id").asText());
             if (stream.rangeVerificationBytes(0, length) <= 1024 * 1024) {
                 byte[] bytes = reader.readRange(selected, stream, 0, length, guard);
                 String text = sanitizePreview(new String(bytes, StandardCharsets.UTF_8));
                 String bounded = boundPreview(text);
-                boolean truncated = size > length || bounded.length() {
-                    < text.length();
-                }
+                boolean truncated = size > length || bounded.length() < text.length();
                 text = bounded;
                 descriptor.set("preview", JSON.createObjectNode().put("text", text).put("truncated", truncated)
                         .put("stream_id", selected.streamId()).put("source_start", 0).put("source_end", length));

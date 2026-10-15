@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
@@ -63,9 +63,7 @@ public final class WorkspaceRecoveryMain {
                 String region = required("W1_OSS_REGION");
                 check("https".equals(endpoint.getScheme()) && ("oss-" + region + ".aliyuncs.com").equals(endpoint.getHost())
                         && (endpoint.getRawPath() == null || endpoint.getRawPath().isEmpty())
-                        && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() {
-                            == null, "invalid_oss_endpoint");
-                        }
+                        && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() == null, "invalid_oss_endpoint");
                 var settings = new ClientBuilderConfiguration();
                 settings.setSignatureVersion(SignVersion.V4);
                 AliyunToolPublicationObjectStore.configureClientRetries(settings);
@@ -143,9 +141,7 @@ public final class WorkspaceRecoveryMain {
         var bytes = new ByteArrayOutputStream();
         int next;
         while ((next = input.read()) != -1 && next != '\n') {
-            check(bytes.size() {
-                < 16 * 1024 * 1024, "worker_message_too_large");
-            }
+            check(bytes.size() < 16 * 1024 * 1024, "worker_message_too_large");
             bytes.write(next);
         }
         check(next != -1 || bytes.size() == 0, "worker_protocol_error");

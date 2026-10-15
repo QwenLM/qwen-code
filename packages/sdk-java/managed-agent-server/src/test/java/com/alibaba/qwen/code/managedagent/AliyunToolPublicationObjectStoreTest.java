@@ -81,9 +81,7 @@ class AliyunToolPublicationObjectStoreTest {
         for (RuntimeException failure : new RuntimeException[] {
                 error("AccessDenied"), error("NoSuchKey"), new ClientException("unknown")}) {
             doThrow(failure).when(client).getObject("bucket", "key");
-            assertThatThrownBy(() {
-                -> store.open("key")).isSameAs(failure);
-            }
+            assertThatThrownBy(() -> store.open("key")).isSameAs(failure);
         }
         verify(client, times(3)).getObject("bucket", "key");
     }

@@ -216,9 +216,7 @@ public final class ToolPublicationAdmissionStore {
             var resource = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                     + " byte_length, sha256, storage_kind, inline_bytes, object_key, object_version_id, encryption_key_id,"
                     + " publish_command_id, state FROM ma_resource"
-                    + " WHERE session_scope_key = ? AND resource_id = ?" + suffix, (schemaRow, schemaIndex) {
-                        -> ManagedSchemaRows.read(schemaRow), sessionScope, resourceId).getFirst();
-                    }
+                    + " WHERE session_scope_key = ? AND resource_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), sessionScope, resourceId).getFirst();
             require(text(key, "tenantId").equals(resource.get("tenant_id"))
                     && text(key, "workspaceId").equals(resource.get("workspace_id"))
                     && text(key, "sessionId").equals(resource.get("session_id"))
@@ -232,9 +230,7 @@ public final class ToolPublicationAdmissionStore {
             if ("MYSQL_INLINE".equals(resource.get("storage_kind"))) {
                 require(inline instanceof byte[] body && body.length == ref.path("byteLength").longValue()
                         && ToolPublicationContract.sha256(body).equals(text(ref, "digest"))
-                        && resource.get("object_key") {
-                            == null, "Original inline Session resource conflicts");
-                        }
+                        && resource.get("object_key") == null, "Original inline Session resource conflicts");
                 resource.put("inlineDigest", text(ref, "digest"));
             } else {
                 require("TOOL_PUBLICATION".equals(resource.get("storage_kind")) && inline == null

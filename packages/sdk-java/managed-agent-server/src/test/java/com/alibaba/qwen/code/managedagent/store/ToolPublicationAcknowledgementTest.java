@@ -282,9 +282,7 @@ class ToolPublicationAcknowledgementTest {
                 .getBytes(StandardCharsets.UTF_8);
         for (int index = 0; index < changed.length; index++) {
             if (changed[index] == '?') {
-                changed[index] = (byte) {
-                    0xff;
-                }
+                changed[index] = (byte) 0xff;
                 break;
             }
         }
@@ -419,9 +417,7 @@ class ToolPublicationAcknowledgementTest {
         var contents = manifest.putArray("contents");
         for (String stream : List.of("stdout", "stderr")) {
             ObjectNode content = JSON.createObjectNode().put("streamId", stream).put("role", stream).put("mimeType", "application/octet-stream")
-                    .put("state", "sealed").put("byteLength", stream.equals("stdout") ? 3 : 0).put("digest", digest(stream.equals("stdout") {
-                        ? output : new byte[0]));
-                    }
+                    .put("state", "sealed").put("byteLength", stream.equals("stdout") ? 3 : 0).put("digest", digest(stream.equals("stdout") ? output : new byte[0]));
             content.putArray("missingRanges");
             var pages = JSON.createObjectNode().putArray("pages");
             if (stream.equals("stdout")) {

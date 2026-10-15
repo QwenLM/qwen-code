@@ -323,9 +323,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() {
-                    -> !running(process), 10, "process cleanup " + process.pid());
-                }
+                await(() -> !running(process), 10, "process cleanup " + process.pid());
             }
         }
     }
@@ -470,9 +468,7 @@ class HostedProcessCrashIT {
             }
             if (route.equals("/worker-kill")) {
                 assertThat(worker.destroyForcibly()).isTrue();
-                await(() {
-                    -> !running(worker), 10, "worker SIGKILL");
-                }
+                await(() -> !running(worker), 10, "worker SIGKILL");
                 return Map.of("pid", worker.pid(), "signal", "SIGKILL");
             }
             assertThat(route).isEqualTo("/worker-stop");
@@ -560,9 +556,7 @@ class HostedProcessCrashIT {
             long revision = 0;
             long sequence = 0;
             for (var transaction : journal) {
-                assertThat(((Number) {
-                    transaction.get("journal_revision")).longValue()).isEqualTo(++revision);
-                }
+                assertThat(((Number) transaction.get("journal_revision")).longValue()).isEqualTo(++revision);
                 assertThat(transactionIds.add(transaction.get("transaction_id").toString())).isTrue();
                 byte[] bytes = (byte[]) transaction.get("record_bytes");
                 for (String line : new String(bytes, StandardCharsets.UTF_8).lines().toList()) {
@@ -625,9 +619,7 @@ class HostedProcessCrashIT {
             }
             processes.forEach(ProcessHandle::destroyForcibly);
             for (ProcessHandle process : processes) {
-                await(() {
-                    -> !running(process), 10, "process cleanup " + process.pid());
-                }
+                await(() -> !running(process), 10, "process cleanup " + process.pid());
             }
             if (driver != null) {
                 assertThat(driver.waitFor(5, TimeUnit.SECONDS)).isTrue();
@@ -646,9 +638,7 @@ class HostedProcessCrashIT {
         if (Files.exists(stat)) {
             try {
                 String value = Files.readString(stat);
-                return value.charAt(value.lastIndexOf(')') + 2) {
-                    != 'Z';
-                }
+                return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
             } catch (java.io.IOException gone) {
                 return process.isAlive();
             }

@@ -1,8 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -186,9 +185,7 @@ class WorkspaceMigrationStoreTest {
         assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo(code);
         assertThat(new WorkspaceOperations(jdbc, "tenant").find(WorkspaceOperations.Kind.WORKSPACE_RECOVERY, attempt, false).get("last_error_code")).isEqualTo(code);
         if (!"source_drift".equals(code)) {
-            assertThatThrownBy(() {
-                -> operation.verify(false)).hasMessageContaining(code);
-            }
+            assertThatThrownBy(() -> operation.verify(false)).hasMessageContaining(code);
             assertThat(operation.inspect().path("verifyOperationId").asText()).isEqualTo(attempt);
         }
     }
@@ -240,9 +237,11 @@ class WorkspaceMigrationStoreTest {
         for (String name : List.of("registration", "sourceDigest", "sessionCount")) {
             manifest.set(name, context.path(name));
         }
-        for (String name : List.of("sessions", "assets")) manifest.putObject(name)
-                .put("path", ".w1-recovery/" + name + ".ndjson").put("count", 0).put("byteLength", 0)
-                .put("digest", WorkspaceRecoveryStore.hash(new byte[0]));
+        for (String name : List.of("sessions", "assets")) {
+            manifest.putObject(name)
+                    .put("path", ".w1-recovery/" + name + ".ndjson").put("count", 0).put("byteLength", 0)
+                    .put("digest", WorkspaceRecoveryStore.hash(new byte[0]));
+        }
         Path metadata = Files.createDirectories(temp.resolve("bundle/.w1-recovery"));
         byte[] bytes = manifest.toString().getBytes(StandardCharsets.UTF_8);
         Files.write(metadata.resolve("manifest.json"), bytes);

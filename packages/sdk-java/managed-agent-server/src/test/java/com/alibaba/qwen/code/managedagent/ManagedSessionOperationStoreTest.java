@@ -197,7 +197,7 @@ class ManagedSessionOperationStoreTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored ->{}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
     }
 
     private List<String> targets(ManagedAgentStore store) {

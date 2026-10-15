@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -56,7 +56,7 @@ class WorkspaceRecoveryStoreTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", root.toString())));
         guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> new WorkspaceStorageGuard.Identity(
                 path.toRealPath().toString(), "test-host", "test-device", "test-inode", "2026-10-01T00:00:00Z"));
-        sessions = new ManagedAgentStore(jdbc, WorkspaceRecoveryStore.JSON, Clock.systemUTC(), ignored ->{},
+        sessions = new ManagedAgentStore(jdbc, WorkspaceRecoveryStore.JSON, Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
         for (String workspace : List.of("workspace-a", "workspace-b")) {
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
@@ -157,11 +157,11 @@ class WorkspaceRecoveryStoreTest {
         properties.getToolPublication().setGcEnabled(true);
         properties.getToolPublication().setDeletionGrace(java.time.Duration.ZERO);
         var collector = new SessionResourceCollectionCollector(jdbc, manager, properties);
-        for (int page = 0; page < 20 && collector.runOnce(); page++) {}
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) {
-            FROM ma_session_journal_tx", Long.class)).isZero();
+        for (int page = 0; page < 20 && collector.runOnce(); page++) {
+            // collector.runOnce() in the condition does the work; the body stays empty.
         }
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Long.class)).isZero();
         var streamBefore = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version"
                 + " FROM ma_event_stream WHERE session_id = ? AND stream_kind = 'SESSION'", session);
         var capture = capture();
@@ -796,11 +796,11 @@ class WorkspaceRecoveryStoreTest {
             manifest.set(name, context.path(name));
         }
         manifest.set("captureOperationId", request.path("operationId"));
-        for (String name : List.of("sessions", "assets")) manifest.putObject(name)
-                .put("path", ".w1-recovery/" + name + ".ndjson").put("byteLength", 0).put("digest", "a".repeat(64))
-                .put("count", "sessions".equals(name) ? context.path("sessionCount").asLong() {
-                    : call(capture, "assetPage").path("assets").size());
-                }
+        for (String name : List.of("sessions", "assets")) {
+            manifest.putObject(name)
+                    .put("path", ".w1-recovery/" + name + ".ndjson").put("byteLength", 0).put("digest", "a".repeat(64))
+                    .put("count", "sessions".equals(name) ? context.path("sessionCount").asLong() : call(capture, "assetPage").path("assets").size());
+        }
         return manifest;
     }
 

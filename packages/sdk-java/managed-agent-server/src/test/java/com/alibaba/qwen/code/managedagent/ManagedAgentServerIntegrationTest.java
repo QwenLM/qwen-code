@@ -205,7 +205,7 @@ class ManagedAgentServerIntegrationTest {
                 ManagedWorkspaceRegistry.class);
         ManagedAgentService upgraded = new ManagedAgentService(
                 new ManagedAgentStore(jdbc, objectMapper, Clock.systemUTC(),
-                        ignored ->{}, workspaces, changed),
+                        ignored -> {}, workspaces, changed),
                 applicationContext.getBean(RequestDigests.class),
                 applicationContext.getBean(HarnessCoordinator.class),
                 harness, workspaces);
@@ -1362,9 +1362,9 @@ class ManagedAgentServerIntegrationTest {
                 store.findLatestTurns(tenant,
                         java.util.List.of(session.sessionId())))
                         .get(session.sessionId())).satisfies(event -> {
-                    assertThat(event.turnId()).isEqualTo(second.turnId());
-                    assertThat(event.type()).isEqualTo("environment.ready");
-                });
+                            assertThat(event.turnId()).isEqualTo(second.turnId());
+                            assertThat(event.type()).isEqualTo("environment.ready");
+                        });
     }
 
     @Test

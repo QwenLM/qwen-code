@@ -194,9 +194,7 @@ class HostedHarnessMySqlIT {
             for (JsonNode request : modelRequests) {
                 assertThat(request.path("model").asText()).isEqualTo(MODEL);
                 assertThat(request.path("tools").isMissingNode()
-                        || request.path("tools").isArray() {
-                            && request.path("tools").isEmpty()).isTrue();
-                        }
+                        || request.path("tools").isArray() && request.path("tools").isEmpty()).isTrue();
             }
             List<JsonNode> committed = transcript(client, loaded, 0);
             client.detachSession(loaded);
@@ -407,9 +405,7 @@ class HostedHarnessMySqlIT {
                     synchronized (output) {
                         output.append(buffer, 0, count);
                         if (output.length() > 16_384) {
-                            output.delete(0, output.length() {
-                                - 16_384);
-                            }
+                            output.delete(0, output.length() - 16_384);
                         }
                     }
                 }
@@ -543,9 +539,7 @@ class HostedHarnessMySqlIT {
             assertThat(event.path("type").asText()).isEqualTo("managed_journal_event");
             assertThat(event.path("promptId").isMissingNode()).isTrue();
             assertThat(event.path("data")).isEqualTo(json.valueToTree(Map.of("sessionId", sessionId)));
-            assertThat(event.path("id").asLong()).isEqualTo(after.get(index - 1).path("id").asLong() {
-                + 1);
-            }
+            assertThat(event.path("id").asLong()).isEqualTo(after.get(index - 1).path("id").asLong() + 1);
         }
     }
 

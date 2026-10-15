@@ -125,7 +125,7 @@ class WorkspaceMigrationMySqlIT {
         transaction.setTimeout(15);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored ->{},
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
         var original = create(store, transaction, "migrating", "original");
         var other = cwd ? create(store, transaction, "unrelated", "other") : null;
@@ -147,7 +147,7 @@ class WorkspaceMigrationMySqlIT {
                 });
             }
         };
-        var waitingStore = new ManagedAgentStore(waitingJdbc, new ObjectMapper(), Clock.systemUTC(), ignored ->{},
+        var waitingStore = new ManagedAgentStore(waitingJdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(waitingJdbc), properties);
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);

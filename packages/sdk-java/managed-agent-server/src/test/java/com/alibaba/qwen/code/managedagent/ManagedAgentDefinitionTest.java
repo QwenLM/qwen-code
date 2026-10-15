@@ -268,9 +268,7 @@ class ManagedAgentDefinitionTest {
                         .value("invalid_idempotency_key"));
         for (String field : new String[] {"model", "instructions", "tools",
                 "permission_policy"}) {
-            ObjectNode missing = (ObjectNode) {
-                objectMapper.readTree(DEFINITION);
-            }
+            ObjectNode missing = (ObjectNode) objectMapper.readTree(DEFINITION);
             missing.remove(field);
             create(tenant, "no-" + field, missing.toString())
                     .andExpect(status().isBadRequest());

@@ -100,9 +100,7 @@ public class ManagedToolResultStore {
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         sources.keySet().toArray());
         for (var row : existing) {
-            Source source = sources.remove((String) {
-                row.get("operation_id"));
-            }
+            Source source = sources.remove((String) row.get("operation_id"));
             require(
                     source.sourceDigest().equals(row.get("request_digest")),
                     "Tool receipt source changed");
@@ -211,9 +209,7 @@ public class ManagedToolResultStore {
                                                 through);
                                 if (!rows.isEmpty()) {
                                     var row = rows.getFirst();
-                                    byte[] bytes = (byte[]) {
-                                        row.get("record_bytes");
-                                    }
+                                    byte[] bytes = (byte[]) row.get("record_bytes");
                                     require(
                                             ToolPublicationContract.sha256(bytes)
                                                     .equals(row.get("record_digest")),
@@ -250,9 +246,7 @@ public class ManagedToolResultStore {
                 var failed = selected.getFirst();
                 transactions.executeWithoutResult(
                         status -> {
-                            String tenant = (String) {
-                                failed.get("tenant_id");
-                            }
+                            String tenant = (String) failed.get("tenant_id");
                             String session = (String) failed.get("session_id");
                             ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                             if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
@@ -304,9 +298,7 @@ public class ManagedToolResultStore {
                             List<Map<String, Object>> rows = new ArrayList<>();
                             for (String state : List.of("PENDING", "RETRYABLE", "LEASED")) {
                                 String due =
-                                        "LEASED".equals(state) {
-                                            ? "claim_until" : "available_at";
-                                        }
+                                        "LEASED".equals(state) ? "claim_until" : "available_at";
                                 String epoch =
                                         "LEASED".equals(state)
                                                 ? "CAST(UNIX_TIMESTAMP(claim_until) AS DECIMAL(20,"
@@ -349,9 +341,7 @@ public class ManagedToolResultStore {
                                             .thenComparing(
                                                     row -> (String) row.get("operation_id")));
                             for (var candidate : rows) {
-                                String tenant = (String) {
-                                    candidate.get("tenant_id");
-                                }
+                                String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
                                 ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {

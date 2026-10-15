@@ -10,9 +10,9 @@ import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -964,14 +964,17 @@ class ManagedExtensionRecordStoreTest {
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         var route = journal.requestDomain("route-race", "channel_route", channelRoute(templates, policy), List.of(policy), 1000);
-        journal.commit(route); journal.committed(route);
+        journal.commit(route);
+        journal.committed(route);
         ObjectNode delivery = channelDelivery(templates, result, segment1, segment2);
         var planned = journal.requestDomain("planned-race", "channel_delivery", delivery, List.of(result, segment1, segment2), 2000);
-        journal.commit(planned); journal.committed(planned);
+        journal.commit(planned);
+        journal.committed(planned);
         ((ObjectNode) delivery.path("run")).put("state", "running");
         ((ObjectNode) delivery.path("run").path("delivery")).put("state", "sending");
         var sending = journal.requestDomain("sending-race", "channel_delivery", delivery, List.of(), 3000);
-        journal.commit(sending); journal.committed(sending);
+        journal.commit(sending);
+        journal.committed(sending);
         var instances = new com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore(jdbc);
         var ledger = new com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository(jdbc);
         String deliveryId = delivery.path("deliveryId").asText();
@@ -995,7 +998,8 @@ class ManagedExtensionRecordStoreTest {
         assertThat(instances.reserveReconciliation(newClaim)).isTrue();
         var current = journal.requestDomain(com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore.reconciliationOperationId(newClaim),
                 "channel_delivery", unknown, List.of(), 4000);
-        journal.commit(current); journal.committed(current);
+        journal.commit(current);
+        journal.committed(current);
         assertThat(records.listRecords(TENANT, sessionId, "channel_delivery").getFirst().path("run").path("delivery").path("state").asText()).isEqualTo("unknown");
     }
 
@@ -1648,9 +1652,7 @@ class ManagedExtensionRecordStoreTest {
                 page.data().forEach(task -> seen.add(task.createdAt() + " "
                         + task.id()));
                 assertThat(page.hasMore()).as("limit %d", limit)
-                        .isEqualTo(seen.size() {
-                            < 3);
-                        }
+                        .isEqualTo(seen.size() < 3);
                 cursor = page.nextCursor();
             }
             while (cursor != null);
@@ -1807,9 +1809,7 @@ class ManagedExtensionRecordStoreTest {
             journal.commit(request);
             journal.committed(request);
             assertThat(records.latestHookRegistration(TENANT, sessionId))
-                    .contains("settled".equals(status) {
-                        ? replacement : registration);
-                    }
+                    .contains("settled".equals(status) ? replacement : registration);
         }
         assertThat(records.listTasks(TENANT, sessionId, null, null, 10).tasks()).isEmpty();
         assertThat(state.findEvents(TENANT, sessionId, 0, 100)).extracting(EventRecord::type)
@@ -1959,9 +1959,7 @@ class ManagedExtensionRecordStoreTest {
             ObjectNode badPlanBody = planBody.deepCopy();
             ObjectNode badManifestBody = manifestBody.deepCopy();
             if (mismatchPart) {
-                ((ObjectNode) {
-                    badManifestBody.get("parts").get(1)).put("digest", "c".repeat(64));
-                }
+                ((ObjectNode) badManifestBody.get("parts").get(1)).put("digest", "c".repeat(64));
             }
             CommitResource badManifest = hookResource("messages", "managed-hook-message-chunks",
                     ExtensionRecordJournal.bytes(badManifestBody));

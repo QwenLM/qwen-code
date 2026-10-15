@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery;
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.DeliveryCursor;
 import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.DeliveryPage;
-import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute;
 import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.RouteCursor;
 import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.RoutePage;
-import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -156,9 +156,7 @@ public final class ManagedChannelJdbcContract {
             all.addAll(page.routes());
             List<ChannelRoute> rows = page.routes();
             if (!rows.isEmpty()) {
-                ChannelRoute last = rows.get(rows.size() {
-                    - 1);
-                }
+                ChannelRoute last = rows.get(rows.size() - 1);
                 cursor = new RouteCursor(last.createdAt(), last.routeKey());
             }
             pages++;
@@ -199,7 +197,7 @@ public final class ManagedChannelJdbcContract {
             tieKeys.add(key);
             routes.findOrCreate(route(tenant, tieChannel, 1L, eventId, 1L, null, List.of()));
             jdbc.update("UPDATE ma_request_receipt SET created_at=?,updated_at=? WHERE namespace='CHANNEL_INGRESS' AND tenant_id=? AND idempotency_key=?",
-                    tieTime,tieTime,tenant,key);
+                    tieTime, tieTime, tenant, key);
         }
         tieKeys.sort(Comparator.reverseOrder());
         assertEquals(tieKeys, routes.listByChannel(tenant, tieChannel, null,
@@ -318,9 +316,7 @@ public final class ManagedChannelJdbcContract {
             all.addAll(page.deliveries());
             List<ChannelDelivery> rows = page.deliveries();
             if (!rows.isEmpty()) {
-                ChannelDelivery last = rows.get(rows.size() {
-                    - 1);
-                }
+                ChannelDelivery last = rows.get(rows.size() - 1);
                 cursor = new DeliveryCursor(last.createdAt(),
                         last.deliveryId());
             }
@@ -359,9 +355,9 @@ public final class ManagedChannelJdbcContract {
         List<String> tieIds = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
             tieIds.add("tie-" + i);
-            deliveries.findOrCreate(delivery(tenant,tieChannel,"tie-"+i,"segment-"+i,0));
+            deliveries.findOrCreate(delivery(tenant, tieChannel, "tie-" + i, "segment-" + i, 0));
             jdbc.update("UPDATE ma_delivery SET created_at=?,updated_at=? WHERE delivery_kind='CHANNEL' AND tenant_id=? AND channel_id=? AND delivery_id=?",
-                    tieTime,tieTime,tenant,tieChannel,"tie-"+i);
+                    tieTime, tieTime, tenant, tieChannel, "tie-" + i);
         }
         tieIds.sort(Comparator.reverseOrder());
         assertEquals(tieIds, deliveries

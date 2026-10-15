@@ -132,9 +132,7 @@ public final class ToolPublicationCollector {
                         ToolPublicationRetentionStore.lockGenericSession(
                                 jdbc,
                                 (String) capture.get("tenant_id"),
-                                (String) {
-                                    capture.get("session_id"));
-                                }
+                                (String) capture.get("session_id"));
                         String scope = (String) capture.get("scope_key");
                         String publication = (String) capture.get("publication_id");
                         String request =
@@ -228,9 +226,7 @@ public final class ToolPublicationCollector {
             Claim claim =
                     transactions.execute(
                             status -> {
-                                String scope = (String) {
-                                    candidate.get("scope_key");
-                                }
+                                String scope = (String) candidate.get("scope_key");
                                 String publication = (String) candidate.get("publication_id");
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");

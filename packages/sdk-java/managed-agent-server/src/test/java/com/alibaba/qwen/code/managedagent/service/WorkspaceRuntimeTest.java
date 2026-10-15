@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
@@ -713,9 +713,7 @@ class WorkspaceRuntimeTest {
                 .isEqualTo(Map.of("state", "running"));
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", session.tenantId());
         for (String kind : List.of("mcp-configure", "mcp-discover")) {
-            assertUnavailable(() {
-                -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, kind)));
-            }
+            assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, kind)));
         }
         for (String kind : List.of("mcp-status", "mcp-cancel", "mcp-release")) {
             Map<String, Object> operation = mcpControl(session, kind);
@@ -784,9 +782,7 @@ class WorkspaceRuntimeTest {
                 .isEqualTo(Map.of("state", "running"));
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", session.tenantId());
         for (String kind : List.of("hook-execute", "hook-catalog")) {
-            assertUnavailable(() {
-                -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, kind)));
-            }
+            assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, kind)));
         }
         for (String kind : List.of("hook-status", "hook-cancel")) {
             Map<String, Object> operation = hookControl(session, kind);

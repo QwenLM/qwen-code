@@ -395,9 +395,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 + " ORDER BY r.resource_id LIMIT 4097", scope, scope)) {
             scope(row, key);
             require("MYSQL_INLINE".equals(row.get("storage_kind")) && number(row, "schema_version") == 1
-                    && row.get("object_key") == null && row.get("object_version_id") == null && row.get("encryption_key_id") {
-                        == null);
-                    }
+                    && row.get("object_key") == null && row.get("object_version_id") == null && row.get("encryption_key_id") == null);
             byte[] bytes = bytes(row, "inline_bytes", ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
             total += bytes.length;
             require(total <= MAX_BYTES && bytes.length == number(row, "byte_length") && hash(bytes).equals(row.get("sha256")));
@@ -432,9 +430,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                         && java.util.Arrays.equals(bytes, Base64.getDecoder().decode(resource.path("bytesBase64").asText())));
                 boolean referenced = false;
                 for (JsonNode value : resource.path("referencedRevisions")) {
-                    referenced |= value.longValue() {
-                        == revision;
-                    }
+                    referenced |= value.longValue() == revision;
                 }
                 require(referenced);
                 return resource.path("ref");
@@ -449,9 +445,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 + String.join("', '", TABLES) + "')");
         require(found.size() == TABLES.size());
         for (var row : found) {
-            require(TABLES.contains(text(row, "table_name")) {
-                && "InnoDB".equals(row.get("engine")));
-            }
+            require(TABLES.contains(text(row, "table_name")) && "InnoDB".equals(row.get("engine")));
         }
     }
 
@@ -467,9 +461,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             statement.setMaxRows(MAX_ROWS + 1);
             boolean h2 = connection.getMetaData().getDriverName().toLowerCase(Locale.ROOT).contains("h2");
             for (int index = 0; index < parameters.length; index++) {
-                int type = h2 ? statement.getParameterMetaData().getParameterType(index + 1) {
-                    : Types.OTHER;
-                }
+                int type = h2 ? statement.getParameterMetaData().getParameterType(index + 1) : Types.OTHER;
                 if (parameters[index] instanceof String value
                         && Set.of(Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY).contains(type)) {
                     statement.setBytes(index + 1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(value));
@@ -482,9 +474,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 List<Map<String, Object>> rows = new ArrayList<>();
                 long decodedBytes = 0;
                 while (result.next()) {
-                    require(rows.size() {
-                        < MAX_ROWS);
-                    }
+                    require(rows.size() < MAX_ROWS);
                     Map<String, Object> row = new LinkedHashMap<>();
                     for (int index = 1; index <= metadata.getColumnCount(); index++) {
                         int type = metadata.getColumnType(index);
@@ -492,9 +482,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                             case Types.BLOB -> boundedBytes(result, index);
                             case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY ->
                                     Set.of("inline_bytes", "record_bytes").contains(metadata.getColumnName(index))
-                                            ? boundedBytes(result, index) {
-                                                : boundedIdentity(result, index);
-                                            }
+                                            ? boundedBytes(result, index) : boundedIdentity(result, index);
                             case Types.CLOB, Types.LONGVARCHAR -> boundedText(result, index);
                             default -> result.getObject(index);
                         };
@@ -548,9 +536,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             char[] buffer = new char[8192];
             int count;
             while ((count = reader.read(buffer)) != -1) {
-                require(text.length() {
-                    <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - count);
-                }
+                require(text.length() <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - count);
                 text.append(buffer, 0, count);
             }
             require(text.toString().getBytes(StandardCharsets.UTF_8).length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES);

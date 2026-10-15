@@ -81,9 +81,7 @@ class WorkspaceCsiResourceGuardTest {
         reject("validatingadmissionpolicybindings", object -> nested(object, "spec").put("policyName", "different"));
         for (String resource : List.of("validatingadmissionpolicies", "validatingadmissionpolicybindings")) {
             var api = new Api();
-            api.afterStorage = () {
-                -> nested(api.objects.get(resource), "metadata").put("generation", 4);
-            }
+            api.afterStorage = () -> nested(api.objects.get(resource), "metadata").put("generation", 4);
             refused(api);
         }
         var denied = new Api();
@@ -101,9 +99,7 @@ class WorkspaceCsiResourceGuardTest {
                         "sensitive body opaque-handle", true, new IllegalStateException("sensitive cause"));
                 assertThatThrownBy(() -> guard(api).verify().toCompletableFuture().join())
                         .hasCauseInstanceOf(RuntimeBrokerException.class).satisfies(error -> {
-                            var cause = (RuntimeBrokerException) {
-                                error.getCause();
-                            }
+                            var cause = (RuntimeBrokerException) error.getCause();
                             assertThat(cause.getStatusCode()).isEqualTo(503);
                             assertThat(cause.getCode()).isEqualTo("workspace_csi_protection_unavailable");
                             assertThat(cause.isRetryable()).isTrue();
@@ -228,9 +224,7 @@ class WorkspaceCsiResourceGuardTest {
     private static Map<String, Object> nested(Map<String, Object> object, String... path) {
         Map<String, Object> current = object;
         for (String field : path) {
-            current = (Map<String, Object>) {
-                current.get(field);
-            }
+            current = (Map<String, Object>) current.get(field);
         }
         return current;
     }

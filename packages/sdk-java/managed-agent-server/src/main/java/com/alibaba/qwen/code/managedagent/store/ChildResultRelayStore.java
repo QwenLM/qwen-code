@@ -554,9 +554,7 @@ public class ChildResultRelayStore {
                 (result, row) -> result.getBytes(1), tenantId, sessionId)) {
             for (String line : new String(bytes, StandardCharsets.UTF_8)
                     .split("\n")) {
-                JsonNode record = line.isBlank() {
-                    ? null : readTree(line);
-                }
+                JsonNode record = line.isBlank() ? null : readTree(line);
                 if (record == null) {
                     throw new IllegalStateException("Session " + sessionId
                             + "'s journal is unreadable");
@@ -879,9 +877,7 @@ public class ChildResultRelayStore {
                     operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
                     owner, row.claimGeneration(), now);
             if (changed == 1 && !"CHILD_SESSION_CLOSE".equals(row.operationKind())) {
-                recordDelivery(row, row.childSessionId(), "done".equals(state) {
-                    ? "delivered" : state, now);
-                }
+                recordDelivery(row, row.childSessionId(), "done".equals(state) ? "delivered" : state, now);
             }
         });
     }

@@ -7,11 +7,11 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -714,9 +714,7 @@ public class HarnessCoordinator {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
                     flushAt = 0;
-                    Map<?, ?> retraction = source.data() {
-                        instanceof Map<?, ?> data ? data : Map.of();
-                    }
+                    Map<?, ?> retraction = source.data() instanceof Map<?, ?> data ? data : Map.of();
                     if (retraction.containsKey("throughSequence")) {
                         Object through = retraction.get("throughSequence");
                         Object sourceBoot = retraction.get("sourceBootId");

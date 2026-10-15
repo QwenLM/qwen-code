@@ -67,9 +67,7 @@ public final class WorkspaceRecoveryStore {
                 && request.path("mountRevision").asLong() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER, "invalid_request");
         for (String field : List.of("sourceRoot", "bundleRoot", "fileHistoryRoot", "nodeExecutable", "cliEntry")) {
             Path path = Path.of(text(request, field));
-            check(path.isAbsolute() {
-                && path.normalize().equals(path), "invalid_request");
-            }
+            check(path.isAbsolute() && path.normalize().equals(path), "invalid_request");
         }
         String requestDigest = hash(requestBytes);
         // The stream-capture collector fences its byte drop with a locking read over this
@@ -103,9 +101,7 @@ public final class WorkspaceRecoveryStore {
             check(capture != null && "SEALED".equals(capture.get("state"))
                     && tenant.equals(capture.get("tenant_id")) && storage.equals(capture.get("storage_id")),
                     "capture_not_sealed");
-            JsonNode original = parse((String) {
-                capture.get("request_json"));
-            }
+            JsonNode original = parse((String) capture.get("request_json"));
             for (String field : List.of("fenceOperationId", "mountRevision", "sourceRoot", "bundleRoot", "fileHistoryRoot")) {
                 check(original.path(field).equals(request.path(field)), "operation_conflict");
             }
@@ -126,13 +122,9 @@ public final class WorkspaceRecoveryStore {
         if (capture != null) {
             String after = "";
             while (true) {
-                List<Map<String, Object>> page = sessionRows((String) {
-                    capture.get("operation_id"), after, PAGE);
-                }
+                List<Map<String, Object>> page = sessionRows((String) capture.get("operation_id"), after, PAGE);
                 for (Map<String, Object> source : page) {
-                    String session = (String) {
-                        source.get("session_id");
-                    }
+                    String session = (String) source.get("session_id");
                     check(currentSource(jdbc, tenant, storage, session, true).toString().equals(source.get("source_json")), "source_drift");
                     operations.insertWork(KIND, id, "SESSION", hash(session), session, session,
                             WorkspaceOperations.values("source_digest", source.get("source_digest"),
@@ -285,15 +277,11 @@ public final class WorkspaceRecoveryStore {
         ArrayNode values = page.putArray("sessions");
         for (var row : rows.subList(0, Math.min(PAGE, rows.size()))) {
             ObjectNode value = values.addObject().put("sessionId", (String) row.get("session_id"))
-                    .put("sourceDigest", (String) row.get("source_digest")).put("sourceJson", (String) {
-                        row.get("source_json"));
-                    }
+                    .put("sourceDigest", (String) row.get("source_digest")).put("sourceJson", (String) row.get("source_json"));
             value.set("source", parse((String) row.get("source_json")));
         }
         if (rows.size() > PAGE) {
-            page.put("nextSessionId", (String) {
-                rows.get(PAGE - 1).get("session_id"));
-            }
+            page.put("nextSessionId", (String) rows.get(PAGE - 1).get("session_id"));
         } else {
             page.putNull("nextSessionId");
         }
@@ -380,15 +368,11 @@ public final class WorkspaceRecoveryStore {
         ObjectNode page = JSON.createObjectNode();
         ArrayNode assets = page.putArray("assets");
         for (var row : rows.subList(0, Math.min(PAGE, rows.size()))) {
-            ObjectNode asset = assets.addObject().put("key", (String) {
-                row.get("work_key"));
-            }
+            ObjectNode asset = assets.addObject().put("key", (String) row.get("work_key"));
             asset.set("metadata", parse((String) row.get("metadata_json")));
         }
         if (rows.size() > PAGE) {
-            page.put("nextKey", (String) {
-                rows.get(PAGE - 1).get("work_key"));
-            }
+            page.put("nextKey", (String) rows.get(PAGE - 1).get("work_key"));
         } else {
             page.putNull("nextKey");
         }
@@ -407,9 +391,7 @@ public final class WorkspaceRecoveryStore {
                     Long.class, operations.key(KIND, id), session) == 0, "references_incomplete");
             var saved = operations.findWork(KIND, id, "SESSION", hash(session), true);
             if (saved.get("summary_json") != null) {
-                check(summary.equals(parse((String) {
-                    saved.get("summary_json"))), "summary_conflict");
-                }
+                check(summary.equals(parse((String) saved.get("summary_json"))), "summary_conflict");
             }
             operations.updateWork(KIND, id, "SESSION", hash(session),
                     WorkspaceOperations.values("state", "COMPLETE", "summary_json", summary.toString()));
@@ -516,9 +498,7 @@ public final class WorkspaceRecoveryStore {
                 JsonNode source = currentSource(session);
                 String bytes = source.toString();
                 digest.update(bytes.getBytes(StandardCharsets.UTF_8));
-                digest.update((byte) {
-                    '\n');
-                }
+                digest.update((byte) '\n');
                 if (save) {
                     operations.insertWork(KIND, id, "SESSION", hash(session), session, session,
                             WorkspaceOperations.values("source_digest", hash(bytes), "source_json", bytes), "PENDING");
@@ -635,9 +615,7 @@ public final class WorkspaceRecoveryStore {
         var captureScopes = new java.util.LinkedHashSet<String>();
         captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) row.get("workspace_id"), session));
         if (!heads.isEmpty()) {
-            captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) {
-                heads.getFirst().get("workspace_id"), session));
-            }
+            captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) heads.getFirst().get("workspace_id"), session));
         }
         for (String captureScope : captureScopes) {
             check(jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_key = ?"
@@ -671,14 +649,10 @@ public final class WorkspaceRecoveryStore {
         }
         if (!heads.isEmpty()) {
             var head = heads.getFirst();
-            long compacted = ((Number) {
-                head.get("compacted_through_revision")).longValue();
-            }
+            long compacted = ((Number) head.get("compacted_through_revision")).longValue();
             long revision = ((Number) head.get("journal_revision")).longValue();
             if (compacted > 0 || revision == 0 && "DELETED".equals(head.get("state"))) {
-                check(!retirements.isEmpty() && "DELETED".equals(head.get("state")) {
-                    && compacted == revision, "source_drift");
-                }
+                check(!retirements.isEmpty() && "DELETED".equals(head.get("state")) && compacted == revision, "source_drift");
                 var completedGc = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE session_scope_key = ?"
                         + " AND scope_key = ? AND target_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' AND state = 'SUCCEEDED'"
                         + " AND operation_id = ? LIMIT 1" + currentRead, String.class,
@@ -800,9 +774,7 @@ public final class WorkspaceRecoveryStore {
     private static void fields(ObjectNode target, Map<String, Object> row, String... mapping) {
         for (int i = 0; i < mapping.length; i += 2) {
             Object value = row.get(mapping[i + 1]);
-            target.set(mapping[i], JSON.valueToTree(value instanceof Timestamp time ? time.getTime() {
-                : value));
-            }
+            target.set(mapping[i], JSON.valueToTree(value instanceof Timestamp time ? time.getTime() : value));
         }
     }
 

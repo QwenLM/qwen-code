@@ -94,9 +94,7 @@ class WorkspaceCsiReservationStoreTest {
         for (String change : new String[] {"registration_revision = 2", "physical_key = 'wrong'",
                 "tenant_id = 'wrong'", "registration_json = '{}'"}) {
             jdbc.update("UPDATE ma_storage SET " + change);
-            assertUnavailable(() {
-                -> store.inspect(registration));
-            }
+            assertUnavailable(() -> store.inspect(registration));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(original);
             jdbc.update("DELETE FROM ma_storage");
             store.register(registration);
@@ -105,9 +103,7 @@ class WorkspaceCsiReservationStoreTest {
         for (String corrupt : new String[] {encoded + " {}", encoded.substring(0, encoded.length() - 1) + ",\"extra\":true}",
                 "{\"tenantId\":\"wrong\"," + encoded.substring(1)}) {
             jdbc.update("UPDATE ma_storage SET registration_json = ?", corrupt);
-            assertUnavailable(() {
-                -> store.inspect(registration));
-            }
+            assertUnavailable(() -> store.inspect(registration));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(original);
         }
     }
@@ -167,9 +163,7 @@ class WorkspaceCsiReservationStoreTest {
                 "provision_request_id = 'changed'", "drain_requested = TRUE", "binding_state = 'READY'"}) {
             var snapshot = jdbc.queryForMap("SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
             jdbc.update("UPDATE ma_runtime_binding SET " + change + " WHERE binding_id = ?", original.getBindingId());
-            assertUnavailable(() {
-                -> store.reserve(registration, bindings, original, reservationId));
-            }
+            assertUnavailable(() -> store.reserve(registration, bindings, original, reservationId));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(before);
             for (String field : new String[] {"record_version", "operation_owner", "operation_generation",
                     "operation_lease_until", "runtime_generation", "workspace_generation", "provision_request_id",
@@ -306,9 +300,7 @@ class WorkspaceCsiReservationStoreTest {
         for (String change : new String[] {"provision_seed_ciphertext = NULL", "credential_key_id = NULL",
                 "provision_seed_ciphertext = 'corrupt'", "credential_key_id = 'different'"}) {
             jdbc.update("UPDATE ma_runtime_binding SET " + change);
-            assertUnavailable(() {
-                -> store.reserve(registration, bindings, original, UUID.randomUUID().toString()));
-            }
+            assertUnavailable(() -> store.reserve(registration, bindings, original, UUID.randomUUID().toString()));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(before);
             jdbc.update("UPDATE ma_runtime_binding SET provision_seed_ciphertext = ?, credential_key_id = ?",
                     snapshot.get("provision_seed_ciphertext"), snapshot.get("credential_key_id"));

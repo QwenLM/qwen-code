@@ -2728,9 +2728,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!pendingStatus(operation.kind()).equals(session.status())) {
             throw new IllegalStateException("Session " + sessionId + " is "
                     + session.status() + " during its "
-                    + operation.kind() {
-                        + " operation");
-                    }
+                    + operation.kind() + " operation");
         }
         if (WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion())) {
             if (lifecycle == null) {

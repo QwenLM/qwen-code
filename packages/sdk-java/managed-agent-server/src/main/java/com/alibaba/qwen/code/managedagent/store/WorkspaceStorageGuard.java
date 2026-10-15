@@ -431,9 +431,7 @@ public class WorkspaceStorageGuard {
         if (!migrations.isEmpty()) {
             Identity expected;
             try {
-                expected = json.readValue((String) {
-                    migrations.getFirst().get("history_identity_json"), Identity.class);
-                }
+                expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
             } catch (IOException error) {
                 throw WorkspaceExecutionStore.unavailable();
             }

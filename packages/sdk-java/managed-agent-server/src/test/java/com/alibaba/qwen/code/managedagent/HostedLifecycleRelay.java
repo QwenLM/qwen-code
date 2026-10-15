@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -52,13 +53,17 @@ final class HostedLifecycleRelay implements AutoCloseable {
             var request = new Request(exchange.getRequestMethod(), exchange.getRequestURI().toString(),
                     Map.copyOf(exchange.getRequestHeaders()), exchange.getRequestBody().readAllBytes());
             Fault selected = fault;
-            if (!selected.before(request)) return;
+            if (!selected.before(request)) {
+                return;
+            }
             var outgoing = HttpRequest.newBuilder(backend.get().resolve(request.path()))
                     .method(request.method(), HttpRequest.BodyPublishers.ofByteArray(request.body()));
             copyHeaders(request.headers(), outgoing::header);
             var response = client.send(outgoing.build(), HttpResponse.BodyHandlers.ofInputStream());
             try (var input = response.body()) {
-                if (!selected.after(request, response.statusCode())) return;
+                if (!selected.after(request, response.statusCode())) {
+                    return;
+                }
                 copyHeaders(response.headers().map(), (name, value) -> exchange.getResponseHeaders().add(name, value));
                 boolean noBody = request.method().equals("HEAD") || response.statusCode() == 204 || response.statusCode() == 304;
                 exchange.sendResponseHeaders(response.statusCode(), noBody ? -1 : 0);
@@ -85,12 +90,17 @@ final class HostedLifecycleRelay implements AutoCloseable {
         var excluded = new HashSet<>(HOP);
         headers.forEach((name, values) -> {
             if (name.equalsIgnoreCase("connection")) {
-                for (String value : values) for (String field : value.split(","))
-                    excluded.add(field.strip().toLowerCase(Locale.ROOT));
+                for (String value : values) {
+                    for (String field : value.split(",")) {
+                        excluded.add(field.strip().toLowerCase(Locale.ROOT));
+                    }
+                }
             }
         });
         headers.forEach((name, values) -> {
-            if (!excluded.contains(name.toLowerCase(Locale.ROOT))) values.forEach(value -> copy.accept(name, value));
+            if (!excluded.contains(name.toLowerCase(Locale.ROOT))) {
+                values.forEach(value -> copy.accept(name, value));
+            }
         });
     }
 

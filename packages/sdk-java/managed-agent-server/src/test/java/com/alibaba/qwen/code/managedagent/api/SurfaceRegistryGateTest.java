@@ -118,9 +118,7 @@ class SurfaceRegistryGateTest {
                         continue;
                     }
                     for (RequestMethod method : methods) {
-                        routes.add(method.name() {
-                            + " " + pattern);
-                        }
+                        routes.add(method.name() + " " + pattern);
                     }
                 }
             });
@@ -144,9 +142,7 @@ class SurfaceRegistryGateTest {
             if (!mounted.contains(entry.routeKey())) {
                 drift.put("route " + entry.routeKey() + " is registered"
                         + " but no controller mounts it (entry "
-                        + entry.name() {
-                            + ")", "");
-                        }
+                        + entry.name() + ")", "");
             }
         }
         for (String route : mounted) {

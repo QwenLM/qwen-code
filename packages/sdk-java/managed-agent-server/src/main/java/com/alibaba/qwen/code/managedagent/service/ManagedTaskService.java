@@ -7,15 +7,15 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.CursorPositions;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.EventPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore.TaskEvent;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 

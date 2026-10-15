@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -301,9 +300,7 @@ class WorkspaceCsiRetirementStoreTest {
         String encoded = retirementIdentity();
         for (String corrupt : new String[] {"{}", encoded + " {}", encoded.substring(0, encoded.length() - 1) + ",\"extra\":true}"}) {
             updateRetirementIdentity(corrupt);
-            assertUnavailable(() {
-                -> store.inspectRetirement(registration, bindings, original));
-            }
+            assertUnavailable(() -> store.inspectRetirement(registration, bindings, original));
             assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, operation));
         }
         updateRetirementIdentity(encoded);

@@ -248,9 +248,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
         long sequence = 0;
         Object previous = null;
         for (var row : journal) {
-            assertThat(((Number) {
-                row.get("journal_revision")).longValue()).isEqualTo(++revision);
-            }
+            assertThat(((Number) row.get("journal_revision")).longValue()).isEqualTo(++revision);
             assertThat(row.get("previous_commit_digest")).isEqualTo(previous);
             previous = row.get("commit_digest");
             byte[] bytes = (byte[]) row.get("record_bytes");
@@ -270,9 +268,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
         var execution = execution(id);
         for (String kind : List.of("input.accepted", "tool.intent", "tool.receipt", "turn.settled")) {
             var matching = events.stream().filter(event -> event.path("kind").asText().equals(kind)).toList();
-            assertThat(matching).as(kind).hasSize(kind.equals("turn.settled") ? 0 : kind.equals("tool.receipt") ? (applied ? 1 : 0) {
-                : 1);
-            }
+            assertThat(matching).as(kind).hasSize(kind.equals("turn.settled") ? 0 : kind.equals("tool.receipt") ? (applied ? 1 : 0) : 1);
             if (kind.equals("input.accepted")) {
                 assertThat(matching.getFirst().path("payload").path("turnId").asText()).isEqualTo(execution.get("turn_id"));
             }
@@ -321,9 +317,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
             var restored = report.path("restoreTransactions").get(index);
             var row = journal.get(index);
             assertThat(restored.path("transactionId").asText()).isEqualTo(row.get("transaction_id"));
-            assertThat(Base64.getDecoder().decode(restored.path("recordBytesBase64").asText())).isEqualTo((byte[]) {
-                row.get("record_bytes"));
-            }
+            assertThat(Base64.getDecoder().decode(restored.path("recordBytesBase64").asText())).isEqualTo((byte[]) row.get("record_bytes"));
             assertThat(restored.path("recordDigest").asText()).isEqualTo(row.get("record_digest"));
         }
         if (session.get("fault").toString().startsWith("receipt-")) {
@@ -333,9 +327,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
             var matching = journal.stream().filter(row -> row.get("transaction_id").equals(target.path("transactionId").asText())).toList();
             assertThat(matching).hasSize(applied ? 1 : 0);
             if (applied) {
-                assertThat((byte[]) {
-                    matching.getFirst().get("record_bytes")).isEqualTo(Base64.getDecoder().decode(target.path("recordBytesBase64").asText()));
-                }
+                assertThat((byte[]) matching.getFirst().get("record_bytes")).isEqualTo(Base64.getDecoder().decode(target.path("recordBytesBase64").asText()));
                 assertThat(report.path("receipt").path("transactionId")).isEqualTo(target.path("transactionId"));
                 assertThat(report.path("receipt").path("replayed").asBoolean(true)).isFalse();
             }
@@ -418,15 +410,11 @@ final class HostedShellOutputProbe implements AutoCloseable {
     @Override
     public void close() throws Exception {
         for (Object value : owned()) {
-            capture((Process) {
-                ReflectionTestUtils.getField(value, "process"));
-            }
+            capture((Process) ReflectionTestUtils.getField(value, "process"));
         }
         processes.forEach(ProcessHandle::destroyForcibly);
         for (ProcessHandle process : processes) {
-            long deadline = System.nanoTime() {
-                + TimeUnit.SECONDS.toNanos(10);
-            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (running(process)) {
                 assertThat(System.nanoTime()).as("Shell worker/descendant cleanup %s", process.pid()).isLessThan(deadline);
                 Thread.sleep(20);

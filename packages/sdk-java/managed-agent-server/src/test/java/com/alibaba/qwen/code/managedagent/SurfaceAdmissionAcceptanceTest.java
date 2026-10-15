@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Capability;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
-import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -1396,9 +1396,7 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("ordinal", "0");
         String path = entry.template();
         for (Map.Entry<String, String> variable : variables.entrySet()) {
-            String placeholder = "{" + variable.getKey() {
-                + "}";
-            }
+            String placeholder = "{" + variable.getKey() + "}";
             if (path.contains(placeholder)) {
                 path = path.replace(placeholder, variable.getValue());
             }

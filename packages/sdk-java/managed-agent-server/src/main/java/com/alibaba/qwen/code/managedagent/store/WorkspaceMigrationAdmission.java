@@ -83,9 +83,7 @@ final class WorkspaceMigrationAdmission {
                         row.getString("tenant_id"), row.getString("session_id"), row.getString("workspace_storage_id")}, tenant, session);
         if (!sessions.isEmpty()) {
             var saved = sessions.getFirst();
-            WorkspaceRecoveryStore.check(tenant.equals(saved[0]) {
-                && session.equals(saved[1]), "migration_identity_conflict");
-            }
+            WorkspaceRecoveryStore.check(tenant.equals(saved[0]) && session.equals(saved[1]), "migration_identity_conflict");
             if (saved[2] != null) {
                 return saved[2];
             }

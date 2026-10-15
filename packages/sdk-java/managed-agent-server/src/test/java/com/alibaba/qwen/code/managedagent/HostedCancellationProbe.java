@@ -193,9 +193,7 @@ final class HostedCancellationProbe implements AutoCloseable {
         long revision = 0;
         long sequence = 0;
         for (var row : rows) {
-            assertThat(((Number) {
-                row.get("journal_revision")).longValue()).isEqualTo(++revision);
-            }
+            assertThat(((Number) row.get("journal_revision")).longValue()).isEqualTo(++revision);
             assertThat(transactions.add(row.get("transaction_id").toString())).isTrue();
             for (String line : new String((byte[]) row.get("record_bytes"), StandardCharsets.UTF_8).lines().toList()) {
                 JsonNode record = JSON.readTree(line);

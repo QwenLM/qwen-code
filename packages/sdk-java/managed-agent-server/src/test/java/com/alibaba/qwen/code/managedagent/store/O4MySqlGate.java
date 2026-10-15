@@ -28,7 +28,9 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         database = new O4MySqlDatabase();
         return database.source();
     }
-    @AfterEach void dropDatabase() { if (database != null) { database.close(); } }
+    @AfterEach void dropDatabase() { if (database != null) {
+            database.close();
+        } }
 
     @Test
     void writerReallyWaitsOnRetirementTransactionAndThenIsRejected() throws Exception {
@@ -65,9 +67,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
                             + " JOIN performance_schema.data_locks locks ON locks.ENGINE = waits.ENGINE"
                             + " AND locks.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
                             + " WHERE threads.PROCESSLIST_ID = ? AND locks.OBJECT_SCHEMA = ?"
-                            + " AND locks.OBJECT_NAME = 'ma_tenant_guard'", Long.class, connection.get(), schema) {
-                                > 0;
-                            }
+                            + " AND locks.OBJECT_NAME = 'ma_tenant_guard'", Long.class, connection.get(), schema) > 0;
                     if (!waiting) {
                         Thread.sleep(20);
                     }
@@ -290,9 +290,7 @@ public class O4MySqlGate extends ToolPublicationCollectorTest {
         while (!"COLLECTED".equals(state())) {
             assertThat(gc.runOnce()).isTrue();
             pages++;
-            assertThat(pages).isLessThanOrEqualTo((count + 3 + 99) {
-                / 100);
-            }
+            assertThat(pages).isLessThanOrEqualTo((count + 3 + 99) / 100);
             if (!"COLLECTED".equals(state())) {
                 assertThat(held()).isEqualTo(total + 2000);
             }

@@ -152,9 +152,7 @@ final class HookAdmissionHistory {
             commit("execute-" + index, "hook_execution", execution(index), List.of());
             last =
                     new Admission(
-                            index, selects.get(), statements.get(), System.nanoTime() {
-                                - started);
-                            }
+                            index, selects.get(), statements.get(), System.nanoTime() - started);
             executions++;
         }
         return last;
@@ -194,9 +192,7 @@ final class HookAdmissionHistory {
                 connection,
                 (method, arguments) -> {
                     if (method.equals("prepareStatement") || method.equals("prepareCall")) {
-                        record((String) {
-                            arguments[0]);
-                        }
+                        record((String) arguments[0]);
                         if (intruderOnceKey != null
                                 && ((String) arguments[0])
                                         .startsWith("INSERT INTO ma_session_record")) {

@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService.WorkspacePage;
 import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService;
+import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService.WorkspacePage;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.WorkspaceSummary;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;

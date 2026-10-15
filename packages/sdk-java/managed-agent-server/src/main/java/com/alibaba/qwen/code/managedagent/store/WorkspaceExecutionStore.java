@@ -230,9 +230,7 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         if (grants.getFirst() == 1) {
-            throw actionResponse ? unavailablePendingGrant() {
-                : unavailable();
-            }
+            throw actionResponse ? unavailablePendingGrant() : unavailable();
         }
         if (grants.getFirst() != 2) {
             throw unavailable();
@@ -475,9 +473,7 @@ public class WorkspaceExecutionStore {
                     String session = row.getString("runtime_session_id");
                     long generation = row.getLong("runtime_generation");
                     if (holder == null) {
-                        return binding == null && session == null && row.getObject("runtime_generation") {
-                            == null;
-                        }
+                        return binding == null && session == null && row.getObject("runtime_generation") == null;
                     }
                     return saved.getBindingId().equals(binding) && saved.getGeneration() == generation && session != null
                             && holder.equals(digest(binding + "\u0000" + generation + "\u0000" + session))

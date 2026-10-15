@@ -86,9 +86,7 @@ class ManagedAgentPropertiesTest {
                 new org.springframework.core.io.ClassPathResource("application.yml"));
         var values = new java.util.LinkedHashMap<String, Object>();
         for (var source : loaded) {
-            var enumerable = (org.springframework.core.env.EnumerablePropertySource<?>) {
-                source;
-            }
+            var enumerable = (org.springframework.core.env.EnumerablePropertySource<?>) source;
             for (String name : enumerable.getPropertyNames()) {
                 values.put(name, enumerable.getProperty(name));
             }
@@ -597,9 +595,7 @@ class ManagedAgentPropertiesTest {
             }
             if (group != null) {
                 collectMillisKeys(group,
-                        prefix + kebab(field.getName()) {
-                            + ".", millisKeys);
-                        }
+                        prefix + kebab(field.getName()) + ".", millisKeys);
             }
         }
     }

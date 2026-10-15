@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
@@ -238,9 +238,7 @@ public class SessionLifecycleCoordinator {
                         && httpError.getErrorCode() != null
                         && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
                                 || "runtime_admission_closed".equals(httpError.getErrorCode()))
-                        ? httpError.getErrorCode() {
-                            : "workspace_lifecycle_hooks_unsettled";
-                        }
+                        ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
             }
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,

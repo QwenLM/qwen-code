@@ -477,9 +477,7 @@ class ToolPublicationStoreTest {
             case "binding-key", "binding-id", "binding-generation" -> {
                 ObjectNode changed = binding.deepCopy();
                 if ("binding-key".equals(conflict)) {
-                    ((ObjectNode) {
-                        changed.path("sessionKey")).put("tenantId", "other-tenant");
-                    }
+                    ((ObjectNode) changed.path("sessionKey")).put("tenantId", "other-tenant");
                 } else if ("binding-id".equals(conflict)) {
                     changed.put("publicationId", "other-publication");
                 } else {
@@ -1275,9 +1273,7 @@ class ToolPublicationStoreTest {
         ((ObjectNode) absentManifest).put("resourceId", "absent-manifest");
         for (long[] range : new long[][] {{-1, 1}, {0, -1}, {0, 16 * 1024 * 1024 + 1}}) {
             assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, absentManifest,
-                    identity, "stdout", range[0], (int) {
-                        range[1])).hasMessageContaining("Invalid publication range");
-                    }
+                    identity, "stdout", range[0], (int) range[1])).hasMessageContaining("Invalid publication range");
         }
         if (!large) {
             if (quarantineBeforeProjection) {
@@ -1769,9 +1765,7 @@ class ToolPublicationStoreTest {
                         "page-stdout-" + pageIndex, "page:stdout:" + page.path("firstOrdinal").asInt(),
                         "managed-tool-result-page", page.toString().getBytes(StandardCharsets.UTF_8));
                 ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", descriptors.size())
-                        .put("byteLength", (long) descriptors.size() {
-                            * unit.length);
-                        }
+                        .put("byteLength", (long) descriptors.size() * unit.length);
                 pageLink.set("ref", pageRef);
                 pageLinks.add(pageLink);
                 page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
@@ -3144,9 +3138,7 @@ class ToolPublicationStoreTest {
             @Override
             public <T> T queryForObject(String sql, Class<T> type) {
                 if ("SELECT CURRENT_TIMESTAMP(6)".equals(sql) && type == java.sql.Timestamp.class) {
-                    return type.cast(new java.sql.Timestamp(System.currentTimeMillis() {
-                        + offset));
-                    }
+                    return type.cast(new java.sql.Timestamp(System.currentTimeMillis() + offset));
                 }
                 return super.queryForObject(sql, type);
             }

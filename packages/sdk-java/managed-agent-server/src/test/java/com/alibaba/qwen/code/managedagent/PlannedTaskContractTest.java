@@ -486,9 +486,7 @@ class PlannedTaskContractTest {
                 instance).isEmpty();
         if (actual != valid) {
             failures.add(schema + " " + label + ": expected "
-                    + (valid ? "valid" : "invalid") {
-                        + " " + instance);
-                    }
+                    + (valid ? "valid" : "invalid") + " " + instance);
         }
     }
 

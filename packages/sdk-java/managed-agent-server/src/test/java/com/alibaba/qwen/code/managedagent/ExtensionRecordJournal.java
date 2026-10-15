@@ -183,7 +183,7 @@ public final class ExtensionRecordJournal {
         List<CommitResource> closure = new ArrayList<>(resources);
         closure.add(input);
         return request("commitMcpRecord", commandId, bytes(body), 1_000,
-                event ->{}, records -> {
+                event -> {}, records -> {
                     int cut = records.indexOf('\n') + 1;
                     return records.substring(0, cut) + lines
                             + records.substring(cut);
@@ -230,9 +230,7 @@ public final class ExtensionRecordJournal {
                             "outputRef", "lastObservationRef")) {
                         JsonNode ref = rewritten.get(field);
                         if (ref != null && ref.isObject() && !ref.isNull()) {
-                            byte[] placeholder = new byte[(int) {
-                                ref.required("byteLength").longValue()];
-                            }
+                            byte[] placeholder = new byte[(int) ref.required("byteLength").longValue()];
                             String digest = sha256(placeholder);
                             rewritten.putObject(field)
                                     .put("resourceId", ref.required("resourceId").textValue())

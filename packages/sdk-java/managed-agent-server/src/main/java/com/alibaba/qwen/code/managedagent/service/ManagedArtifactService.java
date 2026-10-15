@@ -8,8 +8,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.TenantContext;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -72,9 +72,7 @@ public class ManagedArtifactService {
         for (int index = 0; index < artifacts.size(); index++) {
             var artifact = artifacts.get(index);
             var view = view(artifact, availability.get(artifact.descriptor().path("id").asText()), sessionRead);
-            ((ObjectNode) result.path("artifacts").get(index)).setAll((ObjectNode) {
-                view.artifact());
-            }
+            ((ObjectNode) result.path("artifacts").get(index)).setAll((ObjectNode) view.artifact());
             canRead |= view.access().canReadContent();
         }
         return new ToolResultResponse(result, new ArtifactAccess(canRead));
@@ -251,9 +249,7 @@ public class ManagedArtifactService {
                     }
                 };
                 if (selection.partial()) {
-                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) {
-                        selection.length(), lease, guard);
-                    }
+                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), lease, guard);
                     lease.check();
                     guard.run();
                     headers(response, artifact, etag, selection, size);
@@ -319,9 +315,7 @@ public class ManagedArtifactService {
                 HexFormat.of().parseHex(artifact.descriptor().path("sha256").asText())) + ":");
         if (selection.partial()) {
             response.setHeader("Content-Range", "bytes " + selection.offset() + "-"
-                    + (selection.offset() + selection.length() - 1) {
-                        + "/" + size);
-                    }
+                    + (selection.offset() + selection.length() - 1) + "/" + size);
         }
     }
 

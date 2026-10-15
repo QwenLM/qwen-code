@@ -943,9 +943,7 @@ class ManagedSessionLifecycleTest {
                         + " AND tenant_id = ? AND session_id = ?", tenant, sessionId);
                 var delivery = new com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery(tenant, sessionId,
                         "key", "renamed", ((Number) original.get("target_revision")).longValue(),
-                        ((Number) original.get("attempt_count")).intValue(), ((Number) {
-                            original.get("claim_generation")).longValue());
-                        }
+                        ((Number) original.get("attempt_count")).intValue(), ((Number) original.get("claim_generation")).longValue());
                 new TransactionTemplate(transactionManager).execute(ignored -> store.completeSessionRename(delivery,
                         (String) original.get("claim_owner"), FixtureHarness.BOOT_ID));
                 assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("renamed");

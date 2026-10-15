@@ -138,9 +138,7 @@ class WorkspaceSessionRetentionTest {
             web(operation, tenant, session, "owner", "shell-" + operation)
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
-            var mutation = "delete".equals(operation) ? delete(PUBLIC + session) {
-                : post(PUBLIC + session + "/" + operation);
-            }
+            var mutation = "delete".equals(operation) ? delete(PUBLIC + session) : post(PUBLIC + session + "/" + operation);
             request(mutation, tenant, "owner", "shell-public-" + operation)
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));

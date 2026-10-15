@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
@@ -184,9 +183,7 @@ class ManagedActionsTest {
             String tenant = tenant();
             String session = session(tenant);
             boolean multibyte = "multibyte".equals(boundary);
-            int length = "ascii-over".equals(boundary) {
-                ? 8193 : 8192;
-            }
+            int length = "ascii-over".equals(boundary) ? 8193 : 8192;
             int prefixBytes = multibyte ? 8191 : 8192;
             String payload = multibyte
                     ? prefix + "a".repeat(8191 - prefix.length()) + "😀tail" + suffix
@@ -214,9 +211,7 @@ class ManagedActionsTest {
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = inputJournal(tenant, session, "{\"toolName\":\"write_file\",\"input\":{}}");
-            ObjectNode ref = (ObjectNode) {
-                journal.options.path("inputRef");
-            }
+            ObjectNode ref = (ObjectNode) journal.options.path("inputRef");
             String resourceId = ref.path("resourceId").asText();
             journal.change("requested", null);
             switch (fault) {
@@ -228,7 +223,6 @@ class ManagedActionsTest {
                 case "version" -> ref.put("schemaVersion", 2);
                 case "length" -> ref.put("byteLength", 1);
                 case "digest" -> ref.put("digest", "0".repeat(64));
-                default -> {}
             }
             if ("corrupt".equals(fault)) {
                 jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
@@ -272,9 +266,7 @@ class ManagedActionsTest {
         for (boolean otherTenant : List.of(false, true)) {
             String tenant = tenant();
             String session = session(tenant);
-            String foreignTenant = otherTenant ? tenant() {
-                : tenant;
-            }
+            String foreignTenant = otherTenant ? tenant() : tenant;
             String foreignSession = session(foreignTenant);
             ActionJournal foreign = new ActionJournal(journals, foreignTenant, foreignSession, 100, 1000)
                     .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"foreign secret\"}}"));
@@ -301,9 +293,7 @@ class ManagedActionsTest {
                 "scalar", "mcp", "utf8", "empty", "surrogate", "payloadField", "blankRuntime")) {
             String tenant = tenant();
             String session = session(tenant);
-            ObjectNode wrapper = (ObjectNode) {
-                json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
-            }
+            ObjectNode wrapper = (ObjectNode) json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
             switch (fault) {
                 case "session" -> wrapper.put("harnessSessionId", "other-session");
                 case "runtime" -> wrapper.put("runtimeSessionId", 1);
@@ -318,7 +308,6 @@ class ManagedActionsTest {
                 case "payloadField" -> wrapper.put(
                         "payloadJson", "{\"toolName\":\"write_file\",\"input\":{},\"grant\":\"internal authorization\"}");
                 case "blankRuntime" -> wrapper.put("runtimeSessionId", "");
-                default -> {}
             }
             byte[] bytes = json.writeValueAsBytes(wrapper);
             if ("empty".equals(fault)) {
@@ -717,8 +706,7 @@ class ManagedActionsTest {
         responses.put(
                 journal.id,
                 call -> {
-                    if (attempts.incrementAndGet() == 1)
-                    {
+                    if (attempts.incrementAndGet() == 1) {
                         throw new IllegalStateException("temporarily unavailable");
                     }
                     journal.change("decided", call.getArgument(3));
@@ -901,7 +889,7 @@ class ManagedActionsTest {
                             .header("Idempotency-Key", "disabled-ended")
                             .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
                     .path("id").asText();
-            var before = jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
+            var before = jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row, n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst();
             var claim = sessions.claimOperation(tenant, session, endedOp, "stopped-worker", Duration.ofMinutes(10))
                     .orElseThrow();
             ended.change("expired", null);
@@ -913,7 +901,7 @@ class ManagedActionsTest {
             assertThat(result.state()).isEqualTo("FAILED");
             assertThat(result.claimGeneration()).isEqualTo(claim.claimGeneration());
             assertThat(actions.response(tenant, session, endedOp).errorCode()).isEqualTo("action_expired");
-            assertThat(jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row,n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
+            assertThat(jdbc.query("SELECT * FROM ma_operation WHERE operation_id = ?", (row, n) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), pendingOp).getFirst())
                     .isEqualTo(before);
         } finally {
             doReturn(true).when(harness).isAvailable();
@@ -1132,9 +1120,7 @@ class ManagedActionsTest {
 
     private void assertNoInputPreview(String tenant, String session, String id) throws Exception {
         for (JsonNode view : inputViews(tenant, session, id)) {
-            assertThat(view.has("input_preview") {
-                || view.has("inputPreview")).isFalse();
-            }
+            assertThat(view.has("input_preview") || view.has("inputPreview")).isFalse();
             assertThat(view.path("state").asText()).isEqualTo("requested");
         }
     }
@@ -1234,7 +1220,7 @@ class ManagedActionsTest {
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,created_at,updated_at)"
                         + " VALUES (?,'SESSION_CREATE_ACTOR',?,?,'ACTOR',?,?,?,?,?, ?,?,'COMPLETED',?,?)",
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("fixture",tenant,key),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("fixture", tenant, key),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenant), tenant,
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("owner"), "owner", key,
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(key), "sha256:test",

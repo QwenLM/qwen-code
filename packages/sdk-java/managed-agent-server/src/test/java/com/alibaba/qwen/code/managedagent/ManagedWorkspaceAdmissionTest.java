@@ -8,8 +8,8 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
@@ -278,7 +278,7 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setApprovalMode(mode);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-shell", "/workspace")));
-        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored ->{}, registry, properties);
+        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         var transaction = new TransactionTemplate(transactionManager);
         String digest = "sha256:" + "a".repeat(64);
         var selection = new WorkspaceSelection("ws-shell", ".");
@@ -307,7 +307,7 @@ class ManagedWorkspaceAdmissionTest {
         var original = transaction.execute(status -> admitted.submitTurn(tenant, "actor-a", "original", session, input));
         assertThat(admitted.getPublicSession(tenant, "actor-a", session).capabilities().foregroundShell()).isTrue();
         properties.getHarness().setWorkspaceShellEnabled(false);
-        ManagedAgentStore disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored ->{}, registry, properties);
+        ManagedAgentStore disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         ManagedAgentService stopped = new ManagedAgentService(disabled, new RequestDigests(), coordinator, harness, registry);
         assertThat(transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
                 "actor-a", "create-shell", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId())
@@ -367,7 +367,7 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-migration", "actor-a", true);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored ->{}, registry, properties);
+        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         var transaction = new TransactionTemplate(transactionManager);
         String digest = "sha256:" + "a".repeat(64);
         String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(
@@ -796,7 +796,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties changed = new ManagedAgentProperties();
         changed.setAgentRevision("2");
         ManagedAgentStore upgraded = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, changed);
+                Clock.systemUTC(), ignored -> {}, registry, changed);
 
         assertThat(upgraded.insertWorkspaceSessionCommand(tenant, "actor-a",
                 "key", digest, "qwen-code", "1", null, List.of(), null,
@@ -947,7 +947,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
         var admission = transaction.execute(status ->
@@ -1066,7 +1066,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         // The Workspace authority refuses the first attach and admits the
         // second, so a rename after the refused one is observable.
         UnavailableHarnessConnector harness =
@@ -1181,7 +1181,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         // A Harness that lost the Session answers the rename with a 4xx,
         // which the client surfaces as a DaemonHttpException — a permanent
         // failure, but not a broker refusal.
@@ -1275,7 +1275,7 @@ class ManagedWorkspaceAdmissionTest {
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         otherTenant, "storage-shared", "/unused/shared")));
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         // An unproxied store has no @Transactional; creation resolves the
         // Workspace only inside a transaction, as the Spring bean provides.
         TransactionTemplate transaction = new TransactionTemplate(
@@ -1385,9 +1385,7 @@ class ManagedWorkspaceAdmissionTest {
                 {"agent_id":"qwen-code","workspace":{"workspace_id":"ws-a"}}
                 """;
         for (int attempt = 0; attempt < 2; attempt++) {
-            String body = (attempt == 0) {
-                == boundFirst ? bound : unbound;
-            }
+            String body = (attempt == 0) == boundFirst ? bound : unbound;
             var response = mvc.perform(post("/v1/agents/sessions")
                     .header(TenantContextFilter.HEADER, tenant)
                     .header("Idempotency-Key", "same-key")
@@ -1782,7 +1780,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, properties);
+                Clock.systemUTC(), ignored -> {}, registry, properties);
         HarnessCoordinator noopCoordinator = new HarnessCoordinator(null,
                 null, null, null, null, Clock.systemUTC(),
                 new ManagedAgentProperties()) {
@@ -1810,7 +1808,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored ->{}, registry, properties);
+                Clock.systemUTC(), ignored -> {}, registry, properties);
         return new ManagedAgentService(gated, new RequestDigests(), null,
                 new UnavailableHarnessConnector() {
                     @Override

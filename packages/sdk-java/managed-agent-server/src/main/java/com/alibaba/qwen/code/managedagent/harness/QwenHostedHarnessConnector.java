@@ -20,8 +20,8 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
@@ -219,9 +219,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withChildWorkspaces(childWorkspaces)
-                    .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() {
-                        == 2 ? 2 : 1));
-                    }
+                    .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
@@ -350,9 +348,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             AttachmentLock slot = attachmentLocks.compute(key,
                     (ignored, held) -> {
                         AttachmentLock next = held == null
-                                ? new AttachmentLock() {
-                                    : held;
-                                }
+                                ? new AttachmentLock() : held;
                         next.holders++;
                         return next;
                     });
@@ -544,9 +540,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (ref == null) {
             // A resident Harness refuses an ordinary load after the dispatcher loses its cache.
             doCreateOrLoad(tenantId, sessionId, true,
-                    session.workspace() {
-                        != null || workspaceExecution.verifiedRecoveryEnabled(), true);
-                    }
+                    session.workspace() != null || workspaceExecution.verifiedRecoveryEnabled(), true);
             ref = attachments.get(key);
         }
         client().resolveAction(
@@ -857,9 +851,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     sessionId);
             try {
                 createOrLoad(tenantId, sessionId,
-                        session.harnessBootId() {
-                            != null, false);
-                        }
+                        session.harnessBootId() != null, false);
             } catch (DaemonHttpException error) {
                 // The Harness still holds the Session this control plane
                 // attached before it restarted: re-take it passively, the

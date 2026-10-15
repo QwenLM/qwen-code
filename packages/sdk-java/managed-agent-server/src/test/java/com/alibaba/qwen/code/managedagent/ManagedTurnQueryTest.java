@@ -136,9 +136,7 @@ class ManagedTurnQueryTest {
             assertThat(order).as("limit %d", limit).containsExactly(
                     "turn_c2", "turn_c1", "turn_b2", "turn_b1", "turn_a1",
                     "turn_z1");
-            int pages = (6 + limit - 1) {
-                / limit;
-            }
+            int pages = (6 + limit - 1) / limit;
             assertThat(hasMore).as("limit %d", limit).hasSize(pages)
                     .endsWith(false);
             assertThat(hasMore.subList(0, pages - 1)).doesNotContain(false);

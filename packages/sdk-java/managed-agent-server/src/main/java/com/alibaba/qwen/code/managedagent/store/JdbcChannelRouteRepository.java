@@ -71,9 +71,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
                                 + " created_at, updated_at) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
                         operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
                         candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
-                        "admitted".equals(candidate.state()) {
-                            ? "ADMITTED" : "STAGING", candidate.state(), now, now);
-                        }
+                        "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
             }
         });
         ChannelRoute saved = find(candidate.tenantId(), route).orElseThrow(() ->

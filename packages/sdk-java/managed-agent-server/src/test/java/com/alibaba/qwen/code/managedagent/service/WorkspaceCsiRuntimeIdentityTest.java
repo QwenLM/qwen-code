@@ -71,7 +71,7 @@ class WorkspaceCsiRuntimeIdentityTest {
     private Api api;
     private RuntimeTransport transport;
     private final AtomicInteger attestations = new AtomicInteger();
-    private Runnable afterAttestation = () ->{};
+    private Runnable afterAttestation = () -> {};
 
     @BeforeEach
     void setUp() {
@@ -375,9 +375,7 @@ class WorkspaceCsiRuntimeIdentityTest {
     void newPodRejectsUnsafeDefaultsWhileAcceptingOmittedCoreFalseBooleans() {
         for (var change : List.<Consumer<Map<String, Object>>>of(
                 pod -> {
-                    var container = WorkspaceCsiRuntimeIdentity.map(((List<?>) {
-                        nested(pod, "spec").get("containers")).getFirst());
-                    }
+                    var container = WorkspaceCsiRuntimeIdentity.map(((List<?>) nested(pod, "spec").get("containers")).getFirst());
                     nested(container, "securityContext").put("runAsUser", 0);
                 },
                 pod -> {
@@ -521,8 +519,8 @@ class WorkspaceCsiRuntimeIdentityTest {
         private final Map<String, Map<String, Object>> objects = new LinkedHashMap<>();
         private int creates;
         private String loseReply;
-        private Consumer<Map<String, Object>> changeCreatedPod = ignored ->{};
-        private Consumer<Map<String, Object>> observePod = ignored ->{};
+        private Consumer<Map<String, Object>> changeCreatedPod = ignored -> {};
+        private Consumer<Map<String, Object>> observePod = ignored -> {};
         private CompletableFuture<Map<String, Object>> secretReply;
 
         private Api() {

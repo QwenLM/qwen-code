@@ -61,7 +61,7 @@ class WorkspaceRuntimeResolutionPivotTest {
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         TENANT, STORAGE, root.toString())));
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), ignored ->{}, new ManagedWorkspaceRegistry(jdbc), properties);
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         WorkspaceRuntimeResolver resolver = new WorkspaceRuntimeResolver(
                 store, new WorkspaceExecutionStore(jdbc,
                         new DataSourceTransactionManager(dataSource)),

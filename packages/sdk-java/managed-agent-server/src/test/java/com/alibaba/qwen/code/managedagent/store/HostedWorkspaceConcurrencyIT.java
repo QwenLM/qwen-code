@@ -1,10 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -251,7 +250,7 @@ class HostedWorkspaceConcurrencyIT {
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        return new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored ->{},
+        return new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
     }
 
@@ -319,8 +318,10 @@ class HostedWorkspaceConcurrencyIT {
         Broker(String name, Map<String, Object> configuration) throws Exception {
             directory = Files.createDirectory(temporary.resolve(name));
             Files.createDirectory(directory.resolve("state"));
-            if (LINUX) Files.setPosixFilePermissions(directory.resolve("state"),
-                    PosixFilePermissions.fromString("rwx------"));
+            if (LINUX) {
+                Files.setPosixFilePermissions(directory.resolve("state"),
+                        PosixFilePermissions.fromString("rwx------"));
+            }
             JSON.writeValue(directory.resolve("config.json").toFile(), configuration);
             process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(),
                     "-Dnode.executable=" + System.getProperty("node.executable", "node"),
@@ -399,9 +400,7 @@ class HostedWorkspaceConcurrencyIT {
                 if (request.isDone()) {
                     var response = request.get(1, TimeUnit.SECONDS);
                     throw new AssertionError("Request returned before the physical claim barrier: status="
-                            + response.statusCode() {
-                                + " body=" + response.body());
-                            }
+                            + response.statusCode() + " body=" + response.body());
                 }
                 if (System.nanoTime() > deadline) {
                     throw new AssertionError("Barrier timeout: " + path);

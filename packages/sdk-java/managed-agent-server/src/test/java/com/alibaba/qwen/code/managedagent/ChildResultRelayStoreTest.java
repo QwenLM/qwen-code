@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -127,9 +127,7 @@ class ChildResultRelayStoreTest {
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8));
             var out = new StringBuilder(64);
             for (byte value : hashed) {
-                out.append(Character.forDigit((value >> 4) {
-                    & 0xf, 16));
-                }
+                out.append(Character.forDigit((value >> 4) & 0xf, 16));
                 out.append(Character.forDigit(value & 0xf, 16));
             }
             return out.toString();

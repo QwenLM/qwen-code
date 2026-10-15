@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -244,9 +244,7 @@ class ManagedExtensionProjectionContractTest {
             Set<String> ids = new HashSet<>();
             for (JsonNode fixture : field.getValue()) {
                 assertTrue(ids.add(id(fixture)), () -> "duplicate "
-                        + field.getKey() {
-                            + " id: " + id(fixture));
-                        }
+                        + field.getKey() + " id: " + id(fixture));
             }
         }
         names.sort(null);

@@ -235,7 +235,8 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         String fractional = original.substring(0, match.start(1)) + match.group(1) + ".5" + original.substring(match.end(1));
         if (registration) {
             jdbc.update("UPDATE ma_storage SET registration_json = ?", fractional);
-            } else { saveRetirementIdentity(fractional);
+        } else {
+            saveRetirementIdentity(fractional);
         }
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Original CSI checkpoint snapshot is unavailable.").hasNoCause();
@@ -289,16 +290,12 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     + " WHERE resource_id = X'636865636b706f696e74'", bytes, bytes.length, hash(bytes));
         } else {
             if ("transaction".equals(limit) || "total".equals(limit)) {
-                byte[] bytes = new byte[ManagedSessionStoreModels.MAX_TRANSACTION_BYTES + ("transaction".equals(limit) {
-                    ? 1 : 0)];
-                }
+                byte[] bytes = new byte[ManagedSessionStoreModels.MAX_TRANSACTION_BYTES + ("transaction".equals(limit) ? 1 : 0)];
                 jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
                         bytes, bytes.length, hash(bytes));
             }
             if ("rows".equals(limit) || "total".equals(limit)) {
-                int count = "rows".equals(limit) {
-                    ? 4097 : 5;
-                }
+                int count = "rows".equals(limit) ? 4097 : 5;
                 List<Object[]> rows = new ArrayList<>();
                 for (int revision = 2; revision <= count; revision++) {
                     rows.add(new Object[]{revision, String.format("%064d", revision), "transaction-" + revision,
@@ -461,9 +458,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     return readOnly[0];
                 }
                 if ("setReadOnly".equals(method.getName())) {
-                    readOnly[0] = (Boolean) {
-                        args[0];
-                    }
+                    readOnly[0] = (Boolean) args[0];
                     return null;
                 }
                 if ("getMetaData".equals(method.getName())) {
@@ -487,9 +482,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                     });
                 }
                 if ("prepareStatement".equals(method.getName())) {
-                    String sql = (String) {
-                        args[0];
-                    }
+                    String sql = (String) args[0];
                     statements.add(sql);
                     assertThat(sql).startsWith("SELECT").doesNotContain("FOR UPDATE");
                     if (sql.contains("information_schema.tables")) {

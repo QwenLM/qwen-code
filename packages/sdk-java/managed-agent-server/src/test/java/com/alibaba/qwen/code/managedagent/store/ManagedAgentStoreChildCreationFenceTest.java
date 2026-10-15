@@ -45,7 +45,7 @@ class ManagedAgentStoreChildCreationFenceTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), ignored ->{}, new ManagedWorkspaceRegistry(jdbc), properties);
+                Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"

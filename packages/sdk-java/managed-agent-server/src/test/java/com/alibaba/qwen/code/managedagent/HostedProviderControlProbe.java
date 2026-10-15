@@ -184,9 +184,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
 
     private void captureProcesses() {
         for (Object value : new ArrayList<>(((Map<?, ?>) ReflectionTestUtils.getField(provisioner, "owned")).values())) {
-            Process process = (Process) {
-                ReflectionTestUtils.getField(value, "process");
-            }
+            Process process = (Process) ReflectionTestUtils.getField(value, "process");
             processes.add(process.toHandle());
             processes.addAll(process.descendants().toList());
         }
@@ -225,9 +223,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
         boolean released = phase.equals("released");
         if (released) {
             assertThat(releases.getOrDefault(runtimeId, 0)).as("worker closures forwarded")
-                    .isEqualTo(session.get("fault").equals("release-reply") {
-                        ? dropped + 1 : 1);
-                    }
+                    .isEqualTo(session.get("fault").equals("release-reply") ? dropped + 1 : 1);
             assertThat(owner(session).get("holder_key")).isNull();
             assertThat(deactivations.getOrDefault(runtimeId, 0)).isEqualTo(1);
             assertThat(sessionState(session, runtimeId)).isEqualTo("RELEASED");
@@ -253,9 +249,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
         assertThat(row.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
         JsonNode expected = report.path("reference").deepCopy();
         if (session.get("fault").equals("raw-contract")) {
-            ((ObjectNode) {
-                expected).put("dispatchMode", "deferred");
-            }
+            ((ObjectNode) expected).put("dispatchMode", "deferred");
         }
         assertThat(JSON.readTree(row.get("reference_json").toString())).isEqualTo(expected);
         assertThat(row.get("idempotency_key")).isEqualTo(report.path("reservation").path("idempotencyKey").asText());

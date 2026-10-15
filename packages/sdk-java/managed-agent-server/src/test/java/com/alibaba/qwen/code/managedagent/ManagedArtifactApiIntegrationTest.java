@@ -417,9 +417,7 @@ class ManagedArtifactApiIntegrationTest {
         var contract = OpenApiContract.load();
         for (String field : new String[] {"capture_scope", "reason_code"}) {
             var changed = result.deepCopy();
-            ((com.fasterxml.jackson.databind.node.ObjectNode) {
-                changed).put(field, "unknown");
-            }
+            ((com.fasterxml.jackson.databind.node.ObjectNode) changed).put(field, "unknown");
             assertThat(contract.validate("/components/schemas/PublicToolResult", changed)).isNotEmpty();
         }
     }
@@ -503,9 +501,7 @@ class ManagedArtifactApiIntegrationTest {
         if (copy.isObject()) {
             for (var field : copy.properties()) {
                 if (Set.of("created_at", "createdAt", "updatedAt").contains(field.getKey())) {
-                    ((com.fasterxml.jackson.databind.node.ObjectNode) {
-                        copy).put(field.getKey(), 0);
-                    }
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) copy).put(field.getKey(), 0);
                 } else if ("eventId".equals(field.getKey())) {
                     assertThat(field.getValue().asText()).matches("evt_[0-9a-f]{32}");
                     ((com.fasterxml.jackson.databind.node.ObjectNode) copy)

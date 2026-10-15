@@ -54,7 +54,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -438,7 +437,7 @@ class ManagedCwdChangeOperationTest {
         disabled.getRuntimeBroker().setProvisioner("local-process");
         disabled.getRuntimeBroker().setIsolationClass("session");
         ManagedAgentStore gated = new ManagedAgentStore(fixture.jdbc,
-                fixture.mapper, fixture.clock, ignored ->{}, new ManagedWorkspaceRegistry(fixture.jdbc), disabled);
+                fixture.mapper, fixture.clock, ignored -> {}, new ManagedWorkspaceRegistry(fixture.jdbc), disabled);
         OperationAdmission replay = gated.beginCwdChangeOperation(TENANT,
                 sessionId, ACTOR, ACTOR_DIGEST, "key", "digest",
                 "services/b", 1);
@@ -1586,7 +1585,7 @@ class ManagedCwdChangeOperationTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         ManagedAgentStore store = new ManagedAgentStore(jdbc, mapper, clock,
-                ignored ->{}, new ManagedWorkspaceRegistry(jdbc), properties);
+                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         return new Fixture(store, jdbc, mapper, properties, clock);
     }
 

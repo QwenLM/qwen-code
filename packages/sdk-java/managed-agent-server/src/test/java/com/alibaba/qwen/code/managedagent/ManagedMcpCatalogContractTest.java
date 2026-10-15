@@ -25,16 +25,12 @@ class ManagedMcpCatalogContractTest {
         assertThat(CONTRACT.validate("/components/schemas/PublicMcpCatalog", catalog)).isEmpty();
         for (String field : List.of("connectionGeneration", "runtime_binding_id", "configRevision", "grant", "headers", "env")) {
             ObjectNode leaked = catalog.deepCopy();
-            ((ObjectNode) {
-                leaked.at("/servers/0")).put(field, "secret");
-            }
+            ((ObjectNode) leaked.at("/servers/0")).put(field, "secret");
             assertThat(CONTRACT.validate("/components/schemas/PublicMcpCatalog", leaked)).as(field).isNotEmpty();
         }
         for (String field : List.of("server_revision", "catalog_revision")) {
             ObjectNode missing = catalog.deepCopy();
-            ((ObjectNode) {
-                missing.at("/servers/0")).remove(field);
-            }
+            ((ObjectNode) missing.at("/servers/0")).remove(field);
             assertThat(CONTRACT.validate("/components/schemas/PublicMcpCatalog", missing)).as(field).isNotEmpty();
             ObjectNode invalid = catalog.deepCopy();
             ((ObjectNode) invalid.at("/servers/0")).put(field, 0);

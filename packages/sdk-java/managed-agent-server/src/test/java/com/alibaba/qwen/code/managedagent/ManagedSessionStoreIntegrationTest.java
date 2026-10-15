@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -855,9 +855,7 @@ class ManagedSessionStoreIntegrationTest {
         // The genesis is tiny; eleven dense transactions carry the
         // cumulative bytes past 8 MiB.
         for (int revision = 1; revision <= 12; revision++) {
-            commit.accept(String.valueOf((char) {
-                ('a' + revision - 1)), revision);
-            }
+            commit.accept(String.valueOf((char) ('a' + revision - 1)), revision);
         }
         // The split below holds only while revisions 1..9 fit the budget
         // and a tenth does not.

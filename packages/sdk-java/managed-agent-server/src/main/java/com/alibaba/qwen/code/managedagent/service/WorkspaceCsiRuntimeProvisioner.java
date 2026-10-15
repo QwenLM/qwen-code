@@ -136,9 +136,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             require(guard != null && image != null && image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
                     && !command.isEmpty() && command.size() <= 32 && command.stream().allMatch(value ->
                             value != null && !value.isBlank() && value.length() <= 8192 && value.indexOf('\0') < 0)
-                    && artifacts.size() <= 48 && artifacts.stream().map(WorkerArtifact::configMapName).distinct().count() {
-                        == artifacts.size());
-                    }
+                    && artifacts.size() <= 48 && artifacts.stream().map(WorkerArtifact::configMapName).distinct().count() == artifacts.size());
         }
     }
 
@@ -496,9 +494,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var object = get("configmaps", artifact.configMapName());
             checkObject(object, Map.of("apiVersion", "v1", "kind", "ConfigMap", "immutable", true,
                     "metadata", Map.of("name", artifact.configMapName(), "namespace", registration.namespace())), artifact.uid());
-            require(object.get("data") {
-                == null || map(object.get("data")).isEmpty());
-            }
+            require(object.get("data") == null || map(object.get("data")).isEmpty());
             var data = map(object.get("binaryData"));
             require(data.keySet().equals(java.util.Set.of("chunk")));
             byte[] chunk = Base64.getDecoder().decode(text(data, "chunk", 1024 * 1024));
@@ -557,9 +553,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             require(empty(spec.get("initContainers")) && empty(spec.get("ephemeralContainers"))
                     && !Boolean.TRUE.equals(spec.get("shareProcessNamespace")));
             for (String field : List.of("hostNetwork", "hostPID", "hostIPC")) {
-                require(spec.get(field) {
-                    == null || Boolean.FALSE.equals(spec.get(field)));
-                }
+                require(spec.get(field) == null || Boolean.FALSE.equals(spec.get(field)));
             }
             var pvc = list(spec.get("volumes")).stream().map(WorkspaceCsiRuntimeIdentity::map)
                     .filter(volume -> "workspace".equals(volume.get("name"))).findFirst().orElseThrow();
@@ -632,9 +626,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     private void forgetPlacement(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         if (seed != null && handle != null) {
             placements.computeIfPresent(seed, (ignored, current) ->
-                    current.request().equals(request) && current.handle().equals(handle) {
-                        ? null : current);
-                    }
+                    current.request().equals(request) && current.handle().equals(handle) ? null : current);
         }
     }
 

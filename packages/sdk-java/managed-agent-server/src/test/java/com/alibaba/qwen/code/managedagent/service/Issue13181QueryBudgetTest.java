@@ -57,7 +57,6 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
-import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ref;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -959,9 +958,7 @@ class Issue13181QueryBudgetTest {
             Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
             String tenant = "cwd-" + UUID.randomUUID();
             fixture.createCwdSessions(tenant, 1);
-            fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) {
-                VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
-            }
+            fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
             fixture.ledger.reset();
             var page = fixture.service.listWebShellSessions(tenant, "reader", null, 20).data();
             assertThat(page).hasSize(1);
@@ -2014,9 +2011,7 @@ class Issue13181QueryBudgetTest {
         private static boolean matches(Query query, String[] fragments) {
             for (String fragment : fragments) {
                 boolean negated = fragment.startsWith("!");
-                String needle = negated ? fragment.substring(1) {
-                    : fragment;
-                }
+                String needle = negated ? fragment.substring(1) : fragment;
                 if (query.sql.contains(needle) == negated) {
                     return false;
                 }

@@ -83,7 +83,7 @@ class ManagedWorkspaceRolesMigrationTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), ignored ->{},
+                Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));

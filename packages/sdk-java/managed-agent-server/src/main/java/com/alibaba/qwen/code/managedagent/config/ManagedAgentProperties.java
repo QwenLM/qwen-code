@@ -223,9 +223,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
             if (!utf8FileNames(System.getProperty("sun.jnu.encoding", ""))) {
                 throw new IllegalStateException("Child Workspaces need UTF-8 file names; run the server"
                         + " under a UTF-8 locale (sun.jnu.encoding is "
-                        + System.getProperty("sun.jnu.encoding") {
-                            + ")");
-                        }
+                        + System.getProperty("sun.jnu.encoding") + ")");
             }
         }
     }

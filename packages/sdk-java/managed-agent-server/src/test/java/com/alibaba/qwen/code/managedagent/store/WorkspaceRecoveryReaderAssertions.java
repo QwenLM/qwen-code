@@ -60,8 +60,8 @@ public final class WorkspaceRecoveryReaderAssertions {
         for (String table : List.of("ma_session_head", "ma_resource",
                 "ma_output_capture", "ma_resource", "ma_resource_ref",
                 "ma_tool_execution", "ma_runtime_binding")) {
-                    result.put(table, jdbc.queryForList("SELECT * FROM " + table));
-                }
+            result.put(table, jdbc.queryForList("SELECT * FROM " + table));
+        }
         return result;
     }
 }

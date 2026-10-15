@@ -127,9 +127,7 @@ class WorkspaceSessionCloseTest {
             mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
                     .header("Idempotency-Key", "expired").principal(actor(tenant, "owner")))
                     .andExpect(status().isAccepted());
-            await().untilAsserted(() {
-                -> assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED"));
-            }
+            await().untilAsserted(() -> assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED"));
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'ACTION' AND tenant_id = ?",
                     Integer.class, tenant)).isEqualTo(1);
         }

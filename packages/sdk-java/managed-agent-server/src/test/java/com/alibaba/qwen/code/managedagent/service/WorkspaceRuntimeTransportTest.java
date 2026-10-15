@@ -74,9 +74,7 @@ class WorkspaceRuntimeTransportTest {
         for (RuntimeBindingRecord.State state : RuntimeBindingRecord.State.values()) {
             if (state != RuntimeBindingRecord.State.DRAINING) {
                 when(fixture.bindings().findById("binding-a")).thenReturn(fixture.runtime().withState(state, fixture.lease(), Instant.now()));
-                unavailable(() {
-                    -> acknowledge(fixture));
-                }
+                unavailable(() -> acknowledge(fixture));
             }
         }
         when(fixture.bindings().findById("binding-a")).thenReturn(fixture.runtime().withDrainRequested(false, Instant.now()));
@@ -86,9 +84,7 @@ class WorkspaceRuntimeTransportTest {
             if (state != RuntimeSessionRecord.State.READY) {
                 when(fixture.sessions().findById(fixture.session().getScope(), fixture.session().getRuntimeSessionId()))
                         .thenReturn(fixture.record().withState(state, Instant.now()));
-                unavailable(() {
-                    -> acknowledge(fixture));
-                }
+                unavailable(() -> acknowledge(fixture));
             }
         }
         when(fixture.sessions().findById(fixture.session().getScope(), fixture.session().getRuntimeSessionId())).thenReturn(fixture.record());

@@ -402,9 +402,7 @@ public final class ToolPublicationRetentionStore {
                                                     "SELECT retirement_generation, retired_at FROM"
                                                             + " ma_session WHERE tenant_id = ? AND"
                                                             + " session_id = ? FOR UPDATE",
-                            (result, index) {
-                                -> ManagedSchemaRows.read(result), tenant, session);
-                            }
+                            (result, index) -> ManagedSchemaRows.read(result), tenant, session);
                     if (roots.size() != 1 || roots.getFirst().get("retired_at") != null
                             || number(roots.getFirst(), "retirement_generation") != generation) {
                         return false;
@@ -493,9 +491,7 @@ public final class ToolPublicationRetentionStore {
                                         digest.equals(prior.get("request_digest"))
                                                 && request.equals(prior.get("request_json")),
                                         "Object write content conflicts");
-                                String id = (String) {
-                                    prior.get("operation_id");
-                                }
+                                String id = (String) prior.get("operation_id");
                                 String originalKey =
                                         ManagedSchemaKeys.operationKey(
                                                 OperationKind.OBJECT_PUT, scope, target, id);

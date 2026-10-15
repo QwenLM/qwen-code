@@ -3,10 +3,9 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -597,14 +596,14 @@ class WorkspaceStorageGuardTest {
 
     private WorkspaceStorageGuard guard(PlatformTransactionManager manager) {
         return new WorkspaceStorageGuard(jdbc, manager, properties, path -> {
-                    BasicFileAttributes attributes = Files.readAttributes(path,
+            BasicFileAttributes attributes = Files.readAttributes(path,
                             BasicFileAttributes.class);
-                    if (!attributes.isDirectory() || !path.equals(path.toRealPath())) {
-                        throw new java.io.IOException("Root changed");
-                    }
-                    return new WorkspaceStorageGuard.Identity(path.toString(), "test-host",
-                            "test-device", attributes.fileKey().toString(), attributes.creationTime().toInstant().toString());
-                });
+            if (!attributes.isDirectory() || !path.equals(path.toRealPath())) {
+                throw new java.io.IOException("Root changed");
+            }
+            return new WorkspaceStorageGuard.Identity(path.toString(), "test-host",
+            "test-device", attributes.fileKey().toString(), attributes.creationTime().toInstant().toString());
+        });
     }
 
     private static void assertUnavailable(Runnable action) {

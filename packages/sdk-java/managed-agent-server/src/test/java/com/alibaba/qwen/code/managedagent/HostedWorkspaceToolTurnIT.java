@@ -193,9 +193,7 @@ class HostedWorkspaceToolTurnIT {
             String setup = latency ? "await new Promise(resolve => setTimeout(resolve, "
                     + runtimeProvisioningDelayMs + "));\n" : "await import("
                     + mapper.writeValueAsString(root.resolve("integration-tests/helpers/hosted-file-read-gate.mjs")
-                            .toUri().toString()) {
-                                + ");\n";
-                            }
+                            .toUri().toString()) + ");\n";
             Files.writeString(worker, setup + "process.argv[1] = "
                     + mapper.writeValueAsString(cli.toString()) + ";\nawait import("
                     + mapper.writeValueAsString(cli.toUri().toString()) + ");\n");
@@ -249,9 +247,7 @@ class HostedWorkspaceToolTurnIT {
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
             if (faults) {
-                var metadata = jdbc.queryForMap("SELECT VERSION() {
-                    AS version, @@version_comment AS engine");
-                }
+                var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
                 System.out.println((shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 try (var connection = jdbc.getDataSource().getConnection()) {
                     assertThat(connection.getMetaData().getDatabaseProductName())
@@ -306,17 +302,13 @@ class HostedWorkspaceToolTurnIT {
             if (faults && cases.contains("status")) {
                 String statusSession = sessions.get(cases.indexOf("status")).get("sessionId").toString();
                 Object service = ReflectionTestUtils.getField(broker, "service");
-                RuntimeTransport transport = (RuntimeTransport) {
-                    ReflectionTestUtils.getField(service, "transport");
-                }
+                RuntimeTransport transport = (RuntimeTransport) ReflectionTestUtils.getField(service, "transport");
                 RuntimeTransport gated = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
                         new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
                             Object result = method.invoke(transport, args);
                             if (method.getName().equals("execute")
                                     && ((RuntimeSession) args[1]).getHarnessSessionId().equals(statusSession)) {
-                                return ((CompletionStage<?>) result).thenCombine(statusGate, (value, ignored) {
-                                    -> value);
-                                }
+                                return ((CompletionStage<?>) result).thenCombine(statusGate, (value, ignored) -> value);
                             }
                             return result;
                         });
@@ -341,9 +333,7 @@ class HostedWorkspaceToolTurnIT {
                     for (Map<String, Object> session : sessions) {
                         if (shellOutput ? session.get("fault").equals("receipt-failure")
                                 : !session.get("fault").toString().endsWith("-reply")) {
-                            String trigger = (shellOutput ? "fg6f_" : "fg6b_") {
-                                + UUID.randomUUID().toString().replace("-", "");
-                            }
+                            String trigger = (shellOutput ? "fg6f_" : "fg6b_") + UUID.randomUUID().toString().replace("-", "");
                             triggers.add(trigger);
                             createStoreFaultTrigger(jdbc, tenant, session, trigger);
                         }
@@ -402,9 +392,7 @@ class HostedWorkspaceToolTurnIT {
                             if (tool) {
                                 var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_status"
                                         + " FROM ma_tool_execution WHERE harness_session_id = ?", sessions.get(index).get("sessionId"));
-                                assertThat(((Number) {
-                                    execution.get("dispatch_generation")).longValue()).isEqualTo(1);
-                                }
+                                assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(1);
                                 assertThat(execution.get("execution_status")).isEqualTo("success");
                             }
                             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
@@ -505,9 +493,7 @@ class HostedWorkspaceToolTurnIT {
             assertThat(execution.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
             assertThat(execution.get("idempotency_key")).isEqualTo(report.path("idempotencyKey").asText());
             assertThat(execution.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
-            assertThat(((Number) {
-                execution.get("dispatch_generation")).longValue()).isEqualTo(started ? 1 : 0);
-            }
+            assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(started ? 1 : 0);
             assertThat(execution.get("execution_state")).isEqualTo(fault.equals("prepare-twice") ? "PREPARED" : "SETTLED");
             if (started) {
                 assertThat(execution.get("execution_status")).isEqualTo("success");
@@ -648,9 +634,7 @@ class HostedWorkspaceToolTurnIT {
         Object digest = null;
         Object checkpointId = null;
         for (Map<String, Object> transaction : journal) {
-            assertThat(((Number) {
-                transaction.get("journal_revision")).longValue()).isEqualTo(++revision);
-            }
+            assertThat(((Number) transaction.get("journal_revision")).longValue()).isEqualTo(++revision);
             assertThat(transactionIds.add(transaction.get("transaction_id").toString())).isTrue();
             assertThat(transaction.get("previous_commit_digest")).isEqualTo(digest);
             byte[] bytes = (byte[]) transaction.get("record_bytes");

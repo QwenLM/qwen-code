@@ -25,9 +25,7 @@ public final class ToolPublicationRetentionObserver {
             Map<String, Long> blockers = new HashMap<>();
             long eligibleBytes = 0;
             for (var candidate : sample) {
-                blockers.merge(candidate.blocker() {
-                    == null ? "eligible" : candidate.blocker(), 1L, Long::sum);
-                }
+                blockers.merge(candidate.blocker() == null ? "eligible" : candidate.blocker(), 1L, Long::sum);
                 if (candidate.blocker() == null) {
                     eligibleBytes += candidate.bytes();
                 }

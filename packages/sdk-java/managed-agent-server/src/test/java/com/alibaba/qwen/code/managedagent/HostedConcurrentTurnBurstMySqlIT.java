@@ -267,9 +267,7 @@ class HostedConcurrentTurnBurstMySqlIT {
                             + " ma_public_event WHERE tenant_id = ? AND"
                             + " event_type = 'item.output_text.delta' GROUP"
                             + " BY session_id", tenant)) {
-                total += ((Number) {
-                    row.get("deltas")).longValue();
-                }
+                total += ((Number) row.get("deltas")).longValue();
                 firstDeltaAt.putIfAbsent(
                         row.get("session_id").toString(), now);
             }
