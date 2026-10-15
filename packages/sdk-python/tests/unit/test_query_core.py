@@ -5,7 +5,11 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
-from qwen_code_sdk.errors import AbortError, ControlRequestTimeoutError
+from qwen_code_sdk.errors import (
+    AbortError,
+    ControlRequestTimeoutError,
+    ProcessExitError,
+)
 from qwen_code_sdk.json_lines import parse_json_line
 from qwen_code_sdk.query import Query
 from qwen_code_sdk.types import QueryOptions, TimeoutOptions
@@ -493,6 +497,111 @@ async def test_started_iterator_finishes_after_explicit_close() -> None:
     query = await _start_query(transport)
     await query.close()
 
+    for _ in range(2):
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(query), timeout=1)
+    assert transport.close_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_error_type", [ProcessLookupError, TimeoutError])
+@pytest.mark.parametrize("consumer_waiting", [False, True])
+async def test_explicit_close_error_still_finishes_iterator(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_error_type: type[Exception],
+    consumer_waiting: bool,
+) -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+    cleanup_error = cleanup_error_type("transport cleanup failed")
+    original_close = transport.close
+
+    async def failing_close() -> None:
+        await original_close()
+        raise cleanup_error
+
+    monkeypatch.setattr(transport, "close", failing_close)
+    pending = None
+    if consumer_waiting:
+        pending = asyncio.create_task(anext(query))
+        await asyncio.sleep(0)
+        assert not pending.done()
+    else:
+        await query._route_message(
+            {
+                "type": "assistant",
+                "session_id": VALID_UUID,
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        assert query._message_queue.qsize() == 1
+
+    with pytest.raises(cleanup_error_type) as error:
+        await query.close()
+    assert error.value is cleanup_error
+
+    if pending is not None:
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(pending, timeout=1)
+    else:
+        message = await asyncio.wait_for(anext(query), timeout=1)
+        assert message["type"] == "assistant"
+
+    await query.close()
+    for _ in range(2):
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(query), timeout=1)
+    assert transport.close_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_error_type", [ProcessLookupError, TimeoutError])
+@pytest.mark.parametrize("consumer_waiting", [False, True])
+async def test_failure_cleanup_error_preserves_original_error_and_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_error_type: type[Exception],
+    consumer_waiting: bool,
+) -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+    process_error = ProcessExitError("CLI exited with code 23", exit_code=23)
+    cleanup_error = cleanup_error_type("transport cleanup failed")
+    original_close = transport.close
+
+    async def failing_close() -> None:
+        await original_close()
+        raise cleanup_error
+
+    monkeypatch.setattr(transport, "close", failing_close)
+    pending = None
+    if consumer_waiting:
+        pending = asyncio.create_task(anext(query))
+        await asyncio.sleep(0)
+        assert not pending.done()
+    else:
+        await query._route_message(
+            {
+                "type": "assistant",
+                "session_id": VALID_UUID,
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        assert query._message_queue.qsize() == 1
+
+    with pytest.raises(cleanup_error_type) as cleanup:
+        await query._finish_with_error(process_error)
+    assert cleanup.value is cleanup_error
+
+    if pending is None:
+        message = await asyncio.wait_for(anext(query), timeout=1)
+        assert message["type"] == "assistant"
+        pending = asyncio.create_task(anext(query))
+    with pytest.raises(ProcessExitError) as error:
+        await asyncio.wait_for(pending, timeout=1)
+    assert error.value is process_error
+    assert error.value.exit_code == 23
+
+    await query.close()
     for _ in range(2):
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(anext(query), timeout=1)
