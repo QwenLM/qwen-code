@@ -8,6 +8,7 @@ import org.springframework.dao.DataAccessResourceFailureException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -19,15 +20,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Test;
-import org.springframework.dao.DataAccessResourceFailureException;
 
 class MessageMaterializerTest {
     private static final MaterializationTarget POISON =

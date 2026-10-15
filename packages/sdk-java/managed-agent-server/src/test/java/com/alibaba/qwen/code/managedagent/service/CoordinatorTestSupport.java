@@ -1,15 +1,14 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-
 /** Shared test doubles for the coordinator tests. */
 final class CoordinatorTestSupport {
-
     private CoordinatorTestSupport() {
     }
 

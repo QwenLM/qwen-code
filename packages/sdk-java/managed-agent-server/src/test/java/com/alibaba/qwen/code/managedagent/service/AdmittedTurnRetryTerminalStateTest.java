@@ -1,5 +1,30 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -10,30 +35,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.daemon.DaemonHttpException;
-import com.alibaba.qwen.code.daemon.DaemonProtocolException;
-import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.InOrder;
 
 /**
  * Regression for issue #13182 finding 2: once submissionAttempted is

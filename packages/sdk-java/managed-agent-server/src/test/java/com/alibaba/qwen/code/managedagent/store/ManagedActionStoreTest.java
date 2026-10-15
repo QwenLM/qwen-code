@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
@@ -16,9 +10,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,6 +17,16 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Pins the admission stage written when an ACTION_RESPONSE operation
@@ -74,7 +75,9 @@ class ManagedActionStoreTest {
 
     @AfterEach
     void closeFixture() {
-        if (fixture != null) fixture.close();
+        if (fixture != null) {
+            fixture.close();
+        }
     }
 
     @Test
@@ -500,7 +503,11 @@ class ManagedActionStoreTest {
         ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
                 .put("inputRevision", 1).put("state", state);
         payload.set("optionsRef", optionsRef);
-        if (decision == null) payload.putNull("decisionRef"); else payload.set("decisionRef", decision);
+        if (decision == null) {
+            payload.putNull("decisionRef");
+        } else {
+            payload.set("decisionRef", decision);
+        }
         ObjectNode record = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
         record.set("managedSession", envelope);
         transactions.executeWithoutResult(status -> actions.apply(TENANT, "workspace", SESSION, sequence, 1,
