@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -47,7 +48,7 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void definitionAndAutomationReceiptsHaveSeparateNamespacesAndExactReplay() {
-        ManagedAgentDefinitionStore definitions = new ManagedAgentDefinitionStore(jdbc);
+        ManagedAgentDefinitionStore definitions = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         var admitted = definitions.create(tenant, "same-key", "request-1", "agent", "digest", "{}", 1);
         assertThat(definitions.create(tenant, "same-key", "request-1", "ignored", "other", "{}", 2).replayed()).isTrue();
         assertThat(admitted.revision().agentId()).isEqualTo("agent");

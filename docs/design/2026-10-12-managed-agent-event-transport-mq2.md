@@ -246,6 +246,23 @@ with only the Harness stood in for. The rows:
   tolerates the recorded run, and the incident's arm asymmetry (hub
   delivery on/off ≈ 28× at p95 with both arms far above local levels) is
   not reproduced here and stays unexplained.
+  Diagnostics run in a separate 300-round burst after the uninstrumented
+  latency gate, including when that gate fails. They retain the original
+  on-before-off order without per-round broker drains.
+  `event-transport-latency-diagnostics.json` contains the instrumented
+  aggregate; `event-transport-latency-samples.json` retains publish, hub-read
+  and journal wall/CPU samples, including warm-up sequences 1–75.
+  `event-transport-latency-stages.json` contains hub and transport timings
+  inside the production publisher, correlated by session, sequence, thread
+  and transport count. `event-transport-latency.jfr` records those events,
+  execution samples, lock waits and GC pauses. Production events are disabled
+  by default. Instrumented figures describe a diagnostic run and are never
+  used for the latency assertions; subscriber delivery includes the whole
+  publish call and subsequent read, not the instant the hub became ready.
+  Separate percentiles must not be subtracted to attribute individual stages.
+  Evidence is saved even when assertions fail, and diagnostic errors do not
+  replace the original gate failure. The workflow runs daily or by manual
+  dispatch against the selected branch; opening a PR does not run this suite.
 - **Misconfiguration fails startup.** A NORMAL (not LITE) topic, which the
   subscription probe alone passes, is refused by a new send probe — one
   synchronous message to the probe's own lite topic — before any envelope
