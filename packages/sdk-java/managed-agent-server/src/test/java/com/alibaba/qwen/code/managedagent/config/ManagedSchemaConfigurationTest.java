@@ -10,6 +10,9 @@ import javax.sql.DataSource;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -22,7 +25,7 @@ import static org.mockito.Mockito.when;
 
 class ManagedSchemaConfigurationTest {
     @Test
-    void upgradesPublishedV1WithoutChangingItsHistoryOrOrdinaryRows() {
+    void upgradesPublishedV1WithoutChangingItsHistoryOrOrdinaryRows() throws Exception {
         var source = source();
         var flyway =
                 Flyway.configure()
@@ -50,7 +53,9 @@ class ManagedSchemaConfigurationTest {
                         .locations(ManagedSchema.FLYWAY_LOCATION)
                         .load();
         new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(current);
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(2);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+        assertThat(sessionListColumns(source))
+                .containsExactly("tenant_id", "created_at", "session_id");
         assertThat(
                         jdbc.queryForMap(
                                 "SELECT * FROM \"flyway_schema_history\" WHERE \"version\" = '1'"))
@@ -107,10 +112,115 @@ class ManagedSchemaConfigurationTest {
                                     "SELECT \"version\" FROM \"flyway_schema_history\" WHERE"
                                             + " \"type\" = 'BASELINE'",
                                     String.class))
-                    .isEqualTo(baselineOnly ? "1" : "2");
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(2);
+                    .isEqualTo(baselineOnly ? "1" : "3");
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class))
                     .isEqualTo(1);
+        }
+    }
+
+    // V1 and V2 are published, so the created_at list keyset arrives as an
+    // additive V3 that rebuilds the list index in place of editing either.
+    @Test
+    void rebuildsTheSessionListIndexOverAPublishedV2Catalog() throws Exception {
+        var source = source();
+        Flyway.configure()
+                .dataSource(source)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .target("2")
+                .load()
+                .migrate();
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        jdbc.update(
+                "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 2)",
+                "tenant",
+                "session");
+        var published =
+                jdbc.queryForList(
+                        "SELECT * FROM \"flyway_schema_history\" WHERE \"version\" IN ('1', '2')"
+                                + " ORDER BY \"installed_rank\"");
+        var session = jdbc.queryForMap("SELECT * FROM ma_session");
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(2);
+        assertThat(sessionListColumns(source))
+                .containsExactly("tenant_id", "updated_at", "session_id");
+        assertThatThrownBy(() -> ManagedSchema.initialize(source))
+                .hasRootCauseMessage(
+                        "The canonical V2 catalog requires the application's V3 migration");
+
+        new ManagedSchemaConfiguration()
+                .freshManagedSchema(source)
+                .migrate(
+                        Flyway.configure()
+                                .dataSource(source)
+                                .locations(ManagedSchema.FLYWAY_LOCATION)
+                                .load());
+
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+        assertThat(sessionListColumns(source))
+                .containsExactly("tenant_id", "created_at", "session_id");
+        assertThat(
+                        jdbc.queryForList(
+                                "SELECT * FROM \"flyway_schema_history\" WHERE \"version\" IN"
+                                        + " ('1', '2') ORDER BY \"installed_rank\""))
+                .isEqualTo(published);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_session")).isEqualTo(session);
+        ManagedSchema.validate(source);
+    }
+
+    // An unversioned published catalog (Broker-initialized before V3
+    // shipped) is brought forward through every later step by the Broker's
+    // own initializer, whether it stopped at V1 or at V2.
+    @Test
+    void initializesUnversionedPublishedCatalogsForward() throws Exception {
+        List<List<String>> published =
+                List.of(
+                        List.of(ManagedSchema.RESOURCE),
+                        List.of(ManagedSchema.RESOURCE, ManagedSchema.PRIVATE_AUTHORITY));
+        for (List<String> resources : published) {
+            var source = source();
+            try (var connection = source.getConnection();
+                    var statement = connection.createStatement()) {
+                for (String resource : resources) {
+                    try (var stream = ManagedSchema.class.getResourceAsStream(resource)) {
+                        for (String sql :
+                                new String(
+                                                stream.readAllBytes(),
+                                                java.nio.charset.StandardCharsets.UTF_8)
+                                        .replaceAll("(?m)^--[^\\n]*", "")
+                                        .split(";")) {
+                            if (!sql.isBlank()) {
+                                statement.execute(sql);
+                            }
+                        }
+                    }
+                }
+            }
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(resources.size());
+            assertThat(sessionListColumns(source))
+                    .containsExactly("tenant_id", "updated_at", "session_id");
+
+            ManagedSchema.initialize(source);
+
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+            assertThat(sessionListColumns(source))
+                    .containsExactly("tenant_id", "created_at", "session_id");
+        }
+    }
+
+    private static List<String> sessionListColumns(DataSource source) throws SQLException {
+        try (var connection = source.getConnection();
+                var rows =
+                        connection
+                                .getMetaData()
+                                .getIndexInfo(null, null, "ma_session", false, false)) {
+            var columns = new ArrayList<String>();
+            while (rows.next()) {
+                if ("ix_ma_session_list".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
+                    columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+                }
+            }
+            return columns;
         }
     }
 
