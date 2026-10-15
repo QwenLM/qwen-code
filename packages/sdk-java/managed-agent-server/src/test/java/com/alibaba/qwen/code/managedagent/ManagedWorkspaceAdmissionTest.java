@@ -1,16 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.catchThrowable;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -27,20 +16,16 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -56,6 +41,25 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.Clock;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-admission;MODE=MySQL;"
@@ -277,8 +281,7 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setApprovalMode(mode);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-shell", "/workspace")));
-        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {
-        }, registry, properties);
+        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         var transaction = new TransactionTemplate(transactionManager);
         String digest = "sha256:" + "a".repeat(64);
         var selection = new WorkspaceSelection("ws-shell", ".");
@@ -307,8 +310,7 @@ class ManagedWorkspaceAdmissionTest {
         var original = transaction.execute(status -> admitted.submitTurn(tenant, "actor-a", "original", session, input));
         assertThat(admitted.getPublicSession(tenant, "actor-a", session).capabilities().foregroundShell()).isTrue();
         properties.getHarness().setWorkspaceShellEnabled(false);
-        ManagedAgentStore disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {
-        }, registry, properties);
+        ManagedAgentStore disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         ManagedAgentService stopped = new ManagedAgentService(disabled, new RequestDigests(), coordinator, harness, registry);
         assertThat(transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
                 "actor-a", "create-shell", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId())
@@ -368,8 +370,7 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-migration", "actor-a", true);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {
-        }, registry, properties);
+        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         var transaction = new TransactionTemplate(transactionManager);
         String digest = "sha256:" + "a".repeat(64);
         String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(
@@ -743,6 +744,19 @@ class ManagedWorkspaceAdmissionTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isNotFound());
+        // The WebShell create route has no post-service re-read that could
+        // mask the replay probe: with the grant revoked, the recorded
+        // creation command must answer 404 here, never a 202 replay.
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"idempotencyKey":"create",
+                                 "agentId":"qwen-code","input":[],
+                                 "workspace":{"workspaceId":"ws-a"}}
+                                """))
+                .andExpect(status().isNotFound());
         mvc.perform(patch("/v1/agents/sessions/" + sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename")
@@ -754,6 +768,404 @@ class ManagedWorkspaceAdmissionTest {
                 "invalid-rename", sessionId, ""))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo("session_not_found"));
+    }
+
+    @Test
+    void aRecordedSubmitAnswersOnlyToAnActorAuthorizedForTheSession() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry);
+        // The plain store instance is no Spring proxy, so its @Transactional
+        // boundaries come from the template.
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        transaction.executeWithoutResult(status -> assertThat(
+                service.submitTurn(tenant, "actor-a", "submit", sessionId,
+                        input).replayed()).isFalse());
+        // The creator's own retry replays the recorded outcome.
+        transaction.executeWithoutResult(status -> assertThat(
+                service.submitTurn(tenant, "actor-a", "submit", sessionId,
+                        input).replayed()).isTrue());
+
+        // A second actor in the same tenant must never see it — not with
+        // the same body, and not with a different one (which would turn the
+        // 409 into an oracle confirming the key is live).
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-b",
+                        "submit", sessionId, input))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-b",
+                        "submit", sessionId, List.of(new InputBlock("text",
+                                "other"))))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-c",
+                        "submit", sessionId, input))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("session_not_found")));
+    }
+
+    @Test
+    void aBoundRenameReplaysItsRecordedOutcomeAfterTheSessionWasDeleted() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
+
+        // The delete flow's durable footprint for a bound Session: the
+        // operation row records the last-visible status — CLOSED or
+        // ARCHIVED, the two pre-delete states a bound delete admits — and
+        // the Session row becomes a tombstone.
+        recordDelete(tenant, sessionId, "CLOSED");
+
+        // The recorded rename answers with the Session as last visible —
+        // its pre-delete status — rather than a 404 or a 409.
+        transaction.executeWithoutResult(status -> {
+            var replay = service.renameSession(tenant, "actor-a", "rename",
+                    sessionId, "new title");
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.body().status()).isEqualTo("closed");
+        });
+
+        // The outcome answers only to the Session's own actor: on a
+        // tombstone a readable non-creator meets the reads' not-found —
+        // workspace_unavailable is the live-Session refusal — and an actor
+        // without a grant gets the same not-found.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("session_not_found")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-c", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("session_not_found")));
+    }
+
+    // The grant-less arm of the rename replay gate: with the key recorded
+    // as a completed rename of the Session, every title shape — over-long,
+    // blank, control-bearing — must answer the same 404 a fresh key
+    // answers, never the invalid_title the digest evaluation would throw
+    // ahead of the actor gates.
+    @Test
+    void aRecordedRenameAnswers404ToAGrantlessActorForEveryTitleShape() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
+
+        // actor-z holds no grant row at all: the recorded key and a fresh
+        // key answer alike for every title shape.
+        for (String title : new String[] {"t".repeat(300), "",
+                "bad\ntitle", "new title"}) {
+            assertNotFound(service, transaction, tenant, sessionId, "rename",
+                    title);
+            assertNotFound(service, transaction, tenant, sessionId, "fresh",
+                    title);
+        }
+    }
+
+    private void assertNotFound(ManagedAgentService service,
+            TransactionTemplate transaction, String tenant, String sessionId,
+            String key, String title) {
+        transaction.executeWithoutResult(status -> assertThatThrownBy(
+                () -> service.renameSession(tenant, "actor-z", key, sessionId,
+                        title))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(error.getCode())
+                            .isEqualTo("session_not_found");
+                }));
+    }
+
+    // The rename key is tenant-global — its SESSION_COMMAND receipt is
+    // keyed by (tenant, operation, idempotency key), with no session and no
+    // actor — so a key actor-a's Session X consumed is not actor-b's request
+    // for his own Session Y, and the replay probe must not fire on it. The
+    // fall-through answers idempotency_conflict, which tells the client to
+    // retry under a fresh key; the pre-guard probe instead ran the actor
+    // gate against the recorded Session X and answered session_not_found for
+    // a Session that exists and is actor-b's.
+    @Test
+    void aKeyConsumedByAnotherSessionAnswersIdempotencyConflict() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        register(tenant, "ws-b", "storage-b",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-b", "actor-b", true);
+        String sessionX = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-x", "sha256:" + "a".repeat(64),
+                "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("ws-a", ".")).sessionId();
+        String sessionY = store.insertWorkspaceSessionCommand(tenant,
+                "actor-b", "create-y", "sha256:" + "b".repeat(64),
+                "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("ws-b", ".")).sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionX,
+                        "new title").replayed()).isFalse());
+
+        // Same key and same title, but a different Session: not the
+        // recorded request, so no replay — and Y keeps its title.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-b", "rename", sessionY, "new title"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT);
+                        }));
+        assertThat(jdbc.queryForObject(
+                "SELECT title FROM ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                String.class, tenant, sessionY)).isNull();
+    }
+
+    // The recorded rename's actor gate covers the UNFINISHED row too, not
+    // only the completed outcome: beginSessionRename compares key, Session
+    // and digest, never the actor, so without the gate a non-recorder
+    // OPERATOR replaying the key while the row is PENDING claims the
+    // recorder's delivery, drives harness.rename, flips the row to
+    // COMPLETED and answers 200 replayed — the recorded outcome the
+    // contract reserves for the actor who recorded it.
+    @Test
+    void aPendingRenameReplayKeepsTheRecorderGate() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        // The recorder's unfinished row, written exactly as the service
+        // writes it but never driven to completion. The autowired store
+        // runs the default workspace-disabled profile, whose rename gate
+        // refuses, so the row is written through an enabled one.
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
+        String digest = new RequestDigests().digest(Map.of("sessionId",
+                sessionId, "title", "new title"));
+        transaction.executeWithoutResult(status -> gated.beginSessionRename(
+                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+
+        // The non-recorder OPERATOR's same-title replay meets the same
+        // refusal the completed outcome answers, and the recorder's row
+        // and delivery stay untouched.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                        + " ma_request_receipt WHERE namespace ="
+                        + " 'SESSION_COMMAND' AND tenant_id = ?"
+                        + " AND operation = 'RENAME_SESSION'"
+                        + " AND idempotency_key = ?", String.class,
+                tenant, "rename")).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
+                        + " ma_operation WHERE operation_kind = 'RENAME'"
+                        + " AND tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, sessionId)).isZero();
+
+        // The recorder's own retry resumes the delivery to completion.
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isTrue());
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("new title");
+    }
+
+    // A different-title replay of the same unfinished row answers the
+    // uniform refusal too: without the gate, beginSessionMutation's
+    // idempotency_conflict names the live key the answer must keep hidden.
+    @Test
+    void aPendingRenameReplayWithADifferentTitleKeepsTheUniformRefusal() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
+        String digest = new RequestDigests().digest(Map.of("sessionId",
+                sessionId, "title", "new title"));
+        transaction.executeWithoutResult(status -> gated.beginSessionRename(
+                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "other title"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
     }
 
     @Test
@@ -798,8 +1210,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties changed = new ManagedAgentProperties();
         changed.setAgentRevision("2");
         ManagedAgentStore upgraded = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, changed);
+                Clock.systemUTC(), ignored -> {}, registry, changed);
 
         assertThat(upgraded.insertWorkspaceSessionCommand(tenant, "actor-a",
                 "key", digest, "qwen-code", "1", null, List.of(), null,
@@ -950,8 +1361,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
         var admission = transaction.execute(status ->
@@ -1003,7 +1413,7 @@ class ManagedWorkspaceAdmissionTest {
         // A Session pinned to a compiled stored definition (D8c-1) passes
         // the later-Turn gate exactly like qwen-code.
         String agentId = "agent_" + "b".repeat(32);
-        new ManagedAgentDefinitionStore(jdbc).create(tenant, "def",
+        new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create(tenant, "def",
                 "def-digest", agentId, "c".repeat(64),
                 "{\"model\":{},\"instructions\":\"\","
                         + "\"tools\":[{\"type\":\"hosted_profile\","
@@ -1070,8 +1480,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         // The Workspace authority refuses the first attach and admits the
         // second, so a rename after the refused one is observable.
         UnavailableHarnessConnector harness =
@@ -1186,8 +1595,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         // A Harness that lost the Session answers the rename with a 4xx,
         // which the client surfaces as a DaemonHttpException — a permanent
         // failure, but not a broker refusal.
@@ -1281,8 +1689,7 @@ class ManagedWorkspaceAdmissionTest {
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         otherTenant, "storage-shared", "/unused/shared")));
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, enabled);
+                Clock.systemUTC(), ignored -> {}, registry, enabled);
         // An unproxied store has no @Transactional; creation resolves the
         // Workspace only inside a transaction, as the Spring bean provides.
         TransactionTemplate transaction = new TransactionTemplate(
@@ -1753,6 +2160,56 @@ class ManagedWorkspaceAdmissionTest {
                 .containsEntry("title", "renamed title");
     }
 
+    @Test
+    void aRecordedWorkspaceCreateReplaysWhileWorkspaceFilesAreOff() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        var selection = new WorkspaceSelection("ws-a", ".");
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        // Workspace resolution runs inside the creation transaction.
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        CommandAdmission first = transaction.execute(status ->
+                workspaceFilesService(tenant, true).createWorkspaceSession(
+                        tenant, "actor-a", "create-1", "qwen-code", null,
+                        "a title", null, input, selection));
+        assertThat(first.replayed()).isFalse();
+        // The recorded create answers through a files outage; only a fresh
+        // key meets the availability refusal.
+        CommandAdmission replay = transaction.execute(status ->
+                workspaceFilesService(tenant, false).createWorkspaceSession(
+                        tenant, "actor-a", "create-1", "qwen-code", null,
+                        "a title", null, input, selection));
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.sessionId()).isEqualTo(first.sessionId());
+        assertRefused(() -> transaction.execute(status ->
+                workspaceFilesService(tenant, false).createWorkspaceSession(
+                        tenant, "actor-a", "create-2", "qwen-code", null,
+                        "a title", null, input, selection)),
+                "workspace_unavailable");
+    }
+
+    private ManagedAgentService workspaceFilesService(String tenant,
+            boolean workspaceFiles) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant,
+                        "storage-a", "/workspace")));
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, properties);
+        return new ManagedAgentService(gated, new RequestDigests(), null,
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return workspaceFiles;
+                    }
+                }, registry);
+    }
+
     private ManagedAgentService boundServiceWithWorkingHarness() {
         return boundServiceWith(new UnavailableHarnessConnector() {
             @Override
@@ -1787,8 +2244,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, properties);
+                Clock.systemUTC(), ignored -> {}, registry, properties);
         HarnessCoordinator noopCoordinator = new HarnessCoordinator(null,
                 null, null, null, null, Clock.systemUTC(),
                 new ManagedAgentProperties()) {
@@ -1816,8 +2272,7 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {
-                }, registry, properties);
+                Clock.systemUTC(), ignored -> {}, registry, properties);
         return new ManagedAgentService(gated, new RequestDigests(), null,
                 new UnavailableHarnessConnector() {
                     @Override
@@ -1942,5 +2397,36 @@ class ManagedWorkspaceAdmissionTest {
                 return actorId;
             }
         };
+    }
+
+    // The delete flow's durable footprint, as the lifecycle admission
+    // writes it: a DELETE operation row naming the last-visible status,
+    // then the Session row as a tombstone.
+    private void recordDelete(String tenant, String sessionId,
+            String statusBefore) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String target = ManagedSchemaKeys.key(sessionId);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
+                        + " session_scope_key, operation_id, operation_kind,"
+                        + " tenant_id, session_id, target_kind, target_key,"
+                        + " target_id, actor_digest, idempotency_key,"
+                        + " idempotency_digest, request_digest, request_json,"
+                        + " state, phase, admission_stage, delivery_state,"
+                        + " session_status_before, available_at, created_at,"
+                        + " updated_at, completed_at) VALUES (?, ?, ?,"
+                        + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
+                        + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
+                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
+                        + " 0, 0)",
+                ManagedSchemaKeys.operationKey(
+                        ManagedSchemaContract.OperationKind.DELETE, scope,
+                        target, "op-del"),
+                scope, scope, tenant, sessionId, target, sessionId,
+                ManagedSchemaKeys.key("delete"), statusBefore);
+        jdbc.update("UPDATE ma_session SET status = 'DELETED',"
+                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ?",
+                tenant, sessionId);
     }
 }
