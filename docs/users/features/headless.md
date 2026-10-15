@@ -57,6 +57,7 @@ qwen --resume 123e4567-e89b-12d3-a456-426614174000 -p "Apply the follow-up refac
 >
 > - Session data is project-scoped JSONL under `~/.qwen/projects/<sanitized-cwd>/chats`.
 > - Restores conversation history, tool outputs, and chat-compression checkpoints before sending the new prompt.
+> - If the project directory was renamed or moved, first run `qwen --resume <sessionId>` interactively from its new location and confirm the reattachment. Headless mode will not move session files without that confirmation.
 
 ## Run a Persistent Goal
 
