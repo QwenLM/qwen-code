@@ -18,7 +18,7 @@ The Spring JDBC parameter boundary binds timestamp objects as epoch milliseconds
 
 Replace persisted DATETIME arithmetic and comparisons with integer milliseconds; remove FROM_UNIXTIME/UNIX_TIMESTAMP wrappers around stored fields. Preserve NULL and zero semantics, deadline/claim comparisons, paging tie-breakers, and refused/idempotent update behavior. Retention cursors must bind numeric time values. Preserve coordination timestamp exceptions from the preceding query cleanup.
 
-Native Connector/J reads of nullable unsigned time columns request Long explicitly rather than casting the default BigInteger result. Completed GC ledgers set available_at to zero and remain excluded by their SUCCEEDED state. A retention cutoff preceding the epoch yields no candidates, including resumed cursors.
+Native Connector/J reads of nullable unsigned time columns request Long explicitly rather than casting the default BigInteger result. Completed GC ledgers set available_at to a never-due sentinel below 2^53, so the claim range scan skips them instead of walking the whole completed history; their SUCCEEDED state excludes them as well. A retention cutoff preceding the epoch yields no candidates, including resumed cursors.
 
 The catalog validates BIGINT, UNSIGNED and nullability against the baseline on native MySQL. H2 supplies fast contract feedback but cannot establish unsigned enforcement.
 

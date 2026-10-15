@@ -18,7 +18,7 @@ Spring JDBC 参数边界将时间对象绑定为 epoch 毫秒。既有普通 JDB
 
 持久化 DATETIME 运算和比较改为整数毫秒，移除存储字段的 FROM_UNIXTIME/UNIX_TIMESTAMP 包装。保留 NULL 和零值语义、截止/领取比较、分页同值排序，以及拒绝/幂等更新的行为。保留游标应绑定数值时间。保持此前查询整理中纯协调时间戳的特殊语义。
 
-读取 Connector/J 的可空无符号时间列时显式指定 Long，不强转默认返回的 BigInteger。完成的 GC 账本将 available_at 设为零，继续由 SUCCEEDED 状态排除。早于 epoch 的保留截止时间不会产生候选，恢复游标也遵守该规则。
+读取 Connector/J 的可空无符号时间列时显式指定 Long，不强转默认返回的 BigInteger。完成的 GC 账本将 available_at 设为一个低于 2^53 的「永不到期」哨兵，认领查询的区间扫描因此直接跳过它们，不会扫过全部已完成历史；其 SUCCEEDED 状态同样会排除它们。早于 epoch 的保留截止时间不会产生候选，恢复游标也遵守该规则。
 
 真实 MySQL catalog 对照 baseline 校验 BIGINT、UNSIGNED 和可空性。H2 用于快速契约反馈，不能证明无符号约束生效。
 

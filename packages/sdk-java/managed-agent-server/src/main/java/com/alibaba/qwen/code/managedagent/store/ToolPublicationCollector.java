@@ -370,7 +370,9 @@ public final class ToolPublicationCollector {
                     + " publication_id = ?",
                 now, collected, released, claim.scope(), claim.publication());
         jdbc.update(
-                "UPDATE ma_operation SET state = 'SUCCEEDED', claim_owner = NULL, claim_until = NULL, completed_at = ?, gmt_modified = ?, available_at = 0, result_json = ? WHERE operation_key = ? AND claim_generation = ?",
+                "UPDATE ma_operation SET state = 'SUCCEEDED', claim_owner = NULL, claim_until = NULL, completed_at = ?, gmt_modified = ?, available_at = "
+                        + ManagedSchemaTime.NEVER_DUE_MILLIS
+                        + ", result_json = ? WHERE operation_key = ? AND claim_generation = ?",
                 now,
                 now,
                 JSON.createObjectNode()

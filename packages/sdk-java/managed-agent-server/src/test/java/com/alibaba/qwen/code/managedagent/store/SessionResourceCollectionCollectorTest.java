@@ -881,7 +881,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var collector = collector(true, Duration.ZERO);
         assertThat(collector.runOnce()).isTrue();
         var completed = ledger();
-        assertThat(((Number) completed.get("gc_next_at")).longValue()).isZero();
+        assertThat(((Number) completed.get("gc_next_at")).longValue()).isEqualTo(ManagedSchemaTime.NEVER_DUE_MILLIS);
         assertThat(completed.get("state")).isEqualTo("SUCCEEDED");
         assertThat(collector.runOnce()).isFalse();
         assertThat(ledger().get("gc_generation")).isEqualTo(completed.get("gc_generation"));

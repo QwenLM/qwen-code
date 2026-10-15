@@ -118,7 +118,11 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"UPDATE ma_output_capture SET retention_state", "UPDATE ma_session SET status = 'DELETED'",
+    // The retirement UPDATE advances gmt_modified first. A stale prefix here does not
+    // fail loudly: it silently stops injecting the fault and leaves rollback untested.
+    @ValueSource(strings = {
+            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retention_state",
+            "UPDATE ma_session SET status = 'DELETED'",
             "UPDATE ma_operation SET failure_code = NULL, phase = 'COMPLETED', state =", "INSERT INTO ma_public_event"})
     void deletionRollsBackRetirementTombstoneReceiptAndEvent(String failureSql) {
         var store = store(Clock.systemUTC());

@@ -432,7 +432,9 @@ public final class SessionResourceCollectionCollector {
                     result, now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
         } else {
             jdbc.update(
-                    "UPDATE ma_operation SET result_json = ?, state = 'SUCCEEDED', completed_at = ?, claim_owner = NULL, claim_until = NULL, available_at = 0, failure_code = NULL, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
+                    "UPDATE ma_operation SET result_json = ?, state = 'SUCCEEDED', completed_at = ?, claim_owner = NULL, claim_until = NULL, available_at = "
+                            + ManagedSchemaTime.NEVER_DUE_MILLIS
+                            + ", failure_code = NULL, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     result, now, now, operationKey(claim.scope()), claim.generation());
             ManagedSessionRetirementStore.markCollectionCompleted(jdbc, claim.tenant(), claim.session(), operationKey(claim.scope()));
             jdbc.update(
