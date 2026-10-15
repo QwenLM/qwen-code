@@ -943,8 +943,8 @@ describe('getStartupContextLength', () => {
     ],
     ['is 0 when there is no prelude', [userText('hi')], 0],
     // Compressed history prefix: composePostCompactHistory produces
-    // [user(summary), model(ack), user(postAckParts)?, ...]. The ack sentinel
-    // is distinct from the legacy ack above.
+    // [user(summary + attachments?), model(ack)]. The ack sentinel is
+    // distinct from the legacy ack above.
     [
       'is 0 for compressed prefixes by default',
       [summary(), compressionAck()],
@@ -998,7 +998,40 @@ describe('getStartupContextLength', () => {
       3,
     ],
     [
-      'is 3 for rewind with post-compact attachments',
+      'is 2 for rewind with attachments folded into the summary (#14325)',
+      [
+        content(
+          'user',
+          {
+            text:
+              'summary\n\nResume the prior task...\n' +
+              'Recently accessed file (full current content embedded):\n\n' +
+              '## /repo/file.ts\n\n```ts\nexport const x = 1;\n```',
+          },
+          { text: '<system-reminder>\nplan mode\n</system-reminder>' },
+        ),
+        compressionAck(),
+      ],
+      2,
+    ],
+    [
+      'is 2 for rewind with folded attachments and trailing function call (#14325)',
+      [
+        content(
+          'user',
+          { text: 'summary\n\nResume the prior task...' },
+          { text: '<plan-mode-active>\nplan\n</plan-mode-active>' },
+        ),
+        content(
+          'model',
+          { text: 'Got it. Thanks for the additional context!' },
+          fnCall('fn', {}),
+        ),
+      ],
+      2,
+    ],
+    [
+      'is 3 for rewind with legacy post-compact attachments',
       [
         summary(),
         compressionAck(),
@@ -1015,7 +1048,7 @@ describe('getStartupContextLength', () => {
       3,
     ],
     [
-      'is 4 for rewind with attachments and a trailing function call',
+      'is 4 for rewind with legacy attachments and a trailing function call',
       [
         summary('summary'),
         compressionAck(),

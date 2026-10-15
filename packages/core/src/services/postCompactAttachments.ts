@@ -844,34 +844,30 @@ export async function composePostCompactHistory(
     for (const part of imageBlock.parts ?? []) postAckParts.push(part);
   }
 
-  // Preserve trailing model+functionCall so a pending functionResponse
-  // has a matching call (Finding 3). Place it AFTER any merged
-  // attachments so role alternation holds:
-  //  - with attachments:  [user(sum), model(ack), user(attach), model(fc)]
-  //  - without:           [user(sum), model(ack + fc)] — fc lands in
-  //                       the ack's own model Content to avoid the
-  //                       model→model adjacency that would otherwise
-  //                       arise from a separate appended entry.
+  // Fold attachments into the summary user entry and always end on a
+  // model ack (issue #14325). A trailing user(attachments) entry after
+  // ack made detectTurnInterruption treat idle post-/compress history as
+  // interrupted_prompt. Folding into the summary also avoids consecutive
+  // same-role user entries (Finding 2) and matches the degraded fallback
+  // path in chatCompressionService.
+  //
+  // Shapes:
+  //  - no trailing fc:  [user(sum + attach?), model(ack)]
+  //  - with trailing fc: [user(sum + attach?), model(ack + fc)]
+  //    (fc-only parts; trailing turn text is already in the summary)
   const trailingFc = trailingFunctionCallContent(history);
   const ackParts: Part[] = [
     { text: 'Got it. Thanks for the additional context!' },
   ];
 
-  const out: Content[] = [
-    { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
-  ];
-
+  const summaryParts: Part[] = [{ text: postProcessSummary(summary) }];
   if (postAckParts.length > 0) {
-    out.push({ role: 'model', parts: ackParts });
-    out.push({ role: 'user', parts: postAckParts });
-    if (trailingFc) out.push(trailingFc);
-  } else if (trailingFc) {
-    // Fold the trailing functionCall into the ack's own Content so we don't
-    // produce model→model adjacency. Intentionally keep ONLY the
-    // functionCall parts: the trailing turn's text was already captured in
-    // the summary, and merging it into the ack would muddy both. (The
-    // with-attachments branch above keeps trailingFc as its own model turn,
-    // so text survives there — the asymmetry is deliberate, not a bug.)
+    summaryParts.push(...postAckParts);
+  }
+
+  const out: Content[] = [{ role: 'user', parts: summaryParts }];
+
+  if (trailingFc) {
     const fcParts = (trailingFc.parts ?? []).filter((p) => !!p.functionCall);
     out.push({ role: 'model', parts: [...ackParts, ...fcParts] });
   } else {

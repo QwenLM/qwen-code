@@ -949,14 +949,11 @@ describe('composePostCompactHistory', () => {
     expect(last.parts?.some((p) => !!p.functionCall)).toBe(true);
   });
 
-  it('attachments + trailing functionCall produce a 4-entry, role-alternating output', async () => {
-    // The most complex branch: postAckParts.length > 0 AND a trailing
-    // model+functionCall, producing [user(summary), model(ack),
-    // user(attachments), model(fc)]. The prior trailing-fc test hits the
-    // 2-entry fold (no attachments); the cap tests hit the 3-entry shape
-    // (no trailing fc). This is the common production case — auto-compaction
-    // mid-tool-loop after the agent read files AND has an in-flight call —
-    // and a model→model adjacency here is a 400 from the provider.
+  it('attachments + trailing functionCall fold into a 2-entry, role-alternating output', async () => {
+    // postAckParts.length > 0 AND a trailing model+functionCall must fold
+    // into [user(summary + attachments), model(ack + fc)] so the snapshot
+    // always ends on a model entry (#14325) and never produces
+    // model→model adjacency (provider 400).
     const realFile = join(tmpDir, 'real.ts');
     writeFileSync(realFile, 'export const x = 1;');
     const history: Content[] = [
@@ -981,20 +978,59 @@ describe('composePostCompactHistory', () => {
     const result = await composePostCompactHistory(history, 'SUM', {
       workspaceRoot: tmpDir,
     });
-    expect(result).toHaveLength(4);
-    for (let i = 1; i < result.length; i++) {
-      expect(result[i].role).not.toBe(result[i - 1].role);
-    }
-    const last = result[result.length - 1];
-    expect(last.role).toBe('model');
-    expect(last.parts?.some((p) => !!p.functionCall)).toBe(true);
-    // The embedded file attachment is present, confirming postAckParts > 0
-    // (i.e. we really took the 4-entry branch, not the 2-entry fold).
-    const allText = result
-      .flatMap((c) => c.parts ?? [])
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe('user');
+    expect(result[1].role).toBe('model');
+    expect(result[1].parts?.some((p) => !!p.functionCall)).toBe(true);
+    // Attachments live on the summary entry (not a trailing user turn).
+    const summaryText = (result[0].parts ?? [])
       .map((p) => (p as { text?: string }).text ?? '')
       .join('\n');
-    expect(allText).toContain('export const x = 1;');
+    expect(summaryText).toContain('export const x = 1;');
+  });
+
+  it('ends on model when attachments exist without a trailing functionCall (manual /compress, #14325)', async () => {
+    // Manual /compress strips trailing model+functionCall before compose.
+    // Previously that left [user(sum), model(ack), user(attach)] and
+    // detectTurnInterruption classified the idle snapshot as interrupted_prompt.
+    const realFile = join(tmpDir, 'manual.ts');
+    writeFileSync(realFile, 'export const manual = 1;');
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'read it' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { name: 'read_file', args: { file_path: realFile } },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'done reading' }] },
+    ];
+    const result = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+    });
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe('user');
+    expect(result[result.length - 1].role).toBe('model');
+    expect(
+      result[result.length - 1].parts?.some((p) => !!p.functionCall),
+    ).toBe(false);
+    const summaryText = (result[0].parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(summaryText).toContain('export const manual = 1;');
   });
 
   it('skips files outside the workspace root (Finding 4)', async () => {
