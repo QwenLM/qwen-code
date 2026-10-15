@@ -2,11 +2,12 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 final class ExecutedQueryPlan {
     private static final Pattern MYSQL_ROWS = Pattern.compile(

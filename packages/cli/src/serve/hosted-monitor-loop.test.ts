@@ -296,6 +296,29 @@ describe('HostedMonitorLoop', () => {
     await closeLoop(rig);
   });
 
+  it.each(['stop_requested', 'runtime_lost'] as const)(
+    'close stop after a resume that found the record settled (%s)',
+    async (settle) => {
+      const harness = await createHarness();
+      const rig = await openLoop(harness);
+      await rig.session.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-monitor-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await rig.session.dispatchStarted('monitor-1', BINDING);
+      await rig.session.attach('monitor-1', BINDING, { watch: 'started' });
+      await rig.session.settleQuiet('monitor-1', 'exited'); // the publisher's no-observer settle
+      await rig.loop.resumeAttached(params()); // returns early, as designed
+      await rig.loop.stop(settle); // what the Session close does next
+      await closeLoop(rig);
+    },
+  );
+
   it('aggregates lines into one observation per floored debounce window', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
