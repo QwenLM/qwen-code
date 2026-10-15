@@ -1736,6 +1736,41 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it('takes an interrupted journal wait out of its durable wait', async () => {
+    // #13847's interrupted-Turn mirror: the batch committed to the journal
+    // and the Harness died before the round settled.
+    await parkAtAwaitJournal(false);
+    const replacement = await open('boot-2', false);
+    try {
+      const parked = await replacement.authority.harnessRunAuthorization();
+      expect(
+        parked.status === 'runnable' && parked.checkpoint.continuation.phase,
+      ).toBe('await_journal');
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      // The durable wait is gone: the next turn reads a model-start phase
+      // instead of staying parked behind the boundary.
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status === 'runnable')
+        expect(
+          HARNESS_MODEL_START_PHASES.has(
+            authorization.checkpoint.continuation.phase,
+          ),
+        ).toBe(true);
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('drops the interrupted turn’s pending file-history obligation', async () => {
     await parkAtAwaitRuntime('write_file', true);
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({

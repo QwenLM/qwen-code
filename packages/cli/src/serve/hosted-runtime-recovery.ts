@@ -1535,6 +1535,13 @@ export async function settleInterruptedTurnRuntime(input: {
         consume: input.consume,
       });
     }
+    if (harnessCheckpointIsJournalWait(authorization.checkpoint)) {
+      // No Runtime executions exist to stop: the journal already holds what
+      // committed and the common tail answers the round's never-reached
+      // calls. Only the resolve is owed — without it the wait outlives the
+      // settlement and every later load stays refused.
+      await createManagedHarnessHandle(input.session).resolveAwaitJournal();
+    }
     if (harnessCheckpointIsCommandWait(authorization.checkpoint)) {
       // H4e-b3 decision 14: no Runtime executions exist to stop either —
       // each outstanding command run answers by what its own journal

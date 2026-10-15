@@ -7921,13 +7921,9 @@ export function registerHostedHarnessSessionRoutes(
             );
           }
           if (harnessCheckpointIsJournalWait(continueRunnable.checkpoint)) {
-            if (session.hooks) {
-              resumeParts = await toolTurn.resumeHookResults(
-                resumeParts,
-                'recovered',
-                abort.signal,
-              );
-            }
+            // No hook-context pass here: `runHostedHarnessTextTurn` already
+            // applies `resumeHookResults` to `resumeFromToolResults`, and it
+            // passes the real model name where this site passed 'recovered'.
             let resolved;
             try {
               resolved = await harness.resolveAwaitJournal();
