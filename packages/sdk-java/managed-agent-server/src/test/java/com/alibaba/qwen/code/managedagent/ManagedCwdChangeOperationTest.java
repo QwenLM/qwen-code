@@ -508,7 +508,7 @@ class ManagedCwdChangeOperationTest {
         // A pending mutation command is the same barrier.
         String secondId = fixture.createBoundSession(TENANT, WS);
         fixture.jdbc.update("INSERT INTO ma_request_receipt (receipt_key, tenant_key, scope_kind, scope_id, scope_key, namespace, operation, idempotency_key, idempotency_digest,"
-                        + " tenant_id, request_digest, session_id, state, created_at, updated_at) VALUES (?, ?, 'TENANT', 'RENAME', ?, 'SESSION_COMMAND',"
+                        + " tenant_id, request_digest, session_id, state, gmt_create, gmt_modified) VALUES (?, ?, 'TENANT', 'RENAME', ?, 'SESSION_COMMAND',"
                         + " 'RENAME', 'rename', ?, ?, 'digest', ?, 'PENDING', 0, 0)",
                 ManagedSchemaKeys.key("test-pending-receipt", TENANT, secondId), ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(TENANT, "RENAME"),
                 ManagedSchemaKeys.key("rename"), TENANT, secondId);
@@ -907,7 +907,7 @@ class ManagedCwdChangeOperationTest {
         // The lease gates run on database time; expire the dead claim
         // directly instead of advancing the fixture clock.
         fixture.jdbc.update("UPDATE ma_operation SET"
-                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
+                + " claim_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         OperationRecord alive = fixture.store.claimOperation(TENANT,
                 sessionId, operationId, "owner", Duration.ofMillis(60_000))
@@ -955,7 +955,7 @@ class ManagedCwdChangeOperationTest {
                 thirdId, thirdOp, "owner", Duration.ofMillis(60_000))
                 .orElseThrow();
         fixture.jdbc.update("UPDATE ma_operation SET"
-                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
+                + " claim_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, thirdId, thirdOp);
         assertThat(fixture.store.failCwdChangeOperation(TENANT, thirdId,
                 thirdOp, "owner", expiring.claimGeneration(),
@@ -1488,7 +1488,7 @@ class ManagedCwdChangeOperationTest {
                 Duration.ofMillis(100)).orElseThrow();
         assertThat(dead.deliveryState()).isEqualTo("LEASED");
         fixture.jdbc.update("UPDATE ma_operation SET"
-                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
+                + " claim_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         // The recovery scan itself must see an expired cwd claim: a row it
         // cannot see would strand the Session behind session_context_busy
@@ -1652,7 +1652,7 @@ class ManagedCwdChangeOperationTest {
             String target = ManagedSchemaKeys.key(sessionId);
             jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json,"
                             + " tenant_id, session_id, operation_id, operation_kind, request_digest, state, phase, admission_stage,"
-                            + " delivery_state, session_status_before, task_id, created_at, updated_at)"
+                            + " delivery_state, session_status_before, task_id, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 'SESSION', ?, ?, '{}', ?, ?, ?, ?, 'digest', ?, ?, 'JAVA_DURABLE', ?, 'ACTIVE', ?, 0, 0)",
                     ManagedSchemaKeys.operationKey(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.valueOf(kind),
                             scope, target, operationId), scope, target, sessionId, TENANT, sessionId, operationId, kind, state, state, delivery, taskId);
@@ -1661,7 +1661,7 @@ class ManagedCwdChangeOperationTest {
         void insertAction(String sessionId, String actionId,
                 long expiresAtMillis) {
             jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, record_kind, domain, record_id, tenant_id,"
-                            + " workspace_id, session_id, action_id, action_version, revision, state, options_json, created_at)"
+                            + " workspace_id, session_id, action_id, action_version, revision, state, options_json, gmt_create)"
                             + " VALUES (?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
                     ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
                     actionId, TENANT, WS, sessionId, actionId,
@@ -1672,8 +1672,8 @@ class ManagedCwdChangeOperationTest {
         void insertTurn(String sessionId, String turnId, String status) {
             jdbc.update("INSERT INTO ma_turn (tenant_id,"
                             + " session_id, turn_id, prompt_id, input_json,"
-                            + " payload_digest, status, created_at,"
-                            + " updated_at) VALUES (?, ?, ?, ?, '[]',"
+                            + " payload_digest, status, gmt_create,"
+                            + " gmt_modified) VALUES (?, ?, ?, ?, '[]',"
                             + " 'digest', ?, 0, 0)", TENANT, sessionId,
                     turnId, UUID.randomUUID().toString(), status);
         }

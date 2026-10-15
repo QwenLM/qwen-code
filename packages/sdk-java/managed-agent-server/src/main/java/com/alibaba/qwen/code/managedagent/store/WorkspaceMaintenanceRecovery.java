@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -160,8 +162,7 @@ public final class WorkspaceMaintenanceRecovery {
             if (jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, maintenance_id = NULL, maintenance_generation = NULL"
                             + " WHERE storage_key = ? AND maintenance_id = ? AND maintenance_generation = ? AND holder_key = ?",
                     WorkspaceExecutionStore.storageKey(jdbc, binding), maintenance, generation, original.get("holderKey")) != 1
-                    || jdbc.update("UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL"
-                                    + " WHERE operation_key = ? AND claim_generation = ?", operations.key(KIND, maintenance), generation) != 1) {
+                    || jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL WHERE operation_key = ? AND claim_generation = ?", operations.key(KIND, maintenance), generation) != 1) {
                 throw blocked();
             }
             return inspect(binding, maintenance, generation);
@@ -191,7 +192,7 @@ public final class WorkspaceMaintenanceRecovery {
     }
 
     private static Map<String, Object> owner(JdbcTemplate jdbc, ContextBinding binding, boolean lock) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), WorkspaceExecutionStore.storageKey(jdbc, binding));
         return rows.size() == 1 ? rows.getFirst() : null;
     }
