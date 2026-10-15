@@ -1,23 +1,24 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.JournalTurns;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.PendingMessage;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** H4d-b: the message relay's ledger and the journal reads behind the
  * child relay's completion rule, over H2 in MySQL mode. */
@@ -208,10 +209,12 @@ class SessionMessageRelayStoreTest {
                 "{\"route\":\"to_parent\"}");
         Map<String, String> page = new java.util.HashMap<>();
         for (PendingMessage entry : store.findPendingMessages("owner-a",
-                1_000, 50))
+                1_000, 50)) {
             if (entry.tenantId().equals(TENANT)
-                    && entry.senderSessionId().equals(sender))
+                    && entry.senderSessionId().equals(sender)) {
                 page.put(entry.messageId(), entry.domain());
+            }
+        }
         assertThat(page).containsExactlyInAnyOrderEntriesOf(Map.of(
                 "msg_planned", "session_message",
                 "cmd_handover", "session_command",

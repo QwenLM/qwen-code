@@ -1,14 +1,22 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,15 +28,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceRecoveryStoreTest {
     @TempDir Path temporary;
@@ -54,7 +56,7 @@ class WorkspaceRecoveryStoreTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", root.toString())));
         guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> new WorkspaceStorageGuard.Identity(
                 path.toRealPath().toString(), "test-host", "test-device", "test-inode", "2026-10-01T00:00:00Z"));
-        sessions = new ManagedAgentStore(jdbc, WorkspaceRecoveryStore.JSON, Clock.systemUTC(), ignored -> { },
+        sessions = new ManagedAgentStore(jdbc, WorkspaceRecoveryStore.JSON, Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
         for (String workspace : List.of("workspace-a", "workspace-b")) {
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
@@ -155,7 +157,9 @@ class WorkspaceRecoveryStoreTest {
         properties.getToolPublication().setGcEnabled(true);
         properties.getToolPublication().setDeletionGrace(java.time.Duration.ZERO);
         var collector = new SessionResourceCollectionCollector(jdbc, manager, properties);
-        for (int page = 0; page < 20 && collector.runOnce(); page++) {}
+        for (int page = 0; page < 20 && collector.runOnce(); page++) {
+            // collector.runOnce() in the condition does the work; the body stays empty.
+        }
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Long.class)).isZero();
         var streamBefore = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version"
@@ -565,7 +569,9 @@ class WorkspaceRecoveryStoreTest {
     @Test
     void pinsAllSharedStorageMembershipAndRetriesDerivedWorkWithoutMutatingAuthority() {
         List<String> ids = new ArrayList<>();
-        for (int i = 0; i < 35; i++) ids.add(session(i % 2 == 0 ? "workspace-a" : "workspace-b"));
+        for (int i = 0; i < 35; i++) {
+            ids.add(session(i % 2 == 0 ? "workspace-a" : "workspace-b"));
+        }
         jdbc.update("UPDATE ma_session SET status = 'ARCHIVED' WHERE session_id = ?", ids.getFirst());
         jdbc.update("UPDATE ma_session SET status = 'DELETED', deleted_at = 1 WHERE session_id = ?", ids.getLast());
         var before = sessionRows();
@@ -783,12 +789,18 @@ class WorkspaceRecoveryStoreTest {
         JsonNode context = call(capture, "context");
         ObjectNode manifest = object().put("version", 1).put("provider", "local-workspace-bundle/1")
                 .put("tenantId", "tenant").put("storageId", "storage").put("activation", false);
-        for (String name : List.of("fenceOperationId", "mountRevision")) manifest.set(name, request.path(name));
-        for (String name : List.of("registration", "sourceDigest", "sessionCount")) manifest.set(name, context.path(name));
+        for (String name : List.of("fenceOperationId", "mountRevision")) {
+            manifest.set(name, request.path(name));
+        }
+        for (String name : List.of("registration", "sourceDigest", "sessionCount")) {
+            manifest.set(name, context.path(name));
+        }
         manifest.set("captureOperationId", request.path("operationId"));
-        for (String name : List.of("sessions", "assets")) manifest.putObject(name)
-                .put("path", ".w1-recovery/" + name + ".ndjson").put("byteLength", 0).put("digest", "a".repeat(64))
-                .put("count", "sessions".equals(name) ? context.path("sessionCount").asLong() : call(capture, "assetPage").path("assets").size());
+        for (String name : List.of("sessions", "assets")) {
+            manifest.putObject(name)
+                    .put("path", ".w1-recovery/" + name + ".ndjson").put("byteLength", 0).put("digest", "a".repeat(64))
+                    .put("count", "sessions".equals(name) ? context.path("sessionCount").asLong() : call(capture, "assetPage").path("assets").size());
+        }
         return manifest;
     }
 
