@@ -5,6 +5,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore.WakeFence;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Closeable;
 import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -15,8 +18,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The wake consumer role (design 2026-10-04-managed-agent-event-transport,

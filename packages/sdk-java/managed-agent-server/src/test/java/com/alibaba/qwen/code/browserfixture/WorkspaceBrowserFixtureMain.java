@@ -5,14 +5,15 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
-import java.security.Principal;
-import java.util.List;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.security.Principal;
+import java.util.List;
 
 public final class WorkspaceBrowserFixtureMain {
     private WorkspaceBrowserFixtureMain() {

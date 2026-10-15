@@ -10,14 +10,15 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-import java.time.Duration;
-import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.time.Duration;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The real publication controller and grant/data/admission stores with an
@@ -34,7 +35,6 @@ import org.springframework.transaction.PlatformTransactionManager;
  */
 @Configuration(proxyBeanMethods = false)
 public final class PublicationProbeWiring {
-
     private static final long EXECUTION_BYTES = 268_435_456L;
     private static final long SESSION_BYTES = 536_870_912L;
     private static final long TENANT_BYTES = 1_073_741_824L;
