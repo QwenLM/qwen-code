@@ -199,6 +199,11 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
+    void pinsThePersistedKind() {
+        assertEquals("local-process", LocalProcessRuntimeProvisioner.KIND);
+    }
+
+    @Test
     void reportsUnknownWhenTheProcessIsNotOwned() throws Exception {
         HttpRuntimeTransport transport = new HttpRuntimeTransport();
         try (LocalProcessRuntimeProvisioner provisioner =

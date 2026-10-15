@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -43,6 +44,15 @@ public final class StoreModels {
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
                     null, "yolo", null, null);
+        }
+
+        public SessionRecord withStatus(String value) {
+            return new SessionRecord(tenantId, sessionId, agentId,
+                    agentRevision, title, value, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence,
+                    replayFloorSequence, createdAt, updatedAt, deletedAt,
+                    version, workspace, approvalMode, toolProfile,
+                    agentDefinitionDigest);
         }
     }
 
@@ -87,7 +97,31 @@ public final class StoreModels {
     public record CommandRecord(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
-            long createdAt, long updatedAt) {
+            byte[] actorKey, long createdAt, long updatedAt) {
+        /**
+         * The recorder half of every command replay gate. A receipt this
+         * build writes names its recorder or carries
+         * {@code ManagedReceipts.UNATTRIBUTED}, which no actor key equals;
+         * only a receipt recorded before the stamp existed reads back NULL.
+         * Its recorder was never stored, so it keeps the role-gated replay
+         * it was recorded under rather than answering only the creator. A
+         * caller without an actor id never passes, so it stays on the
+         * creator gate.
+         */
+        public boolean admitsReplayBy(String actorId) {
+            if (actorId == null) {
+                return false;
+            }
+            if (actorKey == null) {
+                return true;
+            }
+            try {
+                return Arrays.equals(actorKey,
+                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+            } catch (IllegalArgumentException error) {
+                return false;
+            }
+        }
     }
 
     /**
