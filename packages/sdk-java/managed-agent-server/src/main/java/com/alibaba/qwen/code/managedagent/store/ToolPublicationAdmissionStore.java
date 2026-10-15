@@ -539,8 +539,10 @@ public final class ToolPublicationAdmissionStore {
     }
 
     private void lockTenant(JsonNode key) {
-        // This lane's first tenant-guard acquisition, bounded with the
-        // shared named-failure mapping (#13800).
+        // This lane's publication-guard acquisition, bounded with the shared
+        // named-failure mapping (#13800). For a CSI-pinned Session,
+        // lockCsiOriginal above already took the same row with the same
+        // bound, and this re-lock returns at once.
         ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
                 text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }

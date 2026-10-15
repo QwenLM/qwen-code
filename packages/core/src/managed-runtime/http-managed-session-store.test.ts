@@ -204,6 +204,7 @@ describe('HTTP Managed Session store', () => {
 
   async function bootStoresAndSession(
     server: FakeManagedSessionStore,
+    requestTimeoutMs?: number,
   ): Promise<{
     stores: ReturnType<typeof createHttpManagedSessionStores>;
     session: Awaited<ReturnType<typeof openManagedSession>>;
@@ -220,6 +221,7 @@ describe('HTTP Managed Session store', () => {
       writerId: 'harness-a',
       writerToken: TOKEN_A,
       fetchFn: server.fetch,
+      ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
     });
     const definitionRef = await stores.resourceStore.publish(
       'managed-session-definition',
@@ -2009,6 +2011,49 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('keeps the transient retry allowance after spending guard retries', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 4;
+    let dropped = 2;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?')) {
+        if (contended > 0) {
+          contended--;
+          return jsonResponse(
+            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            503,
+          );
+        }
+        if (dropped > 0) {
+          dropped--;
+          throw new TypeError('fetch failed');
+        }
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).resolves.toBeDefined();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(7);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('retries a contended guard on a non-retryable POST because the store rolled it back', async () => {
     const server = new FakeManagedSessionStore();
     let contended = 4;
@@ -2077,6 +2122,10 @@ describe('HTTP Managed Session store', () => {
         status: 503,
         remoteCode: 'tenant_guard_contended',
       });
+      // The guard retries run until less than one 250 ms pause of the
+      // 1 500 ms budget remains, so the give-up lands at about 1 250 ms:
+      // pin it from below too, or a client that quits early stays green.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_200);
       expect(Date.now() - started).toBeLessThan(1_500 + 1_000);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
@@ -3347,6 +3396,40 @@ describe('HTTP Managed Session store', () => {
       await session.close();
     },
   );
+
+  it('spends one contention budget across the commit retries', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return jsonResponse(
+            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            503,
+          );
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /POST \/transactions:commit failed after \d+ attempts: held/,
+    );
+    // Each of the commit's three attempts restarting its own 1 200 ms of
+    // guard retries would take ~3.6 s and ~15 fetches.
+    expect(Date.now() - started).toBeLessThan(1_200 + 1_000);
+    expect(attempts).toBeLessThanOrEqual(6);
+    // The failed commit latched the log shut, so closing cannot settle.
+    await session.close().catch(() => undefined);
+  });
 
   it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
     const server = new FakeManagedSessionStore();

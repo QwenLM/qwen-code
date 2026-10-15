@@ -229,10 +229,10 @@ public class ManagedSessionStore {
         // taking the two tenant-wide rows here would let any long holder of
         // them wedge every Session of the tenant (#13800). No v2 probe may
         // run here: a plain consistent read pins the REPEATABLE READ snapshot
-        // before the guard waits below (R5 P1); a row-locking read inverts
-        // against the claim order (guards → operation) of a concurrently
-        // claiming lifecycle (R6 follow-up); and borrowing a second pooled
-        // connection deadlocks the pool under saturation (R6 P1). The fence
+        // before the guard waits below; a row-locking read inverts against
+        // the claim order (guards → operation) of a concurrently claiming
+        // lifecycle; and borrowing a second pooled connection deadlocks the
+        // pool under saturation. The fence
         // that rejects ordinary writes against a v2 Session lives in
         // requireOrdinaryAdmission, where the caller's own guards are already
         // held and the same consistent read layer is established.
@@ -316,10 +316,10 @@ public class ManagedSessionStore {
     // An ordinary write against a v2-claimed Session must fail with the
     // claim's name, and the read that names it must never walk the three
     // cliffs the earlier probes hit: no plain consistent read ahead of the
-    // guard waits in the calling path (R5 P1 — pinning the snapshot before
-    // the retry learns its winner), no row lock ahead of the claim order
-    // (guards → operation), and no second pooled connection while this
-    // transaction holds its own (R6 P1 — pool saturation self-deadlock).
+    // guard waits in the calling path (it pins the snapshot before the retry
+    // learns its winner), no row lock ahead of the claim order (guards →
+    // operation), and no second pooled connection while this transaction
+    // holds its own (the pool self-deadlocks at saturation).
     // Every call site invokes this only after its own guard or head row has
     // been taken, so the consistent read layer the flow required is already
     // established and the classification costs one lock-free session-scoped
@@ -869,6 +869,11 @@ public class ManagedSessionStore {
                                     return null;
                                 });
                 requireCsiCurrentTime(continuation);
+            }
+            // A duplicate is fenced like a first attempt: before #13800 the
+            // v2 claim check ran ahead of this lookup.
+            if (authority == null) {
+                requireNoLifecycleClaim(tenantId, sessionId);
             }
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
@@ -2214,8 +2219,8 @@ public class ManagedSessionStore {
     }
 
     private CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
-        return jdbc.execute(
-                (org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>)
+        Boolean pinned = jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<Boolean>)
                         connection -> {
                             var target =
                                     org.springframework.jdbc.datasource.DataSourceUtils
@@ -2251,17 +2256,29 @@ public class ManagedSessionStore {
                             // root, a pin never changes after its row is
                             // inserted, and roots are never deleted, so an
                             // unpinned root can only have legacy markers,
-                            // which no snapshot here is older than. A pinned
-                            // Session takes the tenant guards behind its root;
-                            // a placement-first operation on that same Session
-                            // meanwhile resolves as an InnoDB deadlock.
-                            if (!ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId)
-                                    && !JdbcCsiFilesRetirementGuard.hasCsiRuntimeMarker(
-                                            target, tenantId, sessionId)) {
-                                return null;
-                            }
-                            JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
-                            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+                            // which no snapshot here is older than.
+                            return ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId)
+                                    || JdbcCsiFilesRetirementGuard.hasCsiRuntimeMarker(
+                                            target, tenantId, sessionId);
+                        });
+        if (!Boolean.TRUE.equals(pinned)) {
+            return null;
+        }
+        // A pinned Session takes the tenant guards behind its root, bounded
+        // and named like every other per-turn lane: on renew, commit and
+        // recovery state these are the first tenant-wide waits (#13800). A
+        // placement-first operation on that same Session meanwhile resolves
+        // as an InnoDB deadlock, which the same mapping names.
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        return jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>)
+                        connection -> {
+                            var target =
+                                    org.springframework.jdbc.datasource.DataSourceUtils
+                                            .getTargetConnection(connection);
                             var original =
                                     JdbcCsiFilesRetirementGuard.lockManagedSession(
                                             target, tenantId, sessionId);
@@ -2839,7 +2856,8 @@ public class ManagedSessionStore {
         // Take the root row exclusively first: ordinary writers lock it
         // without a tenant guard (#13800), and the shared lock INSERT IGNORE
         // takes on an existing row would otherwise upgrade behind one of
-        // them and deadlock.
+        // them and deadlock. lockSessionRoot materializes the row with its
+        // keys, so the INSERT IGNORE below never inserts.
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
@@ -2855,9 +2873,6 @@ public class ManagedSessionStore {
                 sessionScopeKey(tenantId, sessionId),
                 now,
                 now);
-        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
-                        + " WHERE tenant_id = ? AND session_id = ? AND session_scope_key IS NULL",
-                tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                         + " updated_at) VALUES (?, ?, 'SESSION', X'', ?)",

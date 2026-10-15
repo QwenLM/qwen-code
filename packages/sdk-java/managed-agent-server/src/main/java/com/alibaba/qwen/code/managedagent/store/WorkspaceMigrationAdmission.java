@@ -9,9 +9,15 @@ final class WorkspaceMigrationAdmission {
     }
 
     static void lockTenant(JdbcTemplate jdbc, String tenant) {
+        // A zero statement timeout is unlimited, the historical shape.
+        lockTenant(jdbc, tenant, 0);
+    }
+
+    /** Bounded variant for per-turn admissions: fails instead of out-waiting the caller (#13800). */
+    static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
         // Fence installation and admission share this lock before any Session lock.
         jdbc.execute((ConnectionCallback<Void>) connection -> {
-            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, timeoutSeconds);
             return null;
         });
     }

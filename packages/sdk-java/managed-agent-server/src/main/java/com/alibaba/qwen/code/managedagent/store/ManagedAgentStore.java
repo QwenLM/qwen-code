@@ -960,7 +960,11 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // A per-turn admission: a long holder of the tenant's placement row
+        // answers tenant_guard_contended within the hot-path bound instead
+        // of parking the submit past the caller's budget (#13800).
+        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR

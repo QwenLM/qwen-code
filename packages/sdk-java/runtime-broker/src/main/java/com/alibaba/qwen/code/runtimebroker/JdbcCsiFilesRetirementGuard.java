@@ -232,7 +232,9 @@ public final class JdbcCsiFilesRetirementGuard {
         List<String> references = new ArrayList<>();
         StringBuilder sql = new StringBuilder(
                 "SELECT * FROM ma_runtime_binding WHERE (tenant_id = ? AND isolation_key = ?)");
-        try (PreparedStatement statement = connection.prepareStatement(
+        // Plain reads still wait on metadata locks, so both statements carry
+        // the class's query timeout.
+        try (PreparedStatement statement = statement(connection,
                 "SELECT * FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
@@ -252,7 +254,7 @@ public final class JdbcCsiFilesRetirementGuard {
                 }
             }
         }
-        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+        try (PreparedStatement statement = statement(connection, sql.toString())) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             for (int index = 0; index < references.size(); index++) {

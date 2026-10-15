@@ -2,9 +2,11 @@
 
 [English](2026-10-11-managed-tenant-guard-wedge.md) | [简体中文](2026-10-11-managed-tenant-guard-wedge.zh-CN.md)
 
-- 状态：提案
+- 状态：已在本改动中实现（见证：`ManagedSessionGuardConvoyIT`）；「后续」
+  一节列出的车道仍保留无界获取
 - Issue：[#13800](https://github.com/QwenLM/qwen-code/issues/13800)——一个处于
-  `recovery_blocked` 的 Session 楔死同 daemon 上其他 Session 的后续轮次
+  `recovery_blocked` 的 Session 楔死同 daemon 上其他 Session 的后续轮次。
+  本改动并不实现该 issue 的 W1 或 W2，见「范围」。
 - 相关：验收报告 `docs/verification/13532-linux-h3/README.md`（发现 A2）、
   复现报告 `.qwen/issues/issue-13800.md`（不随仓库提交）。
 
@@ -14,10 +16,22 @@
 daemon → runtime worker）上，一个被标记为 `recovery_blocked` 的 Session
 与无关 Session 的冻结存在相关性：受害 Session 的 journal 停在
 `hostedModelAttempt` 之后，模型端点不再收到请求，回合从此不再结束。物理
-验收环境中清掉存储行后行为恢复。验收报告只记录了相关性，没有机制；
-issue 的工作项 W1（隔离机制）与 W2（限定影响半径）即本设计的实现内容。
+验收环境中清掉存储行后行为恢复。验收报告只记录了相关性，没有机制。
 
-## 机制（W1）
+### 范围
+
+#13800 的 W1 已落定为另一种机制：Workspace 执行挂载租约，每个
+`(tenantId, storageId)` 一行，由停住的被阻塞回合持有。楔死期间
+`innodb_trx` 与各锁等待表均为空、broker 线程空闲，排除了租户级行锁
+（[issue 评论](https://github.com/QwenLM/qwen-code/issues/13800#issuecomment-6094220681)）。
+W2 是 [#13816](https://github.com/QwenLM/qwen-code/pull/13816)。本改动既不
+实现 W1，也不满足 W2 的验收。
+
+它修复的是调查中独立证实的另一种耦合（下文的守卫持有变体）：每个 Session
+的逐轮 store 流量都在两张租户级守卫行上排队，任一行被长时间持有，就会让
+无关 Session 冻结到超出客户端预算。
+
+## 机制
 
 Managed Session store 在**每一个** Session 的热写路径上无条件地取两个
 per-tenant InnoDB record lock：
@@ -29,7 +43,7 @@ per-tenant InnoDB record lock：
 2. `qwen_tool_publication_tenant`（每租户一行），经
    `ToolPublicationRetentionStore.lockTenant`。
 
-`ManagedSessionStore` 当前的调用矩阵：
+本改动之前 `ManagedSessionStore` 的调用矩阵：
 
 | 操作                 | placement guard                                                               | publication tenant 行                               | per-session 锁（head 行 / drain / session 行） |
 | -------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------- |
@@ -42,9 +56,12 @@ per-tenant InnoDB record lock：
 | `authorizeLifecycle` | 是                                                                            | 是                                                  | 是（claim + session + head）                   |
 
 对 `authority == null`（普通、非生命周期流量）`checkLifecycleWriter`
-**不做任何校验**——它只是取两把锁。任何事务把其中一行持有得比 harness
-客户端 30 秒请求超时更久，其后到达的同租户其他 Session 的下一次 store
-调用都会被冻结，因为：
+取两把锁，并执行一次 v2 探测（`ma_operation` 按 `operation_id` join
+drain 行，种类 `CLOSE`/`ARCHIVE`/`DELETE`，
+`lifecycle_protocol_version = 2`）；存在 v2 claim 时抛
+`workspace_lifecycle_claim_fenced`。D1 迁移了这道栅栏，而不是删掉它。任何
+事务把其中一行持有得比 harness 客户端 30 秒请求超时更久，其后到达的同租户
+其他 Session 的下一次 store 调用都会被冻结，因为：
 
 - InnoDB 锁等待（默认 50 秒）大于客户端超时（30 秒）；
 - 每次超时调用会被重试，重试到达时服务端语句可能仍在排队，客户端等待
@@ -53,7 +70,7 @@ per-tenant InnoDB record lock：
   后续创建在死写者租约到期前一律收到 `409
 managed_session_writer_conflict`。
 
-### 复现（W1 证据）
+### 复现（守卫持有证据）
 
 含环境、命令与原始日志的完整复现报告见 `.qwen/issues/issue-13800.md`。
 决定性命名的变体摘要（本地 MariaDB 10.11 + managed-agent-server + 打包
@@ -79,10 +96,13 @@ to timeout`（30002 ms），路由返回 503 `managed_session_open_failed`；
   回合正常完成。它是 2026-10-02 审计在册的真实放大器（§B1/B2），但不
   是此处的单独楔死机制。
 
-物理 rig 上那次具体的长期持有者未被钉出——rig 没有留下 InnoDB 锁证据，
-复现也刻意不去猜。已被证明的缺陷是耦合本身：**租户级锁绝不能给它不属
-于的会话的逐轮 store 流量设卡。** 任何长持有——无论由什么产出——都必须
-让其他会话的回合要么完成，要么带具名原因快速失败。
+守卫持有变体并不能解释物理 rig 上的楔死（见「范围」）。已被证明的缺陷是
+耦合本身：**在本改动覆盖的车道上，租户级锁绝不能给它不属于的会话的逐轮
+store 流量设卡。** 任何长持有——无论由什么产出——都必须让这些车道上其他
+会话的回合要么完成，要么带具名原因快速失败。覆盖的车道是上表中的
+`ManagedSessionStore` 操作、publication 车道（F2）与回合提交准入
+（`ManagedAgentStore.insertTurnCommand`）。`ManagedAgentStore` 中其余对
+placement 行的获取列在「后续」中。
 
 ## 守卫存在的理由（以及为什么不能一删了之）
 
@@ -113,15 +133,15 @@ to timeout`（30002 ms），路由返回 503 `managed_session_open_failed`；
 
 ## 目标
 
-- W1-G1：当 daemon 所在租户内有一个 `recovery_blocked` 会话且生命周期/
-  恢复工作仍在持续推进时，全新会话的普通回合**仍能完成**——普通流量不
-  再在它不需要的租户级守卫行后排队。（issue W2 验收。）
-- W1-G2：热路径真正需要的守卫争用超过短预算时，调用**快速具名失败**
-  而不是 30 秒客户端超时；原因对调用方可见，对回合则模型可见，而非静
-  默冻结。（issue W2。）
-- W1-G3：持守卫事务不再跨无界工作持行；最重持有者改为无锁快照 + 短
-  复核。
-- W1-G4：一条见证集成测试钉住该几何：耦合恢复时红、改动后绿。
+- G1：另一事务持有租户守卫行时，全新会话的普通回合**仍能完成**——普通
+  流量不再在它不需要的租户级守卫行后排队。
+- G2：覆盖车道上的热路径真正需要的守卫争用超过短预算时，调用**快速具名
+  失败**而不是 30 秒客户端超时；原因对调用方可见，对回合则模型可见，而
+  非静默冻结。
+- G3：`requireIdleJournal` 的整 journal `FOR UPDATE` 扫描改为无锁快照 +
+  在已锁 head 下复核（D3）。生命周期恢复/校验事务在本改动中保留无界获取，
+  也仍在租户行下做 journal 侧工作；给它们加界列为后续。
+- G4：一条见证集成测试钉住该几何：耦合恢复时红、改动后绿。
 
 ## 非目标
 
@@ -143,10 +163,13 @@ to timeout`（30002 ms），路由返回 503 `managed_session_open_failed`；
 1. `checkLifecycleWriter` 仅当 `authority != null`（生命周期签发 writer）
    才取 placement guard 与 publication tenant 行。普通
    （`authority == null`）`commit`、`sealWriter`、`renewWriter` 与
-   `acquireWriter` 不再经它取两道守卫。per-session 栅栏保留：head 行
-   `FOR UPDATE` 串行化单会话写者；drain 行栅栏
-   （`requireOrdinaryAdmission`、`lifecycleFenced`、
-   `lifecycleProtocolFenced`）维持 ordinary-vs-lifecycle 隔离。
+   `acquireWriter` 不再经它取两道守卫。per-session 栅栏保留：Session 根行
+   与 head 行的 `FOR UPDATE` 串行化单会话写者；drain 行栅栏
+   （`requireOrdinaryAdmission`、`lifecycleFenced`）维持
+   ordinary-vs-lifecycle 隔离。v2 claim 栅栏从 `checkLifecycleWriter` 迁到
+   `requireNoLifecycleClaim`：`requireOrdinaryAdmission` 调用它，renew、
+   seal、commit（首次尝试与重复提交的重放分支）以及工具结果发布在取得自身
+   守卫或 head 锁之后调用它。
 2. `authorizeOrdinary` 去掉其显式两道守卫；准入仍由
    `requireOrdinaryAdmission`（drain 行）+ head 行治理。
 3. `findHeadForUpdate`/`requireHeadForUpdate` 不再经 `lockSessionHead`
@@ -156,7 +179,9 @@ to timeout`（30002 ms），路由返回 503 `managed_session_open_failed`；
 4. `blockRecovery` 形状不变，只失去继承来的 tenant 行。
 
 准入路径保留项：`authorizeLifecycle`（claim 协议）、`acquireWriter` 的
-migration 准入（`sessionAdmission`）**及其 publication tenant CAS 行**
+migration 准入（`WorkspaceMigrationAdmission.requireSessionOpen`；本改动
+删掉了它自身的 `lockTenant`，placement 守卫改由调用方显式、有界地获取）
+**及其 publication tenant CAS 行**
 ——Session 还没有 head 行时，该行是同 Session delete/retire 在飞期间的
 唯一排序点（`writerAcquisitionAndRetirementSerializeEvenWithoutAnExistingHead`
 钉住的契约），所以 `acquireWriter` 保留两者并按 D2 加界——以及所有
@@ -177,8 +202,11 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
   （锁等待），而不是静默久等。
 - harness 客户端既有 `uncertain` 分类把 5xx 当可重试；服务端等待被压到
   ≤5 秒后，瞬时争用下三次重试落在一个客户端预算内；持续争用则退化为
-  具名错误而非 30 秒冻结。`innodb_lock_wait_timeout`（50 秒）不再先于
-  客户端（30 秒）引爆。
+  具名错误而非 30 秒冻结。在覆盖车道上，`innodb_lock_wait_timeout`
+  （50 秒）不再先于客户端（30 秒）引爆。
+- 覆盖车道包括 CSI 钉住 Session 的续接检查——在 renew、commit 与恢复状态
+  上，它的 placement 与 publication 获取就是首个租户级等待——以及回合提交
+  准入。
 
 ### D3. 已知无界持有者的重构
 
@@ -189,7 +217,7 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 - 生命周期恢复事务（`recoverEffects`/`saveEffects`）本次不动；D1 之后
   同租户普通流量已不再在这些守卫后面排队，其窗口压界列为后续。
 
-### D4. Harness 侧契约（W2，TypeScript）
+### D4. Harness 侧契约（TypeScript）
 
 当一回合内 store 重试被 transport/5xx 失败耗尽时，回合必须以具名原因
 结束而不是 journal 冻结：
@@ -204,16 +232,19 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
   `recoveryReason` 字段返回。
 - store 客户端超时/重试预算不变；D2 让这些预算重新有意义。
 
-### D5. 见证集成测试（W1 验收）
+### D5. 见证集成测试
 
-在 `managed-agent-server` 新增 MariaDB 集成测试
-`ManagedSessionGuardConvoyIT`（沿用既有 `*MySqlIT` 夹具族）：
+在 `managed-agent-server` 新增集成测试 `ManagedSessionGuardConvoyIT`（沿用
+既有 `*MySqlIT` 夹具族）。它需要 `jdbc:mysql:` URL，可在 MySQL 8.4 或
+MariaDB 10.11 上运行。它不是 PR 门禁：#14205 起 Java 数据库车道只按每日
+计划与手动触发运行，因此其变异保证需要人工执行。
 
 1. 同租户建两个会话，一个标成 `recovery_blocked`（头行 UPDATE，对齐复
    现夹具手法）。
 2. 另开一个外部 JDBC 事务持两行（`UPDATE ... WHERE tenant_id = ?`）。
 3. **见证断言**：持锁期间，另一会话的 `acquireWriter`（migration 准入
-   情形）在约守卫预算内以具名错误失败；`renewWriter`、
+   情形）在一个守卫预算内以具名错误失败（断言上限固定为 15 秒，把预算调
+   到超过它时见证会变红）；`renewWriter`、
    `authorizeOrdinary`、`blockRecovery`（D1 断耦情形）正常完成，而普通
    记录 `commit` 以同一具名错误快速失败（R2 起它重新有界获取
    placement 守卫）；被卡行的 `recovery_status` 不变。
@@ -221,13 +252,17 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 5. 变异反证：恢复 `checkLifecycleWriter` 的无条件获取后 D1 情形重新被
    拖死（测试夹具由此硬编码预期调用矩阵）。
 
-`requireIdleJournal` 重构由补断言覆盖：外部持守卫时对 head 未被外部持
-有的会话，idle 检查仍可完成。
+`requireIdleJournal` 只有失败闭的复核有见证：
+`WorkspaceLifecycleMySqlIT#idleJournalCheckReVerifiesARevisionItsSnapshotCannotSee`
+在 head revision 超前于扫描快照时断言
+`workspace_lifecycle_journal_unverified`。「外部持守卫时 idle 检查仍可完成」
+没有见证。
 
 ## 风险与缓解
 
 - **R1——migration 准入回归（D1 不动它，D2 给它加界）。**
-  `acquireWriter` 保留 `sessionAdmission` 的 placement guard；5 秒预算
+  `acquireWriter` 为 `requireSessionOpen` 保留 placement guard，现在在它
+  之前显式、有界地获取；5 秒预算
   只会把曾经的冻结竞态变成具名 503。迁移 IT 必须全绿
   （`WorkspaceLifecycleMySqlIT` 族）。
 - **R2——生命周期协议栅栏。** 生命周期签发写者保留全套锁与 claim 检查；
@@ -240,8 +275,8 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 - **R4——`requireIdleJournal` 无锁读会看到过期的未决集合。** 以 head 锁下
   的 head-revision 复核缓解；不一致则失败闭（blocked，不放行）。
 - **R5——MySQL/MariaDB 方言。** 有界获取走 Connector/J 语句超时，不用
-  `NOWAIT`/厂商子句；CI 的 MySQL 车道与 production MariaDB 路径都成
-  立。
+  `NOWAIT`/厂商子句；已在 MariaDB 10.11.18（计划内 CI 车道的镜像）与
+  MySQL 8.4.7 上实测。
 - **R6——病理持续持有下的行为。** 持有超过重试预算仍无法完成（不删行任
   何设计都做不到）；本设计交付的契约是：瞬时争用 ⇒ 完成；持续争用 ⇒
   快速具名失败，永无静默冻结，且永不让某会话的行给它不属于的会话设
@@ -252,22 +287,25 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 1. `managed-agent-server` 与 `runtime-broker` 的单元/集成套件（Maven、
    JDK 21）：生命周期、publication、迁移、凭据、store binding 套件必须
    全绿（两模块 `mvn verify`）。
-2. 新见证 `ManagedSessionGuardConvoyIT` 在 MySQL 车道运行。
+2. 新见证 `ManagedSessionGuardConvoyIT` 在 `mysql-integration` profile 下运行。
+   PR 不再运行它（#14205 把 Java 数据库车道改为每日计划与手动触发），合入
+   证据须是一次手动触发的 `sdk-java.yml` 运行，或附上的
+   `mvn -Pmysql-integration -Dit.test=ManagedSessionGuardConvoyIT` 记录。
 3. TypeScript：`packages/core` 的 HTTP 会话存储既有测试、`packages/cli`
    hosted-harness 套件；为具名落定路径新增单测。
 4. 以复现脚本（`.qwen/issues/13800-repro/` 保留）重跑 E2E：守卫持有变
    体现在只产出快速具名失败或正常回合，不再出现 30 秒冻结。
-5. #13532 的物理 rig 复验仍是独立后续；W2 验收由见证 + E2E 在本地示
-   证。
+5. #13532 的物理 rig 复验仍是独立后续，属于 #13800 的 W2（#13816），
+   不属于本改动。
 
 ## 验收标准
 
-1. `ManagedSessionGuardConvoyIT` 绿；回退 D1 调用点后转红（开发期变异
-   验证）。
+1. `ManagedSessionGuardConvoyIT` 在手动触发或本地的 `mysql-integration`
+   运行中绿；回退 D1 调用点后转红（开发期变异验证）。
 2. managed-agent 全部既有 Java 套件绿（生命周期/publication/迁移各
    条车道语义无漂移）。
-3. 复现 E2E 的守卫持有变体下，全新会话的创建与回合不再冻结；持续持
-   有下出现的失败一律带具名码。
+3. 复现 E2E 的守卫持有变体下，覆盖车道上全新会话的创建与回合不再冻结；
+   持续持有下出现的失败一律带具名码。
 4. `recovery_blocked` 标记的表述仍准确：被卡会话继续准确报告自身阻
    塞状态（见证步骤 3 的断言）。
 
@@ -341,7 +379,11 @@ READ 的快照由此在 `qwen_tool_publication_tenant` 等待之前钉住；在�
 O4 门控的迟到 writer 在应被拒绝处径直获得授权
 （`O4MySqlGate#writerReallyWaitsOnRetirementTransactionAndThenIsRejected`）。
 `acquireWriter` 现在依次执行有界 placement 获取、有界 CAS 获取，然后
-才是 `requireSessionOpen`，快照在等待之后钉住，可见赢家的提交。
+才是它的一致性读，快照在等待之后钉住，可见赢家的提交。要守住的不变量
+是：本车道上的每一条普通读都在这些等待之后。目前第一条是 CSI 运行时标记
+探测（在根行锁之后，对 `ma_runtime_slot` 与 `ma_runtime_binding` 的两条普通
+`SELECT`），其后是 `requireSessionOpen`。把任一条移到等待之前都会让缺陷
+复现。
 
 ## Schema 整合（#14069，2026-10-14）
 
@@ -378,10 +420,31 @@ O4 门控的迟到 writer 在应被拒绝处径直获得授权
   的行为：它在调用方自身检查之后再调用一次
   `checkLifecycleWriter(…, null)`，对所有调用方拦截 v2 Session。
 
+## 评审修正（2026-10-15）
+
+对 `f668634b96` 的评审找出了仍然无界等待或跳过栅栏的车道：
+
+- CSI 钉住 Session 的续接检查以 10 秒超时取 placement、以无超时取
+  publication 行，且不在具名映射之内，因此 publication 行被持有时，renew、
+  commit 与恢复状态会冻结满 50 秒锁等待。两者现在都走有界封装。见证：
+  `ManagedAgentCsiMutationMySqlIT#pinnedSessionBoundsItsTenantGuards`。
+- 回合提交准入（`insertTurnCommand`）无超时地取 placement 行；现在有界并
+  具名。见证：`heldTenantGuardsDoNotWedgeUnrelatedSessions` 的回合提交臂。
+- 对 v2 已认领 Session 的普通重复 `commit()` 会被重放，因为迁移后的 claim
+  栅栏只在重放分支之后运行。重放分支现在也运行它。见证：
+  `WorkspaceProfileLifecycleTest#duplicateOrdinaryCommitIsFencedByAVersionTwoClaim`。
+- CSI 运行时标记探测的两条普通读现在带守卫类的 10 秒语句超时，因为普通读
+  仍会等元数据锁。
+
 ## 后续（不在本次改动）
 
 - 生命周期恢复事务的守卫窗口压界（`recoverEffects`/`saveEffects`/
   `verifyCompletion` 的快照复核化）。
+- 给 `ManagedAgentStore` 中其余对 placement 行的获取加界或限定范围
+  （无超时的 `WorkspaceMigrationAdmission.lockTenant` 与
+  `WorkspaceLifecycleStore.lockPlacement`）：Session 创建与子 Session、重命
+  名、变更、close/archive/delete 准入、cwd 变更与任务取消操作。它们都不是
+  逐轮路径；被长持有时每一处仍会等满 `innodb_lock_wait_timeout`。
 - 物化器 gap 绊线熔断（审计 §B2；毒化的 consumer progress 标死而不是
   10 Hz 永久异常）。
 - 续期调度器隔离基线（复现假设 H2）——当前未决；rig 证据若指向它再

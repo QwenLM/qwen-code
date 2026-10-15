@@ -2,10 +2,11 @@
 
 [English](2026-10-11-managed-tenant-guard-wedge.md) | [简体中文](2026-10-11-managed-tenant-guard-wedge.zh-CN.md)
 
-- Status: proposal
+- Status: implemented in this change (witness: `ManagedSessionGuardConvoyIT`);
+  the lanes listed under Follow-ups keep unbounded acquisitions
 - Issue: [#13800](https://github.com/QwenLM/qwen-code/issues/13800) — a
   `recovery_blocked` Session wedges later turns of other Sessions on the same
-  daemon
+  daemon. This change does not implement that issue's W1 or W2; see Scope.
 - Related: acceptance report `docs/verification/13532-linux-h3/README.md`
   (finding A2), reproduction report `.qwen/issues/issue-13800.md` (not
   committed).
@@ -18,10 +19,24 @@ daemon → runtime workers), the presence of one Session marked
 stops after `hostedModelAttempt`, the model endpoint receives no further
 request, and the turn never finishes. Clearing the store rows restored normal
 behavior on the physical rig. The acceptance report recorded the correlation
-but not the mechanism; the issue's work items W1 (name the mechanism) and W2
-(bound the blast radius) are what this design implements.
+but not the mechanism.
 
-## Mechanism (W1)
+### Scope
+
+#13800's W1 was settled on a different mechanism: the Workspace execution
+mount lease, one row per `(tenantId, storageId)`, held by the parked blocked
+turn. During that wedge `innodb_trx` and the lock-wait tables were empty and
+the broker threads idle, which rules out tenant-wide row locks
+([issue comment](https://github.com/QwenLM/qwen-code/issues/13800#issuecomment-6094220681)).
+W2 is [#13816](https://github.com/QwenLM/qwen-code/pull/13816). This change
+neither implements W1 nor discharges W2's exit check.
+
+What it fixes is a separate coupling that the investigation demonstrated
+independently (the guard-hold variant below): every Session's per-turn store
+traffic queued on two tenant-wide guard rows, so any long holder of either
+row froze unrelated Sessions past the client's budget.
+
+## Mechanism
 
 The Managed Session store takes two per-tenant InnoDB record locks on the hot
 write path of **every** Session, unconditionally:
@@ -33,7 +48,7 @@ write path of **every** Session, unconditionally:
 2. `qwen_tool_publication_tenant` (one row per tenant), acquired in
    `ToolPublicationRetentionStore.lockTenant`.
 
-The current call matrix in `ManagedSessionStore`:
+The call matrix in `ManagedSessionStore` before this change:
 
 | Operation            | placement guard                                                                  | publication tenant row                                | per-session locks (head row / drain / session row) |
 | -------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------- |
@@ -46,10 +61,13 @@ The current call matrix in `ManagedSessionStore`:
 | `authorizeLifecycle` | yes                                                                              | yes                                                   | yes (claim + session + head)                       |
 
 For `authority == null` (ordinary, non-lifecycle traffic)
-`checkLifecycleWriter` performs **no validation at all** — it only takes the
-two locks. Any transaction that holds either row longer than the harness
-client's 30-second request timeout freezes every Session of the tenant whose
-next store call arrives meanwhile, because:
+`checkLifecycleWriter` takes the two locks and runs one v2 probe
+(`ma_operation` joined to the drain row on `operation_id`, kinds
+`CLOSE`/`ARCHIVE`/`DELETE`, `lifecycle_protocol_version = 2`); with a v2
+claim present it throws `workspace_lifecycle_claim_fenced`. D1 moves that
+fence rather than dropping it. Any transaction that holds either row longer
+than the harness client's 30-second request timeout freezes every Session of
+the tenant whose next store call arrives meanwhile, because:
 
 - InnoDB lock wait (default 50 s) exceeds the client timeout (30 s);
 - each timed-out call is retried, and the server-side statement may still be
@@ -59,7 +77,7 @@ next store call arrives meanwhile, because:
   later creates of the same session id answer `409
 managed_session_writer_conflict` until the dead writer lease expires.
 
-### Reproduction (W1 evidence)
+### Reproduction (guard-hold evidence)
 
 The full reproduction report with environment, commands, and raw logs lives in
 `.qwen/issues/issue-13800.md`. Summary of the decisive variants, run against a
@@ -89,12 +107,16 @@ model endpoint:
   this hardware. It is a real amplifier tracked by the 2026-10-02 audit
   (§B1/B2) but not a sole wedge mechanism here.
 
-The physical rig's specific long-lived holder is not identified — the rig
-captured no InnoDB lock evidence, and the reproduction deliberately does not
-guess it. The demonstrated defect is the coupling itself: **no tenant-wide
-lock may gate the per-turn store traffic of sessions it does not belong to.**
-Any long hold, whatever produces it, must leave other sessions' turns either
-completing or failing fast with a named reason.
+The guard-hold variant does not explain the physical rig's wedge (see
+Scope). The demonstrated defect is the coupling itself: **on the lanes this
+change covers, no tenant-wide lock may gate the per-turn store traffic of
+Sessions it does not belong to.** Any long hold, whatever produces it, must
+leave other Sessions' turns on those lanes either completing or failing fast
+with a named reason. The lanes covered are the `ManagedSessionStore`
+operations in the matrix above, the publication lanes (F2) and the Turn
+submit admission (`ManagedAgentStore.insertTurnCommand`). The remaining
+`ManagedAgentStore` acquisitions of the placement row are listed under
+Follow-ups.
 
 ## Why the guards exist (and must not simply be deleted)
 
@@ -129,18 +151,19 @@ The defect is therefore not the fences but their **placement and window**:
 
 ## Goals
 
-- W1-G1: A fresh Session's ordinary turn **completes** on a daemon whose
-  tenant contains a `recovery_blocked` Session and whose lifecycle/recovery
-  work is churning — i.e. ordinary traffic no longer queues behind
-  tenant-wide guard rows it does not need. (Issue W2 exit check.)
-- W1-G2: When a guard a hot path genuinely needs is contended beyond a short
-  budget, the call fails **fast with a named reason** instead of a 30 s
-  client timeout; the reason is visible to the caller and, for turns, model-
-  visible rather than a silent freeze. (Issue W2.)
-- W1-G3: Guard-holding transactions never hold the rows across unbounded
-  work; the worst known holders are restructured to snapshot unlocked and
-  verify under a short re-lock.
-- W1-G4: A witness integration test pins the geometry: red when the coupling
+- G1: A fresh Session's ordinary turn **completes** while another
+  transaction holds the tenant's guard rows — i.e. ordinary traffic no
+  longer queues behind tenant-wide guard rows it does not need.
+- G2: When a guard a covered hot path genuinely needs is contended beyond a
+  short budget, the call fails **fast with a named reason** instead of a
+  30 s client timeout; the reason is visible to the caller and, for turns,
+  model-visible rather than a silent freeze.
+- G3: The journal-wide `FOR UPDATE` scan in `requireIdleJournal` is
+  restructured to snapshot unlocked and re-verify under the locked head
+  (D3). The lifecycle recovery/verify transactions keep their unbounded
+  acquisitions and their journal-side work under the tenant row in this
+  change; bounding them is a Follow-up.
+- G4: A witness integration test pins the geometry: red when the coupling
   is restored, green after the change.
 
 ## Non-goals
@@ -167,9 +190,13 @@ In `ManagedSessionStore`:
    tenant row **only when `authority != null`** (a lifecycle-stamped writer).
    Ordinary (`authority == null`) `commit`, `sealWriter`, `renewWriter`, and
    `acquireWriter` no longer take either guard there. Per-session fencing
-   stays: the head row `FOR UPDATE` serializes writers of one Session; the
-   drain-row fence (`requireOrdinaryAdmission`, `lifecycleFenced`,
-   `lifecycleProtocolFenced`) keeps the ordinary-vs-lifecycle barrier.
+   stays: the Session root and head row `FOR UPDATE` serialize writers of
+   one Session; the drain-row fence (`requireOrdinaryAdmission`,
+   `lifecycleFenced`) keeps the ordinary-vs-lifecycle barrier. The v2 claim
+   fence moves from `checkLifecycleWriter` to `requireNoLifecycleClaim`,
+   which `requireOrdinaryAdmission` calls and which renew, seal, commit
+   (both the first attempt and a duplicate's replay) and tool-result
+   publication call after their own guard or head lock.
 2. `authorizeOrdinary` drops its explicit guard acquisitions; admission
    remains governed by `requireOrdinaryAdmission` (drain row) plus the head
    row.
@@ -180,8 +207,10 @@ In `ManagedSessionStore`:
 4. `blockRecovery` keeps its current shape minus the inherited tenant row.
 
 What admission paths keep: `authorizeLifecycle` (claim protocol),
-`acquireWriter`'s migration admission (`sessionAdmission`) **and its
-publication tenant CAS row** — while a Session has no head row, that row is
+`acquireWriter`'s migration admission (`WorkspaceMigrationAdmission.requireSessionOpen`;
+this change removed its own `lockTenant`, and the placement guard is now
+taken explicitly and bounded by the caller) **and its publication tenant CAS
+row** — while a Session has no head row, that row is
 the only ordering point against an in-flight delete/retire of the same
 Session (the `writerAcquisitionAndRetirementSerializeEvenWithoutAnExistingHead`
 contract), so `acquireWriter` keeps both, bounded per D2 — and every
@@ -204,8 +233,12 @@ timeoutSeconds)` overload and an equivalent bounded variant for
 - The harness client's existing `uncertain` classification treats 5xx as
   retryable; with server-side waits now ≤5 s, a 3-attempt retry fits in one
   client budget for transient contention, and persistent contention degrades
-  to the named error instead of the 30 s freeze. `innodb_lock_wait_timeout`
-  (50 s) no longer binds before the client (30 s) does.
+  to the named error instead of the 30 s freeze. On the covered lanes
+  `innodb_lock_wait_timeout` (50 s) no longer binds before the client
+  (30 s) does.
+- The covered lanes include a CSI-pinned Session's continuation check, whose
+  placement and publication acquisitions are the first tenant-wide waits on
+  renew, commit and recovery state, and the Turn submit admission.
 
 ### D3. Restructure the known unbounded holders
 
@@ -219,7 +252,7 @@ timeoutSeconds)` overload and an equivalent bounded variant for
   longer queues on those guards, and bounding their window is follow-up
   (listed in Follow-ups).
 
-### D4. Harness surface (W2, TypeScript)
+### D4. Harness surface (TypeScript)
 
 When every store retry in a turn is exhausted by transport/5xx failures, the
 turn must end with a named reason instead of journal-frozen silence:
@@ -236,19 +269,22 @@ turn must end with a named reason instead of journal-frozen silence:
 - No change to the store client's timeout/retry budgets; the D2 change is
   what makes those budgets meaningful again.
 
-### D5. Witness integration test (W1 exit check)
+### D5. Witness integration test
 
-New MySQL-backed integration test
-`ManagedSessionGuardConvoyIT` in `managed-agent-server` (same fixture family
-as the existing `*MySqlIT` suites):
+New integration test `ManagedSessionGuardConvoyIT` in `managed-agent-server`
+(same fixture family as the existing `*MySqlIT` suites). It needs a
+`jdbc:mysql:` URL and runs against MySQL 8.4 or MariaDB 10.11. It is not a
+pull-request gate: since #14205 the Java database lanes run only on a daily
+schedule and on manual dispatch, so its mutation guarantee is manual.
 
 1. Create two sessions on one tenant; mark one `recovery_blocked` (head row
    update, mirroring the reproduction fixture).
 2. Open an external JDBC transaction that locks both guard rows
    (`UPDATE ... WHERE tenant_id = ?`).
 3. **Witness assertions:** with the hold in place, the other session's
-   `acquireWriter` (migration-admission case) fails within ≈ guard budget
-   with the named error; `renewWriter`, `authorizeOrdinary`,
+   `acquireWriter` (migration-admission case) fails with the named error
+   within one guard budget (asserted below a fixed 15 s ceiling, so raising
+   the budget past it turns the witness red); `renewWriter`, `authorizeOrdinary`,
    `blockRecovery` (D1-decoupled cases) complete normally, while the
    ordinary record `commit` fails fast with the same named error (it
    re-acquires the placement guard bounded since R2); the blocked row's
@@ -260,14 +296,18 @@ as the existing `*MySqlIT` suites):
    blocks again (the test's fixture therefore hard-codes the expected call
    matrix).
 
-`requireIdleJournal` restructuring is covered by an assertion comparing
-journal reads under an externally held guard: the idle check completes for a
-session with an unlocked head row.
+For `requireIdleJournal`, only the fail-closed re-verification is
+witnessed:
+`WorkspaceLifecycleMySqlIT#idleJournalCheckReVerifiesARevisionItsSnapshotCannotSee`
+asserts `workspace_lifecycle_journal_unverified` when the head revision is
+ahead of the scan's snapshot. That the idle check completes under an
+externally held guard is not witnessed.
 
 ## Risks and mitigations
 
 - **R1 — migration-admission regression (D1 does not touch it, D2 bounds
-  it).** `acquireWriter` keeps the placement guard for `sessionAdmission`;
+  it).** `acquireWriter` keeps the placement guard for
+  `requireSessionOpen`, now taken explicitly and bounded before it;
   the 5 s budget can only convert a previously-freezing race into a named 503. Migration ITs must stay green (`WorkspaceLifecycleMySqlIT` family).
 - **R2 — lifecycle protocol fencing.** Lifecycle-stamped writers keep the
   full lock set and claim checks; `authorizeLifecycle` unchanged in
@@ -282,8 +322,8 @@ session with an unlocked head row.
   Mitigated by the head-revision re-verification under the head lock; a
   mismatch fails closed (blocked, not admitted).
 - **R5 — MySQL/MariaDB dialect.** The bounded acquisition uses statement
-  query timeouts (Connector/J), not `NOWAIT`/vendor clauses; both the CI
-  MySQL lane and the MariaDB rig path work.
+  query timeouts (Connector/J), not `NOWAIT`/vendor clauses; measured on
+  MariaDB 10.11.18 (the image of the scheduled CI lane) and MySQL 8.4.7.
 - **R6 — behaviour under pathological persistent holds.** A hold longer than
   the retry budget still cannot complete (no design can without removing the
   row); the contract this design ships is: transient contention → completes;
@@ -295,25 +335,31 @@ session with an unlocked head row.
 1. Unit/integration suites of `managed-agent-server` and `runtime-broker`
    (Maven, JDK 21): lifecycle, publication, migration, credential, and
    store-binding suites must be green (`mvn verify` for the two modules).
-2. The new witness `ManagedSessionGuardConvoyIT` runs in the MySQL lane.
+2. The new witness `ManagedSessionGuardConvoyIT` runs in the
+   `mysql-integration` profile. Pull requests no longer run it (#14205 moved
+   the Java database lanes to a daily schedule and manual dispatch), so
+   merge evidence is a dispatched `sdk-java.yml` run or an attached
+   `mvn -Pmysql-integration -Dit.test=ManagedSessionGuardConvoyIT`
+   transcript.
 3. TypeScript: `packages/core` tests for the HTTP session store (existing),
    `packages/cli` hosted-harness suites; new unit tests for the named
    settle path.
 4. E2E re-run of the reproduction script (driver kept under
    `.qwen/issues/13800-repro/`): guard-hold variant now yields named-fast
    failures or successful turns, never the 30 s freeze.
-5. Physical-rig re-acceptance for #13532 stays an independent follow-up; the
-   W2 exit check is demonstrated locally by witness + E2E.
+5. Physical-rig re-acceptance for #13532 stays an independent follow-up and
+   belongs to #13800's W2 (#13816), not to this change.
 
 ## Acceptance criteria
 
-1. `ManagedSessionGuardConvoyIT` green; with the D1 call sites reverted it
-   turns red (mutation-checked during development).
+1. `ManagedSessionGuardConvoyIT` green in a dispatched or local
+   `mysql-integration` run; with the D1 call sites reverted it turns red
+   (mutation-checked during development).
 2. All existing managed-agent Java suites green (no semantic drift in
    lifecycle/publication/migration lanes).
 3. The reproduction E2E guard-hold variant no longer freezes a fresh
-   Session's create or turn; failures, when they occur under sustained
-   holds, carry the named code.
+   Session's create or turn on the covered lanes; failures, when they occur
+   under sustained holds, carry the named code.
 4. `recovery_blocked` marker remains narrated accurately: the blocked
    Session keeps reporting its own blocked state (witness step 3 assertion).
 
@@ -405,8 +451,12 @@ and the O4 gate's late writer was authorized where rejection was
 required
 (`O4MySqlGate#writerReallyWaitsOnRetirementTransactionAndThenIsRejected`).
 `acquireWriter` now runs the bounded placement acquisition, the bounded
-CAS acquisition, and only then `requireSessionOpen`, so the snapshot is
-pinned after the waits and sees the winner's commit.
+CAS acquisition, and only then its consistent reads, so the snapshot is
+pinned after the waits and sees the winner's commit. The invariant is that
+every plain read on this lane runs after those waits: today the first is
+the CSI runtime-marker probe (two plain `SELECT`s on `ma_runtime_slot` and
+`ma_runtime_binding`, after the root lock), then `requireSessionOpen`.
+Moving either above the waits restores the defect.
 
 ## Schema consolidation (#14069, 2026-10-14)
 
@@ -453,10 +503,37 @@ baseline:
   `checkLifecycleWriter(…, null)` call fenced v2 Sessions for every
   caller.
 
+## Review corrections (2026-10-15)
+
+The review of `f668634b96` found lanes that still waited unbounded or
+skipped a fence:
+
+- A CSI-pinned Session's continuation check took placement with a 10 s
+  timeout and the publication row with none, outside the named mapping, so
+  a held publication row froze renew, commit and recovery state for the
+  full 50 s lock wait. Both now go through the bounded wrapper. Witness:
+  `ManagedAgentCsiMutationMySqlIT#pinnedSessionBoundsItsTenantGuards`.
+- The Turn submit admission (`insertTurnCommand`) took the placement row
+  with no timeout; it is now bounded and named. Witness: the Turn submit
+  arm of `heldTenantGuardsDoNotWedgeUnrelatedSessions`.
+- A duplicate ordinary `commit()` replayed against a v2-claimed Session,
+  because the relocated claim fence ran only after the replay branch. The
+  replay branch now runs it too. Witness:
+  `WorkspaceProfileLifecycleTest#duplicateOrdinaryCommitIsFencedByAVersionTwoClaim`.
+- The CSI runtime-marker probe's two plain reads now carry the guard
+  class's 10 s statement timeout, since plain reads still wait on metadata
+  locks.
+
 ## Follow-ups (not in this change)
 
 - Bound the lifecycle recovery transactions' guard window (snapshot-then-
   verify for `recoverEffects`/`saveEffects`/`verifyCompletion`).
+- Bound or scope the remaining `ManagedAgentStore` acquisitions of the
+  placement row (`WorkspaceMigrationAdmission.lockTenant` and
+  `WorkspaceLifecycleStore.lockPlacement` without a timeout): Session
+  creation and child Sessions, rename, mutation, close/archive/delete
+  admission, cwd change and task-cancel operations. None is per-turn; each
+  still waits up to `innodb_lock_wait_timeout` behind a long holder.
 - Materializer gap tripwire quarantine (audit §B2; mark the poisoned
   consumer progress dead instead of a 10 Hz permanent exception).
 - Renewal-scheduler isolation baseline (reproduction hypothesis H2) —

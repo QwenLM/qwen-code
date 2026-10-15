@@ -35,6 +35,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.DefaultTransactionDefinition;
 
 class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
@@ -210,7 +211,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var originalRequest = new AuthorizeLifecycleRequest("workspace", "writer", original.writerGeneration());
         var neighborRequest = new AuthorizeLifecycleRequest("workspace", "writer", neighbor.writerGeneration());
         var otherRequest = new AuthorizeLifecycleRequest("workspace", "writer", other.writerGeneration());
-        try (var pool = Executors.newFixedThreadPool(2)) {
+        var sameSession = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>>();
+        try (var pool = Executors.newFixedThreadPool(3)) {
             var entered = new CountDownLatch(2);
             var sameTenant = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>>();
             fixture.transactions.executeWithoutResult(ignored -> {
@@ -233,11 +235,33 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                     // waits on the in-flight authorisation above (#13800).
                     sameTenant.get().get(5, TimeUnit.SECONDS);
                     differentTenant.get(5, TimeUnit.SECONDS);
+                    // The fence that stays is per Session: a second ordinary
+                    // authorisation of this same Session queues behind the
+                    // open one until it commits.
+                    sameSession.set(pool.submit(() -> fixture.transactions.executeWithoutResult(transaction ->
+                            journal.authorizeOrdinary("tenant", fixture.session, token, originalRequest))));
+                    awaitLockWaitInSchema(fixture.jdbc);
+                    assertThat(sameSession.get()).isNotDone();
                 } catch (Exception error) {
                     throw new IllegalStateException(error);
                 }
             });
+            sameSession.get().get(10, TimeUnit.SECONDS);
         }
+    }
+
+    private void awaitLockWaitInSchema(JdbcTemplate jdbc) throws InterruptedException {
+        // INNODB_TRX refreshes at most every ~100 ms; poll slower than that.
+        for (int attempt = 0; attempt < 60; attempt++) {
+            Integer waits = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.INNODB_TRX t"
+                    + " JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id"
+                    + " WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?", Integer.class, schema);
+            if (waits != null && waits > 0) {
+                return;
+            }
+            Thread.sleep(150);
+        }
+        throw new AssertionError("Timed out waiting for the same-Session authorisation to queue");
     }
 
     @Test
@@ -267,7 +291,12 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var journal = fixture.transactions.execute(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var txManager = new DataSourceTransactionManager(source);
-        var snapshot = txManager.getTransaction(new DefaultTransactionDefinition());
+        // Declared rather than inherited: under a server defaulted to READ
+        // COMMITTED every statement gets a fresh read view and the
+        // re-verification arm below never fires.
+        var definition = new DefaultTransactionDefinition();
+        definition.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        var snapshot = txManager.getTransaction(definition);
         try {
             // Pin this REPEATABLE READ transaction's read view with a plain
             // consistent read on the head table before the writer appends

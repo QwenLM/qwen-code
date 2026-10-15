@@ -873,6 +873,11 @@ class ManagedSessionStoreHttpClient {
       resources: commitResources,
     };
     let committed: unknown;
+    // One contention budget for the whole commit: the guard retries inside
+    // json() stop at this deadline, and a contended refusal past it is not
+    // retried again below, so three attempts cannot each spend a fresh
+    // requestTimeoutMs behind one held tenant guard (#13800).
+    const contentionDeadline = Date.now() + this.requestTimeoutMs;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         committed =
@@ -883,6 +888,7 @@ class ManagedSessionStoreHttpClient {
                   : '/transactions:commit',
                 'POST',
                 commitBody,
+                contentionDeadline,
               )
             : await this.publicationRequest(
                 `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
@@ -917,7 +923,12 @@ class ManagedSessionStoreHttpClient {
           error instanceof TypeError ||
           (error instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(error.name));
-        if (!uncertain || attempt === 2) throw error;
+        const contentionSpent =
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 503 &&
+          error.remoteCode === 'tenant_guard_contended' &&
+          contentionDeadline - Date.now() <= 250;
+        if (!uncertain || attempt === 2 || contentionSpent) throw error;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
@@ -1307,6 +1318,7 @@ class ManagedSessionStoreHttpClient {
     path: string,
     method: 'GET' | 'POST',
     body?: Readonly<Record<string, unknown>>,
+    contentionDeadline?: number,
   ): Promise<unknown> {
     return this.withRetry(
       method === 'GET' || path === '/writers:renew',
@@ -1331,6 +1343,7 @@ class ManagedSessionStoreHttpClient {
           );
         }
       },
+      contentionDeadline,
     );
   }
 
@@ -1350,9 +1363,17 @@ class ManagedSessionStoreHttpClient {
     method: 'GET' | 'POST',
     path: string,
     run: (timeoutMs: number) => Promise<T>,
+    contentionDeadline?: number,
   ): Promise<T> {
     const deadline = Date.now() + this.requestTimeoutMs;
+    // A caller that retries this helper itself passes one contention
+    // deadline for all of its calls, so their guard retries share a single
+    // budget instead of each restarting a fresh requestTimeoutMs (#13800).
+    const guardDeadline = Math.min(deadline, contentionDeadline ?? deadline);
     let attempt = 0;
+    // Guard retries are counted apart so they never spend the transient
+    // path's three-attempt allowance.
+    let guardRetries = 0;
     for (;;) {
       attempt++;
       try {
@@ -1363,15 +1384,15 @@ class ManagedSessionStoreHttpClient {
         // it — on any route — for the rest of this request budget instead of
         // spending the three-attempt cap in ~15 s and latching the Session's
         // writes behind a contention window it could have outlasted (#13800).
-        if (
+        const contended =
           error instanceof ManagedSessionStoreHttpError &&
           error.status === 503 &&
-          error.remoteCode === 'tenant_guard_contended' &&
-          deadline - Date.now() > 250
-        ) {
+          error.remoteCode === 'tenant_guard_contended';
+        if (contended && guardDeadline - Date.now() > 250) {
           debugLogger.debug(
             `Managed Session Store ${method} ${path} attempt ${attempt} found the tenant guard contended; retrying.`,
           );
+          guardRetries++;
           await new Promise((resolve) => setTimeout(resolve, 250));
           continue;
         }
@@ -1379,10 +1400,13 @@ class ManagedSessionStoreHttpClient {
           error instanceof ManagedSessionStoreTransportError ||
           (error instanceof ManagedSessionStoreHttpError &&
             [500, 502, 503, 504].includes(error.status));
+        // Past its window a contended guard is terminal: a transient retry
+        // there would only time out and rename it a transport failure.
         if (
           !retryable ||
           !transient ||
-          attempt >= 3 ||
+          contended ||
+          attempt - guardRetries >= 3 ||
           Date.now() >= deadline
         ) {
           if (transient) {
@@ -1405,7 +1429,10 @@ class ManagedSessionStoreHttpClient {
           `Managed Session Store ${method} ${path} attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying.`,
         );
         await new Promise((resolve) =>
-          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
+          setTimeout(
+            resolve,
+            200 * (attempt - guardRetries) + Math.floor(Math.random() * 100),
+          ),
         );
       }
     }

@@ -337,16 +337,31 @@ function settledTurnOutcome(abort: AbortController): {
  * The wedge family #13800 names: a turn that dies against its Session store
  * ends with a named, caller-visible reason, never a silent freeze. Only
  * transport and server-5xx failures reclassify: per-Session refusals
- * (writer conflicts, recovery blocks) keep their own names.
+ * (writer conflicts, recovery blocks) keep their own names. A bounded
+ * tenant-guard wait is not an outage either — the store answered it
+ * promptly with a retryable contention refusal — so it stays unattributed
+ * rather than naming the store unavailable.
  */
 function namedStoreFailure(cause: unknown): string | undefined {
   if (
     cause instanceof ManagedSessionStoreTransportError ||
-    (cause instanceof ManagedSessionStoreHttpError && cause.status >= 500)
+    (cause instanceof ManagedSessionStoreHttpError &&
+      cause.status >= 500 &&
+      cause.remoteCode !== 'tenant_guard_contended')
   ) {
     return 'managed_session_store_unavailable';
   }
   return undefined;
+}
+
+/**
+ * Lifts a Session's recovery block. The named reason belongs to the block,
+ * so it is cleared with it here rather than by hand at each lift site.
+ */
+function liftRecoveryBlock(session: HostedSession): void {
+  session.blocked = false;
+  session.recoveryReason = undefined;
+  session.cleanupBlocked = false;
 }
 
 interface HostedSession {
@@ -1732,9 +1747,7 @@ export async function settleCancelledHookTurn(
         },
       ),
     );
-    session.blocked = false;
-    session.recoveryReason = undefined;
-    session.cleanupBlocked = false;
+    liftRecoveryBlock(session);
   } finally {
     session.hooksBusy = false;
   }
@@ -1842,9 +1855,7 @@ function runSettleProjection(
       );
       if (brokerOptions) await retryHostedCleanup(session, brokerOptions);
     });
-    session.blocked = false;
-    session.recoveryReason = undefined;
-    session.cleanupBlocked = false;
+    liftRecoveryBlock(session);
   })()
     .catch((cause: unknown) => {
       session.blocked = true;
@@ -1866,10 +1877,7 @@ async function retryHostedCleanup(
   try {
     if (hasHostedCleanupDebt(session.managed))
       await reconcileHostedTurnCleanup(session.managed, options);
-    if (session.cleanupBlocked) {
-      session.blocked = false;
-      session.recoveryReason = undefined;
-    }
+    if (session.cleanupBlocked) liftRecoveryBlock(session);
     session.cleanupBlocked = false;
   } catch (cause) {
     if (!session.blocked) {
@@ -2702,7 +2710,7 @@ async function startHostedRecoveredTurn(
       // write died on the armed write latch the cause only reads back as
       // ManagedSessionWritesStoppedError, so fall back to the stopReason
       // the turn already computed, exactly as the prompt route does
-      // (#13800 R5 P2; memory only, never a persisted terminal claim).
+      // (#13800; memory only, never a persisted terminal claim).
       const storeFailure = namedStoreFailure(cause);
       const recordedStopReason = (
         turnResult?.systemPayload as { stopReason?: unknown } | undefined
@@ -2720,9 +2728,7 @@ async function startHostedRecoveredTurn(
       session.active = undefined;
     });
   await ready;
-  session.blocked = false;
-  session.recoveryReason = undefined;
-  session.cleanupBlocked = false;
+  liftRecoveryBlock(session);
 }
 
 async function executeHostedTurn(
@@ -3310,9 +3316,7 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     refusedAdoptions.delete(sessionId);
-    resident.blocked = false;
-    resident.recoveryReason = undefined;
-    resident.cleanupBlocked = false;
+    liftRecoveryBlock(resident);
     sendAttachment(res, sessionId, resident);
     if (settle !== null)
       runSettleProjection(resident, sessionId, settle, brokerOptions);
@@ -4688,9 +4692,7 @@ export function registerHostedHarnessSessionRoutes(
                 // path's fleet, never this generic aftermath.
                 const aftermath = await wakeAftermath(turn.turnId);
                 if (aftermath === 'settled') {
-                  session.blocked = false;
-                  session.recoveryReason = undefined;
-                  session.cleanupBlocked = false;
+                  liftRecoveryBlock(session);
                 }
               }
               if (
@@ -4741,9 +4743,7 @@ export function registerHostedHarnessSessionRoutes(
             if (first === undefined) return;
             const aftermath = await wakeAftermath(first.turnId);
             if (aftermath === 'settled') {
-              session.blocked = false;
-              session.recoveryReason = undefined;
-              session.cleanupBlocked = false;
+              liftRecoveryBlock(session);
             }
           },
           failed: (cause) => {
@@ -6133,12 +6133,17 @@ export function registerHostedHarnessSessionRoutes(
           } catch (settleCause) {
             session.blocked = true;
             // The settlement write couldn't commit (#13800): keep the named
-            // failure for the status surface instead of a bare boolean.
+            // failure for the status surface instead of a bare boolean. The
+            // name describes the block, not the turn's outcome, so the outer
+            // cause counts even for a cancelled turn, and a settlement write
+            // that was the first to meet the store names it too.
             const recordedStopReason = (
               turnResult?.systemPayload as { stopReason?: unknown } | undefined
             )?.['stopReason'];
-            if (storeFailure !== undefined) {
-              session.recoveryReason = storeFailure;
+            const blockStoreFailure =
+              namedStoreFailure(cause) ?? namedStoreFailure(settleCause);
+            if (blockStoreFailure !== undefined) {
+              session.recoveryReason = blockStoreFailure;
             } else if (
               recordedStopReason === 'managed_session_store_unavailable'
             ) {
@@ -8058,16 +8063,24 @@ export function registerHostedHarnessSessionRoutes(
         // still at its 'error' initial value. Classify the original cause
         // once so the fallback record and the status surface keep the name
         // (#13800 P2).
+        // An already-named failure (a model-route one) keeps its name: only
+        // the generic value is reclassified, as executeHostedTurn does.
         const storeFailure = namedStoreFailure(cause);
-        if (storeFailure !== undefined) failureReason = storeFailure;
+        if (storeFailure !== undefined && failureReason === 'error')
+          failureReason = storeFailure;
         try {
           await session.managed.sink.write(turnResultRecord('error'));
         } catch (settleCause) {
           session.blocked = true;
           // The fallback terminal write couldn't commit either: keep the
-          // named store failure for the status surface (#13800).
-          if (failureReason === 'managed_session_store_unavailable') {
-            session.recoveryReason = failureReason;
+          // named store failure for the status surface (#13800), whichever
+          // of the turn, its outer cause or the settlement met the store.
+          const blockStoreFailure =
+            failureReason === 'managed_session_store_unavailable'
+              ? failureReason
+              : (storeFailure ?? namedStoreFailure(settleCause));
+          if (blockStoreFailure !== undefined) {
+            session.recoveryReason = blockStoreFailure;
           }
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
@@ -9236,9 +9249,7 @@ export function registerHostedHarnessSessionRoutes(
               if (first !== undefined) {
                 const aftermath = await session.wakeAftermath(first.turnId);
                 if (aftermath === 'settled') {
-                  session.blocked = false;
-                  session.recoveryReason = undefined;
-                  session.cleanupBlocked = false;
+                  liftRecoveryBlock(session);
                   repaired = true;
                 }
               }

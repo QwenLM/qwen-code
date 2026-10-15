@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
@@ -29,6 +30,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -61,6 +63,10 @@ import org.springframework.transaction.support.TransactionTemplate;
  */
 class ManagedSessionGuardConvoyIT {
     private static final ObjectMapper JSON = new ObjectMapper();
+    // A bounded acquisition fails after one GUARD_ACQUIRE_TIMEOUT_SECONDS
+    // (5 s) wait. The ceiling is a fixed number rather than a multiple of
+    // that constant, so raising the bound past it turns these arms red.
+    private static final long BOUNDED_FAILURE_CEILING_MS = 15_000;
 
     private DriverManagerDataSource source;
     private JdbcTemplate admin;
@@ -88,7 +94,7 @@ class ManagedSessionGuardConvoyIT {
         }
     }
 
-    // R6 P1: the v2 probe must never borrow a second pooled connection from
+    // The v2 probe must never borrow a second pooled connection from
     // inside a transaction that already holds one — at saturation the pool
     // self-deadlocks even across distinct tenants with zero database lock
     // contention. Capping the pool at two and releasing four concurrent
@@ -158,11 +164,11 @@ class ManagedSessionGuardConvoyIT {
                 tenant, "blocked");
 
         var holdTx = manager.getTransaction(new DefaultTransactionDefinition());
-        // Hold both tenant-wide guards the way a fat lifecycle transaction
-        // would, on a connection the test never commits.
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
         try {
+            // Hold both tenant-wide guards the way a fat lifecycle transaction
+            // would, on a connection the test never commits.
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             var templates = ManagedHookRecordContractTest.fixtures().get("templates");
             var data = new CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
             ObjectNode registration = templates.get("hook_registration").deepCopy();
@@ -199,7 +205,7 @@ class ManagedSessionGuardConvoyIT {
                                     .isEqualTo("tenant_guard_contended");
                         });
                 long commitElapsedMs = (System.nanoTime() - commitBefore) / 1_000_000;
-                assertThat(commitElapsedMs).isLessThan(25_000);
+                assertThat(commitElapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
             }
 
             // The admission that legitimately fences fails fast and named.
@@ -222,7 +228,7 @@ class ManagedSessionGuardConvoyIT {
                         });
             }
             long elapsedMs = (System.nanoTime() - before) / 1_000_000;
-            assertThat(elapsedMs).isLessThan(25_000);
+            assertThat(elapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
 
             // The lifecycle-authorisation lane fences through the same
             // bounded guards: a held row answers named and fast rather than
@@ -245,7 +251,14 @@ class ManagedSessionGuardConvoyIT {
                         });
             }
             long lifecycleElapsedMs = (System.nanoTime() - lifecycleBefore) / 1_000_000;
-            assertThat(lifecycleElapsedMs).isLessThan(25_000);
+            assertThat(lifecycleElapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
+
+            // A Turn submit admits through the same placement row on its
+            // per-turn path, so it is bounded and named the same way.
+            var agents = new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {
+            }, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+            assertFastGuardFailure(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
+                    "turn.submit", "submit-witness", "a".repeat(64), "victim", List.of(), "b".repeat(64))));
         } finally {
             manager.rollback(holdTx);
         }
@@ -298,8 +311,8 @@ class ManagedSessionGuardConvoyIT {
         // Roll the hold back on any failure path: a leaked transaction here
         // turns removeSchema's DROP DATABASE into an MDL hang.
         var winner = manager.getTransaction(new DefaultTransactionDefinition());
-        var first = journalWriter.commit(request);
         try {
+            var first = journalWriter.commit(request);
             try (var pool = Executors.newSingleThreadExecutor()) {
                 var retry = pool.submit(() ->
                         transactions.execute(ignored -> journalWriter.commit(request)));
@@ -322,9 +335,10 @@ class ManagedSessionGuardConvoyIT {
     /**
      * Publication lanes take their first tenant-wide acquisition with the
      * hot-path bound: reserve (apply lane), prepareAdmission (admission
-     * lane) and commitReceipt (receipt lane's placement-first entry) all
-     * answer tenant_guard_contended within the bound while a guard row is
-     * externally held, and complete after the hold lifts (#13800 R1).
+     * lane), commitReceipt (receipt lane's placement-first entry) and
+     * publishToolResult (tool-result lane) all answer tenant_guard_contended
+     * within the bound while a guard row is externally held, and complete
+     * after the hold lifts (#13800 R1).
      */
     @Test
     void heldTenantGuardsBoundPublicationLaneEntries() throws Exception {
@@ -335,8 +349,8 @@ class ManagedSessionGuardConvoyIT {
         var key = journal.binding.get("sessionKey");
 
         var hold = manager.getTransaction(new DefaultTransactionDefinition());
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
             assertFastGuardFailure(() -> {
                 journal.reserve();
                 return null;
@@ -382,8 +396,8 @@ class ManagedSessionGuardConvoyIT {
         outcome.set("history", history);
 
         hold = manager.getTransaction(new DefaultTransactionDefinition());
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
             assertFastGuardFailure(() ->
                     data.prepareAdmission(key, "pub-1", "writer-1", 1,
                             PublicationJournalFixture.WRITER_TOKEN, outcome));
@@ -414,8 +428,8 @@ class ManagedSessionGuardConvoyIT {
                 journal.sessions, data);
 
         hold = manager.getTransaction(new DefaultTransactionDefinition());
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
         try {
+            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             assertFastGuardFailure(() ->
                     admission.commitReceipt(key, "pub-1", PublicationJournalFixture.WRITER_TOKEN,
                             request));
@@ -424,6 +438,27 @@ class ManagedSessionGuardConvoyIT {
         }
         assertThat(admission.commitReceipt(key, "pub-1", PublicationJournalFixture.WRITER_TOKEN,
                 request).path("historyRevision").asLong()).isEqualTo(sequence);
+
+        // Tool-result publication takes the publication row behind bounded
+        // placement: a held row answers named and fast there too.
+        byte[] content = "tool output".getBytes(StandardCharsets.UTF_8);
+        var publish = new ManagedSessionStoreModels.PublishToolResultRequest("workspace-1", "writer-1", 1,
+                "result-content-1", "managed-tool-result-content", 1, content.length,
+                ToolPublicationContract.sha256(content), Base64.getEncoder().encodeToString(content));
+        var publications = new TransactionTemplate(manager);
+        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+            assertFastGuardFailure(() -> publications.execute(ignored ->
+                    journal.sessions.publishToolResult(tenant, "session-1",
+                            PublicationJournalFixture.WRITER_TOKEN, publish)));
+        } finally {
+            manager.rollback(hold);
+        }
+        ManagedSessionStoreModels.ToolResultResourceRef published = publications.execute(ignored ->
+                journal.sessions.publishToolResult(tenant, "session-1", PublicationJournalFixture.WRITER_TOKEN,
+                        publish));
+        assertThat(published.resourceId()).isEqualTo("result-content-1");
     }
 
     /**
@@ -449,26 +484,36 @@ class ManagedSessionGuardConvoyIT {
         // Hold lifecycle's placement guard: the begin path always locks it
         // before inserting a drain row.
         var lifecycle = manager.getTransaction(new DefaultTransactionDefinition());
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
-        long deadlocksBefore = innodbDeadlocks(jdbc);
-        try (var pool = Executors.newSingleThreadExecutor()) {
-            var writer = pool.submit(() -> transactions.executeWithoutResult(ignored ->
-                    store.acquireWriter(tenant, "victim", token,
-                            new AcquireWriterRequest(workspace, "writer-victim", 60_000L))));
-            awaitWaitingLock(jdbc, "ma_tenant_guard");
-            // The begin path's drain insert must complete inside the same
-            // transaction window: a drain-first writer order would have the
-            // writer holding this gap and deadlock the pair.
-            jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
-                            + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
-                            + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))"
-                            + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                    JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim");
-            manager.rollback(lifecycle);
-            assertThat(innodbDeadlocks(jdbc) - deadlocksBefore)
-                    .as("no InnoDB deadlock must form between lifecycle placement and writer admission")
-                    .isZero();
+        try {
+            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            long deadlocksBefore = innodbDeadlocks(jdbc);
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                var writer = pool.submit(() -> transactions.executeWithoutResult(ignored ->
+                        store.acquireWriter(tenant, "victim", token,
+                                new AcquireWriterRequest(workspace, "writer-victim", 60_000L))));
+                awaitWaitingLock(jdbc, "ma_tenant_guard");
+                // The begin path's drain insert must complete inside the same
+                // transaction window: a drain-first writer order would have the
+                // writer holding this gap and deadlock the pair.
+                jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+                                + " harness_session_id, session_id, head_kind, phase, created_at, updated_at)"
+                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))"
+                                + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
+                        JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
+                        JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim");
+                manager.rollback(lifecycle);
+                // Collected only after the rollback: until then the writer is
+                // parked on the placement row the hold owns. A deadlock victim
+                // or a lock-wait timeout surfaces here.
+                assertThatCode(() -> writer.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
+                assertThat(innodbDeadlocks(jdbc) - deadlocksBefore)
+                        .as("no InnoDB deadlock must form between lifecycle placement and writer admission")
+                        .isZero();
+            }
+        } finally {
+            if (!lifecycle.isCompleted()) {
+                manager.rollback(lifecycle);
+            }
         }
         // A real lifecycle would commit the drain instead of rolling it
         // back; replay that final state explicitly.
@@ -649,7 +694,17 @@ class ManagedSessionGuardConvoyIT {
     private static long innodbDeadlocks(JdbcTemplate jdbc) {
         Long value = jdbc.query("SHOW GLOBAL STATUS LIKE 'Innodb_deadlocks'",
                 result -> result.next() ? result.getLong(2) : null);
-        return value == null ? -1 : value;
+        if (value == null) {
+            // MySQL 8.4 has no Innodb_deadlocks status variable; its InnoDB
+            // metrics count the same events.
+            value = jdbc.query("SELECT `count` FROM information_schema.INNODB_METRICS"
+                            + " WHERE name = 'lock_deadlocks'",
+                    result -> result.next() ? result.getLong(1) : null);
+        }
+        if (value == null) {
+            throw new IllegalStateException("The server exposes no InnoDB deadlock counter");
+        }
+        return value;
     }
 
     private static void assertFastGuardFailure(Callable<Object> action) throws Exception {
@@ -667,6 +722,6 @@ class ManagedSessionGuardConvoyIT {
                     });
         }
         long elapsedMs = (System.nanoTime() - before) / 1_000_000;
-        assertThat(elapsedMs).isLessThan(25_000);
+        assertThat(elapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
     }
 }

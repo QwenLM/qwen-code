@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
@@ -13,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -513,5 +516,31 @@ class WorkspaceProfileLifecycleTest {
                 OperationKind.CLOSE, "owner", "a".repeat(64), "legacy", "digest", true, 0)))
                 .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThat(f.jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
+    }
+
+    /**
+     * An ordinary duplicate commit against a v2-claimed Session is refused
+     * with the claim's name, like a first attempt; it must not replay the
+     * earlier receipt and read the drained Session as writable (#13800).
+     */
+    @Test
+    void duplicateOrdinaryCommitIsFencedByAVersionTwoClaim() throws Exception {
+        var f = fixture();
+        var sessions = new ManagedSessionStore(f.jdbc);
+        var journal = f.transactions.execute(ignored ->
+                new ExtensionRecordJournal(sessions, "tenant", "workspace", f.session).open());
+        var templates = ManagedHookRecordContractTest.fixtures().get("templates");
+        var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
+                ToolPublicationContract.sha256("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)), "e30=");
+        var registration = templates.get("hook_registration").deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) registration).withObject("/catalogRef")
+                .put("digest", data.digest());
+        var request = journal.requestDomain("duplicate-under-claim", "hook_registration",
+                registration, List.of(data), System.currentTimeMillis());
+        f.transactions.execute(ignored -> journal.commit(request));
+        assertThat(admit(f, WorkspaceToolProfiles.SHELL, OperationKind.DELETE).lifecycleProtocolVersion()).isEqualTo(2);
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.commit(request)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
     }
 }

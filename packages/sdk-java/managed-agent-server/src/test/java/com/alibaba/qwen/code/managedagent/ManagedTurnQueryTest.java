@@ -136,9 +136,10 @@ class ManagedTurnQueryTest {
                 "environment.ready", Map.of(), false, "ready:recompile");
         var latest = store.findLatestTurns(tenant, List.of(sessionId));
         assertThat(latest).containsKey(sessionId);
+        var freshSession = new FreshSessionBeforeExecute(
+                jdbc.getDataSource(), "(session_id, turn_id) IN");
         var recompiling = new ManagedAgentStore(
-                new ManagedSchemaJdbcTemplate(new FreshSessionBeforeExecute(
-                        jdbc.getDataSource(), "(session_id, turn_id) IN")),
+                new ManagedSchemaJdbcTemplate(freshSession),
                 objectMapper, Clock.systemUTC(), ignored -> {
                 }, registry, new ManagedAgentProperties());
 
@@ -148,11 +149,16 @@ class ManagedTurnQueryTest {
                     assertThat(event.turnId()).isEqualTo("turn_r");
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });
+        // Without a hit the read ran on a warm statement and proves nothing:
+        // the marker no longer matches the production SQL.
+        assertThat(freshSession.recompiles).hasPositiveValue();
     }
 
     /** Opens and closes a new H2 session right before a matching statement executes. */
     private static final class FreshSessionBeforeExecute extends DelegatingDataSource {
         private final String marker;
+        private final java.util.concurrent.atomic.AtomicInteger recompiles =
+                new java.util.concurrent.atomic.AtomicInteger();
 
         private FreshSessionBeforeExecute(javax.sql.DataSource source, String marker) {
             super(source);
@@ -176,6 +182,7 @@ class ManagedTurnQueryTest {
                                         try {
                                             if (call.getName().startsWith("execute")) {
                                                 DriverManager.getConnection(URL, "sa", "").close();
+                                                recompiles.incrementAndGet();
                                             }
                                             return call.invoke(statement, values);
                                         } catch (InvocationTargetException error) {
