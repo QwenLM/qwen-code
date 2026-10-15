@@ -5,14 +5,13 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -28,7 +27,6 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -749,12 +747,14 @@ public class WorkspaceStorageGuard {
         }
         String host;
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(machineId.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            host = HexFormat.of().formatHex(mac.doFinal(
-                    "Qwen-Code/verified-workspace/v2".getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException error) {
-            throw new IOException("Host identity is unavailable", error);
+            host = new HmacUtils(HmacAlgorithms.HMAC_SHA_256,
+                    machineId.getBytes(StandardCharsets.UTF_8)).hmacHex(
+                            "Qwen-Code/verified-workspace/v2".getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
+            if (error.getCause() instanceof GeneralSecurityException cause) {
+                throw new IOException("Host identity is unavailable", cause);
+            }
+            throw error;
         }
         String device = Long.toUnsignedString(((Number) attributes.get("dev")).longValue());
         String inode = Long.toUnsignedString(((Number) attributes.get("ino")).longValue());
