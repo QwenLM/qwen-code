@@ -274,8 +274,10 @@
                                  healthy wall-clock the FG7 sizing never
                                  covered, so a contended main runner killed
                                  the fork before any test reported (#14125).
-                                 1800 s restores the 2× headroom. -->
-                            <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                                 A contended run now takes 1767 s before the
+                                 final crash class even starts; 2400 s leaves
+                                 that class its own bounded test time. -->
+                            <forkedProcessTimeoutInSeconds>2400</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
