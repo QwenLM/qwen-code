@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -12,12 +14,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -87,10 +86,10 @@ public class ChildWorkspaceStore {
      */
     public static String childWorkspaceId(String tenantId, String parentSessionId, String childRunId) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
+            return DigestUtils.sha256Hex(
                     (tenantId + "\u0000" + parentSessionId + "\u0000" + childRunId)
-                            .getBytes(StandardCharsets.UTF_8))).substring(0, 32);
-        } catch (NoSuchAlgorithmException error) {
+                            .getBytes(StandardCharsets.UTF_8)).substring(0, 32);
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }
@@ -239,7 +238,7 @@ public class ChildWorkspaceStore {
                 return false;
             }
             jdbc.update("UPDATE ma_workspace SET last_error = ?, updated_at = ? WHERE tenant_id = ? AND workspace_id = ?",
-                    truncate(error), now, claimed.tenantId(), claimed.childWorkspaceId());
+                    StringUtils.truncate(error, 1024), now, claimed.tenantId(), claimed.childWorkspaceId());
             return jdbc.update("UPDATE ma_operation SET attempt_count = attempt_count + ?, available_at = ?,"
                     + " claim_owner = NULL, claim_until = NULL, updated_at = ? WHERE operation_key = ?"
                     + " AND claim_generation = ? AND claim_owner = ?", countAttempt ? 1 : 0, nextRetryAt, now,
@@ -380,10 +379,6 @@ public class ChildWorkspaceStore {
         } catch (JsonProcessingException error) {
             throw new IllegalStateException("Conflict paths are not serializable", error);
         }
-    }
-
-    private static String truncate(String text) {
-        return text == null || text.length() <= 1024 ? text : text.substring(0, 1024);
     }
 
     /** The columns a transition sets, in order. */
