@@ -107,7 +107,9 @@ describe('AgentComposer', () => {
         };
       }
     | undefined;
-  // Keyed `authType|modelId|baseUrl`, like the registry itself.
+  // Keyed `authType|modelId|baseUrl`, like the registry itself. As in the
+  // registry, a `null` base URL matches only an entry declared without one,
+  // while an omitted base URL takes any entry for the model.
   let registryWindows: Record<string, number>;
   let sessionConfig: {
     authType?: string;
@@ -171,10 +173,15 @@ describe('AgentComposer', () => {
         getResolvedModel: (
           authType: string,
           modelId: string,
-          baseUrl?: string,
+          baseUrl?: string | null,
         ) => {
+          const prefix = `${authType}|${modelId}|`;
           const window =
-            registryWindows[`${authType}|${modelId}|${baseUrl ?? ''}`];
+            baseUrl === undefined
+              ? Object.entries(registryWindows).find(([key]) =>
+                  key.startsWith(prefix),
+                )?.[1]
+              : registryWindows[`${prefix}${baseUrl ?? ''}`];
           return window === undefined
             ? undefined
             : { generationConfig: { contextWindowSize: window } };
@@ -231,6 +238,17 @@ describe('AgentComposer', () => {
       render(<AgentComposer agentId="agent-1" />);
 
       expect(agentFooterProps.contextWindowSize).toBe(96_000);
+    });
+
+    it('does not take a registry entry declared for another endpoint', () => {
+      agentModel = 'gpt-4o';
+      registryWindows = { 'openai|gpt-4o|https://third.example/v1': 32_000 };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(
+        tokenLimit('gpt-4o', 'input'),
+      );
     });
 
     it("looks the window up on the agent's own provider", () => {
@@ -300,6 +318,41 @@ describe('AgentComposer', () => {
       render(<AgentComposer agentId="agent-1" />);
 
       expect(agentFooterProps.contextWindowSize).toBe(250_000);
+    });
+
+    it("uses the session window when the agent's own route matches the session's", () => {
+      agentModel = 'qwen3-coder-plus';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'openai',
+          baseUrl: 'https://session.example/v1',
+          contextWindowSize: 128_000,
+        },
+      };
+      registryWindows = {
+        'openai|qwen3-coder-plus|https://session.example/v1': 128_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(250_000);
+    });
+
+    it('does not borrow the session window for the same model id on another provider', () => {
+      agentModel = 'qwen3-coder-plus';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'anthropic',
+          baseUrl: 'https://session.example/v1',
+        },
+      };
+      registryWindows = {
+        'anthropic|qwen3-coder-plus|https://session.example/v1': 64_000,
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(64_000);
     });
 
     it('does not borrow the session window for the same model id on another endpoint', () => {

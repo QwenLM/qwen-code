@@ -109,7 +109,8 @@ export function getAgentContextWindowSize(
   const route = ownRoute ?? sessionConfig;
   const modelsConfig = config.getModelsConfig?.();
   // A registry entry declared without a base URL still names this model, so
-  // look it up again without one when the exact endpoint has no entry.
+  // look that entry up when the exact endpoint has none. `null` keeps the
+  // retry from taking an entry declared for some other endpoint.
   const declared =
     route?.authType && modelsConfig
       ? (
@@ -117,7 +118,7 @@ export function getAgentContextWindowSize(
             route.authType,
             agentModel,
             route.baseUrl,
-          ) ?? modelsConfig.getResolvedModel(route.authType, agentModel)
+          ) ?? modelsConfig.getResolvedModel(route.authType, agentModel, null)
         )?.generationConfig.contextWindowSize
       : undefined;
   return declared ?? tokenLimit(agentModel, 'input');
