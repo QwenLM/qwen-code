@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -94,6 +95,30 @@ const proxy = createServer(async (req, res) => {
       : Object.fromEntries(url.searchParams);
     const operation =
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    if (
+      operation === 'release-mount' &&
+      fields.harnessSessionId !== sessionId
+    ) {
+      // An earlier case's owed handback (#13800) keeps retrying on its own
+      // clock: forward it outside this case's ledger.
+      const upstream = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer hosted-tools-broker-token',
+          'Content-Type': 'application/json',
+        },
+        body,
+        signal: AbortSignal.timeout(30_000),
+      });
+      const text = await upstream.text();
+      assert(
+        isLegitimateMountRelease(upstream.status, JSON.parse(text).code),
+        `${upstream.status}: ${text}`,
+      );
+      res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+      res.end(text);
+      return;
+    }
     assert.equal(fields.harnessSessionId, sessionId);
     assert.equal(fields.runtimeSessionId, promptId);
     const id = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
@@ -125,22 +150,10 @@ const proxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(30_000),
     });
     const text = await upstream.text();
-    // #13800: a recovery-blocked turn hands its Workspace mount back on
-    // this route; only two refusals are legitimate — a transient 409
-    // runtime_session_busy while the turn's own dying operation still
-    // reads active (settled by the owed handback retries), and a 503
-    // runtime_reconciliation_required when the turn's full release
-    // already evicted the Runtime Session (non-resident mount residue
-    // belongs to the LOST family's own sweep). Anything else breaks the
-    // fixture's contract.
     if (url.pathname.endsWith(':release-mount')) {
       const replyBody = JSON.parse(text) as { code?: unknown };
       assert(
-        upstream.status === 200 ||
-          (upstream.status === 409 &&
-            replyBody.code === 'runtime_session_busy') ||
-          (upstream.status === 503 &&
-            replyBody.code === 'runtime_reconciliation_required'),
+        isLegitimateMountRelease(upstream.status, replyBody.code),
         `${upstream.status}: ${text}`,
       );
     } else {
@@ -192,9 +205,6 @@ const proxy = createServer(async (req, res) => {
         statusHeld = true;
       });
     }
-    // A tolerated :release-mount refusal keeps its real status: flattened
-    // to 200 the daemon would mis-read the busy reply as a terminal failure
-    // and never retry the handback.
     res.writeHead(
       url.pathname.endsWith(':release-mount') ? upstream.status : 200,
       { 'Content-Type': 'application/json' },

@@ -3239,6 +3239,10 @@ async function executeHostedTurn(
             'qwen serve: Turn completed with cleanup still owed: ' +
               String(cause),
           );
+          // The owed cleanup keeps retrying its full release; the mount
+          // goes back now, or the parked Session wedges its storage until
+          // that release lands (#13800).
+          await toolTurn?.releaseForRecoveryBlock();
         }
         // H4b: the tool-arm results this turn answered are consumed
         // facts only once the turn's own settlement commits durably — a
@@ -3305,6 +3309,16 @@ export function registerHostedHarnessSessionRoutes(
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
 ): void {
+  // The owed mount handbacks of recovery-blocked turns (#13800) outlive
+  // their Session, whose close never frees a parked turn's mount; the
+  // daemon owns them and stops them at shutdown.
+  const mountHandbacks = new Set<() => void>();
+  (
+    app.locals as { stopHostedMountHandbacks?: () => void }
+  ).stopHostedMountHandbacks = () => {
+    for (const stop of [...mountHandbacks]) stop();
+  };
+  if (brokerOptions) brokerOptions = { ...brokerOptions, mountHandbacks };
   const sessions = new Map<string, HostedSession>();
   const opening = new Set<string>();
   const epoch = contract.bootId.replaceAll('-', '_');
@@ -8393,8 +8407,11 @@ export function registerHostedHarnessSessionRoutes(
         // discipline in executeHostedTurn. A recovery-blocked exit keeps the
         // adopted lease held: the parked Turn still owns it, and a release
         // would persist RELEASED, wedging the later takeover's same-identity
-        // re-acquire on runtime_session_not_acquirable.
+        // re-acquire on runtime_session_not_acquirable. Every arm that parks
+        // the re-drive blocked hands its Workspace mount back here, the way
+        // the prompt route's turn does (#13800).
         if (!session.blocked) releaseRecoveredRuntime(session);
+        else await toolTurn?.releaseForRecoveryBlock();
         session.active = undefined;
         void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;

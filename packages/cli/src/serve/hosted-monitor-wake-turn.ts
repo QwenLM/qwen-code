@@ -27,7 +27,8 @@ export function monitorWakeNeedsRecovery(
 ): cause is
   | HostedToolRecoveryRequiredError
   | HostedMcpRecoveryRequiredError
-  | HostedHookRecoveryRequiredError {
+  | HostedHookRecoveryRequiredError
+  | LlmRequestPreparationError {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||

@@ -527,6 +527,41 @@ export class HostedHookSession {
   }
 
   /**
+   * The recovery-blocked turn's handback of this Session-scoped mount
+   * (#13800), under the claim of the acquire that holds it now. Only Hook
+   * work proven settled or never dispatched lets it go — the Broker cannot
+   * see a Hook run — and the next acquire claims the mount again. The
+   * owner's lease stays booked, so close() still runs the full release.
+   */
+  mountHandback(): (() => Promise<void>) | undefined {
+    const claim = this.broker.mountClaim();
+    if (!this.ownsBroker || claim === undefined) return undefined;
+    return async () => {
+      if (this.mountWorkUnproven())
+        throw new Error('Hook work on the Workspace mount is unproven.');
+      await this.broker.releaseMount(claim);
+      if (this.broker.mountClaim() === claim) this.acquired = false;
+    };
+  }
+
+  /** Whether a Hook run on this owner's mount may still be running. */
+  mountWorkUnproven(): boolean {
+    return (
+      this.acquiring !== undefined ||
+      this.pending.size > 0 ||
+      this.occurrences.size > 0 ||
+      this.executions().some(
+        (record) =>
+          record.runtimeSessionId === this.broker.runtimeSessionId &&
+          record.hookId !== '__plan__' &&
+          !record.resultRef &&
+          record.run.execution !== 'not_started_proven' &&
+          record.run.execution !== 'intent',
+      )
+    );
+  }
+
+  /**
    * Whether this Session's Hook catalog holds an eligible non-prompt Hook
    * on a tool-result event. Any such Hook acquires the Session-owned mount
    * when its results complete — possibly after child-agent admission — so a

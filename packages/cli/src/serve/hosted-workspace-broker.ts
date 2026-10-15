@@ -42,6 +42,8 @@ export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
   lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
+  /** Stops for the daemon's owed mount handbacks (#13800). */
+  mountHandbacks?: Set<() => void>;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -186,12 +188,23 @@ export class HostedWorkspaceBroker {
       await this.request('/runtimes:authorize-lifecycle', {});
   }
 
+  // The latest acquire's mount claim, recorded before the request leaves
+  // so that a reply lost after the grant still names it: only that claim
+  // may hand the mount back, and any later acquire supersedes it (#13800).
+  private claim?: string;
+
+  mountClaim(): string | undefined {
+    return this.claim;
+  }
+
   async acquire(expected?: {
     runtimeBindingId: string;
     generation: string;
   }): Promise<void> {
+    this.claim = randomUUID();
     const response = await this.request('/tool-sessions:acquire', {
       turnKind: 'bootstrap',
+      mountClaimId: this.claim,
       ...(expected
         ? {
             recoveryBindingId: expected.runtimeBindingId,
@@ -725,10 +738,10 @@ export class HostedWorkspaceBroker {
   // recovery-blocked turn hands its mount back through here (#13800),
   // never through a full release, whose RELEASED-forever verdict would
   // strand the Session's later runtime recovery outright.
-  async releaseMount(): Promise<void> {
+  async releaseMount(mountClaimId: string): Promise<void> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release-mount`,
-      {},
+      { mountClaimId },
     );
     if (response['mountReleased'] !== true)
       throw new Error('Runtime Session mount release is unconfirmed.');

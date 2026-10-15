@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -176,19 +177,8 @@ const proxy = createServer(async (req, res) => {
     if (target && current.fault === 'receipt-failure') {
       assert.equal(upstream.status, 500, bytes.toString());
     } else if (!store && url.pathname.endsWith(':release-mount')) {
-      // #13800: the recovery-blocked turn hands its mount back on this
-      // route; only two refusals are legitimate — a transient 409
-      // runtime_session_busy (this turn's own dying operation still reads
-      // active, settled by the owed handback retries) and a 503
-      // runtime_reconciliation_required (the turn's full release already
-      // evicted the Runtime Session; non-resident mount residue belongs
-      // to the LOST family's own sweep). Anything else breaks the
-      // fixture's contract.
       assert(
-        upstream.status === 200 ||
-          (upstream.status === 409 && json?.code === 'runtime_session_busy') ||
-          (upstream.status === 503 &&
-            json?.code === 'runtime_reconciliation_required'),
+        isLegitimateMountRelease(upstream.status, json?.code),
         `${upstream.status}: ${bytes.toString()}`,
       );
     } else if (!store && upstream.status === 409) {

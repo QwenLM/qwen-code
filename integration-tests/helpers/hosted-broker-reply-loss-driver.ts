@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -67,21 +68,10 @@ async function upstream(route: string, body?: Buffer) {
     signal: AbortSignal.timeout(30_000),
   });
   const text = await response.text();
-  // #13800: a recovery-blocked turn hands its Workspace mount back on the
-  // release-mount row; only two refusals are legitimate — a transient 409
-  // runtime_session_busy while this turn's own dying operation still reads
-  // active (the owed handback retries settle it), and a 503
-  // runtime_reconciliation_required when the turn's full release already
-  // evicted the Runtime Session (non-resident mount residue belongs to the
-  // LOST family's own sweep). Anything else breaks the fixture's contract.
   if (new URL(route, config.brokerUrl).pathname.endsWith(':release-mount')) {
     const replyBody = JSON.parse(text) as { code?: unknown };
     assert(
-      response.status === 200 ||
-        (response.status === 409 &&
-          replyBody.code === 'runtime_session_busy') ||
-        (response.status === 503 &&
-          replyBody.code === 'runtime_reconciliation_required'),
+      isLegitimateMountRelease(response.status, replyBody.code),
       `${response.status} ${route}: ${text}`,
     );
   } else {
@@ -102,6 +92,17 @@ const proxy = createServer(async (req, res) => {
     const operation =
       req.method === 'GET' ? 'status' : route.pathname.split(':').at(-1)!;
     const executionCallId = route.pathname.match(/\/executions\/([^/:]+)/)?.[1];
+    if (
+      operation === 'release-mount' &&
+      fields['harnessSessionId'] !== sessionId
+    ) {
+      // An earlier case's owed handback (#13800) keeps retrying on its own
+      // clock: forward it outside this case's ledger.
+      const { text, status } = await upstream(req.url!, body);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(text);
+      return;
+    }
     assert.equal(fields['harnessSessionId'], sessionId);
     assert.equal(fields['runtimeSessionId'], promptId);
     if (fault === 'release-before-forward' && operation === 'release') {
@@ -135,9 +136,6 @@ const proxy = createServer(async (req, res) => {
       res.destroy();
       return;
     }
-    // A tolerated :release-mount refusal keeps its real status: flattened
-    // to 200 the daemon would mis-read the busy reply as a terminal failure
-    // and never retry the handback.
     res.writeHead(route.pathname.endsWith(':release-mount') ? status : 200, {
       'Content-Type': 'application/json',
     });
@@ -382,7 +380,11 @@ try {
       }
       await json(`/session/${sessionId}/detach`, {}, 204);
     }
-    const cleanupRetries = exchanges.slice(traffic);
+    // A blocked turn's owed mount handback (#13800) keeps retrying on its
+    // own clock and is not reload traffic.
+    const cleanupRetries = exchanges
+      .slice(traffic)
+      .filter((entry) => entry.operation !== 'release-mount');
     if (retryRelease) {
       assert(cleanupRetries.length > 0, 'Original cleanup must be retried');
       const original = exchanges.find((entry) => entry.operation === 'release');
