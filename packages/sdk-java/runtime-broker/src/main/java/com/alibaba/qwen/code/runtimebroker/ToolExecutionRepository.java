@@ -106,17 +106,24 @@ public interface ToolExecutionRepository {
             String runtimeSessionId,
             java.util.Set<String> excludingExecutionCallIds);
 
-    /** Any execution of this Runtime Session that settled its tool work but
-     * whose output delivery is still open (publication `deliveryStatus`
-     * `pending` or `blocked`): its Workspace effects are discharged, but
-     * its output evidence is not closed, so the mount's exclusion must
-     * hold too — the operator-recovery family lives on exactly this
-     * distinction. The default fails closed like findByBinding's: a
-     * repository without the probe cannot vouch for anything unproven. */
-    default boolean hasPendingDeliveryByRuntimeSession(String bindingId,
+    /** Any SETTLED execution of this Runtime Session whose captured output
+     * never proved its producer stopped: a capture other than `complete`
+     * (both streams sealed by EOF) or `detached` (the live process is its
+     * own `:process` row). A `partial` or `unavailable` capture may leave an
+     * escaped writer in the Workspace, which the operator-recovery family
+     * fences on the mount. Settled rows never change, so this stays true
+     * until that recovery runs. The default fails closed like
+     * findByBinding's. */
+    default boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId) {
         throw new UnsupportedOperationException(
-                "Pending-delivery probe is unavailable");
+                "Unproven-capture probe is unavailable");
+    }
+
+    static boolean captureStopUnproven(Map<?, ?> result) {
+        return result != null && result.get("capture") instanceof Map<?, ?> capture
+                && !"complete".equals(capture.get("captureStatus"))
+                && !"detached".equals(capture.get("captureStatus"));
     }
 
     /** Any nonterminal execution still points at this binding generation.

@@ -116,6 +116,13 @@ abstract class DelegatingToolExecutionRepository
     }
 
     @Override
+    public boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return delegate.hasUnprovenCaptureByRuntimeSession(bindingId,
+                runtimeGeneration, runtimeSessionId);
+    }
+
+    @Override
     public boolean hasActiveByBinding(String bindingId,
             long runtimeGeneration) {
         return delegate.hasActiveByBinding(bindingId, runtimeGeneration);

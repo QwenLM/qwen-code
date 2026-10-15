@@ -900,31 +900,28 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
-    public boolean hasPendingDeliveryByRuntimeSession(String bindingId,
+    public boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
             long runtimeGeneration, String runtimeSessionId) {
         return JdbcRepositorySupport.read(dataSource, connection -> {
-            // deliveryStatus stays out of `'committed'`: pending (undelivered)
-            // or blocked (close not confirmed) — both keep the output's
-            // evidence open. A plain text LIKE: fastjson writes the token
-            // without escapes or whitespace, valid across engines.
             try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT execution_call_id FROM qwen_tool_execution"
-                            + " WHERE binding_id = ? AND runtime_generation = ?"
-                            + " AND runtime_session_key = ?"
-                            + " AND execution_state = 'SETTLED'"
-                            + " AND (result_json LIKE ? OR result_json LIKE ?)")) {
-                statement.setString(1, bindingId);
+                    "SELECT binding_id, runtime_session_id, result_json FROM"
+                            + " ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ? AND execution_state = 'SETTLED'")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
                 statement.setLong(2, runtimeGeneration);
-                statement.setString(3, JdbcRepositorySupport.valueKey(
-                        runtimeSessionId));
-                statement.setString(4,
-                        "%\"deliveryStatus\":\"pending\"%");
-                statement.setString(5,
-                        "%\"deliveryStatus\":\"blocked\"%");
+                statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
                 try (ResultSet result = statement.executeQuery()) {
-                    return result.next();
+                    while (result.next()) {
+                        if (bindingId.equals(result.getString("binding_id"))
+                                && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                                && ToolExecutionRepository.captureStopUnproven(
+                                        fromJson(result.getString("result_json")))) {
+                            return true;
+                        }
+                    }
                 }
             }
+            return false;
         });
     }
 

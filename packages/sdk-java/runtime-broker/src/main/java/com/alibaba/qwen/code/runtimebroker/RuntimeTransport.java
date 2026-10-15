@@ -202,4 +202,15 @@ public interface RuntimeTransport {
                 "Runtime transport does not support Workspace mount release.",
                 false));
     }
+
+    /**
+     * Claims the Workspace execution mount again for an acquired Session
+     * whose mount was handed back by {@link #releaseMount}; a mount the
+     * Session still holds is left as it is. A transport without Workspace
+     * ownership has no mount to claim.
+     */
+    default CompletionStage<Void> reclaimMount(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.completedFuture(null);
+    }
 }
