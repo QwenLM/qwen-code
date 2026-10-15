@@ -591,7 +591,7 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.count("select * from ma_turn"))
                 .isZero();
         assertThat(fixture.ledger.count("session_id, turn_id, status,"
-                + " created_at, completed_at, error_code"
+                + " gmt_create, completed_at, error_code"
                 + " from ma_turn")).isEqualTo(1);
         // Every row carries its own title, its own active turn, and its own
         // snapshot coverage: session 7 is the one without an active turn,
@@ -623,7 +623,7 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
         assertThat(fixture.ledger.count("turn_record.session_id,"
                 + " turn_record.turn_id, turn_record.status,"
-                + " turn_record.created_at, turn_record.completed_at,"
+                + " turn_record.gmt_create, turn_record.completed_at,"
                 + " turn_record.error_code"
                 + " from ma_turn")).isEqualTo(1);
         // The latest turn surfaces even when completed, still per session,
@@ -684,7 +684,7 @@ class Issue13181QueryBudgetTest {
         fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
                 + " target_key, request_json, phase, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
                 + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before,"
-                + " receipt_id, available_at, created_at, updated_at, completed_at)"
+                + " receipt_id, available_at, gmt_create, gmt_modified, completed_at)"
                 + " VALUES (?, ?, ?, 'SESSION', ?, '{}', 'COMPLETED', ?, ?, ?, 'CLOSE', '', 'close-key',"
                 + " 'digest', 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', 'CLOSED', 'rcpt', 0, 0, 0, 0)",
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(closeScope, "CLOSE", closeId),
@@ -1083,8 +1083,8 @@ class Issue13181QueryBudgetTest {
         String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "order-" + UUID.randomUUID(), "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
-        // Two Turns admitted out of created_at order: the turn.accepted
-        // sequence makes turn-b the latest even though turn-a's created_at
+        // Two Turns admitted out of gmt_create order: the turn.accepted
+        // sequence makes turn-b the latest even though turn-a's gmt_create
         // is later.
         String turnA = fixture.store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "order-a-" + UUID.randomUUID(), "digest", sessionId,
@@ -1097,8 +1097,8 @@ class Issue13181QueryBudgetTest {
                 "order-b-" + UUID.randomUUID(), "digest", sessionId,
                 List.of(Map.of("type", "text", "text", "b")), "digest")
                 .turnId();
-        fixture.jdbc.update("UPDATE ma_turn SET created_at ="
-                        + " created_at + 10000 WHERE tenant_id = ? AND"
+        fixture.jdbc.update("UPDATE ma_turn SET gmt_create ="
+                        + " gmt_create + 10000 WHERE tenant_id = ? AND"
                         + " turn_id = ?", tenant, turnA);
         // Inverted environment sequences: the older Turn's failed event
         // sits at the higher sequence, the latest Turn's ready below it.
@@ -1183,7 +1183,8 @@ class Issue13181QueryBudgetTest {
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
         }
-        long renewals = fixture.ledger.count("update ma_operation set claim_until");
+        long renewals = fixture.ledger.count("update ma_operation set",
+                "claim_until = ?, verification_next_at = case when");
         assertThat(renewals).isGreaterThanOrEqualTo(2);
         assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
         assertThat(fixture.ledger.count("from ma_session_head", "for update"))
@@ -1231,7 +1232,8 @@ class Issue13181QueryBudgetTest {
         assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read")
                 .path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(reads).hasValueGreaterThan(1000);
-        assertThat(fixture.ledger.count("update ma_operation set claim_until")).isZero();
+        assertThat(fixture.ledger.count("update ma_operation set",
+                "claim_until = ?, verification_next_at = case when")).isZero();
         assertThat(fixture.ledger.count("select inline_bytes from ma_resource")).isZero();
         assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
     }

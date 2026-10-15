@@ -38,7 +38,7 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
         var f = fixture();
         var first = admit(f, WorkspaceToolProfiles.SHELL, StoreModels.OperationKind.CLOSE);
         f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(first));
-        f.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '2000-01-01 00:00:00' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
+        f.jdbc.update("UPDATE ma_operation SET claim_until = 946684800000 WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
         var start = new java.util.concurrent.CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
             var futures = java.util.stream.IntStream.range(0, 2).mapToObj(index -> executor.submit(() -> {

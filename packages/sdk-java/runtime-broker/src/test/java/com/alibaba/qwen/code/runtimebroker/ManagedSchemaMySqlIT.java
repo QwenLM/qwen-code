@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -91,6 +93,7 @@ class ManagedSchemaMySqlIT {
             }
             assertEquals(ManagedSchemaContract.TABLES, tables);
             verifyMaximumStorageScopeKeys(connection, prefix);
+            verifyCaptureTimestampDefaults(connection, prefix);
             statement.execute("DROP INDEX ix_ma_storage_owner_binding ON ma_storage_owner");
             try {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
@@ -106,10 +109,16 @@ class ManagedSchemaMySqlIT {
                                 .orElseThrow());
             }
             ManagedSchema.initialize(source);
+            try (var row = statement.executeQuery("SELECT CAST(18446744073709551615 AS UNSIGNED) AS invalid_time")) {
+                assertTrue(row.next());
+                assertThrows(SQLException.class, () -> ManagedSchemaTime.timestamp(row, "invalid_time"));
+            }
+            assertThrows(SQLException.class, () -> statement.execute(
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                            + " VALUES ('" + prefix + "negative','session','agent',-1,0)"));
             try (var row =
                     statement.executeQuery(
-                            "SELECT CURRENT_TIMESTAMP(6) AS observed_at, CAST('tenant ' AS BINARY)"
-                                + " AS tenant_id, X'0102' AS inline_bytes, X'0304' AS actor_key")) {
+                            "SELECT CURRENT_TIMESTAMP(6) AS observed_at, CAST('tenant ' AS BINARY) AS tenant_id, X'0102' AS inline_bytes, X'0304' AS actor_key")) {
                 assertTrue(row.next());
                 var values = ManagedSchemaRows.read(row);
                 assertTrue(values.get("observed_at") instanceof java.sql.Timestamp);
@@ -124,14 +133,14 @@ class ManagedSchemaMySqlIT {
                 System.out.println("Managed schema MySQL DDL server version: " + row.getString(1));
             }
             statement.execute(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,created_at,updated_at)"
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                             + " VALUES ('"
                             + prefix
                             + "tenant','"
                             + prefix
                             + "session','agent',0,0)");
             statement.execute(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,created_at,updated_at)"
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                             + " VALUES ('"
                             + prefix
                             + "tenant','"
@@ -142,7 +151,7 @@ class ManagedSchemaMySqlIT {
                     () ->
                             statement.execute(
                                     "INSERT INTO ma_operation"
-                                        + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,target_kind,target_key,request_digest,request_json,state,phase,created_at,updated_at)"
+                                        + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,target_kind,target_key,request_digest,request_json,state,phase,gmt_create,gmt_modified)"
                                         + " VALUES ('invalid','scope','invalid','CLOSE"
                                         + " ','tenant','SESSION','target','digest','{}','PENDING','ADMITTED',0,0)"));
             assertThrows(
@@ -150,9 +159,9 @@ class ManagedSchemaMySqlIT {
                     () ->
                             statement.execute(
                                     "INSERT INTO ma_resource_ref"
-                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,created_at)"
+                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
                                         + " VALUES"
-                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session',CURRENT_TIMESTAMP(6))"));
+                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")"));
             byte[] largeBody = new byte[17 * 1024 * 1024];
             largeBody[0] = 1;
             largeBody[largeBody.length - 1] = 2;
@@ -162,9 +171,9 @@ class ManagedSchemaMySqlIT {
             try (var insert =
                     connection.prepareStatement(
                             "INSERT INTO ma_resource (resource_key,session_scope_key,"
-                                + "tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
+                                + "tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
                                 + " VALUES"
-                                + " (?,?,?,?,?,'message-body/1',1,?,?,'MYSQL_INLINE',?,'PUBLISHED',CURRENT_TIMESTAMP(6))")) {
+                                + " (?,?,?,?,?,'message-body/1',1,?,?,'MYSQL_INLINE',?,'PUBLISHED'," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setString(1, resourceKey);
                 insert.setString(
                         2,
@@ -225,12 +234,12 @@ class ManagedSchemaMySqlIT {
             }
             ManagedSchema.initialize(source);
             statement.execute(
-                    "ALTER TABLE ma_session_head MODIFY writer_lease_until DATETIME(0) NULL");
+                    "ALTER TABLE ma_session_head MODIFY writer_lease_until BIGINT NULL");
             try {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
             } finally {
                 statement.execute(
-                        "ALTER TABLE ma_session_head MODIFY writer_lease_until DATETIME(6) NULL");
+                        "ALTER TABLE ma_session_head MODIFY writer_lease_until BIGINT UNSIGNED NULL");
             }
             ManagedSchema.initialize(source);
             if (mariaDb) {
@@ -300,6 +309,43 @@ class ManagedSchemaMySqlIT {
         }
     }
 
+    private static void verifyCaptureTimestampDefaults(java.sql.Connection connection, String prefix)
+            throws SQLException {
+        String scope = ManagedSchemaKeys.key(prefix, "capture-time");
+        try (var statement = connection.createStatement()) {
+            long before;
+            try (var row = statement.executeQuery("SELECT " + ManagedSchemaTime.SQL_NOW)) {
+                assertTrue(row.next());
+                before = row.getLong(1);
+            }
+            try (var insert = connection.prepareStatement(
+                    "INSERT INTO ma_output_capture (scope_key,tenant_key,tenant_id,workspace_id,session_id,"
+                            + "publication_id,execution_key,capture_id,binding_json,binding_digest,token_hash,state,"
+                            + "capture_bytes,producer_bytes,admission_bytes) VALUES (?,?,?,?,?,?,?,?,'{}',?,?,'OPEN',1,1,1)")) {
+                for (int index = 1; index <= 10; index++) {
+                    insert.setString(index, scope);
+                }
+                assertEquals(1, insert.executeUpdate());
+            }
+            try (var query = connection.prepareStatement("SELECT gmt_create,gmt_modified,"
+                    + ManagedSchemaTime.SQL_NOW + " AS db_now FROM ma_output_capture WHERE scope_key=?")) {
+                query.setString(1, scope);
+                try (var row = query.executeQuery()) {
+                    assertTrue(row.next());
+                    long created = row.getLong("gmt_create");
+                    assertEquals(created, row.getLong("gmt_modified"));
+                    assertTrue(created >= before && created <= row.getLong("db_now"));
+                    assertEquals(created, ManagedSchemaTime.timestamp(row, "gmt_create").getTime());
+                }
+            } finally {
+                try (var remove = connection.prepareStatement("DELETE FROM ma_output_capture WHERE scope_key=?")) {
+                    remove.setString(1, scope);
+                    remove.executeUpdate();
+                }
+            }
+        }
+    }
+
     private static void verifyMaximumStorageScopeKeys(java.sql.Connection connection, String prefix)
             throws Exception {
         byte[] tenant =
@@ -315,7 +361,7 @@ class ManagedSchemaMySqlIT {
         try (var insert =
                 connection.prepareStatement(
                         "INSERT INTO"
-                            + " ma_session(tenant_id,session_id,session_kind,workspace_storage_id,created_at,updated_at)"
+                            + " ma_session(tenant_id,session_id,session_kind,workspace_storage_id,gmt_create,gmt_modified)"
                             + " VALUES(?,?,'CONTROL',?,0,0)")) {
             insert.setBytes(1, tenant);
             insert.setBytes(2, session);
@@ -336,9 +382,9 @@ class ManagedSchemaMySqlIT {
                             "INSERT INTO"
                                 + " ma_session_head(tenant_id,session_id,workspace_id,tenant_key,"
                                 + "harness_key,harness_session_id,head_kind,storage_version,state,"
-                                + "writer_generation,journal_revision,committed_sequence,activation_epoch,created_at,updated_at)"
+                                + "writer_generation,journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified)"
                                 + " VALUES(?,?,?,?,?,?,'MANAGED_SESSION',1,'OPEN',"
-                                + "0,0,0,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))")) {
+                                + "0,0,0,0," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setBytes(1, tenant);
                 insert.setBytes(2, session);
                 insert.setBytes(3, binding);
@@ -355,7 +401,7 @@ class ManagedSchemaMySqlIT {
                                 + "isolation_class,provisioner_kind,storage_id,storage_alias_key,runtime_generation,"
                                 + "binding_state,attestation_generation,drain_requested,operation_generation,record_version,last_active_at)"
                                 + " VALUES(?,?,?,?,?,?,'cwd',?,'WORKSPACE',"
-                                + "'schema-test',?,?,1,'ACTIVE',0,FALSE,0,0,CURRENT_TIMESTAMP(6))")) {
+                                + "'schema-test',?,?,1,'ACTIVE',0,FALSE,0,0," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setBytes(1, binding);
                 insert.setString(2, ManagedSchemaKeys.key(prefix, "request"));
                 insert.setString(3, ManagedSchemaKeys.key(prefix, "scope"));

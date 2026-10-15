@@ -71,8 +71,7 @@ class ManagedAgentCsiMutationMySqlIT {
             String ordinary = "!ordinary-retired";
             String scope = ManagedSessionStore.sessionScopeKey("tenant", ordinary);
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at,"
-                            + " updated_at) VALUES ('tenant', ?, 'qwen-code', 'DELETED', 1, 1)", ordinary);
+                    "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', 'DELETED', 1, 1)", ordinary);
             jdbc.update(
                     "UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?,"
                         + " retirement_operation_id = 'delete', retirement_generation = 1,"
@@ -84,11 +83,7 @@ class ManagedAgentCsiMutationMySqlIT {
             String operationId = "session-resources-" + scope;
             long now = ToolPublicationRetentionStore.now(jdbc);
             jdbc.update(
-                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key,"
-                        + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
-                        + " target_key, request_digest, request_json, phase, state, created_at,"
-                        + " updated_at) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', 'tenant', ?,"
-                        + " 'SESSION', ?, ?, '{}', 'COLLECTING', 'PENDING', ?, ?)",
+                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', 'tenant', ?, 'SESSION', ?, ?, '{}', 'COLLECTING', 'PENDING', ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
                             .operationKey(
                                     com.alibaba.qwen.code.runtimebroker.managedschema

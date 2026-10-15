@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -25,14 +26,7 @@ public class WorkspaceLifecycleStore {
     public static boolean legacyClose(JdbcTemplate jdbc, String tenant, String session) {
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
-        return !WorkspaceOperations.rows(jdbc, "SELECT o.operation_id FROM ma_operation o"
-                + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
-                + " JOIN ma_session_head f ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id"
-                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_kind = 'CLOSE'"
-                + " AND o.lifecycle_protocol_version = 0 AND o.delivery_state = 'LEASED'"
-                + " AND UNIX_TIMESTAMP(o.claim_until) * 1000.0 > ? AND s.status = 'CLOSING'"
-                + " AND f.tenant_key = ? AND f.harness_key = ?"
-                + " AND f.phase = 'DRAINING' AND f.operation_id IS NULL FOR UPDATE", tenant, session, now,
+        return !WorkspaceOperations.rows(jdbc, "SELECT o.operation_id FROM ma_operation o JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id JOIN ma_session_head f ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_kind = 'CLOSE' AND o.lifecycle_protocol_version = 0 AND o.delivery_state = 'LEASED' AND o.claim_until > ? AND s.status = 'CLOSING' AND f.tenant_key = ? AND f.harness_key = ? AND f.phase = 'DRAINING' AND f.operation_id IS NULL FOR UPDATE", tenant, session, now,
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session)).isEmpty();
     }
     private final JdbcTemplate jdbc;
@@ -63,12 +57,7 @@ public class WorkspaceLifecycleStore {
         if (authority == null) {
             throw blocked("workspace_lifecycle_claim_fenced");
         }
-        var rows = jdbc.query("SELECT o.claim_generation, UNIX_TIMESTAMP(o.claim_until) * 1000.0 AS lease_until, o.delivery_state, o.lifecycle_protocol_version,"
-                + " s.status, f.phase, f.operation_id FROM ma_operation o"
-                + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
-                + " JOIN ma_session_head f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id"
-                + " WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?"
-                + " AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE", (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), tenant, session, authority.operationId(),
+        var rows = jdbc.query("SELECT o.claim_generation, o.claim_until AS lease_until, o.delivery_state, o.lifecycle_protocol_version, s.status, f.phase, f.operation_id FROM ma_operation o JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id JOIN ma_session_head f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ? AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE", (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), tenant, session, authority.operationId(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
@@ -208,11 +197,9 @@ public class WorkspaceLifecycleStore {
 
     private void saveLocked(OperationRecord operation, JsonNode receipt) {
         verifyEffects(operation, receipt);
-        jdbc.update("UPDATE ma_operation SET lifecycle_effects_receipt_json = ?"
-                + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? AND claim_generation = ?",
+        jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", lifecycle_effects_receipt_json = ? WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? AND claim_generation = ?",
                 receipt.toString(), operation.tenantId(), operation.sessionId(), operation.operationId(), operation.claimGeneration());
-        jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING', claim_lease_until = CASE WHEN ? = 2 THEN claim_lease_until ELSE NULL END"
-                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ?",
+        jdbc.update("UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", phase = 'DRAINING', claim_lease_until = CASE WHEN ? = 2 THEN claim_lease_until ELSE NULL END WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ?",
                 operation.lifecycleProtocolVersion(), JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()), JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), operation.operationId());
     }
@@ -228,8 +215,7 @@ public class WorkspaceLifecycleStore {
         if (operation.lifecycleProtocolVersion() == 2) {
             verifyResources(operation);
         }
-        var writers = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, state, CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS live_writer"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+        var writers = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, state, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS live_writer FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()),
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
         if (!writers.isEmpty() && (!operation.tenantId().equals(writers.getFirst().get("tenant_id"))
@@ -372,9 +358,7 @@ public class WorkspaceLifecycleStore {
     }
 
     private boolean neverInitialized(OperationRecord operation) {
-        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, journal_revision, CASE WHEN state = 'ACTIVE' AND"
-                + " writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS live_writer"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, journal_revision, CASE WHEN state = 'ACTIVE' AND writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS live_writer FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()),
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
         if (!heads.isEmpty() && (!operation.tenantId().equals(heads.getFirst().get("tenant_id"))
