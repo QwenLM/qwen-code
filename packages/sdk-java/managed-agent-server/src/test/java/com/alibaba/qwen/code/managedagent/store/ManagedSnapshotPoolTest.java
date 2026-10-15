@@ -4,20 +4,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.druid.pool.DruidDataSource;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Clock;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.Clock;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 class ManagedSnapshotPoolTest {
     private DruidDataSource source;
@@ -35,11 +36,13 @@ class ManagedSnapshotPoolTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, created_at, updated_at,"
-                + " tenant_key, session_key, session_scope_key) VALUES ('tenant', 'session', 'qwen-code', 0, 0, ?, ?, ?)",
+                + " tenant_key, session_key, session_scope_key) VALUES ('tenant', 'session',"
+                    + " 'qwen-code', 0, 0, ?, ?, ?)",
                 ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
                 ManagedSessionStore.sessionScopeKey("tenant", "session"));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                + " last_sequence, covered_sequence, updated_at) VALUES ('tenant', 'session', 'SESSION', X'', 1, 1, 0)");
+                + " last_sequence, covered_sequence, updated_at) VALUES ('tenant', 'session',"
+                    + " 'SESSION', X'', 1, 1, 0)");
         snapshots = new ManagedSnapshotStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
                 (tenant, session, guard) -> {
                     guard.run();
@@ -59,6 +62,25 @@ class ManagedSnapshotPoolTest {
         assertThat(snapshots.page("tenant", "session", null, 0, 20).items()).hasSize(1);
         assertThat(snapshots.latest("tenant", "session").orElseThrow().items()).hasSize(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
+    }
+
+    @Test
+    void retainedPrivatePinPreventsProjectionExpiryAndBodyCollection() {
+        snapshots.build("tenant", "session");
+        var manager = new DataSourceTransactionManager(source);
+        jdbc.update("UPDATE ma_snapshot SET retain_until = 0");
+        jdbc.update("UPDATE ma_resource SET retention_until = CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
+        var roots = jdbc.queryForList("SELECT * FROM ma_snapshot");
+        var resources = jdbc.queryForList("SELECT * FROM ma_resource");
+        var refs = jdbc.queryForList("SELECT * FROM ma_resource_ref");
+        var collector = new ManagedProjectionResourceCollector(jdbc, manager);
+        assertThat(collector.runOnce()).isFalse();
+        assertThat(jdbc.queryForList("SELECT * FROM ma_snapshot")).isEqualTo(roots);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_resource"))
+                .usingRecursiveComparison()
+                .isEqualTo(resources);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_resource_ref")).isEqualTo(refs);
     }
 
     @Test
