@@ -34,7 +34,7 @@ import java.util.regex.Pattern;
  */
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
-    static final String KIND = "local-process";
+    public static final String KIND = "local-process";
     public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
@@ -308,7 +308,7 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
         if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
-                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                 || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
                 || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);
