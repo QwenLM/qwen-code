@@ -85,6 +85,11 @@ describe('qwencloudStandardProvider', () => {
       'kimi-k3',
       'glm-5.3',
     ]);
+    expect(
+      qwencloudStandardProvider.models.find(
+        (model) => model.id === 'qwen3.7-plus',
+      )?.modalities,
+    ).toEqual({ image: true, video: true });
   });
 
   it('accepts pay-as-you-go key prefixes and rejects Token Plan keys', () => {

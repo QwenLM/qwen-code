@@ -42269,7 +42269,7 @@ describe('auth device-flow routes', () => {
     expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
   });
 
-  it('POST /workspace/auth/provider passes valid keys through to installAuthProvider', async () => {
+  it('POST /workspace/auth/provider passes padded valid keys through to installAuthProvider', async () => {
     const installAuthProvider = vi.fn().mockResolvedValue({
       v: 1,
       providerId: 'qwencloud-standard',
@@ -42289,7 +42289,7 @@ describe('auth device-flow routes', () => {
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .send({
         providerId: 'qwencloud-standard',
-        apiKey: 'sk-valid-pay-as-you-go-key',
+        apiKey: '  sk-valid-pay-as-you-go-key  ',
         baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
       });
 
