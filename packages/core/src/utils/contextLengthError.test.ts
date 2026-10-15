@@ -131,6 +131,47 @@ describe('contextLengthError', () => {
         expect(info.limitKind).toBe('total');
       },
     );
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: {
+          message:
+            'The decoder prompt (length 40000) is longer than the maximum model length of 32768.',
+        },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(40000);
+      expect(info.limitTokens).toBe(32768);
+    });
+
+    // An encoder prompt is bounded by the encoder cache budget, not by the
+    // window, so its number must not be offered as the server's window.
+    it('marks the encoder prompt limit as an input bound', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          '400 The encoder prompt (length 9000) is longer than the maximum model length of 8192.',
+        ),
+      );
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(9000);
+      expect(info.limitTokens).toBe(8192);
+      expect(info.limitKind).toBe('input');
+    });
+
+    it('stays fast on a huge error body with repeated prompt fragments', () => {
+      const body =
+        "This model's maximum context length is exceeded. " +
+        'The decoder prompt (length 1) '.repeat(20_000);
+      const start = performance.now();
+
+      const info = getContextLengthExceededInfo(new Error(body));
+
+      expect(info.isExceeded).toBe(true);
+      expect(performance.now() - start).toBeLessThan(1_000);
+    });
   });
 
   it('parses prompt-too-long actual and limit token counts', () => {
