@@ -11,7 +11,9 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -242,15 +244,7 @@ public final class ToolPublicationStore {
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.query(
-                                "SELECT workspace_id, state, storage_version, writer_id,"
-                                    + " writer_generation, CASE WHEN writer_lease_until >"
-                                    + " CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
-                                    + " recovery_status, activation_epoch, journal_revision,"
-                                    + " activation_id, activation_phase, activation_event_epoch,"
-                                    + " activation_expires_at, activation_head_revision FROM"
-                                    + " ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
-                                    + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND"
-                                    + " session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                                "SELECT workspace_id, state, storage_version, writer_id, writer_generation, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session()).getFirst();
         require(((Number) head.get("storage_version")).intValue() >= 1
                 && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
@@ -316,10 +310,7 @@ public final class ToolPublicationStore {
         }
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         Integer writerLive = jdbc.queryForObject(
-                        "SELECT CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0"
-                            + " END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
-                            + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id"
-                            + " = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
+                        "SELECT CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
         if (writerLive == null || writerLive != 1) {
             require(false, "Original Session or activation expired");
         }
@@ -418,7 +409,7 @@ public final class ToolPublicationStore {
             return;
         }
         jdbc.update(
-                "UPDATE ma_session_head SET activation_id = ?, activation_phase = ?,"
+                "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", activation_id = ?, activation_phase = ?,"
                     + " activation_event_epoch = ?, activation_expires_at = ?,"
                     + " activation_head_revision = ? WHERE head_kind = 'MANAGED_SESSION' AND"
                     + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
@@ -449,7 +440,7 @@ public final class ToolPublicationStore {
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
                 text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken);
         String operation = text(request, "operation");
-        List<Row> rows = jdbc.query("SELECT * FROM ma_output_capture"
+        List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture"
                         + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"),
@@ -480,7 +471,7 @@ public final class ToolPublicationStore {
             require(bytes <= capacity.executionBytes(), "Execution capture capacity exceeded");
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
-            jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'FENCED', expires_at = NULL,"
                     + " capture_held_bytes = capture_used_bytes, producer_held_bytes ="
                         + " producer_used_bytes, admission_held_bytes = CASE WHEN producer_phase IN"
                         + " ('FINISHED', 'REFERENCED') THEN admission_held_bytes ELSE"
@@ -523,7 +514,7 @@ public final class ToolPublicationStore {
                     "Original writer is fenced");
             long expires = requireEvidence(binding, writerToken, writer, false);
             jdbc.update(
-                    "UPDATE ma_output_capture SET expires_at = ? WHERE scope_key = ? AND"
+                    "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", expires_at = ? WHERE scope_key = ? AND"
                             + " publication_id = ?",
                     expires, scope, id);
             return grant(id, row.withState("OPEN", expires));
@@ -548,7 +539,7 @@ public final class ToolPublicationStore {
             state = row.state();
         }
         jdbc.update(
-                "UPDATE ma_output_capture SET state = ?, expires_at = NULL, capture_held_bytes ="
+                "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = ?, expires_at = NULL, capture_held_bytes ="
                     + " CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_used_bytes END,"
                     + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE"
                     + " producer_used_bytes END, admission_held_bytes = CASE WHEN ? = 'NOT_STARTED'"
@@ -909,7 +900,7 @@ public final class ToolPublicationStore {
     }
 
     private Row findPublicationRow(String scope, String publicationId) {
-        List<Row> rows = jdbc.query("SELECT * FROM ma_output_capture WHERE scope_key = ?"
+        List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ?"
                         + " AND publication_id = ?",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"), r.getString("binding_digest"),

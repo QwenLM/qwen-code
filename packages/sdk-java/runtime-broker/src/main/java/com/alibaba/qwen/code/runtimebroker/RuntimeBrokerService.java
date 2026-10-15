@@ -1133,22 +1133,35 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     context.lease(), context.session(), grant)),
                                     "runtime_publication_install_failed", "Publication installation failed")
                                     .thenApply(ignored -> {
-                                        // The detached family holds its Runtime
-                                        // through its own ledger row: the Shell
-                                        // process for `is_background`, the watch
-                                        // for `is_monitor`.
-                                        Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
-                                        ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
-                                                ? ManagedHoldFamily.MONITOR
-                                                : Boolean.TRUE.equals(toolInput.get("is_background"))
-                                                        ? ManagedHoldFamily.SHELL
-                                                        : null;
-                                        if (family != null) {
-                                            admitBackgroundProcess(context, record, family);
+                                        context.lock();
+                                        try {
+                                            ToolExecutionRecord current = executionRepository
+                                                    .findByExecutionCallId(executionId);
+                                            if (current == null || current.isTerminal()
+                                                    || current.isCancelRequested()
+                                                    || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
+                                                return current == null ? record : current;
+                                            }
+                                            // The detached family holds its Runtime
+                                            // through its own ledger row: the Shell
+                                            // process for `is_background`, the watch
+                                            // for `is_monitor`.
+                                            Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
+                                            ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
+                                                    ? ManagedHoldFamily.MONITOR
+                                                    : Boolean.TRUE.equals(toolInput.get("is_background"))
+                                                            ? ManagedHoldFamily.SHELL
+                                                            : null;
+                                            if (family != null) {
+                                                admitBackgroundProcess(context, current, family);
+                                            }
+                                            beginDispatch(context, current, payload, grant);
+                                            ToolExecutionRecord latest = executionRepository
+                                                    .findByExecutionCallId(executionId);
+                                            return latest == null ? current : latest;
+                                        } finally {
+                                            context.unlock();
                                         }
-                                        beginDispatch(context, record, payload, grant);
-                                        ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-                                        return latest == null ? record : latest;
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
@@ -1243,6 +1256,54 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     executionId)),
                     harnessSessionId, runtimeSessionId, executionId);
         });
+    }
+
+    /**
+     * The runtime Session ids of this Harness Session still owed the close's
+     * drain: a hold row (a background Shell process or a Monitor watch)
+     * exists — terminal or not — and the Runtime Session's release was never
+     * durably recorded. A hold row settling (the run exited, the watch
+     * stopped) discharges nothing on its own; only the Session's RELEASED
+     * record does. Read-only: a reloaded Harness asks this to restore the
+     * close's drain obligation after a restart — restore, never discharge
+     * (#13930 R1-2).
+     */
+    public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(
+            String harnessSessionId) {
+        requireOpen();
+        String id = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        return mapFailure(safeStage(() -> sessionResolver.resolveTenant(id)),
+                "runtime_hold_inventory_scope_failed",
+                "Runtime hold inventory scope resolution failed")
+                .thenApply(tenant -> listActiveHoldIdsSync(id, tenant));
+    }
+
+    private List<String> listActiveHoldIdsSync(String harnessSessionId,
+            String tenantId) {
+        Set<String> candidates = new LinkedHashSet<>();
+        String after = null;
+        for (;;) {
+            List<ToolExecutionRecord> batch = executionRepository
+                    .findHoldRowsByHarnessSession(harnessSessionId, after, 100);
+            for (ToolExecutionRecord row : batch) {
+                candidates.add(row.getRuntimeSessionId());
+            }
+            if (batch.size() < 100) {
+                break;
+            }
+            after = batch.get(batch.size() - 1).getExecutionCallId();
+        }
+        List<String> held = new ArrayList<>();
+        for (String runtimeSessionId : candidates) {
+            RuntimeSessionRecord session = sessionRepository.findHistorical(
+                    tenantId, harnessSessionId, runtimeSessionId);
+            // A missing record is not a durably recorded release either.
+            if (session == null
+                    || session.getState() != RuntimeSessionRecord.State.RELEASED) {
+                held.add(runtimeSessionId);
+            }
+        }
+        return List.copyOf(held);
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,

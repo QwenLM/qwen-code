@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -269,21 +271,11 @@ class CsiNativeToolReservationTest {
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
                 statement.executeUpdate(
-                        "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                                + " journal_revision, command_key_hash, transaction_id, operation,"
-                                + " command_id, content_digest, first_sequence, last_sequence,"
-                                + " event_count, writer_generation, writer_id, writer_token_hash,"
-                                + " activation_epoch, record_encoding, record_bytes, byte_length,"
-                                + " record_digest, created_at) VALUES ('tenant','workspace','"
+                        "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant','workspace','"
                                 + SESSION
-                                + "',99,'0000000000000000000000000000000000000000000000000000000000000099','fixture-99','commitFileHistory','fixture-99','0000000000000000000000000000000000000000000000000000000000000000',15,15,1,1,'fixture-owner','0000000000000000000000000000000000000000000000000000000000000000',1,'identity',X'7b7d',2,'0000000000000000000000000000000000000000000000000000000000000000',CURRENT_TIMESTAMP)");
+                                + "',99,'0000000000000000000000000000000000000000000000000000000000000099','fixture-99','commitFileHistory','fixture-99','0000000000000000000000000000000000000000000000000000000000000000',15,15,1,1,'fixture-owner','0000000000000000000000000000000000000000000000000000000000000000',1,'identity',X'7b7d',2,'0000000000000000000000000000000000000000000000000000000000000000'," + ManagedSchemaTime.SQL_NOW + ")");
                 statement.executeUpdate(
-                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                            + " resource_id, journal_revision, created_at) SELECT"
-                            + " session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key,"
-                            + " tenant_id, workspace_id, session_id, resource_id, 99,"
-                            + " CURRENT_TIMESTAMP FROM ma_resource");
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) SELECT session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key, tenant_id, workspace_id, session_id, resource_id, 99, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource");
             }
             assertEquals(3, CsiNativeToolReservation.complete(connection, original, frozen, inventory).size());
             var retry = tuples.getFirst();
@@ -297,14 +289,9 @@ class CsiNativeToolReservationTest {
             try (var statement = connection.createStatement()) {
                 statement.executeUpdate("UPDATE ma_resource_ref SET journal_revision = 99");
                 statement.executeUpdate(
-                        "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                                + " journal_revision, command_key_hash, transaction_id, operation,"
-                                + " command_id, content_digest, first_sequence, last_sequence,"
-                                + " event_count, writer_generation, writer_id, writer_token_hash,"
-                                + " activation_epoch, record_encoding, record_bytes, byte_length,"
-                                + " record_digest, created_at) VALUES ('tenant','workspace','"
+                        "INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant','workspace','"
                                 + SESSION
-                                + "',100,'0000000000000000000000000000000000000000000000000000000000000100','fixture-100','commitFileHistory','fixture-100','0000000000000000000000000000000000000000000000000000000000000000',15,15,1,1,'fixture-owner','0000000000000000000000000000000000000000000000000000000000000000',1,'identity',X'7b7d',2,'0000000000000000000000000000000000000000000000000000000000000000',CURRENT_TIMESTAMP)");
+                                + "',100,'0000000000000000000000000000000000000000000000000000000000000100','fixture-100','commitFileHistory','fixture-100','0000000000000000000000000000000000000000000000000000000000000000',15,15,1,1,'fixture-owner','0000000000000000000000000000000000000000000000000000000000000000',1,'identity',X'7b7d',2,'0000000000000000000000000000000000000000000000000000000000000000'," + ManagedSchemaTime.SQL_NOW + ")");
             }
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
             try (var statement = connection.createStatement()) {
@@ -333,12 +320,7 @@ class CsiNativeToolReservationTest {
             associationTables(connection);
             try (var statement = connection.createStatement()) {
                 statement.executeUpdate(
-                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                            + " resource_id, journal_revision, created_at) SELECT"
-                            + " session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key,"
-                            + " tenant_id, workspace_id, session_id, resource_id, 99,"
-                            + " CURRENT_TIMESTAMP FROM ma_resource");
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) SELECT session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key, tenant_id, workspace_id, session_id, resource_id, 99, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource");
             }
             var inventory = CsiNativeToolReservation.inventory(connection, original);
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, frozen, inventory));
@@ -381,12 +363,7 @@ class CsiNativeToolReservationTest {
             assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.complete(connection, original, entered, inventory));
             try (var statement = connection.createStatement()) {
                 statement.executeUpdate(
-                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                            + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                            + " resource_id, journal_revision, created_at) SELECT"
-                            + " session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key,"
-                            + " tenant_id, workspace_id, session_id, resource_id, 99,"
-                            + " CURRENT_TIMESTAMP FROM ma_resource WHERE state = 'REFERENCED'");
+                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) SELECT session_scope_key, 'JOURNAL', session_scope_key, 99, resource_key, tenant_id, workspace_id, session_id, resource_id, 99, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource WHERE state = 'REFERENCED'");
             }
             assertEquals(2, CsiNativeToolReservation.complete(connection, original, entered, inventory).size());
             assertEquals(first.execution().getExecutionCallId(), CsiNativeToolReservation.prepare(connection, original,

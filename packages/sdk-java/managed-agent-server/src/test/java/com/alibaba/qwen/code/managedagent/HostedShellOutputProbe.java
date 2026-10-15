@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -70,16 +71,14 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(String id) {
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", id);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", id);
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
-                + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ?"
-                + " AND s.storage_id = ?",
+        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
     }
@@ -167,12 +166,12 @@ final class HostedShellOutputProbe implements AutoCloseable {
     }
 
     private List<Map<String, Object>> resources(String id, String kind) {
-        return jdbc.queryForList("SELECT * FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND kind = ?",
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND kind = ?",
                 tenant, id, kind);
     }
 
     private byte[] resource(String id, String resourceId, String digest, int length) throws Exception {
-        var row = jdbc.queryForMap("SELECT * FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+        var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 tenant, id, resourceId);
         byte[] bytes = (byte[]) row.get("inline_bytes");
         assertThat(bytes).hasSize(length);
@@ -241,7 +240,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
     private void assertJournal(Map<String, Object> session, JsonNode report) throws Exception {
         String id = session.get("sessionId").toString();
         boolean applied = session.get("fault").equals("receipt-reply");
-        var journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
+        var journal = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
         var events = new ArrayList<JsonNode>();
         var eventIds = new HashSet<String>();
         long revision = 0;
@@ -299,7 +298,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
             resource(id, manifestRef.path("resourceId").asText(), manifestRef.path("digest").asText(),
                     manifestRef.path("byteLength").asInt());
         }
-        var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var head = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         assertThat(head.get("last_commit_digest")).isEqualTo(previous);

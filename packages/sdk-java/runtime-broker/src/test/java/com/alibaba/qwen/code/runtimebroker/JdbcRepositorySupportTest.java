@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.sql.Connection;
@@ -56,8 +57,26 @@ class JdbcRepositorySupportTest {
                         Duration.ofSeconds(1)));
     }
 
+    @Test
+    void instantParametersRejectNegativeAndOverflowingEpochMilliseconds() throws Exception {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:instant-range-" + UUID.randomUUID() + ";MODE=MySQL");
+        try (var connection = source.getConnection();
+                var statement = connection.prepareStatement("SELECT CAST(? AS BIGINT)")) {
+            assertThrows(java.sql.SQLException.class, () -> JdbcRepositorySupport.setInstant(
+                    statement, 1, Instant.ofEpochMilli(-1)));
+            assertThrows(java.sql.SQLException.class, () -> JdbcRepositorySupport.setInstant(
+                    statement, 1, Instant.MAX));
+            JdbcRepositorySupport.setInstant(statement, 1, Instant.parse("2040-01-01T00:00:00.123456Z"));
+            try (var row = statement.executeQuery()) {
+                assertTrue(row.next());
+                assertEquals(2_208_988_800_123L, row.getLong(1));
+            }
+        }
+    }
+
     static void assertDatabaseClock(Instant actual) {
-        assertEquals(0, actual.getNano() % 1_000);
+        assertEquals(0, actual.getNano() % 1_000_000);
         Duration drift = Duration.between(Instant.now(), actual).abs();
         assertTrue(drift.compareTo(Duration.ofSeconds(5)) < 0,
                 () -> "database clock drifted by " + drift);

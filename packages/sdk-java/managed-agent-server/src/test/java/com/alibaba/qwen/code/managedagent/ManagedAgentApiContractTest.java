@@ -1610,7 +1610,7 @@ class ManagedAgentApiContractTest {
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, runtime_state,"
-                        + " delivery_target, delivery_state, created_at,"
+                        + " delivery_target, delivery_state, gmt_create,"
                         + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
@@ -1724,16 +1724,7 @@ class ManagedAgentApiContractTest {
         // H4f-b: a workflow task serves the same cancel on both surfaces,
         // and its view advertises the action.
         String workflowKey = "e".repeat(64);
-        jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
-                        + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, runtime_state,"
-                        + " delivery_target, delivery_state, created_at,"
-                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
-                        + " ?, 'child_run', 'run-contract-wf', ?, 1,"
-                        + " 'resource-run-contract-wf', 'workflow',"
-                        + " 'running', 'ready', 'session', 'planned', 1, 2)",
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 workflowKey, tenant, sessionId, "f".repeat(64));
@@ -2084,7 +2075,7 @@ class ManagedAgentApiContractTest {
         jdbc.update("INSERT INTO ma_channel_instance (tenant_id,"
                         + " channel_id, platform, account_id,"
                         + " account_generation, state, actor_id, workspace_id,"
-                        + " cwd_relative, policy_json, created_at, updated_at)"
+                        + " cwd_relative, policy_json, gmt_create, gmt_modified)"
                         + " VALUES (?, 'mail-1', 'email', 'agent@example.com',"
                         + " 1, 'connected', 'channel-reader', 'ws-channel',"
                         + " '.', '{}', 1000, 1000)", channelTenant);
@@ -2174,7 +2165,7 @@ class ManagedAgentApiContractTest {
                 .replace("-", "");
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, error_code, created_at, updated_at,"
+                        + " status, error_code, gmt_create, gmt_modified,"
                         + " completed_at) VALUES (?, ?, ?, ?, '[]', 'digest',"
                         + " 'FAILED', 'hosted_harness_unavailable', ?, ?,"
                         + " ?)",

@@ -27,10 +27,13 @@ import java.util.Optional;
  */
 @Repository
 public class ManagedAgentDefinitionStore {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
+    private final RequestDigests digests;
 
-    public ManagedAgentDefinitionStore(JdbcTemplate jdbc) {
+    public ManagedAgentDefinitionStore(JdbcTemplate jdbc, RequestDigests digests) {
         this.jdbc = jdbc;
+        this.digests = digests;
     }
 
     public record DefinitionRevision(String agentId, long revision,
@@ -113,13 +116,13 @@ public class ManagedAgentDefinitionStore {
                 .orElseThrow(ManagedAgentDefinitionStore::notFound);
         Map<String, Object> content;
         try {
-            content = new ObjectMapper().readValue(revision.definitionJson(),
+            content = JSON.readValue(revision.definitionJson(),
                     new TypeReference<Map<String, Object>>() { });
         } catch (Exception error) {
             throw new IllegalStateException("Invalid pinned definition", error);
         }
         if (!revision.digest().equals(session.agentDefinitionDigest())
-                || !new RequestDigests().digest(content)
+                || !digests.digest(content)
                         .equals("sha256:" + session.agentDefinitionDigest())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "hosted_agent_definition_conflict",
@@ -131,7 +134,7 @@ public class ManagedAgentDefinitionStore {
     public Optional<DefinitionRevision> latest(String tenantId,
             String agentId) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"
-                + " definition_json, created_at FROM ma_agent_definition"
+                + " definition_json, gmt_create FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1",
                 ManagedAgentDefinitionStore::row, tenantId, agentId));
@@ -146,7 +149,7 @@ public class ManagedAgentDefinitionStore {
     public Optional<DefinitionRevision> latestForUpdate(String tenantId,
             String agentId) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"
-                + " definition_json, created_at FROM ma_agent_definition"
+                + " definition_json, gmt_create FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1 FOR UPDATE",
                 ManagedAgentDefinitionStore::row, tenantId, agentId));
@@ -155,7 +158,7 @@ public class ManagedAgentDefinitionStore {
     public Optional<DefinitionRevision> find(String tenantId, String agentId,
             long revision) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"
-                + " definition_json, created_at FROM ma_agent_definition"
+                + " definition_json, gmt_create FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ? AND revision = ?",
                 ManagedAgentDefinitionStore::row, tenantId, agentId,
                 revision));
@@ -199,7 +202,7 @@ public class ManagedAgentDefinitionStore {
         try {
             jdbc.update("INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
                             + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest, request_digest,"
-                            + " state, agent_id, agent_revision, created_at, updated_at)"
+                            + " state, agent_id, agent_revision, gmt_create, gmt_modified)"
                             + " VALUES (?, 'AGENT_DEFINITION', ?, ?, 'TENANT', ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)",
                     receiptKey(tenantId, idempotencyKey), ManagedSchemaKeys.key(tenantId), tenantId,
                     ManagedSchemaKeys.key("TENANT", tenantId), tenantId, idempotencyKey,
@@ -219,7 +222,7 @@ public class ManagedAgentDefinitionStore {
 
     private void insertRevision(String tenantId, DefinitionRevision revision) {
         jdbc.update("INSERT INTO ma_agent_definition (tenant_id,"
-                + " agent_id, revision, digest, definition_json, created_at)"
+                + " agent_id, revision, digest, definition_json, gmt_create)"
                 + " VALUES (?, ?, ?, ?, ?, ?)", tenantId, revision.agentId(),
                 revision.revision(), revision.digest(),
                 revision.definitionJson(), revision.createdAt());
@@ -229,7 +232,7 @@ public class ManagedAgentDefinitionStore {
             throws java.sql.SQLException {
         return new DefinitionRevision(row.getString("agent_id"),
                 row.getLong("revision"), row.getString("digest"),
-                row.getString("definition_json"), row.getLong("created_at"));
+                row.getString("definition_json"), row.getLong("gmt_create"));
     }
 
     private static <T> Optional<T> first(List<T> rows) {
