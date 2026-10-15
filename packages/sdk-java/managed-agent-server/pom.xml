@@ -160,6 +160,22 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>csi-session</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-session</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-runtime</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-runtime</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>operator-recovery</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>
@@ -299,7 +315,7 @@
                 <configuration>
                     <includes><include>**/HostedProcessCrashIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <forkedProcessTimeoutInSeconds>480</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>720</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
