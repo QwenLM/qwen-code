@@ -110,6 +110,10 @@ describe('SDK Java self-hosted workflow guards', () => {
 
   it('runs the Broker suite on hosted Java 21 after installing its SDK dependency', () => {
     const block = step(job('test'), 'Run Runtime Broker state tests');
+    const hosted = parse(workflow).jobs.test.steps.find(
+      (candidate) => candidate.name === 'Run Runtime Broker state tests',
+    );
+    expect(hosted.shell).toBe('bash');
     expect(block).toContain(
       "working-directory: 'packages/managed-agent-server'",
     );
@@ -119,6 +123,47 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     expect(block).toContain(`'-Dtest=${brokerTestPattern}'`);
   });
+
+  it.skipIf(process.platform === 'win32').each([0, 23])(
+    'gates the hosted Broker test command on SDK install exit %s',
+    (installStatus) => {
+      const hosted = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Runtime Broker state tests',
+      );
+      expect(hosted.shell).toBe('bash');
+      const result = spawnSync(
+        hosted.shell,
+        [
+          '--noprofile',
+          '--norc',
+          '-e',
+          '-o',
+          'pipefail',
+          '-c',
+          `mvn() {
+            printf 'ARG<%s>\\n' "$@"
+            if [[ "$*" == *" install" ]]; then return "$SDK_INSTALL_STATUS"; fi
+            printf 'BROKER_TESTS_RAN\\n'
+          }
+          ${hosted.run}`,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, SDK_INSTALL_STATUS: String(installStatus) },
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(installStatus);
+      expect(result.stdout).toContain('ARG<-Dgpg.skip=true>');
+      expect(result.stdout).toContain('ARG<-Dmaven.javadoc.skip=true>');
+      expect(result.stdout.includes('BROKER_TESTS_RAN')).toBe(
+        installStatus === 0,
+      );
+      if (installStatus === 0) {
+        expect(result.stdout).toContain(`ARG<-Dtest=${brokerTestPattern}>`);
+      }
+    },
+  );
 
   it('keeps the Broker matrix selector matched to every default test including nested packages', () => {
     const cwd = 'packages/managed-agent-server/src/test/java';
