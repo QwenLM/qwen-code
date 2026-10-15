@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
@@ -15,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
@@ -25,15 +18,9 @@ import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -52,6 +39,20 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-retention;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -439,7 +440,9 @@ class WorkspaceSessionRetentionTest {
 
     private ResultActions request(MockHttpServletRequestBuilder request, String tenant, String actor, String key) throws Exception {
         request.header(TenantContextFilter.HEADER, tenant).principal(actor(tenant, actor));
-        if (key != null) { request.header("Idempotency-Key", key); }
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
         return mvc.perform(request);
     }
 
@@ -490,9 +493,14 @@ class WorkspaceSessionRetentionTest {
         public CompletionStage<Void> warm(String id) { throw new AssertionError("Unexpected warm"); }
         public CompletionStage<Void> drain(String id) { throw new AssertionError("Unexpected drain"); }
         public void requestWorkspaceClose(String tenant, String id) { throw new AssertionError("Unexpected legacy close"); }
-        public CompletionStage<Void> closeWorkspace(String tenant, String id) { record(id); return CompletableFuture.completedFuture(null); }
+        public CompletionStage<Void> closeWorkspace(String tenant, String id) {
+            record(id);
+            return CompletableFuture.completedFuture(null);
+        }
         private void record(String id) {
-            if (calls.merge(id, 1, Integer::sum) > 1) { throw new AssertionError("Cleanup repeated after close"); }
+            if (calls.merge(id, 1, Integer::sum) > 1) {
+                throw new AssertionError("Cleanup repeated after close");
+            }
         }
     }
 }

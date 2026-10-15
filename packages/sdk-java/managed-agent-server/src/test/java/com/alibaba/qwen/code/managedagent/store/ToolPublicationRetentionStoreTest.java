@@ -1,12 +1,19 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.time.Duration;
@@ -15,15 +22,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class ToolPublicationRetentionStoreTest {
     protected JdbcTemplate jdbc;
@@ -79,7 +80,9 @@ public class ToolPublicationRetentionStoreTest {
     @Test
     void retainsActiveOutputAndStartsGraceOnlyAtPermanentRetirement() {
         assertThat(retention.observe(Duration.ZERO)).noneMatch(candidate -> scope.equals(candidate.scope()));
-        try (var lease = retention.read(key)) { lease.check(); }
+        try (var lease = retention.read(key)) {
+            lease.check();
+        }
         retire();
         long first = jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ? AND retired_at IS NOT NULL",
                 Long.class, tenant);
@@ -139,8 +142,11 @@ public class ToolPublicationRetentionStoreTest {
                 return new ByteArrayInputStream(new byte[] {1, 2}) {
                     @Override public synchronized int read(byte[] target, int offset, int length) {
                         entered.countDown();
-                        try { assertThat(resume.await(10, TimeUnit.SECONDS)).isTrue(); }
-                        catch (InterruptedException error) { throw new IllegalStateException(error); }
+                        try {
+                            assertThat(resume.await(10, TimeUnit.SECONDS)).isTrue();
+                        } catch (InterruptedException error) {
+                            throw new IllegalStateException(error);
+                        }
                         return super.read(target, offset, length);
                     }
                 };
@@ -251,8 +257,11 @@ public class ToolPublicationRetentionStoreTest {
             @Override public void putIfAbsent(String objectKey, byte[] bytes) {
                 puts.incrementAndGet();
                 entered.countDown();
-                try { assertThat(resume.await(20, TimeUnit.SECONDS)).isTrue(); }
-                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                try {
+                    assertThat(resume.await(20, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    throw new IllegalStateException(error);
+                }
                 super.putIfAbsent(objectKey, bytes);
             }
         };
@@ -261,7 +270,9 @@ public class ToolPublicationRetentionStoreTest {
             try {
                 assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
                 for (byte[] invalid : new byte[][] {new byte[0], new byte[] {1}, new byte[] {1, 3}, new byte[] {1, 2, 3}}) {
-                    if (invalid.length != 0) { objects.bytes.put("exact-key", invalid); }
+                    if (invalid.length != 0) {
+                        objects.bytes.put("exact-key", invalid);
+                    }
                     assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact-key", new byte[] {1, 2}, objects))
                             .isInstanceOfSatisfying(ApiException.class,
                                     error -> assertThat(error.getCode()).isEqualTo("tool_output_put_unresolved"));
@@ -270,7 +281,9 @@ public class ToolPublicationRetentionStoreTest {
                 retire();
                 assertThat(blocker()).isEqualTo("put_unresolved");
                 assertThat(puts).hasValue(1);
-            } finally { resume.countDown(); }
+            } finally {
+                resume.countDown();
+            }
             original.get(10, TimeUnit.SECONDS);
         }
         assertThat(blocker()).isNull();
@@ -323,8 +336,11 @@ public class ToolPublicationRetentionStoreTest {
             var deletion = executor.submit(() -> tx.executeWithoutResult(status -> {
                 ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, session);
                 locked.countDown();
-                try { assertThat(release.await(10, TimeUnit.SECONDS)).isTrue(); }
-                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                try {
+                    assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    throw new IllegalStateException(error);
+                }
                 ToolPublicationRetentionStore.retire(jdbc, tenant, session, "delete-1");
             }));
             assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
@@ -439,7 +455,9 @@ public class ToolPublicationRetentionStoreTest {
         var admissions = new java.util.concurrent.atomic.AtomicInteger();
         var observed = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override public int update(String sql, Object... arguments) {
-                if (sql.startsWith("INSERT INTO ma_read_lease")) { admissions.incrementAndGet(); }
+                if (sql.startsWith("INSERT INTO ma_read_lease")) {
+                    admissions.incrementAndGet();
+                }
                 return super.update(sql, arguments);
             }
         };

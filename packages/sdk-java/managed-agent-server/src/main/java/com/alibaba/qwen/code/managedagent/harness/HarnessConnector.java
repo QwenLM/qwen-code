@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
 import java.util.Map;
-import com.fasterxml.jackson.databind.JsonNode;
 
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
