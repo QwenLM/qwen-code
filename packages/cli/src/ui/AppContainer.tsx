@@ -156,6 +156,7 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
@@ -844,6 +845,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [props.extensionRefreshState],
   );
   const historyManager = useHistory();
+  const addHistoryItem = historyManager.addItem;
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribe((text) => {
+        addHistoryItem({ type: MessageType.INFO, text }, Date.now());
+      }),
+    [config, addHistoryItem],
+  );
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
   // would rebuild them on every message. Mirror history into a ref so
@@ -1184,8 +1193,6 @@ export const AppContainer = (props: AppContainerProps) => {
         ),
       );
       profileCheckpoint('config_initialize_end');
-      setConfigInitialized(true);
-      profileCheckpoint('input_enabled');
       // Profile finalize is intentionally NOT here. With PR-A's background
       // MCP discovery, MCP-related events (`mcp_server_ready:*`,
       // `mcp_first_tool_registered`, `mcp_all_servers_settled`,
@@ -1319,6 +1326,9 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
+      await getInteractiveModSession(config)?.initialize();
+      setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
     })();
 
     // Register SessionEnd cleanup for process exit
@@ -1621,6 +1631,13 @@ export const AppContainer = (props: AppContainerProps) => {
       ),
   );
 
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: useTerminalBuffer,
+      columns: terminalWidth,
+    });
+  }, [config, useTerminalBuffer, terminalWidth]);
+
   // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
   // <Static> content from the viewport just like the wake path; pair it with
   // the same remount bump so keyed statics (agent tab history) re-emit. The
@@ -1867,7 +1884,6 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, [config]);
 
-  const addHistoryItem = historyManager.addItem;
   useEffect(() => {
     if (typeof config.onChatRecordingFailure !== 'function') return;
     return config.onChatRecordingFailure(() => {

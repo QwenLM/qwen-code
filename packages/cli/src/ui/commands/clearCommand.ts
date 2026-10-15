@@ -7,6 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   uiTelemetryService,
   SessionEndReason,
@@ -96,6 +97,7 @@ export const clearCommand: SlashCommand = {
       }
 
       const newSessionId = config.startNewSession();
+      await getInteractiveModSession(config)?.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();

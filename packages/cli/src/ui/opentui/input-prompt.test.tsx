@@ -672,6 +672,36 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(editor.plainText).toBe('echo hi!');
   });
 
+  it('Esc cancels a running slash command before restoring the prompt queue', async () => {
+    const onCancelCommand = vi.fn(() => true);
+    const onPopQueue = vi.fn(() => 'queued text');
+    const onInterrupt = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        onCancelCommand={onCancelCommand}
+        onInterrupt={onInterrupt}
+        queueLength={1}
+        onPopQueue={onPopQueue}
+      />,
+    );
+    await typeText('draft');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onCancelCommand).toHaveBeenCalledOnce();
+    expect(onPopQueue).not.toHaveBeenCalled();
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('draft');
+    onCancelCommand.mockReturnValue(false);
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(onPopQueue).toHaveBeenCalledOnce();
+    expect(currentEditor().plainText).toBe('queued text\ndraft');
+  });
+
   it('Esc in shell mode exits the mode before the queue restore (U-33)', async () => {
     const onToggleShellMode = vi.fn();
     const onPopQueue = vi.fn(() => 'queued text');

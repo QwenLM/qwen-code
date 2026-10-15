@@ -73,6 +73,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
+import * as interactiveMods from '../services/interactive-mod-session.js';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
@@ -6499,6 +6500,76 @@ describe('AppContainer State Management', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it('keeps Mod startup logs after restoring history and holds input until Mods are ready', async () => {
+      const calls: string[] = [];
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn((item: HistoryItemWithoutId) => {
+          calls.push(`add:${item.text}`);
+        }),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(() => calls.push('load')),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let emit!: (text: string) => void;
+      const initialize = vi.fn(async () => {
+        emit('Mod tool hooks are unavailable in terminal sessions.');
+        await ready;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize,
+          subscribe: (listener: (text: string) => void) => {
+            emit = listener;
+            return () => {};
+          },
+          setPresentation: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession);
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+        expect(calls).toEqual([
+          'load',
+          'add:Mod tool hooks are unavailable in terminal sessions.',
+        ]);
+        expect(capturedUIState.isConfigInitialized).toBe(false);
+        expect(capturedUIState.isInputActive).toBe(false);
+        release();
+        await flushConfigInitialization();
+      } finally {
+        release();
+        cleanup();
+        owner.mockRestore();
+      }
     });
 
     it('announces active scheduled tasks after restoring resumed history', async () => {

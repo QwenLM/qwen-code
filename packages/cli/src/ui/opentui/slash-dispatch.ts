@@ -25,6 +25,8 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { CommandService } from '../../services/CommandService.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { ensureConfigInitialized } from './live-session.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -56,10 +58,12 @@ export async function loadInteractiveCommands(
   // manager is created in initialize()); without this /skills errors and
   // skill commands are missing from /-completion.
   try {
-    await config?.initialize();
-  } catch {
+    if (config) await ensureConfigInitialized(config);
+  } catch (error) {
+    if (getInteractiveModSession(config)) throw error;
     /* proceed with partial commands */
   }
+  const mods = getInteractiveModSession(config);
   const loaders = [
     new McpPromptLoader(config),
     new BuiltinCommandLoader(config),
@@ -67,6 +71,7 @@ export async function loadInteractiveCommands(
     new SkillCommandLoader(config),
     new SavedWorkflowLoader(config),
     new FileCommandLoader(config),
+    ...(mods ? [mods] : []),
   ];
   const disabled = config?.getDisabledSlashCommands() ?? [];
   const commandService = await CommandService.create(

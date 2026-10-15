@@ -1,6 +1,6 @@
 # Experimental Mods
 
-Qwen Code can run a small subset of the Claude Code Mod API in headless sessions.
+Qwen Code can run a small subset of the Claude Code Mod API in headless and interactive terminal sessions.
 This feature is opt-in and requires a trusted workspace and an enabled Claude or
 native Qwen extension. Agent Plugins v1 packages continue to ignore hooks.
 
@@ -67,7 +67,29 @@ qwen -p '/hello Qwen' --output-format json
 
 Normal CLI authentication configuration is still required at startup. The Mod
 command itself makes no model request. Text, JSON and stream-json headless output
-are supported. A stream-json process retains module variables between turns.
+are supported. A stream-json or interactive process retains module variables between turns.
+
+To use the same `/hello Qwen` command in the terminal UI, start `qwen` without
+`-p`. Both Ink and OpenTUI load Mod commands with the same opt-in setting.
+Interactive `session.start` receives `surface: 'terminal'` and
+`isInteractive: true`; `command.run` receives `origin: { kind: 'composer' }`
+and `presentation: { isFullscreen, columns }` from the active renderer. These
+host fields stay pinned. Headless sessions retain `surface: null`,
+`isInteractive: false`, and `origin: { kind: 'sdk' }`.
+
+Interactive transcript logs appear as informational messages and never enter
+model context. Debug-only logs stay in the debug logger. Terminal text is
+control-character sanitized and each transcript log is limited to 2,000
+characters. These UI logs need not survive a restart or resume. Esc cancels
+the current Mod command; the next command waits for worker cancellation to
+settle. Clear, resume and branch retain the loaded modules and their variables,
+send `session.end` for the replaced session, and do not repeat `session.start`.
+
+Interactive support currently covers commands, lifecycle and logs. Explicit
+`tool.call`, `tool.check` and `tool.*` registrations reject initialization before
+a model request. Broad wildcard or negated patterns that also match tool events
+receive a visible diagnostic and apply only to supported events. Tool
+interception below is available only in headless sessions.
 
 ## Supported subset
 
@@ -77,7 +99,7 @@ are supported. A stream-json process retains module variables between turns.
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
-| Tools      | Intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                                              |
+| Tools      | In headless sessions only, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                   |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
@@ -303,7 +325,7 @@ uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
 1.5 seconds. An outer handler that finishes early abandons pending downstream
 work; cancellation never starts a fallback operation. Retained next/API functions
 cannot perform work after their invocation ends. A worker that cannot acknowledge
-cancellation within 250 milliseconds is terminated, requiring a new session.
+cancellation within 250 milliseconds is terminated; restart the CLI to reload Mods.
 
 There are at most 32 Mod environments, 64 registered commands, 128 registrations
 per plugin, and 4,096 root/API event chains per root call. Passing through another
@@ -313,7 +335,7 @@ and configuration failures still reject initialization; ordinary hook failure
 can recover without resetting module state. Guest promise jobs run only while a
 host request is active, including its queued notification drain.
 
-Mods do not run in TUI, ACP, managed/SSH, sandbox or session-agent entry points in
+Mods do not run in ACP, managed/SSH, sandbox or session-agent entry points in
 this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.
 Restart after changing plugin code, options or extension activation. An already loaded
 command rechecks every participating plugin before execution and refuses a changed

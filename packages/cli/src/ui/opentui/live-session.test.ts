@@ -45,6 +45,11 @@ const visionMocks = vi.hoisted(() => ({
   run: vi.fn(),
 }));
 
+const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock('../../services/interactive-mod-session.js', () => ({
+  getInteractiveModSession: modMocks.get,
+}));
+
 // The round-trip tests also replace the tool scheduler with a stub that
 // completes the pending calls immediately.
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -370,6 +375,7 @@ describe('livePromptEvents', () => {
     atMocks.hang = null;
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
+    modMocks.get.mockReset();
   });
 
   it('seeds prompt ids past claims in the resumed transcript', () => {
@@ -413,6 +419,27 @@ describe('livePromptEvents', () => {
     ]);
 
     expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks model sends on Mod failure even when the native client is initialized', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({ isInitialized: () => true }),
+    } as unknown as Config;
+    const initializeMods = vi
+      .fn()
+      .mockRejectedValue(new Error('Unsupported terminal tool.call'));
+    modMocks.get.mockReturnValue({ initialize: initializeMods });
+
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'terminal tool.call',
+    );
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'terminal tool.call',
+    );
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(initializeMods).toHaveBeenCalledOnce();
   });
 
   it('waits for the shared initialization before the first send', async () => {
