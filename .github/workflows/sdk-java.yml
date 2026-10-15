@@ -217,7 +217,7 @@ jobs:
       - name: 'Run Runtime Broker state tests'
         if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
         working-directory: 'packages/managed-agent-server'
-        shell: bash
+        shell: 'bash'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: |-
