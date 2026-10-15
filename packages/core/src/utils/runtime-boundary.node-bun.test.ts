@@ -72,7 +72,9 @@ describe('runtime boundary: same fixture under node and bun', () => {
   if (bunAvailable) runtimes.push('bun');
 
   const interpreterFor = (runtime: 'node' | 'bun'): string =>
-    runtime === 'bun' ? bunBin : (process.env['NODE_TEST_BIN'] ?? process.execPath);
+    runtime === 'bun'
+      ? bunBin
+      : (process.env['NODE_TEST_BIN'] ?? process.execPath);
 
   const collectIdentityLines = async (
     child: ReturnType<typeof spawn>,
@@ -158,11 +160,9 @@ describe('runtime boundary: same fixture under node and bun', () => {
     '%s: round-trips messages over the Node IPC channel',
     { timeout: 30_000 },
     async (runtime) => {
-      const child = spawn(
-        interpreterFor(runtime),
-        [fixturePath, 'stay'],
-        { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] },
-      );
+      const child = spawn(interpreterFor(runtime), [fixturePath, 'stay'], {
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      });
       const types: string[] = [];
       child.on('message', (message) => {
         const type = (message as { type?: string }).type ?? '';

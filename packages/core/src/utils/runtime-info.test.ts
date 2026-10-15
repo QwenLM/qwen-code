@@ -148,10 +148,21 @@ describe('getJsInterpreterCommand', () => {
     chmodSync(runner, 0o755);
     writeFileSync(
       path.join(host, 'manifest.json'),
-      JSON.stringify({ name: 'unrelated-sdk-host', interpreter: './custom-runner' }),
+      JSON.stringify({
+        name: 'unrelated-sdk-host',
+        interpreter: './custom-runner',
+      }),
     );
     writeExecutable(
-      path.join(host, 'node_modules', '@qwen-code', 'qwen-code', 'bun', 'bin', 'bun'),
+      path.join(
+        host,
+        'node_modules',
+        '@qwen-code',
+        'qwen-code',
+        'bun',
+        'bin',
+        'bun',
+      ),
     );
     expect(
       resolvedFor(
@@ -168,7 +179,12 @@ describe('getJsInterpreterCommand', () => {
       JSON.stringify({ runtime: 'bun' }),
     );
     writeExecutable(path.join(host, 'bun', 'bin', 'bun'));
-    const packageDir = path.join(host, 'node_modules', '@qwen-code', 'qwen-code-core');
+    const packageDir = path.join(
+      host,
+      'node_modules',
+      '@qwen-code',
+      'qwen-code-core',
+    );
     mkdirSync(packageDir, { recursive: true });
     writeFileSync(path.join(packageDir, 'package.json'), '{"name":"x"}\n');
     expect(
