@@ -10,13 +10,13 @@ CREATE TABLE ma_session (
     harness_boot_id VARBINARY(144),
     harness_event_epoch VARBINARY(256),
     harness_last_event_id BIGINT NOT NULL DEFAULT 0,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     version BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, session_id),
     public_session_id VARBINARY(512) GENERATED ALWAYS AS (CASE WHEN session_kind = 'PUBLIC' THEN session_id ELSE NULL END),
     UNIQUE (public_session_id),
-    deleted_at BIGINT,
+    deleted_at BIGINT UNSIGNED,
     workspace_id VARBINARY(2048),
     workspace_generation BIGINT,
     workspace_storage_id VARBINARY(1024),
@@ -42,7 +42,7 @@ CREATE TABLE ma_session (
     title_revision BIGINT NOT NULL DEFAULT 0,
     retirement_operation_id VARBINARY(512),
     retirement_generation BIGINT NOT NULL DEFAULT 0,
-    retired_at BIGINT,
+    retired_at BIGINT UNSIGNED,
     recovery_protected BOOLEAN NOT NULL DEFAULT FALSE,
     resource_gc_completed BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT ck_ma_session_kind CHECK ((CASE session_kind WHEN 'PUBLIC' THEN 6 WHEN 'CONTROL' THEN 7 ELSE -1 END = CHAR_LENGTH(session_kind))),
@@ -53,7 +53,7 @@ CREATE TABLE ma_session (
     CONSTRAINT uq_ma_session_scope UNIQUE (session_scope_key)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
-CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, updated_at, session_id);
+CREATE INDEX ix_ma_session_list ON ma_session (tenant_id, gmt_modified, session_id);
 
 CREATE INDEX ix_ma_session_retirement ON ma_session (retired_at, recovery_protected);
 
@@ -71,22 +71,22 @@ CREATE TABLE ma_turn (
     harness_event_epoch VARBINARY(256),
     harness_last_event_id BIGINT,
     dispatch_owner VARBINARY(512),
-    dispatch_lease_until BIGINT,
+    dispatch_lease_until BIGINT UNSIGNED,
     error_code VARCHAR(128),
     error_message VARCHAR(2048),
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
-    completed_at BIGINT,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
+    completed_at BIGINT UNSIGNED,
     version BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, session_id, turn_id),
     UNIQUE (prompt_id),
     FOREIGN KEY (tenant_id, session_id)
         REFERENCES ma_session (tenant_id, session_id),
     retry_count INT NOT NULL DEFAULT 0,
-    retry_after BIGINT
+    retry_after BIGINT UNSIGNED
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
-CREATE INDEX ix_ma_turn_dispatch ON ma_turn (status, dispatch_lease_until, updated_at);
+CREATE INDEX ix_ma_turn_dispatch ON ma_turn (status, dispatch_lease_until, gmt_modified);
 
 CREATE TABLE ma_session_head (
     tenant_id VARBINARY(2048) NOT NULL,
@@ -96,7 +96,7 @@ CREATE TABLE ma_session_head (
     state VARCHAR(32),
     writer_generation BIGINT,
     writer_id VARBINARY(2048),
-    writer_lease_until DATETIME(6),
+    writer_lease_until BIGINT UNSIGNED,
     lease_token_hash CHAR(64),
     journal_revision BIGINT,
     committed_sequence BIGINT,
@@ -106,8 +106,8 @@ CREATE TABLE ma_session_head (
     compacted_through_revision BIGINT,
     recovery_status VARCHAR(32),
     recovery_detail_code VARCHAR(128),
-    created_at DATETIME(6) NOT NULL,
-    updated_at DATETIME(6) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     o3_backfill_revision BIGINT NOT NULL DEFAULT 0,
     o3_backfill_through BIGINT,
     o3_backfill_error VARCHAR(128),
@@ -115,7 +115,7 @@ CREATE TABLE ma_session_head (
     activation_id VARBINARY(2048),
     activation_phase VARCHAR(32),
     activation_event_epoch BIGINT,
-    activation_expires_at BIGINT,
+    activation_expires_at BIGINT UNSIGNED,
     activation_head_revision BIGINT,
     tenant_key CHAR(64) NOT NULL,
     harness_key CHAR(64) NOT NULL,
@@ -124,7 +124,7 @@ CREATE TABLE ma_session_head (
     phase VARCHAR(32) NOT NULL DEFAULT 'OPEN',
     operation_id VARBINARY(512),
     claim_generation BIGINT NOT NULL DEFAULT 0,
-    claim_lease_until BIGINT,
+    claim_lease_until BIGINT UNSIGNED,
     PRIMARY KEY (tenant_key, harness_key),
     CONSTRAINT ck_ma_head_kind CHECK ((CASE head_kind WHEN 'MANAGED_SESSION' THEN 15 WHEN 'HARNESS' THEN 7 ELSE -1 END = CHAR_LENGTH(head_kind))),
     CONSTRAINT ck_ma_head_journal CHECK ((head_kind = 'HARNESS' AND journal_revision IS NULL AND committed_sequence IS NULL AND writer_generation IS NULL AND activation_epoch IS NULL AND storage_version IS NULL) OR (head_kind = 'MANAGED_SESSION' AND journal_revision IS NOT NULL AND committed_sequence IS NOT NULL AND writer_generation IS NOT NULL AND activation_epoch IS NOT NULL AND storage_version IS NOT NULL)),
@@ -160,7 +160,7 @@ CREATE TABLE ma_session_journal_tx (
     record_bytes MEDIUMBLOB NOT NULL,
     byte_length BIGINT NOT NULL,
     record_digest CHAR(64) NOT NULL,
-    created_at DATETIME(6) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, journal_revision),
     CONSTRAINT uq_managed_session_command
         UNIQUE (tenant_id, session_id, command_key_hash)
@@ -176,12 +176,12 @@ CREATE TABLE ma_event_stream (
     covered_sequence BIGINT NOT NULL DEFAULT 0,
     wake_covered_sequence BIGINT,
     projection_version INT NOT NULL DEFAULT 1,
-    snapshot_stale_since BIGINT,
+    snapshot_stale_since BIGINT UNSIGNED,
     current_snapshot_id VARBINARY(512),
     artifact_refs_resource_key CHAR(64),
     output_ranges_json LONGTEXT,
     projection_pending BOOLEAN GENERATED ALWAYS AS (last_sequence > covered_sequence OR snapshot_stale_since IS NOT NULL),
-    updated_at BIGINT NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, stream_kind, stream_id),
     CONSTRAINT ck_ma_stream_kind CHECK ((CASE stream_kind WHEN 'SESSION' THEN 7 WHEN 'TASK' THEN 4 ELSE -1 END = CHAR_LENGTH(stream_kind))),
     CONSTRAINT ck_ma_stream_counters CHECK (last_sequence >= 0 AND replay_floor_sequence >= 0 AND replay_floor_sequence <= last_sequence AND covered_sequence >= 0 AND covered_sequence <= last_sequence),
@@ -189,7 +189,7 @@ CREATE TABLE ma_event_stream (
     CONSTRAINT fk_ma_stream_session FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
-CREATE INDEX ix_ma_stream_projection ON ma_event_stream (stream_kind, projection_pending, updated_at);
+CREATE INDEX ix_ma_stream_projection ON ma_event_stream (stream_kind, projection_pending, gmt_modified);
 
 CREATE TABLE ma_public_event (
     tenant_id VARBINARY(512) NOT NULL,
@@ -201,7 +201,7 @@ CREATE TABLE ma_public_event (
     data_json LONGTEXT,
     terminal BOOLEAN,
     source_key VARBINARY(1024),
-    created_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, stream_kind, stream_id, sequence_id),
     UNIQUE (event_id),
     UNIQUE (tenant_id, session_id, stream_kind, stream_id, source_key),
@@ -241,8 +241,8 @@ CREATE TABLE ma_message (
     attributes_json LONGTEXT NOT NULL,
     first_sequence BIGINT NOT NULL,
     last_sequence BIGINT NOT NULL,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     revision BIGINT NOT NULL DEFAULT 1,
     PRIMARY KEY (tenant_id, session_id, item_id),
     FOREIGN KEY (tenant_id, session_id)
@@ -270,9 +270,9 @@ CREATE TABLE ma_snapshot (
     manifest_sha256 CHAR(64) NOT NULL,
     item_count BIGINT NOT NULL,
     state VARCHAR(16) NOT NULL,
-    created_at BIGINT NOT NULL,
-    published_at BIGINT,
-    retain_until BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    published_at BIGINT UNSIGNED,
+    retain_until BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, session_id, snapshot_id),
     CONSTRAINT uq_ma_snapshot_version UNIQUE (tenant_id, session_id, snapshot_version),
     CONSTRAINT ck_ma_snapshot_state CHECK ((CASE state WHEN 'BUILDING' THEN 8 WHEN 'PUBLISHED' THEN 9 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
@@ -299,9 +299,9 @@ CREATE TABLE ma_session_record (
     definition_revision BIGINT,
     delivery_target VARCHAR(16),
     delivery_state VARCHAR(16),
-    created_at BIGINT NOT NULL,
-    started_at BIGINT,
-    settled_at BIGINT,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    started_at BIGINT UNSIGNED,
+    settled_at BIGINT UNSIGNED,
     PRIMARY KEY (session_scope_key, record_key),
     first_sequence BIGINT NOT NULL DEFAULT 0,
     hook_once_key_hash CHAR(64) NULL,
@@ -324,17 +324,17 @@ CREATE TABLE ma_session_record (
     CONSTRAINT uq_ma_hook_occurrence UNIQUE (session_scope_key, hook_occurrence_hash, hook_ordinal)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
-CREATE INDEX ix_ma_record_task ON ma_session_record (session_scope_key, created_at, record_key);
+CREATE INDEX ix_ma_record_task ON ma_session_record (session_scope_key, gmt_create, record_key);
 
-CREATE INDEX ix_ma_record_action ON ma_session_record (session_scope_key, record_kind, state, created_at, action_id);
+CREATE INDEX ix_ma_record_action ON ma_session_record (session_scope_key, record_kind, state, gmt_create, action_id);
 
 CREATE INDEX ix_ma_record_operation ON ma_session_record (session_scope_key, operation_hash);
 
-CREATE INDEX ix_ma_record_domain ON ma_session_record (domain, created_at, record_id);
+CREATE INDEX ix_ma_record_domain ON ma_session_record (domain, gmt_create, record_id);
 
-CREATE INDEX ix_ma_record_delivery ON ma_session_record (domain, delivery_state, created_at);
+CREATE INDEX ix_ma_record_delivery ON ma_session_record (domain, delivery_state, gmt_create);
 
-CREATE INDEX ix_ma_record_session_delivery ON ma_session_record (session_scope_key, domain, delivery_state, created_at, record_key);
+CREATE INDEX ix_ma_record_session_delivery ON ma_session_record (session_scope_key, domain, delivery_state, gmt_create, record_key);
 
 CREATE TABLE ma_agent_definition (
     tenant_id VARBINARY(512) NOT NULL,
@@ -342,7 +342,7 @@ CREATE TABLE ma_agent_definition (
     revision BIGINT NOT NULL,
     digest VARCHAR(64) NOT NULL,
     definition_json LONGTEXT NOT NULL,
-    created_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, agent_id, revision)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -376,9 +376,9 @@ CREATE TABLE ma_resource (
     operation_id VARBINARY(512),
     quarantine_reason VARCHAR(128),
     deletion_operation_key CHAR(64),
-    created_at DATETIME(6) NOT NULL,
-    last_verified_at DATETIME(6),
-    retention_until DATETIME(6),
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    last_verified_at BIGINT UNSIGNED,
+    retention_until BIGINT UNSIGNED,
     PRIMARY KEY (resource_key),
     CONSTRAINT uq_ma_resource_id UNIQUE (session_scope_key, resource_id),
     CONSTRAINT uq_ma_capture_slot UNIQUE (scope_key, publication_id, slot_key),
@@ -409,7 +409,7 @@ CREATE TABLE ma_resource_ref (
     session_id VARBINARY(2048) NOT NULL,
     journal_revision BIGINT,
     resource_id VARBINARY(2048),
-    created_at DATETIME(6) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (session_scope_key, owner_kind, owner_key, owner_revision, resource_key),
     CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'SNAPSHOT' THEN 8 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 ELSE -1 END = CHAR_LENGTH(owner_kind))),
     CONSTRAINT fk_ma_ref_resource FOREIGN KEY (resource_key) REFERENCES ma_resource (resource_key)
@@ -432,7 +432,7 @@ CREATE TABLE ma_output_capture (
     binding_digest CHAR(64) NOT NULL,
     token_hash CHAR(64) NOT NULL,
     state VARCHAR(32) NOT NULL,
-    expires_at BIGINT,
+    expires_at BIGINT UNSIGNED,
     capture_bytes BIGINT NOT NULL,
     producer_bytes BIGINT NOT NULL,
     admission_bytes BIGINT NOT NULL,
@@ -458,15 +458,15 @@ CREATE TABLE ma_output_capture (
     retention_state VARCHAR(32) NOT NULL DEFAULT 'PINNED',
     write_evidence BOOLEAN NOT NULL DEFAULT FALSE,
     accepted_complete BOOLEAN NOT NULL DEFAULT FALSE,
-    collected_at BIGINT,
+    collected_at BIGINT UNSIGNED,
     collected_bytes BIGINT,
     released_held_bytes BIGINT ,
     manifest_resource_key CHAR(64),
     manifest_sha256 CHAR(64),
     seal_manifest_resource_key CHAR(64),
     seal_manifest_sha256 CHAR(64),
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+    gmt_create BIGINT UNSIGNED NOT NULL DEFAULT (CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000)),
+    gmt_modified BIGINT UNSIGNED NOT NULL DEFAULT (CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX ix_ma_capture_tenant ON ma_output_capture (tenant_key, state);
@@ -524,8 +524,8 @@ CREATE TABLE ma_request_receipt (
     session_status_before VARCHAR(32),
     result_operation_key CHAR(64),
     result_json LONGTEXT,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (receipt_key),
     CONSTRAINT uq_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uq_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
@@ -577,15 +577,15 @@ CREATE TABLE ma_operation (
     receipt_id VARBINARY(512),
     claim_owner VARBINARY(512),
     claim_generation BIGINT NOT NULL DEFAULT 0,
-    claim_until DATETIME(6),
-    available_at BIGINT NOT NULL DEFAULT 0,
+    claim_until BIGINT UNSIGNED,
+    available_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
     attempt_count INT NOT NULL DEFAULT 0,
-    deadline DATETIME(6),
-    recovery_deadline DATETIME(6),
+    deadline BIGINT UNSIGNED,
+    recovery_deadline BIGINT UNSIGNED,
     execution_mode VARCHAR(16) NOT NULL DEFAULT 'SYNC',
     verification_request_json LONGTEXT,
     verification_ready BOOLEAN NOT NULL DEFAULT FALSE,
-    verification_next_at DATETIME(6),
+    verification_next_at BIGINT UNSIGNED,
     publication_id VARBINARY(512),
     publication_command_id VARBINARY(2048) GENERATED ALWAYS AS (CASE operation_kind WHEN 'OUTPUT_UPLOAD' THEN operation_id WHEN 'OUTPUT_VERIFY' THEN operation_id WHEN 'OUTPUT_FINISH' THEN operation_id ELSE NULL END),
     slot_key VARBINARY(1024),
@@ -594,9 +594,9 @@ CREATE TABLE ma_operation (
     policy_version VARBINARY(512),
     failure_status INT,
     failure_code VARCHAR(128),
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
-    completed_at BIGINT,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
+    completed_at BIGINT UNSIGNED,
     PRIMARY KEY (operation_key),
     CONSTRAINT uq_ma_operation_identity UNIQUE (scope_key, operation_kind, target_key, operation_id),
     CONSTRAINT uq_ma_publication_operation UNIQUE (scope_key, publication_id, publication_command_id),
@@ -640,8 +640,8 @@ CREATE TABLE ma_operation_work (
     payload_json LONGTEXT NOT NULL,
     evidence_resource_key CHAR(64),
     evidence_sha256 CHAR(64),
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (operation_key, work_kind, target_key),
     CONSTRAINT ck_ma_work_kind CHECK ((CASE work_kind WHEN 'SESSION' THEN 7 WHEN 'RESOURCE' THEN 8 WHEN 'EXECUTION_ACK' THEN 13 WHEN 'RUNTIME_BINDING' THEN 15 WHEN 'CSI_WORKER_ACK' THEN 14 WHEN 'RECOVERY_EVIDENCE' THEN 17 ELSE -1 END = CHAR_LENGTH(work_kind))),
     CONSTRAINT fk_ma_work_operation FOREIGN KEY (operation_key) REFERENCES ma_operation (operation_key),
@@ -685,8 +685,8 @@ CREATE TABLE ma_workspace (
     last_error VARCHAR(1024),
     is_default BOOLEAN NOT NULL DEFAULT FALSE,
     default_tenant VARBINARY(512) GENERATED ALWAYS AS (CASE WHEN is_default THEN tenant_id ELSE NULL END),
-    created_at BIGINT NOT NULL DEFAULT 0,
-    updated_at BIGINT NOT NULL DEFAULT 0,
+    gmt_create BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    gmt_modified BIGINT UNSIGNED NOT NULL DEFAULT 0,
     CONSTRAINT uq_ma_workspace_default UNIQUE (default_tenant),
     CONSTRAINT uq_ma_workspace_child UNIQUE (tenant_id, parent_session_id, child_run_id),
     CONSTRAINT uq_ma_child_workspace_id UNIQUE (child_workspace_id),
@@ -720,8 +720,8 @@ CREATE TABLE ma_storage (
     registration_json LONGTEXT,
     fence_operation_id VARBINARY(512),
     mount_revision BIGINT NOT NULL DEFAULT 0,
-    created_at BIGINT NOT NULL DEFAULT 0,
-    updated_at BIGINT NOT NULL DEFAULT 0,
+    gmt_create BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    gmt_modified BIGINT UNSIGNED NOT NULL DEFAULT 0,
     PRIMARY KEY (alias_key),
     CONSTRAINT uq_ma_storage_alias UNIQUE (tenant_key, storage_key),
     CONSTRAINT ck_ma_storage_registration CHECK ((CASE registration_state WHEN 'FENCE_ONLY' THEN 10 WHEN 'REGISTERED' THEN 10 WHEN 'RETIRING' THEN 8 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(registration_state))),
@@ -778,12 +778,12 @@ CREATE TABLE ma_runtime_binding (
     attestation_generation BIGINT NOT NULL,
     drain_requested BOOLEAN NOT NULL,
     operation_owner VARBINARY(2048),
-    operation_lease_until DATETIME(6),
+    operation_lease_until BIGINT UNSIGNED,
     operation_generation BIGINT NOT NULL,
     record_version BIGINT NOT NULL,
-    last_health_at DATETIME(6),
-    last_reconciled_at DATETIME(6),
-    last_active_at DATETIME(6) NOT NULL,
+    last_health_at BIGINT UNSIGNED,
+    last_reconciled_at BIGINT UNSIGNED,
+    last_active_at BIGINT UNSIGNED NOT NULL,
     CONSTRAINT uq_runtime_binding_generation
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
@@ -810,7 +810,7 @@ CREATE TABLE ma_runtime_session (
     runtime_generation BIGINT NOT NULL,
     session_state VARCHAR(32) NOT NULL,
     record_version BIGINT NOT NULL,
-    last_active_at DATETIME(6) NOT NULL,
+    last_active_at BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (scope_key, runtime_session_id),
     INDEX idx_runtime_session_binding
         (binding_id, runtime_generation, session_state),
@@ -837,11 +837,11 @@ CREATE TABLE ma_tool_execution (
     last_sequence BIGINT NOT NULL,
     cancel_requested BOOLEAN NOT NULL,
     dispatch_owner VARBINARY(2048),
-    dispatch_lease_until DATETIME(6),
+    dispatch_lease_until BIGINT UNSIGNED,
     dispatch_generation BIGINT NOT NULL,
     record_version BIGINT NOT NULL,
-    settled_at DATETIME(6),
-    abandoned_at DATETIME(6),
+    settled_at BIGINT UNSIGNED,
+    abandoned_at BIGINT UNSIGNED,
     loss_evidence_id VARBINARY(2048),
     authorized_dispatch_generation BIGINT,
     authorized_binding_version BIGINT,
@@ -900,7 +900,7 @@ CREATE TABLE ma_read_lease (
     tenant_key CHAR(64) NOT NULL,
     session_key CHAR(64) NOT NULL,
     retirement_generation BIGINT NOT NULL,
-    expires_at BIGINT NOT NULL,
+    expires_at BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (lease_id),
     CONSTRAINT ck_ma_read_generation CHECK (retirement_generation >= 0)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
@@ -918,8 +918,8 @@ CREATE TABLE ma_channel_instance (
     workspace_id VARBINARY(2048) NOT NULL,
     cwd_relative VARCHAR(1024) NOT NULL,
     policy_json LONGTEXT NOT NULL,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, channel_id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -932,11 +932,11 @@ CREATE TABLE ma_channel_binding (
     sender_id VARBINARY(2048),
     chat_id VARBINARY(2048),
     thread_id VARBINARY(2048),
-    created_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, channel_id, route_id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
-CREATE INDEX ix_ma_channel_created ON ma_channel_instance (tenant_id, created_at, channel_id);
+CREATE INDEX ix_ma_channel_created ON ma_channel_instance (tenant_id, gmt_create, channel_id);
 
 CREATE INDEX ix_ma_channel_binding_session ON ma_channel_binding (tenant_id, session_id);
 
@@ -962,17 +962,17 @@ CREATE TABLE ma_delivery (
     transport_state VARCHAR(32) NOT NULL,
     reception_state VARCHAR(32) NOT NULL,
     consumption_state VARCHAR(32) NOT NULL,
-    claimed_at BIGINT,
+    claimed_at BIGINT UNSIGNED,
     reconcile_operation_id VARBINARY(512),
     claim_owner VARBINARY(512),
     claim_generation BIGINT NOT NULL DEFAULT 0,
-    claim_until BIGINT,
+    claim_until BIGINT UNSIGNED,
     attempt_count INT NOT NULL DEFAULT 0,
-    available_at BIGINT NOT NULL DEFAULT 0,
+    available_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
     last_error VARCHAR(2048),
     failure_code VARCHAR(128),
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (delivery_key),
     CONSTRAINT uq_ma_delivery_identity UNIQUE (delivery_kind, source_scope_key, delivery_id),
     CONSTRAINT ck_ma_delivery_kind CHECK ((CASE delivery_kind WHEN 'CHANNEL' THEN 7 WHEN 'SESSION_MESSAGE' THEN 15 WHEN 'CHILD_RESULT' THEN 12 ELSE -1 END = CHAR_LENGTH(delivery_kind))),
@@ -1008,13 +1008,13 @@ CREATE TABLE ma_schedule (
     enabled BOOLEAN NOT NULL,
     state VARCHAR(16) NOT NULL,
     blocked_reason VARCHAR(1024) NULL,
-    armed_at BIGINT NOT NULL,
-    watermark_slot BIGINT NULL,
+    armed_at BIGINT UNSIGNED NOT NULL,
+    watermark_slot BIGINT UNSIGNED NULL,
     lease_owner VARBINARY(512) NULL,
-    lease_until BIGINT NULL,
+    lease_until BIGINT UNSIGNED NULL,
     fence BIGINT NOT NULL DEFAULT 0,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, schedule_id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -1024,27 +1024,27 @@ CREATE TABLE ma_schedule_occurrence (
     occurrence_key VARBINARY(640) NOT NULL,
     run_id VARBINARY(512) NOT NULL,
     session_id VARBINARY(2048) NOT NULL,
-    slot BIGINT NULL,
+    slot BIGINT UNSIGNED NULL,
     trigger_kind VARCHAR(16) NOT NULL,
     outcome VARCHAR(16) NOT NULL,
     reason VARCHAR(64) NULL,
     definition_revision BIGINT NOT NULL,
     fence BIGINT NOT NULL,
     attempts INT NOT NULL DEFAULT 0,
-    next_retry_at BIGINT NOT NULL DEFAULT 0,
+    next_retry_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
     last_error VARCHAR(1024) NULL,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    gmt_modified BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, schedule_id, occurrence_key)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE INDEX ix_ma_schedule_scan ON ma_schedule (state, enabled, lease_until);
 
-CREATE INDEX ix_ma_schedule_list ON ma_schedule (tenant_id, created_at, schedule_id);
+CREATE INDEX ix_ma_schedule_list ON ma_schedule (tenant_id, gmt_create, schedule_id);
 
 CREATE INDEX ix_ma_schedule_session ON ma_schedule (tenant_id, session_id);
 
-CREATE INDEX ix_ma_occurrence_list ON ma_schedule_occurrence (tenant_id, schedule_id, created_at, occurrence_key);
+CREATE INDEX ix_ma_occurrence_list ON ma_schedule_occurrence (tenant_id, schedule_id, gmt_create, occurrence_key);
 
 CREATE INDEX ix_ma_occurrence_outcome ON ma_schedule_occurrence (tenant_id, schedule_id, outcome);
 
@@ -1066,13 +1066,13 @@ CREATE INDEX ix_ma_operation_target_raw ON ma_operation (operation_kind, target_
 
 CREATE INDEX ix_ma_operation_raw_id ON ma_operation (operation_kind, operation_id);
 
-CREATE INDEX ix_ma_channel_delivery_page ON ma_delivery (delivery_kind, source_scope_key, created_at, delivery_id);
+CREATE INDEX ix_ma_channel_delivery_page ON ma_delivery (delivery_kind, source_scope_key, gmt_create, delivery_id);
 
 CREATE INDEX ix_ma_channel_delivery_expiry ON ma_delivery (delivery_kind, transport_state, claimed_at, delivery_id);
 
 CREATE INDEX ix_ma_receipt_ingress_lookup ON ma_request_receipt (namespace, tenant_key, idempotency_digest);
 
-CREATE INDEX ix_ma_receipt_ingress_page ON ma_request_receipt (namespace, tenant_key, channel_id, created_at, idempotency_key);
+CREATE INDEX ix_ma_receipt_ingress_page ON ma_request_receipt (namespace, tenant_key, channel_id, gmt_create, idempotency_key);
 
 CREATE INDEX ix_ma_operation_state_due ON ma_operation (operation_kind, state, available_at, operation_key);
 

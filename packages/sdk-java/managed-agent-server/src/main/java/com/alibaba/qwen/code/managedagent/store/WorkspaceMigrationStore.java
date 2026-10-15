@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -116,8 +118,9 @@ public final class WorkspaceMigrationStore {
                     "request_json", request.toString(), "state", "RETIRING",
                     "source_registration_json", JSON.valueToTree(source).toString(),
                     "target_registration_id", UUID.randomUUID().toString()));
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
-                    + " VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE"
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+                    + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                     + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                     JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(storage),
@@ -303,7 +306,7 @@ public final class WorkspaceMigrationStore {
                     + " AND workspace_storage_id = ? AND session_id > ? ORDER BY session_id LIMIT 32",
                     String.class, tenant, storage, after);
             for (String session : page) {
-                jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                         (row, index) -> ManagedAgentStore.readBinding(row), tenant, session);
                 JsonNode source = WorkspaceRecoveryStore.currentSource(jdbc, tenant, storage, session, true);
                 after = session;
@@ -375,10 +378,7 @@ public final class WorkspaceMigrationStore {
                 break;
             }
         }
-        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_session_head h"
-                + " ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND h.state = 'ACTIVE'"
-                + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until > CURRENT_TIMESTAMP(6))") == 0,
+        check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")") == 0,
                 "migration_writer_active");
     }
 
@@ -417,8 +417,7 @@ public final class WorkspaceMigrationStore {
     }
 
     private void clearFence() {
-        check(jdbc.update("UPDATE ma_storage SET fence_operation_id = NULL WHERE tenant_key = ? AND storage_key = ?"
-                + " AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL WHERE tenant_key = ? AND storage_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
                 JdbcRuntimeBindingRepository.storageFenceKey(storage), id) == 1, "migration_conflict");
     }
 
