@@ -186,7 +186,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
-   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
+   * Model Studio endpoints under *.maas.aliyuncs.com (workspace-dedicated
+   * <WorkspaceId>.<region>, trial.<region> and token-plan.<region> hosts),
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
@@ -224,10 +225,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         (host) => hostname === host || hostname.endsWith('.' + host),
       );
 
-    const isTokenPlanOrigin =
-      hostname !== null &&
-      hostname.startsWith('token-plan.') &&
-      hostname.endsWith('.maas.aliyuncs.com');
+    // Every Model Studio host under maas.aliyuncs.com serves the DashScope
+    // API: workspace-dedicated domains (the recommended production entry),
+    // trial domains and Token Plan domains.
+    const isMaasOrigin =
+      hostname !== null && hostname.endsWith('.maas.aliyuncs.com');
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
@@ -255,7 +257,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (
       normalizedProxyUrl &&
       !isDashscopeOrigin &&
-      !isTokenPlanOrigin &&
+      !isMaasOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -279,7 +281,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     return (
       isDashscopeOrigin ||
-      isTokenPlanOrigin ||
+      isMaasOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch
