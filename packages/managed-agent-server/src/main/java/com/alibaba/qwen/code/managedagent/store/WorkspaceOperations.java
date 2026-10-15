@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,7 +42,7 @@ final class WorkspaceOperations {
     }
 
     Map<String, Object> find(Kind kind, String id, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT * FROM ma_operation WHERE operation_key = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ?"
                         + " AND operation_kind = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> operation(row), key(kind, id), kind.name());
         if (rows.isEmpty()) {
@@ -71,10 +73,7 @@ final class WorkspaceOperations {
         String request = (String) data.getOrDefault("request_json", encode(data));
         String state = (String) data.getOrDefault("state", "PENDING");
         requireState(kind, state);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id,"
-                        + " tenant_id, session_id, target_kind, target_key, target_id, target_revision, storage_key, physical_key,"
-                        + " state, phase, delivery_state, request_digest, request_json, result_json, available_at, created_at, updated_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000.0, UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000.0)",
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, target_id, target_revision, storage_key, physical_key, state, phase, delivery_state, request_digest, request_json, result_json, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 key(kind, id), hash(tenant), data.get("session_id") instanceof String session
                         ? ManagedSessionStore.sessionScopeKey(tenant, session) : null, kind.name(), id.getBytes(StandardCharsets.UTF_8),
                 tenant.getBytes(StandardCharsets.UTF_8), data.get("session_id"),
@@ -95,8 +94,7 @@ final class WorkspaceOperations {
         if (changes.containsKey("state") && !changes.containsKey("phase")) {
             row.put("phase", row.get("state"));
         }
-        jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, updated_at = UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000.0"
-                        + " WHERE operation_key = ? AND operation_kind = ?",
+        jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND operation_kind = ?",
                 row.get("state"), row.get("phase") == null ? row.get("state") : row.get("phase"), envelope(row), key(kind, id), kind.name());
     }
 
@@ -115,14 +113,13 @@ final class WorkspaceOperations {
 
     void insertWork(Kind kind, String id, String workKind, String targetKey,
             String rawKey, String session, Map<String, Object> data, String state) {
-        jdbc.update("INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, session_id,"
-                        + " storage_key, state, payload_json, evidence_resource_key, evidence_sha256, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000.0, UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000.0)",
+        jdbc.update("INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, session_id, storage_key, state, payload_json, evidence_resource_key, evidence_sha256, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 key(kind, id), workKind, targetKey, rawKey.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8), session,
                 data.get("storage_key"), state, workEnvelope(rawKey, data), data.get("evidence_resource_key"), data.get("evidence_sha256"));
     }
 
     Map<String, Object> findWork(Kind kind, String id, String workKind, String targetKey, boolean lock) {
-        List<Map<String, Object>> rows = jdbc.query("SELECT * FROM ma_operation_work WHERE operation_key = ?"
+        List<Map<String, Object>> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION_WORK.columns() + " FROM ma_operation_work WHERE operation_key = ?"
                         + " AND work_kind = ? AND target_key = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> {
                     if (!tenant.equals(row.getString("tenant_id"))) {
@@ -139,8 +136,7 @@ final class WorkspaceOperations {
             throw new IllegalStateException("Workspace operation work is missing");
         }
         row.putAll(changes);
-        jdbc.update("UPDATE ma_operation_work SET state = ?, payload_json = ?, updated_at = UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000.0 WHERE operation_key = ?"
-                        + " AND work_kind = ? AND target_key = ?",
+        jdbc.update("UPDATE ma_operation_work SET state = ?, payload_json = ?, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND work_kind = ? AND target_key = ?",
                 row.get("state"), workEnvelope((String) row.get("work_key"), row), key(kind, id), workKind, targetKey);
     }
 
@@ -152,8 +148,8 @@ final class WorkspaceOperations {
         data.put("request_json", row.getString("request_json"));
         data.put("state", row.getString("state"));
         data.put("phase", row.getString("phase"));
-        data.put("created_at", row.getLong("created_at"));
-        data.put("updated_at", row.getLong("updated_at"));
+        data.put("created_at", row.getLong("gmt_create"));
+        data.put("updated_at", row.getLong("gmt_modified"));
         return data;
     }
 

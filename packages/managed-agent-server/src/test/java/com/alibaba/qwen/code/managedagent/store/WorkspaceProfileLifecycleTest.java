@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -54,7 +55,7 @@ class WorkspaceProfileLifecycleTest {
         var f = fixture();
         var first = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(first));
-        f.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '2000-01-01 00:00:00' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
+        f.jdbc.update("UPDATE ma_operation SET claim_until = 946684800000 WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
         var next = f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, first.operationId(),
                 "server-2", Duration.ofSeconds(30)).orElseThrow());
         var current = WorkspaceLifecycleStore.authority(next);
@@ -91,7 +92,7 @@ class WorkspaceProfileLifecycleTest {
                 renew, WorkspaceLifecycleStore.authority(first))))
                 .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
         f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(first));
-        f.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '2000-01-01 00:00:00' WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
+        f.jdbc.update("UPDATE ma_operation SET claim_until = 946684800000 WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')");
         var current = f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, first.operationId(),
                 "server-2", Duration.ofSeconds(30)).orElseThrow());
         assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token, renew)))
@@ -347,10 +348,7 @@ class WorkspaceProfileLifecycleTest {
         payload.set("resultRef", !committed || "receipt".equals(mode) ? f.json.nullNode() : manifestRef);
         payload.putArray("resources").add(manifestRef);
         byte[] bytes = f.json.writeValueAsBytes(f.json.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event));
-        f.jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count,"
-                + " writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, created_at)"
-                + " VALUES ('tenant', 'workspace', ?, 1, ?, 'receipt', 'recordToolResult', 'call-1', ?, 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, CURRENT_TIMESTAMP(6))",
+        f.jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant', 'workspace', ?, 1, ?, 'receipt', 'recordToolResult', 'call-1', ?, 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 f.session, "c".repeat(64), "c".repeat(64), "c".repeat(64), bytes, bytes.length, ToolPublicationContract.sha256(bytes));
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var results = new ManagedToolResultStore(f.jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(f.jdbc.getDataSource()), f.store);
@@ -455,7 +453,7 @@ class WorkspaceProfileLifecycleTest {
         ManagedExtensionRecords.requireChildRun(shell);
         var ref = f.resource("background-record", "managed-child_run", shell);
         f.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id,"
-                + " domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, created_at)"
+                + " domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'child_run', 'shell-1', ?, 1, ?, 'background_shell', 'settled', 1)",
                 ManagedSessionStore.sessionScopeKey("tenant", f.session), "r".repeat(64), f.session, "o".repeat(64), ref.path("resourceId").asText());
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);

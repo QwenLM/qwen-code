@@ -21,7 +21,7 @@ class ManagedSessionToolProfileMigrationTest {
         var jdbc = new JdbcTemplate(source);
         for (String id : new String[] {"bound", "unbound", "explicit"}) {
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,created_at,updated_at)"
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES (?,?,?,?,?)",
                     "tenant",
                     id,

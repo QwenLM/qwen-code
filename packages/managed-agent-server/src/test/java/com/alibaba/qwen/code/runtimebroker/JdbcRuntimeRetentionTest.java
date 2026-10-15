@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -50,15 +52,15 @@ class JdbcRuntimeRetentionTest {
                 Timestamp.from(cutoff), boundary.getBindingId());
         RuntimeBindingRecord older = fixture.binding("older", "legacy", false, "RELEASED");
         fixture.execute("UPDATE ma_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
-                Timestamp.from(cutoff.minusNanos(1000)), older.getBindingId());
+                Timestamp.from(cutoff.minusMillis(1)), older.getBindingId());
         RuntimeBindingRecord completion = fixture.binding("completion", "legacy", false, "RELEASED");
         fixture.session(completion, "session", "RELEASED", cutoff);
         fixture.execution(completion, "session", "at-boundary", "SETTLED", cutoff);
-        fixture.execution(completion, "session", "before-boundary", "ABANDONED", cutoff.minusNanos(1000));
+        fixture.execution(completion, "session", "before-boundary", "ABANDONED", cutoff.minusMillis(1));
         RuntimeBindingRecord sessionBoundary = fixture.binding("session-boundary", "legacy", false, "RELEASED");
         fixture.session(sessionBoundary, "boundary-session", "FAILED", cutoff);
         RuntimeBindingRecord sessionOlder = fixture.binding("session-older", "legacy", false, "RELEASED");
-        fixture.session(sessionOlder, "older-session", "FAILED", cutoff.minusNanos(1000));
+        fixture.session(sessionOlder, "older-session", "FAILED", cutoff.minusMillis(1));
 
         assertEquals(List.of(1, 1, 2), fixture.complete(100, NO_REFERENCES));
         assertNotNull(fixture.bindings.findById(boundary.getBindingId()));
@@ -82,6 +84,32 @@ class JdbcRuntimeRetentionTest {
     }
 
     @Test
+    void retentionCutoffBeforeEpochKeepsRecordsAcrossEveryCursorPhase() throws Exception {
+        verifyPreEpochCutoff(new Fixture(clockSource(Fixture.h2(), Instant.parse("2001-06-01T00:00:00Z"))));
+    }
+
+    private static void verifyPreEpochCutoff(Fixture fixture) throws Exception {
+        RuntimeBindingRecord binding = fixture.binding("large-age", "legacy", false, "RELEASED");
+        fixture.session(binding, "session", "RELEASED", OLD);
+        fixture.execution(binding, "session", "settled", "SETTLED", OLD);
+        List<JdbcRuntimeRetention.Cursor> cursors = new ArrayList<>();
+        cursors.add(null);
+        for (JdbcRuntimeRetention.Phase phase : JdbcRuntimeRetention.Phase.values()) {
+            cursors.add(new JdbcRuntimeRetention.Cursor("RELEASED", OLD, binding.getBindingId(), phase, "", ""));
+        }
+        for (var cursor : cursors) {
+            var result = fixture.retention(NO_REFERENCES).sweep(Duration.ofDays(36_500), 100, cursor);
+            assertEquals(0, result.bindingsScanned());
+            assertEquals(0, result.childrenScanned());
+            assertEquals(0, result.bindingsDeleted());
+            assertNull(result.cursor());
+        }
+        assertNotNull(fixture.bindings.findById(binding.getBindingId()));
+        assertNotNull(fixture.sessions.findById(binding.getRequest().getScope(), "session"));
+        assertNotNull(fixture.executions.findByExecutionCallId("settled"));
+    }
+
+    @Test
     void deletesChildrenBeforeBindingAndPreservesGenerationAndPlacementEvidence() throws Exception {
         Fixture fixture = new Fixture();
         RuntimeBindingRecord binding = fixture.binding("old", "legacy", false, "RELEASED");
@@ -89,8 +117,8 @@ class JdbcRuntimeRetentionTest {
         fixture.execution(binding, "session", "settled", "SETTLED", OLD);
         fixture.execution(binding, "session", "abandoned", "ABANDONED", OLD);
         fixture.execute("INSERT INTO ma_session_head"
-                + " (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, created_at, updated_at)"
-                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                + " (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
                 "other-tenant", "other-harness", "other-harness");
         fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
@@ -178,7 +206,7 @@ class JdbcRuntimeRetentionTest {
             fixture.binding(state, "legacy", false, state);
         }
         RuntimeBindingRecord recent = fixture.binding("recent", "legacy", false, "RELEASED");
-        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = CURRENT_TIMESTAMP WHERE binding_id = ?",
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = " + ManagedSchemaTime.SQL_NOW + " WHERE binding_id = ?",
                 recent.getBindingId());
         RuntimeBindingRecord future = fixture.binding("future", "legacy", false, "RELEASED");
         fixture.execute("UPDATE ma_runtime_binding SET last_active_at = ? WHERE binding_id = ?",
@@ -320,7 +348,7 @@ class JdbcRuntimeRetentionTest {
         }
         fixture.execute("INSERT INTO ma_operation (operation_key, operation_id, scope_key, operation_kind, tenant_id,"
                 + " target_kind, target_key, target_id, target_revision, state, phase, request_digest, request_json,"
-                + " created_at, updated_at) VALUES (?, ?, ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
+                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
                 + " ?, ?, 1, 'COMPLETED', 'COMPLETED', ?, '{}', 1, 1)",
                 "a".repeat(64), UUID.randomUUID().toString(), "b".repeat(64),
                 recovery.getRequest().getScope().getTenantId(), "c".repeat(64), recovery.getBindingId(), "d".repeat(64));
@@ -360,11 +388,10 @@ class JdbcRuntimeRetentionTest {
         List<String> ids = List.of("subsecond-01", "subsecond-02", "subsecond-03");
         for (String id : ids) {
             fixture.binding(id, "legacy", false, "RELEASED");
-            // SQL literals preserve migrated microseconds even when the driver truncates Timestamp parameters.
-            fixture.execute("UPDATE ma_runtime_binding SET last_active_at = '2000-01-01 00:00:00.250001' "
+            fixture.execute("UPDATE ma_runtime_binding SET last_active_at = 946684800250 "
                     + "WHERE binding_id = ?", id);
         }
-        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = '2000-01-01 00:00:00.750003' "
+        fixture.execute("UPDATE ma_runtime_binding SET last_active_at = 946684800750 "
                 + "WHERE binding_id = ?", ids.getLast());
         JdbcRuntimeRetention retention = fixture.retention(guard(Set.of(ids.getFirst()), Set.of()));
         JdbcRuntimeRetention.Cursor cursor = null;
@@ -488,6 +515,9 @@ class JdbcRuntimeRetentionTest {
     }
 
     static void verifyOnDatabase(DataSource source) throws Exception {
+        Fixture epoch = new Fixture(clockSource(source, Instant.parse("2001-06-01T00:00:00Z")));
+        verifyPreEpochCutoff(epoch);
+        assertEquals(List.of(1, 1, 1), epoch.complete(100, NO_REFERENCES));
         Fixture fixture = new Fixture(source);
         verifySubsecondBindingProgress(fixture);
         verifyProtectedProgress(fixture);

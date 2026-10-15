@@ -45,7 +45,7 @@ class ManagedReceiptScopeTest {
                         Integer.class, tenant)).isOne();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
                         Integer.class, tenant)).isEqualTo(2);
-                assertThat(ManagedReceipts.creation(jdbc, tenant, actorBytes, "create").get("session_id"))
+                assertThat(ManagedReceipts.creation(jdbc, tenant, actorBytes, "create").sessionId())
                         .isEqualTo(admission.sessionId());
             }
         }
@@ -62,7 +62,7 @@ class ManagedReceiptScopeTest {
             }
             for (String actor : List.of("actor", "Actor", "actor ")) {
                 assertThat(ManagedReceipts.creation(jdbc, "tenant", actor.getBytes(StandardCharsets.UTF_8), "same-key")
-                        .get("session_id")).isEqualTo(actor);
+                        .sessionId()).isEqualTo(actor);
             }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt", Integer.class)).isEqualTo(3);
         }

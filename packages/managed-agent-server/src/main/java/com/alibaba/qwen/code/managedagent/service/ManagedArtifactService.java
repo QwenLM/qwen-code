@@ -17,6 +17,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -329,28 +330,20 @@ public class ManagedArtifactService {
         if (range.contains(",")) {
             throw badRequest("unsupported_range", "Only one byte range is supported.");
         }
-        var matcher = RANGE.matcher(range.trim());
+        String value = range.trim();
+        // HttpRange also accepts signs and whitespace inside the range.
+        var matcher = RANGE.matcher(value);
         if (!matcher.matches() || matcher.group(1).isEmpty() && matcher.group(2).isEmpty()) {
             throw badRequest("invalid_range", "Invalid byte range.");
         }
-        long start;
-        long end;
+        HttpRange parsed;
         try {
-            if (matcher.group(1).isEmpty()) {
-                long suffix = Long.parseLong(matcher.group(2));
-                start = Math.max(0, size - suffix);
-                end = size - 1;
-            } else {
-                start = Long.parseLong(matcher.group(1));
-                end = matcher.group(2).isEmpty() ? size - 1 : Long.parseLong(matcher.group(2));
-                if (!matcher.group(2).isEmpty() && end < start) {
-                    throw badRequest("invalid_range", "Invalid byte range.");
-                }
-                end = Math.min(size - 1, end);
-            }
-        } catch (NumberFormatException error) {
+            parsed = HttpRange.parseRanges(value).getFirst();
+        } catch (IllegalArgumentException error) {
             throw badRequest("invalid_range", "Invalid byte range.");
         }
+        long start = parsed.getRangeStart(size);
+        long end = parsed.getRangeEnd(size);
         if (size == 0 || start >= size || end < start) {
             throw new ApiException(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
                     "The range does not intersect this representation.");
