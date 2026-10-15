@@ -159,6 +159,8 @@ class SessionRowLockOrderTest {
     // only. Main's private CSI work (#13996) adds the same shapes:
     // data-source probes, the publication-placement lock delegator and the
     // runtime-access record's accessors, none of which reaches either side.
+    // SSH storage adds same-name verify/1 and storageKey/2 references;
+    // their SQL touches only storage ownership and migration history.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
@@ -240,6 +242,8 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
                             Set.of("WorkspaceCsiWorkerAckStore.decode/1",
                                     "WorkspaceCsiWorkerAckStore.hash/1")),
+                    Map.entry("WorkspaceExecutionStore.java",
+                            Set.of("WorkspaceExecutionStore.storageKey/2")),
                     Map.entry("WorkspaceMigrationStore.java",
                             Set.of("WorkspaceMigrationStore.inspect/0",
                                     "WorkspaceMigrationStore.path/1")),
@@ -257,7 +261,8 @@ class SessionRowLockOrderTest {
                                     "WorkspaceRecoveryStore.hash/1",
                                     "WorkspaceRecoveryStore.parse/1")),
                     Map.entry("WorkspaceStorageGuard.java",
-                            Set.of("IdentityReader.read/1")));
+                            Set.of("IdentityReader.read/1",
+                                    "WorkspaceStorageGuard.verify/1")));
 
     // Held bodies whose invocation the parse cannot see but whose
     // transaction it can: ManagedSnapshotStore.afterCommit registers a

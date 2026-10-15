@@ -32,6 +32,7 @@ import type {
   ManagedAgentWorkspace,
 } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
+import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
 
 interface PendingCreation {
   agentId: string;
@@ -123,6 +124,8 @@ export function WorkspaceBindingCreator({
   const [error, setError] = useState<string>();
   const [pathError, setPathError] = useState<string>();
   const [switchTo, setSwitchTo] = useState<string>();
+  const [registrationAvailable, setRegistrationAvailable] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const editor = useRef<EditorHandle | null>(null);
   const acceptedCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
   const lifetime = useRef<AbortController | undefined>(undefined);
@@ -506,6 +509,16 @@ export function WorkspaceBindingCreator({
               ))}
             </SelectContent>
           </Select>
+          {registrationAvailable && binding.registration && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setRegistrationOpen(true)}
+            >
+              {t('managed.remoteWorkspaceAdd')}
+            </Button>
+          )}
           {nextCursor && (
             <Button
               type="button"
@@ -586,6 +599,14 @@ export function WorkspaceBindingCreator({
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              existingFolderWorkspaceSupported={
+                registrationAvailable && Boolean(binding.registration)
+              }
+              onOpenExistingWorkspace={() => {
+                if (!busy && !pendingRef.current) setRegistrationOpen(true);
+              }}
+              workspaceMutationBusy={busy || Boolean(pending)}
+              dialogOpen={registrationOpen}
               attachmentsEnabled={false}
               visibleToolbarActions={['model', 'workspace']}
               showChatWidthToggle={false}
@@ -665,6 +686,28 @@ export function WorkspaceBindingCreator({
             </details>
           </div>
         </div>
+      )}
+      {binding.registration && (
+        <RemoteWorkspaceRegistration
+          key={provider.storageKey}
+          provider={provider}
+          clientId={clientId}
+          open={registrationOpen}
+          onOpenChange={setRegistrationOpen}
+          onAvailable={setRegistrationAvailable}
+          onRegistered={(workspace) => {
+            setItems((current) => [
+              ...current.filter(
+                (item) => item.workspaceId !== workspace.workspaceId,
+              ),
+              workspace,
+            ]);
+            setSelected(workspace.workspaceId);
+            setCwdRelative('.');
+            setError(undefined);
+            setPathError(undefined);
+          }}
+        />
       )}
       <AlertDialog
         open={Boolean(switchTo)}

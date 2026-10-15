@@ -40,6 +40,34 @@ import static org.mockito.Mockito.when;
 
 class WorkspaceRuntimeTransportTest {
     @Test
+    void v2AcknowledgementUsesTheReleasedOriginalSshSessionWithoutReclaimingStorage() throws Exception {
+        var fixture = fixture();
+        var original = fixture.runtime();
+        var oldScope = fixture.session().getScope();
+        var scope = new RuntimeScope(oldScope.getTenantId(), oldScope.getWorkspaceId(), oldScope.getWorkspaceGeneration(),
+                oldScope.getCanonicalCwd(), oldScope.getCapabilityDigest(), "session");
+        var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
+                fixture.session().getTurnKind(), scope);
+        var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), "ssh-process", original.getRequest().getStorageId());
+        var runtime = new RuntimeBindingRecord(original.getBindingId(), request, original.getProvisionSeed(), original.getGeneration(),
+                RuntimeBindingRecord.State.DRAINING, original.getLease(), new RuntimeResourceHandle("ssh-process", 1, Map.of("fixture", true)),
+                3, true, null, null, 0, 1, null, Instant.now(), Instant.now());
+        var record = new RuntimeSessionRecord(session, runtime.getBindingId(), runtime.getGeneration(),
+                RuntimeSessionRecord.State.RELEASED, 1, Instant.now());
+        when(fixture.bindings().findById(runtime.getBindingId())).thenReturn(runtime);
+        when(fixture.sessions().findById(scope, session.getRuntimeSessionId())).thenReturn(record);
+        when(fixture.http().acknowledgeV2(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        Map<String, Object> reference = Map.of("callId", "file-call");
+        fixture.transport().acknowledgeV2(fixture.lease(), session, reference).toCompletableFuture().join();
+        verify(fixture.http()).acknowledgeV2(fixture.lease(), session, reference);
+        verify(fixture.resolver(), never()).resolve(any(), any());
+        verifyNoInteractions(fixture.ownership());
+        var crossed = new RuntimeLease("other", fixture.lease().getEndpoint(), fixture.lease().getToken(),
+                fixture.lease().getLeaseId(), fixture.lease().getEpoch());
+        unavailable(() -> fixture.transport().acknowledgeV2(crossed, session, reference));
+    }
+
+    @Test
     void componentGuardForwardsOnlyTheSavedOriginalCsiWorkspaceWithoutNewAuthorizationOrOwnership() throws Exception {
         var fixture = fixture();
         when(fixture.http().acknowledgeCsi(any(), any(), any(), any(), any(), any()))

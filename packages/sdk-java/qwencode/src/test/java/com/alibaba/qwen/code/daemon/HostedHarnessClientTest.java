@@ -758,6 +758,25 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void preservesTheForegroundOnlyRestrictionAcrossEveryLoadCopy() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID);
+        assertFalse(create.build().toJson().containsKey("foregroundOnly"));
+        assertEquals(Boolean.TRUE, create.foregroundOnly(true).build().toJson().get("foregroundOnly"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.toJson().containsKey("foregroundOnly"));
+        LoadHarnessSession restricted = load.withForegroundOnly(true);
+        for (LoadHarnessSession copy : java.util.List.of(restricted,
+                restricted.withChildWorkspaces(false), restricted.withStoppedMessages(),
+                restricted.forLifecycle("close-1", 2, 2),
+                load.forLifecycle("close-1", 2, 2).withStoppedMessages().withForegroundOnly(true))) {
+            assertEquals(Boolean.TRUE, copy.toJson().get("foregroundOnly"));
+            assertEquals(Boolean.TRUE, copy.toJson().get("passiveManagedRuntimeRecovery"));
+        }
+        assertFalse(load.toJson().containsKey("foregroundOnly"));
+    }
+
+    @Test
     void parsesAnAgentWaitRuntimeRecovery() {
         server.createContext("/session/" + SESSION_ID + "/load",
                 exchange -> sendSessionJson(exchange, 200,

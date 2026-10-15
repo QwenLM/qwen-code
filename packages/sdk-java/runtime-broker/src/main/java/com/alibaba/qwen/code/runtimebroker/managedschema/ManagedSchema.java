@@ -20,7 +20,9 @@ public final class ManagedSchema {
     public static final String SESSION_LIST =
             "/db/managed-schema/V3__session_list_created_at.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST);
+    public static final String SSH_WORKSPACE =
+            "/db/managed-schema/V4__ssh_workspace_registration.sql";
+    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, SSH_WORKSPACE);
     private static final int CURRENT = EXTENSIONS.size() + 1;
 
     private ManagedSchema() {}
@@ -85,6 +87,17 @@ public final class ManagedSchema {
     }
 
     private static String extend(String ddl, String extension) {
+        var checks = Pattern.compile("ALTER TABLE (ma_[a-z_]+) DROP CONSTRAINT ([a-z_]+);\\s*"
+                + "ALTER TABLE \\1 ADD CONSTRAINT \\2 CHECK ([^;]+);").matcher(extension);
+        while (checks.find()) {
+            String name = checks.group(2);
+            var original = Pattern.compile("(?m)CONSTRAINT " + name + " CHECK [^\\n]+").matcher(ddl);
+            if (!original.find()) {
+                throw new IllegalStateException("Changed check is absent from the canonical baseline");
+            }
+            ddl = original.replaceFirst(java.util.regex.Matcher.quoteReplacement(
+                    "CONSTRAINT " + name + " CHECK " + checks.group(3)));
+        }
         var columns =
                 Pattern.compile("ALTER TABLE (ma_[a-z_]+) ADD COLUMN ([^;]+);").matcher(extension);
         while (columns.find()) {

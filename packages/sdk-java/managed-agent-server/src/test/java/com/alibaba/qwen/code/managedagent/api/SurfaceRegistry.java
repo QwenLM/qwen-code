@@ -277,6 +277,22 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/workspaces/get",
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
+    WEBSHELL_RUNTIME_NODE_LIST(Method.POST,
+            "/api/agent/web-shell/v1/runtime-nodes/query",
+            Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
+            EnumSet.of(Capability.RUNTIME_NODE_LIST)),
+    WEBSHELL_WORKSPACE_DIRECTORY_CHECK(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/check-directory",
+            Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
+            EnumSet.of(Capability.WORKSPACE_DIRECTORY_CHECK)),
+    WEBSHELL_WORKSPACE_REGISTER(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/create",
+            Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
+            EnumSet.of(Capability.WORKSPACE_REGISTER)),
+    WEBSHELL_WORKSPACE_REGISTRATION_GET(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/operations/get",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_REGISTRATION_OWNER,
+            EnumSet.of(Capability.WORKSPACE_REGISTRATION_GET)),
     // ManagedSessionStoreController: internal writer routes.
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
@@ -519,6 +535,10 @@ public enum SurfaceRegistry {
         ARTIFACT_CONTENT,
         WORKSPACE_LIST,
         WORKSPACE_GET,
+        RUNTIME_NODE_LIST,
+        WORKSPACE_DIRECTORY_CHECK,
+        WORKSPACE_REGISTER,
+        WORKSPACE_REGISTRATION_GET,
         CHANNEL_LIST,
         CHANNEL_DELIVERY_LIST,
         CHANNEL_DELIVERY_GET,
@@ -662,6 +682,28 @@ public enum SurfaceRegistry {
          * Workspace is invisible.
          */
         WORKSPACE_DISCOVERY,
+        /**
+         * SSH node discovery and fresh directory registration require a
+         * trusted actor ({@code 401 actor_required} without one). The
+         * catalog filters administrator-configured nodes by exact tenant
+         * and actor grants; checks and fresh registration answer {@code
+         * 403 runtime_node_forbidden} without a node grant. Disabled
+         * registration returns an empty unsupported catalog and {@code
+         * 404 ssh_runtime_disabled} for checks and fresh creates. A
+         * retained create key replays only for its original actor before
+         * checking current node admission. No Workspace role substitutes
+         * for the node grant.
+         */
+        RUNTIME_NODE_ACCESS,
+        /**
+         * Workspace registration operations belong to the exact tenant
+         * and actor that admitted them: {@code 401 actor_required}
+         * without an actor and {@code 404 operation_not_found} for an
+         * unknown operation or another actor, regardless of Workspace
+         * role. The original actor may query while new registration is
+         * disabled, including terminal blocked registrations.
+         */
+        WORKSPACE_REGISTRATION_OWNER,
         /**
          * Tenant-scoped agent definitions: any caller of the tenant may
          * create, read and revise; no actor and no Workspace grant is

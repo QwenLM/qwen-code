@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComponentProps } from 'react';
@@ -59,9 +59,9 @@ describe('WorkspaceBindingCreator', () => {
     for (let index = 0; index < 8; index++) await Promise.resolve();
   }
 
-  async function render() {
+  async function render(strict = false) {
     await act(async () => {
-      root.render(
+      const content = (
         <I18nProvider language="en">
           <WorkspaceBindingCreator
             provider={provider}
@@ -69,8 +69,9 @@ describe('WorkspaceBindingCreator', () => {
             onCreated={onCreated}
             onAbandoned={onAbandoned}
           />
-        </I18nProvider>,
+        </I18nProvider>
       );
+      root.render(strict ? <StrictMode>{content}</StrictMode> : content);
       await flush();
     });
     await act(flush);
@@ -141,6 +142,336 @@ describe('WorkspaceBindingCreator', () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.useRealTimers();
+  });
+
+  const remoteWorkspace = {
+    ...workspace,
+    workspaceId: 'ws-remote',
+    displayName: 'Remote project',
+  };
+
+  function enableRegistration() {
+    const registration = {
+      listNodes: vi.fn().mockResolvedValue({
+        supported: true,
+        data: [{ nodeId: 'mac', displayName: 'Remote Mac' }],
+      }),
+      checkDirectory: vi.fn().mockResolvedValue({
+        nodeId: 'mac',
+        canonicalPath: '/projects/example',
+        platform: 'darwin',
+      }),
+      create: vi.fn().mockResolvedValue({
+        operationId: 'registration-a',
+        type: 'workspace_create',
+        status: 'completed',
+        workspaceId: 'ws-remote',
+        replayed: false,
+      }),
+      query: vi.fn().mockResolvedValue({
+        operationId: 'registration-a',
+        type: 'workspace_create',
+        status: 'completed',
+        workspaceId: 'ws-remote',
+        replayed: false,
+      }),
+    };
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      registration,
+    };
+    vi.mocked(provider.workspaceBinding.get).mockResolvedValue(remoteWorkspace);
+    return registration;
+  }
+
+  async function typeInput(id: string, value: string) {
+    await act(async () => {
+      const input = document.getElementById(id) as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  async function openRegistration(direct = false) {
+    if (direct)
+      await act(async () => editorMocks.props!.onOpenExistingWorkspace!());
+    else await click('Add Workspace');
+    await act(async () =>
+      document.getElementById('managed-runtime-node')!.click(),
+    );
+    const machine = [...document.querySelectorAll('[role="option"]')].find(
+      (item) => item.textContent === 'Remote Mac',
+    );
+    expect(machine).toBeDefined();
+    await act(async () => (machine as HTMLElement).click());
+    await typeInput('managed-runtime-directory', '/projects/link');
+    await typeInput('managed-runtime-name', 'Remote project');
+    await click('Check directory');
+  }
+
+  it.each([401, 403, 404])(
+    'hides remote registration when node discovery returns %s',
+    async (status) => {
+      const registration = enableRegistration();
+      registration.listNodes.mockRejectedValue(
+        new JavaManagedAgentHttpError(status, 'unavailable', 'Unavailable'),
+      );
+      directCreation();
+      await render();
+      expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(false);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(registration.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the registration entry hidden when disabled or no nodes are authorized', async () => {
+    const registration = enableRegistration();
+    registration.listNodes.mockResolvedValue({ supported: false, data: [] });
+    await render();
+    expect(container.textContent).not.toContain('Add Workspace');
+    expect(registration.create).not.toHaveBeenCalled();
+  });
+
+  it('registers and selects a remote Workspace without creating a Session', async () => {
+    const registration = enableRegistration();
+    const createSession = directCreation();
+    await render();
+    expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(true);
+    await openRegistration(true);
+    expect(registration.checkDirectory).toHaveBeenCalledWith(
+      { nodeId: 'mac', path: '/projects/link' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    await click('Register Workspace');
+    expect(registration.create).toHaveBeenCalledWith(
+      {
+        nodeId: 'mac',
+        path: '/projects/example',
+        displayName: 'Remote project',
+      },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-remote');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+  });
+
+  it('requires a new directory check after changing the machine path', async () => {
+    const registration = enableRegistration();
+    await render();
+    await openRegistration();
+    await typeInput('managed-runtime-directory', '/different/path');
+    const register = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Register Workspace',
+    );
+    expect(register!.disabled).toBe(true);
+    await click('Register Workspace');
+    expect(registration.create).not.toHaveBeenCalled();
+  });
+
+  it('does not register a directory rejected by server authorization', async () => {
+    const registration = enableRegistration();
+    registration.checkDirectory.mockRejectedValue(
+      new JavaManagedAgentHttpError(403, 'forbidden', 'Forbidden'),
+    );
+    await render();
+    await openRegistration();
+    expect(
+      document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+    ).toContain('does not have permission');
+    await click('Register Workspace');
+    expect(registration.create).not.toHaveBeenCalled();
+  });
+
+  it('replays a lost registration response using the frozen key after a refresh', async () => {
+    const registration = enableRegistration();
+    registration.create.mockRejectedValueOnce(new TypeError('Lost response'));
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    const original = registration.create.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    await click('Continue confirming registration');
+    expect(registration.create).toHaveBeenCalledTimes(2);
+    expect(registration.create.mock.calls[1][0]).toEqual(original[0]);
+    expect(registration.create.mock.calls[1][1].idempotencyKey).toBe(
+      original[1].idempotencyKey,
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+  });
+
+  it('polls only the accepted operation after a lost read, including when new registrations are disabled', async () => {
+    vi.useFakeTimers();
+    const registration = enableRegistration();
+    registration.create.mockResolvedValue({
+      operationId: 'registration-a',
+      type: 'workspace_create',
+      status: 'running',
+      replayed: false,
+    });
+    registration.query.mockRejectedValueOnce(new TypeError('Lost read'));
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unconfirmed',
+    );
+    await act(async () => root.unmount());
+    registration.listNodes.mockResolvedValue({ supported: false, data: [] });
+    root = createRoot(container);
+    await render();
+    expect(registration.create).toHaveBeenCalledOnce();
+    expect(registration.query).toHaveBeenCalledTimes(2);
+    expect(registration.query.mock.calls[1][0]).toBe('registration-a');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('keeps the original operation when completed Workspace read-back denies access', async () => {
+    const registration = enableRegistration();
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue({
+      ...remoteWorkspace,
+      canCreateSession: false,
+    });
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+    ).toContain('does not have permission');
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue(
+      remoteWorkspace,
+    );
+    await click('Continue confirming registration');
+    expect(registration.create).toHaveBeenCalledOnce();
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-a',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+  });
+
+  it('clears only a confirmed blocked browser draft before starting another registration', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'ssh_runtime_version_conflict',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce(blocked);
+    const storageKey = `qwen-managed-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    const originalKey = registration.create.mock.calls[0][1].idempotencyKey;
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'administrator review',
+    );
+    expect(JSON.parse(sessionStorage.getItem(storageKey)!)).toMatchObject({
+      operationId: 'registration-blocked',
+      idempotencyKey: originalKey,
+    });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-blocked',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    await click('Start another registration');
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(registration.create).toHaveBeenCalledOnce();
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(provider.workspaceBinding!.get).not.toHaveBeenCalled();
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
+    await typeInput('managed-runtime-directory', '/projects/another');
+    registration.checkDirectory.mockResolvedValue({
+      nodeId: 'mac',
+      canonicalPath: '/projects/another',
+      platform: 'darwin',
+    });
+    await click('Check directory');
+    await click('Register Workspace');
+    expect(registration.create).toHaveBeenCalledTimes(2);
+    expect(registration.create.mock.calls[1][0].path).toBe('/projects/another');
+    expect(registration.create.mock.calls[1][1].idempotencyKey).not.toBe(
+      originalKey,
+    );
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('recovers the original registration under React StrictMode effect replay', async () => {
+    const registration = enableRegistration();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        nodeId: 'mac',
+        path: '/projects/example',
+        displayName: 'Remote project',
+        idempotencyKey: 'original',
+        operationId: 'registration-a',
+      }),
+    );
+    directCreation();
+    await render(true);
+    expect(registration.create).not.toHaveBeenCalled();
+    expect(registration.query).toHaveBeenCalled();
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-remote');
+    expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(true);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('does not send a registration when its recovery record cannot be persisted', async () => {
+    const registration = enableRegistration();
+    await render();
+    await openRegistration();
+    const storage = vi
+      .spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+      .mockImplementation(() => {
+        throw new Error('Storage unavailable');
+      });
+    try {
+      await click('Register Workspace');
+      expect(registration.create).not.toHaveBeenCalled();
+      expect(
+        document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+      ).toContain('session storage is unavailable');
+    } finally {
+      storage.mockRestore();
+    }
   });
 
   function directCreation() {

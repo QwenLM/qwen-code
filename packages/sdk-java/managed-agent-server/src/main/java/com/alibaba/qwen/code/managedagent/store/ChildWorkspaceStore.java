@@ -101,6 +101,13 @@ public class ChildWorkspaceStore {
     public Row admit(String tenantId, String parentSessionId, String childRunId,
             ContextBinding parent, long now) {
         return transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            var storages = jdbc.queryForList("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ? FOR UPDATE",
+                    String.class, tenantId, parent.getWorkspaceId());
+            if (storages.size() != 1 || !parent.getStorageId().equals(storages.getFirst())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storages.getFirst());
             String childId = childWorkspaceId(tenantId, parentSessionId, childRunId);
             jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state, workspace_kind, parent_workspace_id, parent_session_id,"

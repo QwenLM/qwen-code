@@ -140,6 +140,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
+        if (runtimeBroker.getSsh().isEnabled() && (!harness.isWorkspaceFilesEnabled()
+                || runtimeBroker.getSsh().getNodes().isEmpty())) {
+            throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
+        }
         runtimeBroker.getRetention().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
@@ -160,7 +164,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         || !runtimeBroker.isEnabled()
                         || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
-                        || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || runtimeBroker.getWorkspaceMounts().isEmpty() && runtimeBroker.getSsh().getNodes().isEmpty()
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
                                 .contains(
@@ -879,6 +883,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     }
 
     public static class RuntimeBroker {
+        private final SshRuntimeSettings ssh = new SshRuntimeSettings();
+
+        public SshRuntimeSettings getSsh() {
+            return ssh;
+        }
         private boolean enabled;
         private final Retention retention = new Retention();
         private String host = "127.0.0.1";

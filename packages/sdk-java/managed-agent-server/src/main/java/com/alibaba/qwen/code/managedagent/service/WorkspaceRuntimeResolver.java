@@ -22,10 +22,17 @@ import java.util.Objects;
 final class WorkspaceRuntimeResolver {
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore authority;
+    private final SshWorkspaceService ssh;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
 
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties) {
+        this(sessions, authority, properties, null);
+    }
+
+    WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+            ManagedAgentProperties properties, SshWorkspaceService ssh) {
+        this.ssh = ssh;
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
@@ -85,6 +92,15 @@ final class WorkspaceRuntimeResolver {
             authority.authorizeLifecycle(session, lifecycle);
         }
         ContextBinding binding = session.workspace();
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            if (hook) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ssh.verifyBinding(binding);
+            return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
+                    Long.toString(binding.getWorkspaceGeneration()), ssh.runtimeStorage(binding).mountRoot(),
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+        }
         Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
@@ -107,6 +123,12 @@ final class WorkspaceRuntimeResolver {
      * feature exists for.
      */
     void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            ssh.verify(new ContextBinding(binding.getTenantId(), binding.getWorkspaceId(),
+                    binding.getWorkspaceGeneration(), binding.getStorageId(), WorkspaceRelativePath.normalize(targetCwdRelative),
+                    binding.getContextConfigRef(), binding.getContextRevision()));
+            return;
+        }
         Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();

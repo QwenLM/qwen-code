@@ -337,12 +337,14 @@ public class ManagedAgentStore implements AgentStateStore {
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
-        // Admission already proved the agent is qwen-code or a compiled
-        // definition, so only the deployment mounts gate execution here.
+        boolean sshWorkspace = isSshWorkspace(workspace.binding());
+        if (sshWorkspace) {
+            requireSshToolProfile(pin.toolProfile());
+        }
         if (!input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || workspaceMounts.stream().noneMatch(mount ->
+                        || !sshWorkspace && workspaceMounts.stream().noneMatch(mount ->
                                 tenantId.equals(mount.tenantId())
                                         && workspace.binding().getStorageId().equals(mount.storageId())))) {
             throw workspaceExecutionUnavailable();
@@ -817,6 +819,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String approvalMode, String toolProfile) {
     }
 
+    private boolean isSshWorkspace(ContextBinding binding) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+    }
+
+    private static void requireSshToolProfile(String profile) {
+        if (!WorkspaceToolProfiles.FILES.equals(profile) && !WorkspaceToolProfiles.SHELL.equals(profile)) {
+            throw workspaceExecutionUnavailable();
+        }
+    }
+
     // Called only for a new admission; a retry has already replayed and
     // never resolves a definition again.
     private AgentPin resolveAgentPin(String tenantId, String agentId,
@@ -1011,6 +1024,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (isSshWorkspace(session.workspace())) {
+                requireSshToolProfile(session.toolProfile());
+            }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {

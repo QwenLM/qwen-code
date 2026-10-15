@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
@@ -50,6 +51,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedAgentDefinitionStore definitions;
     private final ManagedSessionStore resources;
     private final WriterCredentialPolicy credentials;
+    private final SshWorkspaceStore ssh;
     /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
     private final boolean childWorkspaces;
     private volatile HostedHarnessClient client;
@@ -86,6 +88,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             AgentStateStore sessions, WorkspaceExecutionStore workspaceExecution,
             ManagedActionStore actions, ManagedAgentDefinitionStore definitions,
             ManagedSessionStore resources) {
+        this(properties, sessions, workspaceExecution, actions, definitions, resources, null);
+    }
+
+    public QwenHostedHarnessConnector(ManagedAgentProperties properties,
+            AgentStateStore sessions, WorkspaceExecutionStore workspaceExecution,
+            ManagedActionStore actions, ManagedAgentDefinitionStore definitions,
+            ManagedSessionStore resources, SshWorkspaceStore ssh) {
         this.definitions = definitions;
         this.resources = resources;
         this.properties = properties.getHarness();
@@ -96,6 +105,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.actions = actions;
         this.workspaceExecution = workspaceExecution;
         this.credentials = new WriterCredentialPolicy(properties);
+        this.ssh = ssh;
         this.childWorkspaces = properties.getRuntimeBroker().isChildWorkspacesEnabled();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
@@ -218,7 +228,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
-                    .withChildWorkspaces(childWorkspaces)
+                    .withForegroundOnly(foregroundOnly(session))
+                    .withChildWorkspaces(childWorkspaces && !foregroundOnly(session))
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
@@ -707,7 +718,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         false, false,
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                         .withAgentDefinition(agentDefinition(session, false))
-                        .withChildWorkspaces(childWorkspaces)
+                        .withForegroundOnly(foregroundOnly(session))
+                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session))
                         .withStoppedMessages());
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
@@ -922,7 +934,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(profile)
-                            .childWorkspaces(childWorkspaces);
+                            .foregroundOnly(foregroundOnly(session))
+                            .childWorkspaces(childWorkspaces && !foregroundOnly(session));
             if (WorkspaceToolProfiles.isPublicShell(profile)) {
                 builder.suppressChildAgents();
             }
@@ -980,7 +993,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 driveRuntimeRecovery, cancellationTakeover,
                 WorkspaceToolProfiles.isPublicShell(profile))
                 .withAgentDefinition(agentDefinition(session, false))
-                .withChildWorkspaces(childWorkspaces));
+                .withForegroundOnly(foregroundOnly(session))
+                .withChildWorkspaces(childWorkspaces && !foregroundOnly(session)));
     }
 
     @Override
@@ -1135,6 +1149,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         actions.approvalMode(session.tenantId(), session.sessionId())))) {
             throw new IllegalStateException("Hosted Workspace Shell requires persisted default or auto-edit approval mode");
         }
+    }
+
+    private boolean foregroundOnly(SessionRecord session) {
+        return session.workspace() != null && ssh != null
+                && ssh.runtimeStorage(session.tenantId(), session.workspace().getStorageId()) != null;
     }
 
     private static String toolProfile(SessionRecord session) {

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -30,6 +31,25 @@ final class LocalStorageOwners {
 
     static String physicalKey(WorkspaceStorageGuard.Identity identity) {
         return ManagedSchemaKeys.key("local-storage/1", identity.hostId(), identity.device(), identity.inode(), identity.birthTime());
+    }
+
+    static void requireNonOverlapping(JdbcTemplate jdbc, WorkspaceStorageGuard.Identity identity) {
+        WorkspaceStorageKindGuard.lockDomain(jdbc, "local-storage-host/" + identity.hostId());
+        String key = physicalKey(identity);
+        var owners = jdbc.queryForList("SELECT storage_key, mount_root FROM ma_storage_owner"
+                + " WHERE mount_host_id = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", identity.hostId());
+        for (var owner : owners) {
+            String root = (String) owner.get("mount_root");
+            if (!key.equals(owner.get("storage_key")) && root != null
+                    && (contains(root, identity.root()) || contains(identity.root(), root))) {
+                throw new RuntimeBrokerException(409, "storage_overlapping_roots",
+                        "Workspace directory overlaps an existing physical owner.", false);
+            }
+        }
+    }
+
+    private static boolean contains(String root, String candidate) {
+        return root.equals(candidate) || candidate.startsWith(root.endsWith("/") ? root : root + "/");
     }
 
     static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {

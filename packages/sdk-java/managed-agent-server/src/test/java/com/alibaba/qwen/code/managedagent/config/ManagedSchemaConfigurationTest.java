@@ -53,7 +53,7 @@ class ManagedSchemaConfigurationTest {
                         .locations(ManagedSchema.FLYWAY_LOCATION)
                         .load();
         new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(current);
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "created_at", "session_id");
         assertThat(
@@ -112,8 +112,8 @@ class ManagedSchemaConfigurationTest {
                                     "SELECT \"version\" FROM \"flyway_schema_history\" WHERE"
                                             + " \"type\" = 'BASELINE'",
                                     String.class))
-                    .isEqualTo(baselineOnly ? "1" : "3");
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+                    .isEqualTo(baselineOnly ? "1" : "4");
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class))
                     .isEqualTo(1);
         }
@@ -156,7 +156,7 @@ class ManagedSchemaConfigurationTest {
                                 .locations(ManagedSchema.FLYWAY_LOCATION)
                                 .load());
 
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "created_at", "session_id");
         assertThat(
@@ -202,7 +202,7 @@ class ManagedSchemaConfigurationTest {
 
             ManagedSchema.initialize(source);
 
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(3);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(4);
             assertThat(sessionListColumns(source))
                     .containsExactly("tenant_id", "created_at", "session_id");
         }

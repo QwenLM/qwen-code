@@ -58,6 +58,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
     private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
             "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
+    private final SshWorkspaceService ssh;
+    private final RuntimeProvisioner localProvisioner;
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -85,7 +87,21 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store,
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications,
+            ToolPublicationDataStore publicationData,
+            SshWorkspaceService ssh) {
         this.store = store;
+        this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -107,16 +123,31 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
-        HttpRuntimeTransport http = new HttpRuntimeTransport();
+        boolean remote = ssh != null && ssh.configured();
+        HttpRuntimeTransport http = remote ? new HttpRuntimeTransport(ssh.connections()::resolveEndpoint) : new HttpRuntimeTransport();
         this.workspaces = workspaceExecutionStore == null ? null
-                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
+                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh);
         WorkspaceRuntimeResolver workspaces = this.workspaces;
         this.childWorkspaces = broker.isChildWorkspacesEnabled()
                 ? childWorkspaces(workspaces, broker) : null;
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository);
-        RuntimeProvisioner baseProvisioner = provisioner(broker, http);
+        RuntimeProvisioner baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http);
+        this.localProvisioner = baseProvisioner;
+        if (remote) {
+            RuntimeProvisioner local = baseProvisioner;
+            var remoteProvisioner = new com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner(
+                    ssh::node, ssh::runtimeStorage, ssh.connections(), http);
+            baseProvisioner = new com.alibaba.qwen.code.runtimebroker.RoutingRuntimeProvisioner(
+                    java.util.Map.of(local.kind(), local, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND, remoteProvisioner),
+                    scope -> ssh.runtimeStorage(scope) == null ? local.kind() : com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND,
+                    (kind, lease) -> {
+                        if (!com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND.equals(kind)) {
+                            ssh.connections().registerDirect(lease);
+                        }
+                    });
+        }
         RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
@@ -205,8 +236,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                         var binding = publications.verifyDispatch(execution, id, token);
                         var fields = mapper.convertValue(binding,
                                 new TypeReference<java.util.Map<String, Object>>() { });
-                        return new RuntimePublicationGrant(id, token,
-                                properties.getToolPublication().getServiceBaseUrl(), fields);
+                        var runtime = bindingRepository.findById(execution.getBindingId());
+                        var storage = remote && runtime != null ? ssh.runtimeStorage(runtime.getRequest().getScope()) : null;
+                        String publicationUrl = storage == null ? properties.getToolPublication().getServiceBaseUrl()
+                                : ssh.connections().publicationEndpoint(ssh.node(storage.nodeId())).toString();
+                        return new RuntimePublicationGrant(id, token, publicationUrl, fields);
                     }
 
                     @Override
@@ -286,6 +320,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     @Override
     public boolean supportsWorkspaceClose() {
         return service.supportsDrainedStop();
+    }
+
+    @Override
+    public boolean supportsWorkspaceClose(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
+        if (binding != null && ssh != null && ssh.runtimeStorage(binding) != null) {
+            ssh.node(ssh.runtimeStorage(binding).nodeId());
+            return true;
+        }
+        return localProvisioner.supportsDrainedStop();
     }
 
     @Override

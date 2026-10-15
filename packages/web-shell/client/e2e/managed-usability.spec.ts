@@ -21,6 +21,8 @@ for (const width of [1280, 390]) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       const body = request.postDataJSON();
+      if (path.endsWith('/runtime-nodes/query'))
+        return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
         return route.fulfill({
           json: { data: summary ? [summary] : [], hasMore: false },
@@ -171,6 +173,8 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON();
+    if (path.endsWith('/runtime-nodes/query'))
+      return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query')) {
       queries++;
       return route.fulfill({

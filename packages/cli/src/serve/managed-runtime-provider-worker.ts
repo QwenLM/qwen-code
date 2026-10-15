@@ -628,6 +628,7 @@ export function registerManagedRuntimeProviderRoute(
   identity: ManagedRuntimeRequestIdentity,
   executor: ManagedToolExecutor,
   contextFor: ContextResolver,
+  sshForegroundOnly = false,
 ): void {
   const provider = new ManagedRuntimeProviderWorker(executor, contextFor);
   executor.attachProvider(provider);
@@ -641,6 +642,21 @@ export function registerManagedRuntimeProviderRoute(
     async (req: Request, res: Response) => {
       try {
         const request = parseManagedRuntimeProviderRequest(req.body);
+        if (
+          sshForegroundOnly &&
+          ![
+            'workspace-context',
+            'raw-file-history',
+            'history',
+            'release',
+          ].includes(request.operation.kind)
+        ) {
+          throw new ManagedRuntimeProviderProtocolError(
+            'SSH Runtime provider operation is unsupported.',
+            501,
+            'managed_runtime_provider_unsupported',
+          );
+        }
         const raw: unknown = JSON.parse(
           JSON.stringify(
             await provider.control(request.session, request.operation),

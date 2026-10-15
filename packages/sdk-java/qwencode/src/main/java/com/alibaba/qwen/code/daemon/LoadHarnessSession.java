@@ -16,6 +16,7 @@ public final class LoadHarnessSession {
     private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
     private boolean stopMessages;
+    private boolean foregroundOnly;
 
     /**
      * #13753 I2: a copy that tells the Hosted side this control plane
@@ -37,6 +38,21 @@ public final class LoadHarnessSession {
         copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = value;
         copy.stopMessages = stopMessages;
+        copy.foregroundOnly = foregroundOnly;
+        return copy;
+    }
+
+    /** Restates the immutable SSH Session tool restriction on every attachment. */
+    public LoadHarnessSession withForegroundOnly(boolean value) {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
+        copy.agentDefinition = agentDefinition;
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
+        copy.childWorkspaces = childWorkspaces;
+        copy.stopMessages = stopMessages;
+        copy.foregroundOnly = value;
         return copy;
     }
 
@@ -59,6 +75,7 @@ public final class LoadHarnessSession {
         copy.lifecycleProtocolVersion = protocolVersion;
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = stopMessages;
+        copy.foregroundOnly = foregroundOnly;
         return copy;
     }
 
@@ -73,6 +90,7 @@ public final class LoadHarnessSession {
         copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = childWorkspaces;
         copy.stopMessages = true;
+        copy.foregroundOnly = foregroundOnly;
         return copy;
     }
 
@@ -177,6 +195,9 @@ public final class LoadHarnessSession {
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (foregroundOnly) {
+            result.put("foregroundOnly", true);
         }
         return result;
     }

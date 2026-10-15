@@ -107,6 +107,12 @@ public interface RuntimeTransport {
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 
+    /** Releases the worker journal payload only after the original v2 result is durable. */
+    default CompletionStage<Void> acknowledgeV2(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        return CompletableFuture.completedFuture(null);
+    }
+
     default CompletionStage<Void> installPublication(RuntimeLease lease,
             RuntimeSession session, RuntimePublicationGrant grant) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
