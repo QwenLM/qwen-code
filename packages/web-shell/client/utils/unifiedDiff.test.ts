@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildContextBoundedDiff,
   buildUnifiedDiff,
+  DIFF_CRLF_UNIFORM_MARKER,
   DIFF_OMITTED_MARKER,
   localizeDiffNotice,
   parseUnifiedDiff,
@@ -288,6 +289,62 @@ describe('parseUnifiedDiff', () => {
         { type: 'context', content: 'same', oldLine: 1, newLine: 1 },
       ],
     });
+  });
+});
+
+describe('CRLF uniformity is decided at the source layer', () => {
+  it('stamps the marker when both sides are uniform CRLF, and the parser reports it', () => {
+    const diff = buildUnifiedDiff('a\r\nb\r\n', 'a\r\nc\r\n');
+    expect(diff.split('\n')[0]).toBe(DIFF_CRLF_UNIFORM_MARKER);
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(true);
+  });
+
+  it('allows one unterminated final line per side', () => {
+    const diff = buildUnifiedDiff('a\r\nb', 'a\r\nc');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(true);
+  });
+
+  it('refuses the marker when a bare-LF line hides inside a CRLF file', () => {
+    // The render boundary cannot distinguish "unterminated final line" from
+    // "an LF-terminated line in a mixed-ending file" — the source text can,
+    // which is exactly why the decision lives here.
+    const diff = buildUnifiedDiff('a\r\nb\nc\r\n', 'a\r\nb\nd\r\n');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+    expect(diff).not.toContain(DIFF_CRLF_UNIFORM_MARKER);
+  });
+
+  it('refuses the marker when a final line is terminated by a bare LF', () => {
+    const diff = buildUnifiedDiff('a\r\nb\n', 'a\r\nc\n');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('does not stamp the marker for LF files', () => {
+    expect(
+      parseUnifiedDiff(buildUnifiedDiff('a\n', 'a\nb\n')).crlfUniform,
+    ).toBe(false);
+  });
+
+  it('keeps the marker out of the bounded hunk arithmetic', () => {
+    const oldText = Array.from({ length: 10 }, (_, i) => `L${i}\r`).join('\n');
+    const newSegments = oldText.split('\n');
+    newSegments[5] = 'X5\r';
+    const newText = newSegments.join('\n');
+    const diff = buildContextBoundedDiff(oldText, newText);
+    const parsed = parseUnifiedDiff(diff);
+    expect(parsed.crlfUniform).toBe(true);
+    // One changed row in a 10-line CRLF file: the @@ header counts the hunk
+    // rows only (3 context + 1 changed + 3 context per side = 7). Had the
+    // marker row leaked into the arithmetic, the counts would read 8/8
+    // instead of 7/7.
+    const header = parsed.lines.find(
+      (line) => line.type === 'header' && line.content.startsWith('@@'),
+    );
+    expect(header?.content).toBe('@@ -3,7 +3,7 @@');
+    expect(
+      parsed.lines.filter(
+        (line) => line.type === 'header' && line.content.startsWith('\\diff'),
+      ),
+    ).toHaveLength(1);
   });
 });
 

@@ -22,6 +22,30 @@ export const DIFF_TRAILING_NEWLINE_ADDED_MARKER =
   '\\diff-trailing-newline-added';
 export const DIFF_TRAILING_NEWLINE_REMOVED_MARKER =
   '\\diff-trailing-newline-removed';
+export const DIFF_CRLF_UNIFORM_MARKER = '\\diff-crlf-uniform';
+
+/**
+ * Decided at the SOURCE layer, never from rendered patch text: a patch line
+ * carries no marker distinguishing "unterminated final line" from "an LF
+ * line inside a mixed-ending file", so any inference at the render boundary
+ * certifies whole-file properties it cannot know. Here the raw text does
+ * know. Uniform means: every line is terminated by `\r\n`, with the sole
+ * allowed exception of a final line that has no terminator at all — a bare
+ * `\n` anywhere (a line ending without its `\r`) breaks it.
+ */
+function isUniformCrlf(text: string): boolean {
+  if (!text) return true;
+  const segments = text.split('\n');
+  const trailing = segments[segments.length - 1] === '';
+  const body = trailing ? segments.slice(0, -1) : segments;
+  for (let i = 0; i < body.length - 1; i++) {
+    if (!body[i].endsWith('\r')) return false;
+  }
+  const lastLine = body[body.length - 1];
+  if (lastLine === '') return true;
+  if (lastLine.endsWith('\r')) return true;
+  return !trailing;
+}
 
 type Translate = (
   key: string,
@@ -65,10 +89,17 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   const n = oldLines.length;
   const m = newLines.length;
 
+  const crlfUniform =
+    isUniformCrlf(oldText) &&
+    isUniformCrlf(newText) &&
+    (oldText.includes('\r') || newText.includes('\r')) &&
+    n + m > 0;
+
   if (n * m > MAX_DIFF_PRODUCT) {
     const removed = oldLines.map((l) => (l ? `-${l}` : '-'));
     const added = newLines.map((l) => (l ? `+${l}` : '+'));
-    return [...removed, ...added].join('\n');
+    const rows = [...removed, ...added].join('\n');
+    return crlfUniform ? `${DIFF_CRLF_UNIFORM_MARKER}\n${rows}` : rows;
   }
 
   const dp: number[][] = Array.from({ length: n + 1 }, () =>
@@ -100,7 +131,8 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
     }
   }
 
-  return result.reverse().join('\n');
+  const rows = result.reverse().join('\n');
+  return crlfUniform ? `${DIFF_CRLF_UNIFORM_MARKER}\n${rows}` : rows;
 }
 
 export function buildContextBoundedDiff(
@@ -152,7 +184,7 @@ export function buildContextBoundedDiff(
   ) {
     return omitted;
   }
-  const rows = buildUnifiedDiff(
+  const inner = buildUnifiedDiff(
     oldLines
       .slice(start, oldLines.length - skippedSuffix)
       .map((line) => `${line}\n`)
@@ -162,6 +194,22 @@ export function buildContextBoundedDiff(
       .map((line) => `${line}\n`)
       .join(''),
   ).split('\n');
+  // The inner builder stamps its own CRLF marker as the first row; pull it
+  // out so it neither counts toward the @@ hunk arithmetic nor lands inside
+  // a hunk body — the verdict is re-stamped below from the source layer.
+  if (inner[0] === DIFF_CRLF_UNIFORM_MARKER) {
+    inner.shift();
+  }
+  const rows = inner;
+  // The CRLF decision uses the ORIGINAL texts, not the windowed substring:
+  // re-joining sliced rows appends a `\n` to the window's last line, which
+  // would turn a genuinely unterminated final line into a bare-LF one and
+  // flip the verdict. The inner builder's own stamp (if any) is dropped and
+  // the decision is re-stamped from the source layer.
+  const crlfUniform =
+    isUniformCrlf(oldText) &&
+    isUniformCrlf(newText) &&
+    (oldText.includes('\r') || newText.includes('\r'));
   const ranges: Array<{ start: number; end: number }> = [];
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].startsWith(' ')) continue;
@@ -195,7 +243,8 @@ export function buildContextBoundedDiff(
     newLine += newCount;
     cursor = range.end;
   }
-  return result.join('\n');
+  const output = result.join('\n');
+  return crlfUniform ? `${DIFF_CRLF_UNIFORM_MARKER}\n${output}` : output;
 }
 
 interface UnifiedDiffLine {
@@ -209,9 +258,11 @@ export function parseUnifiedDiff(diff: string): {
   lines: UnifiedDiffLine[];
   additions: number;
   deletions: number;
+  crlfUniform: boolean;
 } {
   let additions = 0;
   let deletions = 0;
+  let crlfUniform = false;
   const lines: UnifiedDiffLine[] = [];
   let oldLine = 0;
   let newLine = 0;
@@ -230,6 +281,7 @@ export function parseUnifiedDiff(diff: string): {
       newRemaining = match[4] === undefined ? 1 : parseInt(match[4], 10);
       lines.push({ type: 'header', content: line });
     } else if (line.startsWith('\\')) {
+      if (line === DIFF_CRLF_UNIFORM_MARKER) crlfUniform = true;
       lines.push({ type: 'header', content: line });
     } else if ((!hasHunks || newRemaining > 0) && line.startsWith('+')) {
       additions++;
@@ -262,5 +314,5 @@ export function parseUnifiedDiff(diff: string): {
     }
   }
 
-  return { lines, additions, deletions };
+  return { lines, additions, deletions, crlfUniform };
 }

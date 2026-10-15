@@ -4731,7 +4731,11 @@ it('renders matching visible escapes in mixed artifact diffs neutralize the same
       toolCallId: 'tool-app',
       isArtifact: false,
       diffs: [
-        { oldText: 'old', newText: 'safe\u200blooking', fullContent: true },
+        {
+          oldText: 'old\u200btext',
+          newText: 'safe\u200blooking',
+          fullContent: true,
+        },
         {
           oldText: '',
           newText: '',
@@ -4777,24 +4781,57 @@ it('renders matching visible escapes in mixed artifact diffs neutralize the same
   );
   await flush();
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The CodeMirror editor mounts through a multi-hop async chain
+    // (ResizeObserver → setIsWide → effect → dynamic import), so a fixed
+    // wall-clock sleep flakes under the full-suite load. Wait for the editor
+    // deterministically instead.
+    await vi.waitFor(() => {
+      if (!container.querySelector('.cm-content')) {
+        throw new Error('CodeMirror editor not mounted yet');
+      }
+    });
   });
   const cm = container.querySelector('.cm-content');
   const patch = container.querySelector('[aria-label="File diff"]');
   expect(cm).not.toBeNull();
   expect(patch).not.toBeNull();
+  // The unified (narrow) view escapes BOTH sides at the data layer — the
+  // merge extension's DeletionWidget paints the original document through
+  // raw text nodes no view extension can reach, so the main document holds
+  // the same literal escapes as the deleted side.
   expect(EditorView.findFromDOM(cm!)!.state.doc.toString()).toBe(
-    'safe\u200blooking',
+    'safe\\u200blooking',
   );
-  expect(
-    cm!.querySelector('[title^="Invisible character:"]')?.getAttribute('title'),
-  ).toBe('Invisible character: \\u200b');
+  expect(cm!.querySelector('[title^="Invisible character:"]')).toBeNull();
+  // The deleted side reaches the DOM through either merge view path — the
+  // chunk widget (`.cm-deletedLine del`) for multi-line chunks or the inline
+  // renderer (`del.cm-deletedText`) when allowInlineDiffs folds same-line
+  // chunks. The data-layer escape must hold on both: literal escapes, never
+  // a raw invisible character.
+  const deletedNodes = Array.from(
+    container.querySelectorAll('.cm-deletedLine del, del.cm-deletedText'),
+  );
+  expect(deletedNodes.length).toBeGreaterThan(0);
+  const deletedText = deletedNodes.map((node) => node.textContent).join('');
+  expect(deletedText).toContain('old');
+  expect(deletedText).not.toContain('\u200b');
+  // The literal escape sequence stays visible on the row, split across the
+  // boundary between the deleted and inserted inline fragments.
+  const lineText = container.querySelector('.cm-line')?.textContent ?? '';
+  expect(lineText).toContain('\\u200b');
+  expect(lineText).not.toContain('\u200b');
   expect(
     patch!
       .querySelector('[title^="Invisible character:"]')
       ?.getAttribute('title'),
   ).toBe('Invisible character: \\u200b');
   expect(cm!.textContent).not.toContain('\u200b');
-  expect(cm!.textContent).toContain('safe\\u200blooking');
+  // Inline chunk rendering interleaves deleted and inserted fragments around
+  // the shared boundary, so the full doc string is asserted above via
+  // doc.toString(); here the literal escape and both sides must merely be
+  // present in the painted text.
+  expect(cm!.textContent).toContain('\\u200b');
+  expect(cm!.textContent).toContain('safe');
+  expect(cm!.textContent).toContain('looking');
   expect(patch!.textContent).toContain('safe\\u200blooking');
 });

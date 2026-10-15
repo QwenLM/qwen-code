@@ -2893,6 +2893,46 @@ describe('tool output logic', () => {
     }
   });
 
+  it('bounds oversized pending fragments on the live projection too', () => {
+    // The live projection carries the edit tool's real parameter names
+    // (old_string/new_string); a pending card holding them used to run the
+    // unbounded builder because the size gate keyed on projection shape
+    // rather than status. The gate must cover both shapes.
+    const oldLines = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[1] = 'first change';
+    newLines[1_998] = 'last change';
+    for (const status of ['pending', 'in_progress'] as const) {
+      const args = {
+        old_string: oldLines.join('\n'),
+        new_string: newLines.join('\n'),
+      };
+      expect(extractDiff(makeTool({ toolName: 'edit', status, args }))).toBe(
+        DIFF_OMITTED_MARKER,
+      );
+    }
+    // Under the cap the fragment still renders as a headerless diff.
+    const underCap = { old_string: 'a\nb\n', new_string: 'a\nc\n' };
+    expect(
+      extractDiff(
+        makeTool({ toolName: 'edit', status: 'pending', args: underCap }),
+      ),
+    ).toBe(buildUnifiedDiff('a\nb\n', 'a\nc\n'));
+    // A completed call keeps its full diff regardless of shape.
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'completed',
+          args: {
+            old_string: oldLines.join('\n'),
+            new_string: newLines.join('\n'),
+          },
+        }),
+      ),
+    ).toBe(buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')));
+  });
+
   it('keeps embedded notice markers literal in a pending supplied patch', () => {
     const patch = '@@ -1,1 +1,1 @@\n-old\n+new\n\\diff-omitted';
     const tool = makeTool({

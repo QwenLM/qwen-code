@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { useI18n } from '../../../i18n';
 import { DIFF_INVISIBLE_CHARACTERS, escapeDiffContent } from './diffContent';
 import {
+  DIFF_CRLF_UNIFORM_MARKER,
   localizeDiffNotice,
   parseUnifiedDiff,
 } from '../../../utils/unifiedDiff';
@@ -23,23 +24,12 @@ export const DiffView = memo(function DiffView({
   if (!diff) return null;
 
   const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
-  const { lines, additions, deletions } = parseUnifiedDiff(input);
-  const contentLines = lines.filter((line) => line.type !== 'header');
-  const reversedContent = [...contentLines].reverse();
-  const lastOld = reversedContent.find((line) => line.oldLine !== undefined);
-  const lastNew = reversedContent.find((line) => line.newLine !== undefined);
-  const unterminatedEnds =
-    lastOld &&
-    lastNew &&
-    !lastOld.content.endsWith('\r') &&
-    !lastNew.content.endsWith('\r');
-  const crlfBody =
-    contentLines.some((line) => line.content.endsWith('\r')) &&
-    contentLines.every(
-      (line) =>
-        line.content.endsWith('\r') ||
-        (unterminatedEnds && (line === lastOld || line === lastNew)),
-    );
+  const { lines, additions, deletions, crlfUniform } = parseUnifiedDiff(input);
+  // Whether a trailing `\r` is part of a `\r\n` terminator is a whole-file
+  // property that only the SOURCE text knows — the builders decide it there
+  // and emit `DIFF_CRLF_UNIFORM_MARKER`. Without that marker the `\r` stays
+  // in the content and renders as a visible escape node: honest rendering
+  // instead of a whole-file certification this layer cannot make.
   // Builders emit a notice as the whole preview, never inside a raw patch.
   const notice =
     lines.length === 1 && lines[0].type === 'header'
@@ -48,13 +38,16 @@ export const DiffView = memo(function DiffView({
   let remaining = maxLength ?? Infinity;
   let truncated = input.length < diff.length;
   const renderedLines = lines.flatMap((line) => {
+    if (line.type === 'header' && line.content === DIFF_CRLF_UNIFORM_MARKER) {
+      return [];
+    }
     if (remaining === 0) {
       truncated = true;
       return [];
     }
     const content = notice ?? line.content;
     const body =
-      crlfBody && content.endsWith('\r') ? content.slice(0, -1) : content;
+      crlfUniform && content.endsWith('\r') ? content.slice(0, -1) : content;
     const parts = body.split(DIFF_INVISIBLE_CHARACTERS);
     const rendered = parts.map((part, index) => {
       const safe = escapeDiffContent(part);

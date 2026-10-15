@@ -29,6 +29,7 @@ import { DiffView } from './tools/DiffView';
 import {
   buildContextBoundedDiff,
   buildUnifiedDiff,
+  DIFF_OMITTED_MARKER,
 } from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
 import {
@@ -209,6 +210,23 @@ export function extractDiff(tool: ACPToolCall): string {
     const hasWholeFileText =
       typeof tool.args?.oldText === 'string' ||
       typeof tool.args?.newText === 'string';
+    // The status gate keys on the STATUS, not the projection shape: a live
+    // pending edit carries the tool's real parameter names, and its payload
+    // can still be an entire file — the fragment path must be bounded too,
+    // or the pending card renders the whole file while it waits.
+    if (!hasWholeFileText && isActiveToolStatus(tool.status)) {
+      const MAX_PENDING_FRAGMENT_CHARS = 10_000;
+      const pendingOldText =
+        typeof previewOldText === 'string' ? previewOldText : '';
+      const pendingNewText =
+        typeof previewNewText === 'string' ? previewNewText : '';
+      if (
+        pendingOldText.length > MAX_PENDING_FRAGMENT_CHARS ||
+        pendingNewText.length > MAX_PENDING_FRAGMENT_CHARS
+      ) {
+        return DIFF_OMITTED_MARKER;
+      }
+    }
     return (hasWholeFileText ? buildDiff : buildUnifiedDiff)(
       typeof previewOldText === 'string' ? previewOldText : '',
       typeof previewNewText === 'string' ? previewNewText : '',
