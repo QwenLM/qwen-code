@@ -985,8 +985,14 @@ async function receiptDrop(cli: HostedHarnessProcess, clientId: string) {
   return {
     case: current.name,
     droppedCommits,
+    // Report the observation, not the conclusion: the IT re-reads which
+    // commit the drop actually hit off this log, so a positional misdrop
+    // goes red instead of passing on a count alone.
+    droppedOp: commitLog[dropIndex].op,
     committedSegments: fullSegments(state).length,
-    postDropSettled: true,
+    postDropSettled: commitLog
+      .slice(dropIndex + 1)
+      .some((entry) => entry.op === 'settleTurn' && entry.status === 200),
   };
 }
 

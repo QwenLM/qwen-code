@@ -825,10 +825,12 @@ jobs:
           # Smoke-test admission the way the gates exercise it: this shell
           # enters the delegated root through the privileged move, then a
           # child joins a unit by a non-root write — cgroup.kill existing
-          # alone proves nothing about migration.
+          # alone proves nothing about migration. The sleep's fds point at
+          # /dev/null so a failing line below never leaves it holding the
+          # step's stdout open for the rest of its 600 s.
           echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs
           mkdir /sys/fs/cgroup/fg8/smoke
-          sleep 600 & smoke=$!
+          sleep 600 </dev/null >/dev/null 2>&1 & smoke=$!
           echo "$smoke" > /sys/fs/cgroup/fg8/smoke/cgroup.procs
           grep -q "^$smoke\$" /sys/fs/cgroup/fg8/smoke/cgroup.procs
           echo 1 > /sys/fs/cgroup/fg8/smoke/cgroup.kill

@@ -52,13 +52,20 @@ class HostedMonitorRunFaultGatesIT {
 
     @AfterEach
     void tearDown() {
-        if (spring != null) {
-            spring.close();
-            spring = null;
-        }
-        if (gateServer != null) {
-            gateServer.stop(0);
-            gateServer = null;
+        try {
+            if (spring != null) {
+                spring.close();
+                spring = null;
+            }
+        } finally {
+            // The gate server's dispatcher thread and loopback socket must
+            // not survive a Spring close that throws — a kill case leaves
+            // broker-supervised children alive, so a throwing close is not
+            // exotic here.
+            if (gateServer != null) {
+                gateServer.stop(0);
+                gateServer = null;
+            }
         }
     }
 
@@ -400,6 +407,14 @@ class HostedMonitorRunFaultGatesIT {
             assertThat(report.path("droppedCommits").asInt())
                     .as(name + " dropped exactly one commit reply")
                     .isEqualTo(1);
+            // Not just *a* commit: the drop must have hit the settle
+            // cascade's manifest commit — the child_run record's settle
+            // commit carries the output manifest. A positional misdrop
+            // into an unrelated journal commit goes red here instead of
+            // passing on the count alone.
+            assertThat(report.path("droppedOp").asText())
+                    .as(name + " the dropped reply is the manifest commit")
+                    .isEqualTo("commitChildRunRecord");
             // The re-drive resolving by the original identity is proven by
             // the Session's writer still committing: a post-drop turn ran
             // to its settleTurn commit. A re-drive minting a fresh
