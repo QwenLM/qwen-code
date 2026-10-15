@@ -84,7 +84,32 @@ public final class ManagedExtensionProjection {
                     ManagedSessionMessageRecords::requireMessage,
                     body -> body.get("messageId").textValue(),
                     ManagedSessionMessageRecords::isMessageStart,
-                    ManagedSessionMessageRecords::isMessageSuccessor)));
+                    ManagedSessionMessageRecords::isMessageSuccessor)),
+            entry("session_command", new Body(record -> null,
+                    ManagedSessionCommandRecords::requireCommand,
+                    body -> body.get("commandId").textValue(),
+                    ManagedSessionCommandRecords::isCommandStart,
+                    ManagedSessionCommandRecords::isCommandSuccessor)),
+            entry("team_state", new Body(record -> null,
+                    ManagedTeamRecords::requireState,
+                    body -> body.get("teamId").textValue(),
+                    ManagedTeamRecords::isStateStart,
+                    ManagedTeamRecords::isStateSuccessor)),
+            entry("team_task", new Body(record -> null,
+                    ManagedTeamRecords::requireTask,
+                    body -> body.get("taskId").textValue(),
+                    ManagedTeamRecords::isTaskStart,
+                    ManagedTeamRecords::isTaskSuccessor)),
+            entry("team_message", new Body(record -> null,
+                    ManagedTeamRecords::requireMessage,
+                    body -> body.get("messageId").textValue(),
+                    ManagedTeamRecords::isMessageStart,
+                    ManagedTeamRecords::isMessageSuccessor)),
+            entry("team_plan", new Body(record -> null,
+                    ManagedTeamRecords::requirePlan,
+                    body -> body.get("requestId").textValue(),
+                    ManagedTeamRecords::isPlanStart,
+                    ManagedTeamRecords::isPlanSuccessor)));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
@@ -92,6 +117,23 @@ public final class ManagedExtensionProjection {
             "workflow", "background_shell", "monitor", "automation_run");
     public static final List<String> RUNTIME_STATES = List.of("unbound",
             "provisioning", "ready", "draining", "lost");
+    /**
+     * H4f: the task kinds whose cancel reaches a durable stop request on
+     * their own record. Both child Session kinds ride the child_run stop
+     * request — set once on the record and honored by the relay's
+     * kind-blind stop arm; workflow joined in the H4f-b slice once its
+     * runtime (#13803) made the close cascade's stop of a workflow row a
+     * shipped path. Every other kind has no public cancel path yet: H3's
+     * Shell settles exited rather than stop_requested after a stop and
+     * Monitor carries no stop request, and an automation run has none
+     * either.
+     */
+    public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
+            "child_agent", "workflow");
+    /** Task states a cancel may still act on: the run has not ended and
+     * is not waiting on recovery reconciliation. */
+    private static final Set<String> CANCELLABLE_TASK_STATES = Set.of(
+            "pending", "running", "waiting", "degraded");
 
     /**
      * Run states that mean the work began. A blocked run may still prove
@@ -187,6 +229,18 @@ public final class ManagedExtensionProjection {
                         .get("definitionRevision").decimalValue()
                         .longValueExact(),
                 createdAt, startedAt, settledAt);
+    }
+
+    /**
+     * The actions a task supports now, the same for every caller:
+     * {@code cancel} while a cancellable kind's run has not ended. The
+     * task view advertises this list and a new cancel admission rechecks
+     * it under the Session lock.
+     */
+    public static List<String> taskActions(String kind, String state) {
+        return CANCELLABLE_TASK_KINDS.contains(kind)
+                && CANCELLABLE_TASK_STATES.contains(state)
+                ? List.of("cancel") : List.of();
     }
 
     /** Whether the run's delivery is in the outbox. */

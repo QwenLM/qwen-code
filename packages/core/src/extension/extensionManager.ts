@@ -35,6 +35,7 @@ import {
   substituteHookVariables,
   performVariableReplacement,
   hydrateExtensionText,
+  replacePluginRootInMarkdown,
   type JsonValue,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
@@ -3375,6 +3376,17 @@ export class ExtensionManager {
 
         const usesPluginVariables =
           originSource === 'Claude' || originSource === 'Qoder';
+        // ${CLAUDE_PLUGIN_ROOT} in markdown is how plugin authors reference their
+        // own scripts, so it resolves on every Claude/Qoder install regardless of
+        // whether the plugin ships hooks. The hook-conditional rewrites below stay
+        // gated on a hooks source.
+        if (usesPluginVariables) {
+          try {
+            replacePluginRootInMarkdown(stagingPath, destinationPath);
+          } catch (error) {
+            debugLogger.error('Plugin root markdown replacement failed', error);
+          }
+        }
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||

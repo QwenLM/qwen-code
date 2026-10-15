@@ -67,7 +67,11 @@ public class SessionLifecycleCoordinator {
     }
 
     public boolean supportsWorkspaceLifecycle() {
-        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+        return supportsWorkspaceLifecycle("hosted-workspace-files/1");
+    }
+
+    public boolean supportsWorkspaceLifecycle(String profile) {
+        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(profile);
     }
 
     private final ManagedSessionStore sessionStore;
@@ -76,6 +80,7 @@ public class SessionLifecycleCoordinator {
     private final ChildResultRelayStore childScopes;
     private final ObjectMapper objectMapper;
     private final ChildLifecycleAdmissions childCloses;
+    private final com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerService> brokerProviders;
     private final ExecutorService executor;
     private final Clock clock;
@@ -107,6 +112,22 @@ public class SessionLifecycleCoordinator {
             ObjectProvider<RuntimeBrokerService> brokerProviders,
             ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
+        this(store, sessionStore, harness, runtimeWarmer, childScopes,
+                objectMapper, childCloses, brokerProviders, executor, clock,
+                properties, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public SessionLifecycleCoordinator(AgentStateStore store,
+            ManagedSessionStore sessionStore, HarnessConnector harness,
+            RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
+            ObjectMapper objectMapper,
+            ChildLifecycleAdmissions childCloses,
+            ObjectProvider<RuntimeBrokerService> brokerProviders,
+            ExecutorService executor,
+            Clock clock, ManagedAgentProperties properties,
+            com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore childWorkspaces) {
+        this.childWorkspaces = childWorkspaces;
         this.store = store;
         this.sessionStore = sessionStore;
         this.harness = harness;
@@ -196,7 +217,9 @@ public class SessionLifecycleCoordinator {
             }
             String blocked = null;
             if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
-                if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
+                if (brokerError.getCode().startsWith("workspace_lifecycle")
+                        || "runtime_admission_closed".equals(brokerError.getCode())
+                        || "workspace_close_execution_unsettled".equals(brokerError.getCode())) {
                     blocked = brokerError.getCode();
                 } else if ("workspace_close_identity_unverified".equals(brokerError.getCode())
                         || "runtime_broker_recovery_blocked".equals(brokerError.getCode())) {
@@ -210,7 +233,11 @@ public class SessionLifecycleCoordinator {
             if ((cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException
                     || cause instanceof com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException)
                     && operationIsLifecycle(claimed)) {
-                blocked = "workspace_lifecycle_hooks_unsettled";
+                blocked = cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException httpError
+                        && httpError.getErrorCode() != null
+                        && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
+                                || "runtime_admission_closed".equals(httpError.getErrorCode()))
+                        ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
             }
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
@@ -232,7 +259,7 @@ public class SessionLifecycleCoordinator {
     }
 
     private static boolean operationIsLifecycle(OperationRecord operation) {
-        return operation.lifecycleProtocolVersion() == 1;
+        return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion());
     }
 
     // A cwd change settles without Harness or worker involvement: the probe
@@ -308,6 +335,9 @@ public class SessionLifecycleCoordinator {
     // it. A Harness that never held it, or that replaced the one that did,
     // answers too, but its answer confirms nothing about the Session.
     private boolean settle(OperationRecord operation) {
+        if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
+            throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+        }
         boolean harnessConfirmed = false;
         boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
         if (bound && operation.kind() == OperationKind.DELETE
@@ -318,15 +348,59 @@ public class SessionLifecycleCoordinator {
                 || operation.kind() == OperationKind.DELETE) {
             cascadeChildScopes(operation);
         }
-        if (bound && operation.lifecycleProtocolVersion() == 1) {
+        if (bound && operationIsLifecycle(operation)) {
             if (lifecycle == null || !runtimeWarmer.supportsWorkspaceClose()) {
                 throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
-            if (lifecycle.recoverEffects(operation) == null) {
-                if (!harness.supportsLifecycle()) {
+            lifecycle.requireSettledExecutions(operation);
+            JsonNode effects = lifecycle.recoverEffects(operation);
+            if (effects == null) {
+                if (!harness.supportsLifecycle(store.requireSession(operation.tenantId(), operation.sessionId()).toolProfile())) {
                     throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
-                lifecycle.saveEffects(operation, harness.settleLifecycle(operation));
+                effects = harness.settleLifecycle(operation);
+                lifecycle.saveEffects(operation, effects);
+            }
+            if (operation.lifecycleProtocolVersion() == 2
+                    && !effects.path("neverInitialized").asBoolean()) {
+                String profile = store.requireSession(operation.tenantId(), operation.sessionId()).toolProfile();
+                try {
+                    harness.prepareLifecycleResources(operation);
+                    if (com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.SHELL.equals(profile)) {
+                        runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
+                                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation))
+                                .toCompletableFuture().join();
+                    }
+                    harness.settleLifecycleResources(operation);
+                    runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
+                            com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation))
+                            .toCompletableFuture().join();
+                } catch (RuntimeException unsettled) {
+                    if (!(unsettled instanceof com.alibaba.qwen.code.daemon.DaemonException)
+                            || unsettled instanceof com.alibaba.qwen.code.daemon.HostedHarnessGenerationException) {
+                        throw unsettled;
+                    }
+                    if (unsettled instanceof com.alibaba.qwen.code.daemon.DaemonHttpException http
+                            && (http.getErrorCode() != null && (http.getErrorCode().startsWith("workspace_lifecycle_claim")
+                                    || http.getErrorCode().startsWith("workspace_lifecycle_authorization")
+                                    || http.getErrorCode().startsWith("workspace_close")
+                                            && !(com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.MCP.equals(profile)
+                                                    && "workspace_close_identity_unverified".equals(http.getErrorCode()))
+                                    || "runtime_admission_closed".equals(http.getErrorCode())))) {
+                        throw unsettled;
+                    }
+                    if (com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.MCP.equals(profile)) {
+                        runtimeWarmer.recoverStoppedWorkspaceResources(operation.tenantId(), operation.sessionId(),
+                                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation))
+                                .toCompletableFuture().join();
+                    } else {
+                        throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+                    }
+                }
+            }
+            if (operation.lifecycleProtocolVersion() == 2) {
+                lifecycle.verifyOutputContents(operation);
+                lifecycle.verifyResources(operation);
             }
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
@@ -380,6 +454,46 @@ public class SessionLifecycleCoordinator {
     }
 
     /**
+     * #13753 I2: a worktree child's Workspace is discarded with it. The
+     * request is durable and runs once the child Session is closed, so the
+     * parent's close never waits for the discard to run; a refusal meaning
+     * the row already settled (merged, discarded, a merge already running)
+     * owes nothing. False only when the request itself is owed.
+     */
+    private boolean discardChildWorkspace(String tenantId, String sessionId,
+            String childRunId) {
+        if (childWorkspaces == null) {
+            return true;
+        }
+        try {
+            if (childWorkspaces.find(tenantId, sessionId, childRunId) == null) {
+                return true;
+            }
+            childWorkspaces.requestFinish(tenantId, sessionId, childRunId,
+                    com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD,
+                    clock.millis());
+            return true;
+        } catch (com.alibaba.qwen.code.managedagent.api.ApiException refused) {
+            if (java.util.Set.of("child_workspace_conflict",
+                    "child_workspace_finishing", "child_workspace_not_found")
+                    .contains(refused.getCode())) {
+                return true;
+            }
+            LOG.warn("Managed Session close cascade's child Workspace"
+                            + " discard faltered tenant={} session={}"
+                            + " childRun={} — debt owed; failure={}",
+                    tenantId, sessionId, childRunId, refused.getMessage());
+            return false;
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Session close cascade's child Workspace"
+                            + " discard faltered tenant={} session={}"
+                            + " childRun={} — debt owed; failure={}",
+                    tenantId, sessionId, childRunId, error.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * H4b close cascade (reference design §12): after the admission
      * barriers seal new work and before the Harness closes, every
      * non-terminal child run of the closing Session takes its durable stop
@@ -407,7 +521,7 @@ public class SessionLifecycleCoordinator {
                 .findLiveScopes(tenantId, sessionId)) {
             ScopeEvidence body;
             try {
-                String text = childScopes.readResource(tenantId,
+                String text = childScopes.readResource(tenantId, sessionId,
                         scope.recordResourceId());
                 if (text == null) {
                     body = new ScopeEvidence(null, null, null, null);
@@ -515,6 +629,11 @@ public class SessionLifecycleCoordinator {
                                 + " debt owed; failure={}", tenantId,
                         sessionId, scope.childRunId(), error.getMessage());
             }
+            boolean discardOwed = !discardChildWorkspace(tenantId, sessionId,
+                    scope.childRunId());
+            if (discardOwed) {
+                journalDebt = true;
+            }
             if (childSessionId != null) {
                 String status = childScopes.sessionStatus(tenantId,
                         childSessionId);
@@ -571,6 +690,11 @@ public class SessionLifecycleCoordinator {
                     journalDebt = true;
                     continue;
                 }
+            }
+            if (discardOwed) {
+                // The settled run would leave the live scopes the re-armed
+                // close walks, and its discard with them (#13753 I2).
+                continue;
             }
             Map<String, Object> closeScope = new LinkedHashMap<>();
             closeScope.put("operationId", UUID.randomUUID().toString());
@@ -663,7 +787,7 @@ public class SessionLifecycleCoordinator {
      * tests pin the tagging contract directly. */
     void runLifecycleChildOperation(OperationRecord parent,
             Map<String, Object> childBody) {
-        if (parent.lifecycleProtocolVersion() == 1) {
+        if (operationIsLifecycle(parent)) {
             childBody.put("authority", Map.of(
                     "operationId", parent.operationId(),
                     "claimGeneration", parent.claimGeneration(),

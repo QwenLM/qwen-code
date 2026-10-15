@@ -498,6 +498,8 @@ export interface UseQueuedPromptsResult {
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
+  /** Ask the daemon to deliver the queued mid-turn messages now. */
+  sendQueuedPromptNow: (id: number) => Promise<void>;
   editQueuedPrompt: (id: number) => Promise<void>;
   editLastQueuedPrompt: () => boolean;
   clearQueuedPrompts: () => boolean;
@@ -4612,12 +4614,47 @@ export function useQueuedPrompts({
     sessionActions,
   ]);
 
+  const sendingNowIdsRef = useRef(new Set<number>());
+  const sendQueuedPromptNow = useCallback(
+    async (id: number) => {
+      const target = queuedPromptsRef.current.find(
+        (prompt) => prompt.id === id,
+      );
+      // The daemon delivers every user message waiting in its queue, not
+      // only this row.
+      if (
+        target?.midTurnState !== 'queued' ||
+        !target.midTurnMessageId ||
+        sendingNowIdsRef.current.has(id)
+      ) {
+        return;
+      }
+      sendingNowIdsRef.current.add(id);
+      try {
+        const result = await sessionActions.sendMidTurnMessagesNow({
+          sessionId: target.sessionId,
+        });
+        // None of the user's messages was waiting, so this row has already
+        // left the daemon's queue: refresh it instead of leaving it queued.
+        if (!result.requested && canQueryMidTurn && target.sessionId) {
+          await reconcileMidTurnMessages(target.sessionId);
+        }
+      } catch (error) {
+        reportError(error, t('queue.sendNowFailed'));
+      } finally {
+        sendingNowIdsRef.current.delete(id);
+      }
+    },
+    [canQueryMidTurn, reconcileMidTurnMessages, reportError, sessionActions, t],
+  );
+
   return {
     queuedPrompts: visibleQueuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
