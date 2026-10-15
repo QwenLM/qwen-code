@@ -1,26 +1,37 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
-import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.aliyun.oss.OSSException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
@@ -28,17 +39,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import javax.sql.DataSource;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ConnectionCallback;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import com.aliyun.oss.OSSException;
+
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 /** O2b's publication catalog. Object I/O always runs outside SQL transactions. */
 public final class ToolPublicationDataStore {
@@ -1736,8 +1739,8 @@ public final class ToolPublicationDataStore {
 
     private static MessageDigest sha256() {
         try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.getSha256Digest();
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException(error);
         }
     }
@@ -1998,6 +2001,10 @@ public final class ToolPublicationDataStore {
         grants.lockStagedPlacement(key, publicationId);
     }
 
+    void lockPublicationPlacement(JsonNode key, String publicationId) {
+        grants.lockPublicationPlacement(key, publicationId);
+    }
+
     void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
         grants.lockOriginalSettledResult(key, publicationId, finished);
     }
@@ -2202,7 +2209,7 @@ public final class ToolPublicationDataStore {
         guard.run();
         objects.requireUnversioned();
         try (InputStream stream = retention.open(scope, publicationId, objectKey, objects, guard)) {
-            var hash = java.security.MessageDigest.getInstance("SHA-256");
+            var hash = DigestUtils.getSha256Digest();
             byte[] buffer = new byte[64 * 1024];
             long read = 0;
             for (int count; (count = stream.read(buffer)) != -1; ) {
@@ -2216,8 +2223,13 @@ public final class ToolPublicationDataStore {
             if (read != length || !HexFormat.of().formatHex(hash.digest()).equals(digest)) {
                 throw new CorruptObjectException("Publication object digest changed");
             }
-        } catch (IOException | java.security.NoSuchAlgorithmException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Publication object verification failed", error);
+        } catch (IllegalArgumentException error) {
+            if (error.getCause() instanceof NoSuchAlgorithmException cause) {
+                throw new IllegalStateException("Publication object verification failed", cause);
+            }
+            throw error;
         }
     }
 

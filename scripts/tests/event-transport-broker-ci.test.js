@@ -103,12 +103,14 @@ describe('EventTransport broker gates CI', () => {
     expect(String(java).split('\n')).toEqual(['17', '21']);
   });
 
-  it('triggers on the provisioning script on both events', () => {
-    for (const event of ['pull_request', 'push']) {
-      expect(workflow.on[event].paths).toContain(
-        'scripts/rocketmq-lite-broker.sh',
-      );
-    }
+  it('still runs the gate on its only live triggers', () => {
+    // Keep both daily coverage and the release caller after leaving PR CI.
+    expect(Object.keys(workflow.on).sort()).toEqual([
+      'schedule',
+      'workflow_call',
+      'workflow_dispatch',
+    ]);
+    expect(workflow.on.schedule).toContainEqual({ cron: expect.any(String) });
   });
 
   it('provisions every group the server and the gate subscribe in', () => {

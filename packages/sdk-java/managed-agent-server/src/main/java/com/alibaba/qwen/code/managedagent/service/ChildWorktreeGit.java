@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -80,7 +82,7 @@ public final class ChildWorktreeGit {
     }
 
     ChildWorktreeGit(String executable, Duration timeout, long maxOutputBytes) {
-        if (executable == null || executable.isBlank() || timeout == null
+        if (StringUtils.isBlank(executable) || timeout == null
                 || timeout.isNegative() || timeout.isZero() || maxOutputBytes <= 0) {
             throw new IllegalArgumentException("Child Workspace Git needs an executable and a timeout");
         }
@@ -346,9 +348,20 @@ public final class ChildWorktreeGit {
                             }
                             return FileVisitResult.CONTINUE;
                         }
+
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException error) throws IOException {
+                            // Git can remove an object entry after the directory iterator lists it.
+                            if ("objects".equals(name) && !file.equals(directory)
+                                    && error instanceof NoSuchFileException) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                            throw error;
+                        }
                     });
         } catch (IOException error) {
-            throw ChildWorkspaceException.layout("The repository's " + name + " directory is unreadable");
+            throw new ChildWorkspaceException(ChildWorkspaceException.LAYOUT, false,
+                    "The repository's " + name + " directory is unreadable", error);
         }
     }
 
@@ -1361,7 +1374,7 @@ public final class ChildWorktreeGit {
     private static String readBounded(Path file) throws IOException {
         try (InputStream in = Files.newInputStream(file)) {
             String text = new String(in.readNBytes(MAX_ERROR_CHARS * 4), StandardCharsets.UTF_8);
-            return text.length() > MAX_ERROR_CHARS ? text.substring(0, MAX_ERROR_CHARS) : text;
+            return StringUtils.truncate(text, MAX_ERROR_CHARS);
         }
     }
 
@@ -1372,7 +1385,7 @@ public final class ChildWorktreeGit {
 
     private static String summary(String text) {
         String line = text.strip().replace('\n', ' ');
-        return line.length() > MAX_ERROR_CHARS ? line.substring(0, MAX_ERROR_CHARS) : line;
+        return StringUtils.truncate(line, MAX_ERROR_CHARS);
     }
 
     private static String objectId(byte[] out) {

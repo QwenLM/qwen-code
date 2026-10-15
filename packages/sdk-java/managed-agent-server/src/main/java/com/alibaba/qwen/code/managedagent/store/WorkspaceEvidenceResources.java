@@ -1,11 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.util.Arrays;
+import java.util.List;
 
 final class WorkspaceEvidenceResources {
     private WorkspaceEvidenceResources() {
@@ -62,9 +61,9 @@ final class WorkspaceEvidenceResources {
 
     static String digest(byte[] bytes) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 unavailable", impossible);
+            return DigestUtils.sha256Hex(bytes);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalStateException("SHA-256 unavailable", error);
         }
     }
 }

@@ -48,6 +48,54 @@ class RuntimeBrokerServiceTest {
             "capability", "session");
 
     @Test
+    @SuppressWarnings("unchecked")
+    void refusesPrivateAuthorizedCancellationBeforeRepositoryOrTransportMutation() throws Exception {
+        var request = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", PROVIDER_SESSION);
+        // Isolate service ordering; this manually installed context is not SQL admission evidence.
+        try (Fixture fixture = new Fixture(request.getScope())) {
+            var binding = fixture.bindingRepository.findOrCreate(request);
+            binding = fixture.bindingRepository.claimOperation(binding.getBindingId(), "owner", Duration.ofMinutes(1));
+            var seed = binding.getProvisionSeed();
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            binding = fixture.bindingRepository.compareAndSet(binding, binding.withAttestation(lease,
+                    new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("fixture", true)), START, START));
+            var runtime = new RuntimeSession(PROVIDER_SESSION, PROVIDER_SESSION, "bootstrap", request.getScope());
+            var saved = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(runtime, binding.getBindingId(),
+                    binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, START));
+            fixture.sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, START));
+            var contextClass = Class.forName(RuntimeBrokerService.class.getName() + "$SessionContext");
+            var constructor = contextClass.getDeclaredConstructor(RuntimeSession.class, RuntimeBindingRecord.class, RuntimeLease.class);
+            constructor.setAccessible(true);
+            var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            ((Map<String, CompletableFuture<?>>) field.get(fixture.service)).put(PROVIDER_SESSION,
+                    CompletableFuture.completedFuture(constructor.newInstance(runtime, binding, lease)));
+            var candidate = ToolExecutionRecord.prepared("execution", "idempotency", binding.getBindingId(),
+                    binding.getGeneration(), PROVIDER_SESSION, PROVIDER_SESSION, "prompt", "call", "sha256:" + "b".repeat(64),
+                    Map.of("dispatchMode", "deferred", "sessionId", PROVIDER_SESSION, "promptId", "prompt",
+                            "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
+            fixture.executionRepository.findOrCreate(candidate);
+            var execution = fixture.executionRepository.claimDispatch("execution", "owner", Duration.ofMinutes(1));
+            execution = fixture.executionRepository.authorizeDispatch(execution, "owner", execution.getDispatchGeneration(), binding.getVersion());
+            assertEquals("csi_execution_cancel_unavailable", failure(fixture.service.cancelExecution(
+                    PROVIDER_SESSION, PROVIDER_SESSION, "execution")).getCode());
+            assertSame(execution, fixture.executionRepository.findByExecutionCallId("execution"));
+            assertFalse(execution.isCancelRequested());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+            var completed = fixture.executionRepository.compareAndSet(execution,
+                    execution.withResult(Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", "complete"))),
+                            0, START), "owner", execution.getDispatchGeneration());
+            assertEquals("success", completed.getExecutionStatus());
+            assertFalse(completed.isCancelRequested());
+            assertSame(completed, join(fixture.service.cancelExecution(PROVIDER_SESSION, PROVIDER_SESSION, "execution")));
+        }
+    }
+
+    @Test
     void cleanupBeforeAcquireTombstonesTheOriginalOwnerWithoutAcquiringALease() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeBindingRecord binding = join(fixture.service.warm("harness-a"));
@@ -1340,6 +1388,49 @@ class RuntimeBrokerServiceTest {
             wrong.put("manifest", Map.of("resourceId", "m"));
             assertEquals("runtime_execution_conflict", failure(fixture.service.acknowledgeExecution(
                     "harness", "runtime", prepared.getExecutionCallId(), wrong)).getCode());
+        }
+    }
+
+    @Test
+    void cancellationWhilePublicationInstallIsPendingBlocksLateBackgroundDispatch() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            CompletableFuture<Void> installed = new CompletableFuture<>();
+            fixture.transport.installPublicationResult = installed;
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            CompletableFuture<ToolExecutionRecord> starting = fixture.service.startExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), payload, "pub-1", "token")
+                    .toCompletableFuture();
+            assertFalse(starting.isDone());
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", "runtime", prepared.getExecutionCallId()));
+            assertTrue(cancelled.isCancelRequested());
+            assertEquals("not_started", cancelled.getExecutionStatus());
+
+            installed.complete(null);
+            assertEquals("not_started", join(starting).getExecutionStatus());
+            assertNull(fixture.executionRepository.findByExecutionCallId(
+                    prepared.getExecutionCallId() + ":process"));
+            assertEquals(0, fixture.transport.executeV3Calls.get());
         }
     }
 
@@ -6411,6 +6502,7 @@ class RuntimeBrokerServiceTest {
                 CompletableFuture.completedFuture(
                         Map.of("executionStatus", "success"));
         volatile CompletableFuture<Map<String, Object>> executeV3Result;
+        volatile CompletableFuture<Void> installPublicationResult;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
@@ -6477,6 +6569,9 @@ class RuntimeBrokerServiceTest {
         @Override
         public CompletionStage<Void> installPublication(RuntimeLease lease,
                 RuntimeSession session, RuntimePublicationGrant grant) {
+            if (installPublicationResult != null) {
+                return installPublicationResult;
+            }
             return executeV3Result == null ? RuntimeTransport.super.installPublication(lease, session, grant)
                     : CompletableFuture.completedFuture(null);
         }

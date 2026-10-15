@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.service.OwnerSubscriptions;
 import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.concurrent.ScheduledFuture;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -24,6 +23,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+
+import java.util.concurrent.ScheduledFuture;
 
 /**
  * Wires the broker EventTransport (design
