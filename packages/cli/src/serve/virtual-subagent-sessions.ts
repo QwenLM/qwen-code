@@ -5,10 +5,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { createReadStream } from 'node:fs';
 import readline from 'node:readline';
 import {
   getSubagentSessionDir,
+  isProcessRunning,
   parseLineTolerant,
   read as readJsonl,
   readAgentMeta,
@@ -814,7 +816,13 @@ export class VirtualSubagentSessions {
         id: meta.agentId,
         title: meta.description || meta.agentType,
         outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
-        status: meta.status ?? 'completed',
+        status:
+          meta.status === 'running' &&
+          meta.isBackgrounded === false &&
+          meta.workflowOwner?.hostname === hostname() &&
+          !isProcessRunning(meta.workflowOwner.pid)
+            ? 'failed'
+            : (meta.status ?? 'completed'),
         startTime: Number.isFinite(Date.parse(meta.createdAt))
           ? Date.parse(meta.createdAt)
           : Date.now(),

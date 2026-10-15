@@ -1020,9 +1020,14 @@ describe('VirtualSubagentSessions', () => {
   });
 });
 
-it.each([false, true])(
-  'resolves a workflow dispatch by persisted identity with unloaded parent=%s',
-  async (unloaded) => {
+it.each([
+  { unloaded: false, dead: false },
+  { unloaded: true, dead: false },
+  { unloaded: false, dead: true },
+  { unloaded: true, dead: true },
+])(
+  'resolves a workflow dispatch with owner state %j',
+  async ({ unloaded, dead }) => {
     const runtimeDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-workflow-detail-'),
     );
@@ -1052,6 +1057,10 @@ it.each([false, true])(
       createdAt: new Date(1_000).toISOString(),
       status: 'running',
       isBackgrounded: false,
+      workflowOwner: {
+        pid: dead ? 2147483647 : process.pid,
+        hostname: os.hostname(),
+      },
     };
     await fs.writeFile(metaPath, JSON.stringify(meta));
     const runtime = {
@@ -1076,8 +1085,34 @@ it.each([false, true])(
       },
     } as unknown as WorkspaceRuntime;
     const sessions = new VirtualSubagentSessions();
+    if (!dead) {
+      await fs.writeFile(
+        metaPath,
+        JSON.stringify({
+          ...meta,
+          workflowOwner: {
+            pid: 2147483647,
+            hostname: `${os.hostname()}-other-host`,
+          },
+        }),
+      );
+      expect(
+        await sessions.resolve(runtime, parentSessionId, agentId),
+      ).toMatchObject({ status: 'running' });
+      await fs.writeFile(
+        metaPath,
+        JSON.stringify({ ...meta, workflowOwner: undefined }),
+      );
+      expect(
+        await sessions.resolve(runtime, parentSessionId, agentId),
+      ).toMatchObject({ status: 'running' });
+      await fs.writeFile(metaPath, JSON.stringify(meta));
+    }
     const running = await sessions.resolve(runtime, parentSessionId, agentId);
-    expect(running).toMatchObject({ taskId: agentId, status: 'running' });
+    expect(running).toMatchObject({
+      taskId: agentId,
+      status: dead ? 'failed' : 'running',
+    });
     expect(parseVirtualSubagentSessionId(running!.sessionId)).toEqual({
       parentSessionId,
       agentId,
@@ -1087,6 +1122,43 @@ it.each([false, true])(
     ).toBeUndefined();
     const loaded = await sessions.load(runtime, running!.sessionId);
     expect(JSON.stringify(loaded)).toContain('Inspect workflow activity');
+    expect(loaded?.hasActivePrompt).toBe(!dead);
+    const intervals = vi.spyOn(globalThis, 'setInterval');
+    const cleared = vi.spyOn(globalThis, 'clearInterval');
+    const abort = new AbortController();
+    const stream = await sessions.subscribe(runtime, running!.sessionId, {
+      signal: abort.signal,
+      lastEventId: 0,
+    });
+    const iterator = stream![Symbol.asyncIterator]();
+    try {
+      await iterator.next();
+      expect(
+        intervals.mock.calls.filter((call) => call[1] === 250),
+      ).toHaveLength(dead ? 0 : 1);
+      if (!dead) {
+        await fs.writeFile(
+          metaPath,
+          JSON.stringify({
+            ...meta,
+            workflowOwner: { ...meta.workflowOwner, pid: 2147483647 },
+          }),
+        );
+        expect(
+          await sessions.resolve(runtime, parentSessionId, agentId),
+        ).toMatchObject({ status: 'failed' });
+        expect(cleared).toHaveBeenCalled();
+        expect(
+          (await sessions.load(runtime, running!.sessionId))?.hasActivePrompt,
+        ).toBe(false);
+      }
+    } finally {
+      abort.abort();
+      await iterator.return?.();
+      intervals.mockRestore();
+      cleared.mockRestore();
+    }
+
     await fs.writeFile(
       metaPath,
       JSON.stringify({

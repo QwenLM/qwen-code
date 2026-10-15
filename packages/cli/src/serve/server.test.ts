@@ -33057,9 +33057,18 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
-    it.each(['trusted', 'untrusted', 'ambiguous', 'missing'] as const)(
-      'routes historical workflow detail only to its persisted %s owner',
-      async (ownership) => {
+    it.each([
+      ['trusted', 'active'],
+      ['untrusted', 'active'],
+      ['ambiguous', 'active'],
+      ['missing', 'active'],
+      ['missing', 'transitioning'],
+      ['missing', 'blocked'],
+      ['trusted', 'transitioning'],
+      ['trusted', 'blocked'],
+    ] as const)(
+      'routes historical workflow detail only to its persisted %s owner with primary %s',
+      async (ownership, primaryState) => {
         const parentId = '55555555-bbbb-cccc-dddd-123456789abc';
         const agentId = 'workflow-agent-history';
         const virtualId = createVirtualSubagentSessionId(parentId, agentId);
@@ -33132,11 +33141,18 @@ describe('createServeApp', () => {
           undefined,
           { workspaceRegistry: registry },
         );
+        if (primaryState !== 'active') {
+          registry.beginReplacement(registry.primaryEntry, 'next');
+          if (primaryState === 'blocked')
+            registry.blockReplacement(registry.primaryEntry, 'build failed');
+        }
         const expected =
           ownership === 'trusted'
             ? 200
             : ownership === 'missing'
-              ? 404
+              ? primaryState === 'active'
+                ? 404
+                : 503
               : ownership === 'untrusted'
                 ? 403
                 : 500;
@@ -33144,6 +33160,10 @@ describe('createServeApp', () => {
           .get(`/session/${parentId}/subagents/${agentId}`)
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(resolved.status).toBe(expected);
+        if (expected === 503) {
+          expect(resolved.body.code).toBe('workspace_runtime_unavailable');
+          expect(resolved.headers['retry-after']).toBe('1');
+        }
         const loaded = await request(app)
           .post(`/session/${virtualId}/load`)
           .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -33166,6 +33186,10 @@ describe('createServeApp', () => {
             .get(`/session/${virtualId}/events`)
             .set('Host', `127.0.0.1:${baseOpts.port}`);
           expect(events.status).toBe(expected);
+          if (expected === 503) {
+            expect(events.body.code).toBe('workspace_runtime_unavailable');
+            expect(events.headers['retry-after']).toBe('1');
+          }
           if (ownership === 'trusted') {
             expect(events.text).toContain('secondary');
             expect(subscribe.mock.calls[0]?.[0].workspaceCwd).toBe(secondaryWs);

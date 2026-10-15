@@ -2364,7 +2364,27 @@ export function registerSessionRoutes(
         daemonLog,
       });
     }
-    return resolveTranscriptSessionRuntime(res, route, parentSessionId, false);
+    try {
+      return await resolveTranscriptSessionRuntime(
+        res,
+        route,
+        parentSessionId,
+        false,
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found' &&
+        (workspaceRegistry.primaryEntry.state !== 'active' ||
+          !workspaceRegistry.primaryEntry.current)
+      ) {
+        logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
+          sessionId: parentSessionId,
+        });
+        return requirePrimarySessionRuntime(workspaceRegistry, res);
+      }
+      throw error;
+    }
   };
 
   const resolveSessionAnyStateRuntime = async (

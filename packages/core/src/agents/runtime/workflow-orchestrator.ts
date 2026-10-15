@@ -795,6 +795,7 @@ function attachDispatchTranscript(
       lastUpdatedAt: now,
       status: 'running',
       isBackgrounded: false,
+      workflowOwner: { pid: process.pid, hostname: os.hostname() },
     };
     writeAgentMeta(metaPath, meta);
     return (status) => {

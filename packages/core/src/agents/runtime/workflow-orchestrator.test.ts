@@ -5252,6 +5252,7 @@ describe('createProductionDispatch — subagent transcripts', () => {
         parentSessionId: 'sess-1',
         status: 'running',
         isBackgrounded: false,
+        workflowOwner: { pid: process.pid, hostname: os.hostname() },
         description: 'Inspect the workflow',
       });
     };
