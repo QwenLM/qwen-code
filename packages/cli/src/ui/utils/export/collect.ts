@@ -282,10 +282,10 @@ function calculateTokenStats(records: ChatRecord[]): {
       }
       // Context usage is the prompt size, as in the footer and on resume. The
       // total also counts this turn's output, which is not in the context yet.
-      // The recorder stores a prompt size the provider left out as 0, so this
-      // falls back on any falsy value and lets no zero reading displace a real
-      // one. Resume keeps a recorded 0 instead; export prefers the last real
-      // reading because it reports a single number for the whole session.
+      // The recorder stores a prompt size the provider left out as 0, so a
+      // zero falls back to this turn's total. Resume uses `??` and skips such
+      // a reply, keeping the reading before it; export still counts the reply
+      // through its total. Neither lets a zero displace a real reading.
       const contextTokenCount =
         record.usageMetadata?.promptTokenCount ||
         record.usageMetadata?.totalTokenCount;
