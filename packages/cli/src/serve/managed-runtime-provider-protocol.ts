@@ -190,11 +190,30 @@ function oneOf(value: unknown, values: readonly string[]): boolean {
   return typeof value === 'string' && values.includes(value);
 }
 
+function checkWellFormedStrings(value: unknown): void {
+  if (typeof value === 'string') {
+    // The Broker's JSON writer replaces unpaired surrogates with '?'.
+    if (/[\ud800-\udfff]/u.test(value))
+      throw new ManagedRuntimeProviderProtocolError();
+  } else if (Array.isArray(value)) {
+    value.forEach(checkWellFormedStrings);
+  } else if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      checkWellFormedStrings(key);
+      checkWellFormedStrings(item);
+    }
+  }
+}
+
 function checkSession(
   identity: ManagedToolCallIdentity,
   session: ManagedRuntimeProviderSession,
+  rawIdentity: unknown,
 ): void {
-  if (identity.sessionId !== session.runtimeSessionId)
+  if (
+    identity.sessionId !== session.runtimeSessionId ||
+    object(rawIdentity)['sessionId'] !== identity.sessionId
+  )
     throw new ManagedRuntimeProviderProtocolError(
       'Managed Runtime provider Session identity conflicts.',
       409,
@@ -217,8 +236,10 @@ export function parseManagedRuntimeProviderOperation(
   const kind = id(op['kind']);
   // The composed request parser bounds the whole envelope per kind, which
   // strictly implies this bound; only standalone callers need it re-run.
-  if (!boundedByCaller)
+  if (!boundedByCaller) {
     managedToolDigest(value, managedRuntimeProviderLimit(kind));
+    checkWellFormedStrings(value);
+  }
   switch (kind) {
     case 'raw-file-history': {
       const action = op['action'];
@@ -255,7 +276,11 @@ export function parseManagedRuntimeProviderOperation(
           : ['kind', 'identity'],
         kind === 'prepare' ? ['modification', 'mediaContext'] : [],
       );
-      checkSession(parseManagedToolCallIdentity(op['identity']), session);
+      checkSession(
+        parseManagedToolCallIdentity(op['identity']),
+        session,
+        op['identity'],
+      );
       if (kind === 'prepare') {
         id(op['toolName']);
         object(op['input']);
@@ -263,6 +288,7 @@ export function parseManagedRuntimeProviderOperation(
           checkSession(
             parseManagedToolContentModification(op['modification']).source,
             session,
+            object(op['modification'])['source'],
           );
         if ('mediaContext' in op)
           parseManagedToolMediaContext(op['mediaContext']);
@@ -289,6 +315,7 @@ export function parseManagedRuntimeProviderOperation(
       checkSession(
         parseManagedToolInvocationReference(op['reference']),
         session,
+        op['reference'],
       );
       if (kind === 'confirm') {
         if (
@@ -369,6 +396,7 @@ export function parseManagedRuntimeProviderRequest(
     ),
   };
   managedToolDigest(value, managedRuntimeProviderLimit(parsed.operation.kind));
+  checkWellFormedStrings(parsed.operation);
   return parsed;
 }
 
@@ -482,7 +510,11 @@ export function parseManagedRuntimeProviderResult(
           'argsDigest',
         ].map((key) => [key, result[key]]),
       );
-      checkSession(parseManagedToolInvocationReference(reference), session);
+      checkSession(
+        parseManagedToolInvocationReference(reference),
+        session,
+        reference,
+      );
       for (const [key, expected] of Object.entries(operation.identity))
         if (result[key] !== expected)
           throw new ManagedRuntimeProviderProtocolError();

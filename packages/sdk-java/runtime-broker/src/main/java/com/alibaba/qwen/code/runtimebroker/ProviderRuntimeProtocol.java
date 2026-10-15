@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.util.Map;
 import java.util.List;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -16,11 +17,8 @@ final class ProviderRuntimeProtocol {
     private static final Set<String> REFERENCE_FIELDS = Set.of("sessionId",
             "promptId", "callId", "capabilityDigest", "policyRevision",
             "invocationId", "argsDigest");
-    // Mirrors SESSION_ID_PATTERN / DIGEST_PATTERN in core's
-    // managed-tool-protocol.ts; the case-insensitive flag is load-bearing.
     private static final Pattern SESSION_ID = Pattern.compile(
-            "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-            Pattern.CASE_INSENSITIVE);
+            "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}");
     private static final Pattern DIGEST = Pattern.compile("[a-f0-9]{64}");
     private static final Set<String> CONFIRM_OUTCOMES = Set.of("proceed_once",
             "proceed_once_and_switch_to_default", "proceed_always", "proceed_always_tool",
@@ -60,22 +58,25 @@ final class ProviderRuntimeProtocol {
                 switch (action) {
                     case "bind" -> {
                         required = Set.of("kind", "action", "state");
-                        if (operation.get("state") != null
-                                && !harnessSessionId.equals(object(operation.get("state")).get("ownerSessionId"))) {
-                            throw invalid();
+                        if (operation.get("state") != null) {
+                            Map<String, Object> state = object(operation.get("state"));
+                            if (!harnessSessionId.equals(state.get("ownerSessionId"))) {
+                                throw invalid();
+                            }
+                            snapshotPromptIds(state.get("snapshots"));
                         }
                     }
                     case "prepare" -> {
                         required = Set.of("kind", "action", "promptId", "paths");
-                        if (string(operation, "promptId").length() > 128
-                                || !(operation.get("paths") instanceof List<?> paths)
+                        promptId(operation);
+                        if (!(operation.get("paths") instanceof List<?> paths)
                                 || paths.isEmpty() || paths.stream().anyMatch(value -> !(value instanceof String))) {
                             throw invalid();
                         }
                     }
                     case "rewind" -> {
                         required = Set.of("kind", "action", "promptId");
-                        string(operation, "promptId");
+                        promptId(operation);
                     }
                     case "snapshot" -> required = Set.of("kind", "action");
                     default -> throw invalid();
@@ -109,14 +110,14 @@ final class ProviderRuntimeProtocol {
                 if (!sessionId.equals(string(binding, "ownerRuntimeSessionId"))
                         || !harnessSessionId.equals(string(binding, "ownerSessionId"))
                         || !BINDING_FIELDS.containsAll(binding.keySet())
-                        || !(binding.get("executionCwd") instanceof String)
-                        || !(binding.get("snapshots") instanceof List)) {
+                        || !(binding.get("executionCwd") instanceof String)) {
                     throw invalid();
                 }
+                snapshotPromptIds(binding.get("snapshots"));
             }
             case "checkpoint" -> {
                 required = Set.of("kind", "promptId");
-                string(operation, "promptId");
+                promptId(operation);
             }
             default -> throw invalid();
         }
@@ -192,12 +193,11 @@ final class ProviderRuntimeProtocol {
             string(identity, field);
         }
         String identitySession = string(identity, "sessionId");
-        String promptId = string(identity, "promptId");
+        promptId(identity);
         String policyRevision = string(identity, "policyRevision");
         String capabilityDigest = string(identity, "capabilityDigest");
         if (!sessionId.equals(identitySession)
                 || !SESSION_ID.matcher(identitySession).matches()
-                || promptId.length() > 128
                 || policyRevision.length() > 256
                 || !DIGEST.matcher(capabilityDigest).matches()) {
             throw invalid();
@@ -206,6 +206,26 @@ final class ProviderRuntimeProtocol {
             String invocationId = string(identity, "invocationId");
             String argsDigest = string(identity, "argsDigest");
             if (invocationId.length() > 128 || !DIGEST.matcher(argsDigest).matches()) {
+                throw invalid();
+            }
+        }
+    }
+
+    private static String promptId(Map<String, Object> value) {
+        String promptId = string(value, "promptId");
+        if (promptId.length() > 128) {
+            throw invalid();
+        }
+        return promptId;
+    }
+
+    private static void snapshotPromptIds(Object value) {
+        if (!(value instanceof List<?> snapshots) || snapshots.size() > 100) {
+            throw invalid();
+        }
+        Set<String> prompts = new HashSet<>();
+        for (Object snapshot : snapshots) {
+            if (!prompts.add(promptId(object(snapshot)))) {
                 throw invalid();
             }
         }
