@@ -9,6 +9,8 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { PassThrough } from 'node:stream';
+import archiver from 'archiver';
 import * as tar from 'tar';
 import {
   acquireLock,
@@ -41,6 +43,19 @@ vi.mock('node:fs', async (importOriginal) => {
         throw new Error('EBUSY: resource busy or locked');
       }
       return actual.rmSync(...args);
+    },
+  };
+});
+
+// Records every spawned command; each call still delegates to the real spawn.
+const spawnedCommands = vi.hoisted(() => [] as string[]);
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      spawnedCommands.push(args[0]);
+      return actual.spawn(...args);
     },
   };
 });
@@ -744,6 +759,104 @@ describe('standalone-update', () => {
         expect(fs.existsSync(parent)).toBe(false);
       },
     );
+  });
+
+  describe('Windows zip extraction', () => {
+    const filename = 'qwen-code-win-x64.zip';
+    const releaseManifest = JSON.stringify({
+      target: 'win-x64',
+      version: '1.2.3',
+    });
+    let standaloneDir: string;
+
+    beforeEach(() => {
+      spawnedCommands.length = 0;
+      vi.stubEnv(
+        'QWEN_UPDATE_BASE_URL',
+        'https://downloads.example.com/qwen-code',
+      );
+      standaloneDir = path.join(tempDir, 'installed');
+      fs.mkdirSync(standaloneDir);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({ target: 'win-x64', version: '0.1.0' }),
+      );
+    });
+
+    async function zip(files: Record<string, string>): Promise<Buffer> {
+      const output = new PassThrough();
+      const chunks: Buffer[] = [];
+      output.on('data', (chunk: Buffer) => chunks.push(chunk));
+      const archive = archiver('zip');
+      archive.pipe(output);
+      for (const [name, content] of Object.entries(files)) {
+        archive.append(content, { name });
+      }
+      const complete = new Promise<void>((resolve, reject) => {
+        output.on('end', resolve);
+        output.on('error', reject);
+        archive.on('error', reject);
+      });
+      await archive.finalize();
+      await complete;
+      return Buffer.concat(chunks);
+    }
+
+    function serveZip(archive: Buffer) {
+      const checksum = createHash('sha256').update(archive).digest('hex');
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.endsWith(`/${filename}`)) {
+          return new Response(new Uint8Array(archive));
+        }
+        if (url.endsWith('/SHA256SUMS')) {
+          return new Response(`${checksum}  ${filename}\n`);
+        }
+        return new Response('', { status: 404 });
+      });
+    }
+
+    it('extracts the release zip without spawning PowerShell', async () => {
+      serveZip(
+        await zip({
+          // Release zips (`zip -qr`) carry explicit directory entries; archiver
+          // writes a name ending in '/' as one, at mode 0o40755.
+          'qwen-code/': '',
+          'qwen-code/manifest.json': releaseManifest,
+          'qwen-code/node/node.exe': '',
+        }),
+      );
+
+      // Reaching the cli.js check proves manifest.json and node/node.exe were
+      // extracted; the archive has no lib/cli.js, so nothing is executed.
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow('Smoke test failed: cli.js not found');
+      expect(spawnedCommands).not.toContain('powershell.exe');
+    });
+
+    it('rejects a zip entry that escapes the extraction directory', async () => {
+      const archive = await zip({
+        'qwen-code/manifest.json': releaseManifest,
+        'xx/evil': 'escaped',
+      });
+      // archiver strips a leading "../" from entry names, so write the
+      // traversal name over a placeholder of the same length.
+      serveZip(
+        Buffer.from(
+          archive.toString('latin1').replaceAll('xx/evil', '../evil'),
+          'latin1',
+        ),
+      );
+
+      // yauzl rejects the '../evil' name before extractZipArchive's own bound
+      // check runs, so the message does not show which layer caught it. The
+      // existsSync check is the end-to-end witness that nothing escaped.
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow('../evil');
+      expect(fs.existsSync(path.join(tempDir, 'evil'))).toBe(false);
+      expect(spawnedCommands).not.toContain('powershell.exe');
+    });
   });
 
   describe('isSafeTarEntryPath', () => {
