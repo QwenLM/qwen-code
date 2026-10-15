@@ -278,6 +278,72 @@ describe('parseAndFormatApiError', () => {
       },
     );
 
+    it('reads x-request-id off a nested response.headers record', () => {
+      // Gaxios-shaped Gemini/Vertex failures nest the header record under
+      // `error.response.headers` instead of stamping it on the error itself.
+      const error = Object.assign(new Error(BODYLESS), {
+        status: 400,
+        response: { headers: { 'x-request-id': REQUEST_ID } },
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it.each(['requestID', 'request_id', 'response_id'])(
+      'reads the provider id off the %s spelling',
+      (key) => {
+        const error = Object.assign(new Error(BODYLESS), {
+          status: 400,
+          [key]: REQUEST_ID,
+        });
+
+        expect(parseAndFormatApiError(error)).toBe(
+          `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+        );
+      },
+    );
+
+    it('prefers an explicit .requestId over the other spellings', () => {
+      const error = Object.assign(new Error(BODYLESS), {
+        status: 400,
+        requestId: REQUEST_ID,
+        request_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('walks error.cause to recover an id from a wrapped gateway error', () => {
+      const error = new Error(BODYLESS, {
+        cause: Object.assign(new Error('inner'), {
+          headers: { 'x-request-id': REQUEST_ID },
+        }),
+      });
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (cause: inner) (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
+    it('recovers a request id from a JSON payload embedded in the message', () => {
+      // The rate-limit diagnostics already parse a provider id out of a JSON
+      // body in the message; the user-facing line should see the same id.
+      const error = Object.assign(
+        new Error(
+          `stream failed: {"error":{"message":"bad"},"requestId":"${REQUEST_ID}"}`,
+        ),
+        { status: 400 },
+      );
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: stream failed: {"error":{"message":"bad"},"requestId":"${REQUEST_ID}"} (request_id: ${REQUEST_ID})]`,
+      );
+    });
+
     it('omits the suffix when no request id is available', () => {
       const error: StructuredError = { message: BODYLESS, status: 400 };
 
@@ -285,6 +351,57 @@ describe('parseAndFormatApiError', () => {
       expect(parseAndFormatApiError(new Error(BODYLESS))).toBe(
         `[API Error: ${BODYLESS}]`,
       );
+    });
+
+    it.each(['', '   '])(
+      'treats a blank request id as absent (%j)',
+      (requestId) => {
+        // The openai SDK stamps requestID from headers.get('x-request-id'),
+        // which is '' for a present-but-empty header; that must not render
+        // an empty "(request_id: )" suffix.
+        const error: StructuredError = {
+          message: BODYLESS,
+          status: 400,
+          requestId,
+        };
+
+        expect(parseAndFormatApiError(error)).toBe(`[API Error: ${BODYLESS}]`);
+      },
+    );
+
+    it('drops a request id carrying control or escape characters', () => {
+      // A hostile gateway could answer a bodyless 400 with a request_id full
+      // of ANSI/OSC sequences; the id goes verbatim onto a terminal-bound
+      // line, so anything outside the token allowlist is dropped, not
+      // sanitized.
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: '\u001b[2J\u001b[H\u001b]0;pwned\u0007x',
+      };
+
+      const result = parseAndFormatApiError(error);
+
+      expect(result).toBe(`[API Error: ${BODYLESS}]`);
+      expect(result).not.toContain('\u001b');
+      expect(result).not.toContain('\u0007');
+    });
+
+    it('drops an escape-laden id even when the message embeds its JSON-escaped form', () => {
+      // ResponsesHttpError shape: JSON.parse turned `\u001b` into a real ESC
+      // in .requestId, while JSON.stringify re-escaped it inside the message,
+      // so the dedup guard can never match — the allowlist is what keeps the
+      // raw bytes off the line.
+      const error = Object.assign(
+        new Error(
+          `Responses API error 400: ${JSON.stringify({ request_id: '\u001b[2J' })}`,
+        ),
+        { status: 400, requestId: '\u001b[2J' },
+      );
+
+      const result = parseAndFormatApiError(error);
+
+      expect(result).not.toContain('\u001b');
     });
 
     it('keeps the 429 quota guidance after the request id', () => {
@@ -339,17 +456,34 @@ describe('parseAndFormatApiError', () => {
       expect(result).toBe(`[API Error: ${message}]`);
     });
 
-    it('bounds an over-long provider-supplied request id', () => {
+    it('still appends the suffix when the message merely contains the id as a substring', () => {
+      // "400" is a substring of the bodyless-400 message itself; a bare
+      // includes() dedup guard would read that as "already embedded" and
+      // silently drop the one thing this formatter exists to add.
       const error: StructuredError = {
         message: BODYLESS,
         status: 400,
-        requestId: 'a'.repeat(5000),
+        requestId: '400',
       };
 
-      const result = parseAndFormatApiError(error);
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: 400)]`,
+      );
+    });
 
-      expect(result).toContain('(request_id: ');
-      expect(result.length).toBeLessThan(200);
+    it('bounds an over-long provider-supplied request id', () => {
+      // Positionally distinct input so the assertion pins HOW the id is
+      // bounded (first 128 chars), not merely THAT something bounded it.
+      const long = 'ABCDEFGHIJ'.repeat(50); // 500 chars
+      const error: StructuredError = {
+        message: BODYLESS,
+        status: 400,
+        requestId: long,
+      };
+
+      expect(parseAndFormatApiError(error)).toBe(
+        `[API Error: ${BODYLESS} (request_id: ${long.substring(0, 128)})]`,
+      );
     });
   });
 });
