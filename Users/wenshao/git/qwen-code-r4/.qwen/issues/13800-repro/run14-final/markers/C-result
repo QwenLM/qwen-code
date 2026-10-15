@@ -1,9 +1,0 @@
-{
-  "postSettled": true,
-  "freshUnwedgedAfterClear": true,
-  "freshFinalStatus": {
-    "sessionId": "504ccd7a-6539-453d-b1ac-9a93ebdb1e56",
-    "hasActivePrompt": false,
-    "recoveryBlocked": false
-  }
-}
