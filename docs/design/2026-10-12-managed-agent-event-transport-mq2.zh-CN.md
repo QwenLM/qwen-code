@@ -77,7 +77,7 @@ MQ2c 不包含:真实 broker 故障行(MQ2d)、接收侧对 journal 事实的 di
 ## 范围边界
 
 - 任何交付配置都不默认启用;flag 在所有交付配置中关闭。
-- 不含多节点故障矩阵(那是 MQ3)。
+- 不含多节点故障矩阵(那是 MQ3:[2026-10-14-managed-agent-event-transport-mq3](2026-10-14-managed-agent-event-transport-mq3.zh-CN.md))。
 - 不改提交路径的事务形态;发布点仅 after-commit,且发布失败永不阻塞本地 post-commit SSE(#12380 约束)。
 - 不重新标称:不主张 MQ1 hub seam 覆盖 journal 线。
 

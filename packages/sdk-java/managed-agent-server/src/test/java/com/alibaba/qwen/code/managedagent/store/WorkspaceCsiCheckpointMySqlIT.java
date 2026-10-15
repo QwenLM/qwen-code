@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
+
+import javax.sql.DataSource;
 
 class WorkspaceCsiCheckpointMySqlIT extends WorkspaceCsiCheckpointSnapshotStoreTest {
     private IsolatedManagedSchemaMySqlTestDatabase database;
