@@ -11,6 +11,7 @@ import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { IdeContextStore } from '../ide/ideContext.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type { NativeLspServiceOptions } from './types.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -86,6 +87,209 @@ class MockIdeContextStore {
   // 模拟 IDE 上下文存储
 }
 
+const TS = 'typescript-language-server';
+const PY = 'pyright-langserver';
+const TS_TEXT = 'const value = 1;\n';
+const CPP_TEXT = 'int main(){return 0;}\n';
+const JAVA_TEXT = 'public class Main { }\n';
+
+type Fn = ReturnType<typeof vi.fn>;
+type Reconcile = Record<
+  'added' | 'removed' | 'restarted' | 'unchanged' | 'failed',
+  string[]
+>;
+type Internals = {
+  serverManager: unknown;
+  openedDocuments: Map<string, Map<string, { text: string; version: number }>>;
+  lastConnections: Map<string, unknown>;
+  replayUris: Map<string, Set<string>>;
+};
+
+const internalsOf = (service: NativeLspService) =>
+  service as unknown as Internals;
+const reconcile = (result: Partial<Reconcile> = {}): Reconcile => ({
+  added: [],
+  removed: [],
+  restarted: [],
+  unchanged: [],
+  failed: [],
+  ...result,
+});
+const openOld = (internals: Internals, server: string, uri: string) =>
+  internals.openedDocuments.set(
+    server,
+    new Map([[uri, { text: 'old', version: 1 }]]),
+  );
+const zeroRange = () => ({
+  start: { line: 0, character: 0 },
+  end: { line: 0, character: 0 },
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+async function inTempDir(
+  prefix: string,
+  fn: (dir: string) => Promise<void>,
+  fakeTimers = false,
+) {
+  if (fakeTimers) vi.useFakeTimers();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  try {
+    await fn(dir);
+  } finally {
+    if (fakeTimers) vi.useRealTimers();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+const inTempDirWithFakeTimers = (
+  prefix: string,
+  fn: (dir: string) => Promise<void>,
+) => inTempDir(prefix, fn, true);
+
+/** Runs pending fake timers, then settles the already-started operation. */
+async function settle<T>(promise: Promise<T>): Promise<T> {
+  await vi.runAllTimersAsync();
+  return promise;
+}
+
+const hover = (service: NativeLspService, uri: string) =>
+  settle(service.hover({ uri, range: zeroRange() }));
+
+function writeLspJson(
+  dir: string,
+  config: unknown = { typescript: { command: TS } },
+) {
+  fs.writeFileSync(
+    path.join(dir, '.lsp.json'),
+    typeof config === 'string' ? config : JSON.stringify(config),
+  );
+}
+
+function writeDoc(dir: string, name: string, text: string) {
+  const filePath = path.join(dir, name);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, text, 'utf-8');
+  return pathToFileURL(filePath).toString();
+}
+
+function configAt(rootPath?: string, trusted = true) {
+  const config = new MockConfig();
+  if (rootPath !== undefined) config.rootPath = rootPath;
+  if (!trusted) vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+  return config;
+}
+
+const makeConnection = (
+  overrides: Partial<Record<'send' | 'request', Fn>> = {},
+) => ({
+  listen: vi.fn(),
+  send: vi.fn() as Fn,
+  onNotification: vi.fn(),
+  onRequest: vi.fn(),
+  request: vi.fn(async () => null) as Fn,
+  initialize: vi.fn(async () => ({})),
+  shutdown: vi.fn(async () => {}),
+  end: vi.fn(),
+  ...overrides,
+});
+type Connection = ReturnType<typeof makeConnection>;
+
+const makeHandle = (
+  connection: Connection,
+  name = 'clangd',
+  languages = ['cpp'],
+  command = name,
+  args: string[] = [],
+) => ({
+  config: { name, languages, command, args, transport: 'stdio' },
+  status: 'READY',
+  textDocumentSync: 1,
+  connection,
+});
+
+/** Server manager for query tests; `isTypescriptServer` is omitted unless given. */
+const managerFor = (
+  key: string,
+  handle: unknown,
+  isTypescriptServer?: boolean,
+  warmupTypescriptServer: Fn = vi.fn(),
+) => ({
+  getHandles: () => new Map([[key, handle]]),
+  warmupTypescriptServer,
+  ...(isTypescriptServer === undefined
+    ? {}
+    : { isTypescriptServer: () => isTypescriptServer }),
+});
+
+/** A service rooted at `dir` with its own workspace, emitter and discovery. */
+function workspaceService(dir: string, serverManager: unknown) {
+  const workspace = new MockWorkspaceContext();
+  workspace.rootPath = dir;
+  const service = new NativeLspService(
+    configAt(dir) as unknown as CoreConfig,
+    workspace as unknown as WorkspaceContext,
+    new EventEmitter(),
+    new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+    new MockIdeContextStore() as unknown as IdeContextStore,
+    { workspaceRoot: dir },
+  );
+  internalsOf(service).serverManager = serverManager;
+  return service;
+}
+
+function expectDidOpen(
+  connection: Connection,
+  uri: string,
+  languageId: string,
+  text?: string,
+) {
+  expect(connection.send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      method: 'textDocument/didOpen',
+      params: {
+        textDocument: expect.objectContaining({
+          uri,
+          languageId,
+          ...(text === undefined ? {} : { text }),
+        }),
+      },
+    }),
+  );
+}
+
+/** Connection logging `send:<method>` / `request:<method>` into `events`. */
+const loggingConnection = (
+  events: string[],
+  answer: (method: string) => unknown = () => null,
+) =>
+  makeConnection({
+    send: vi.fn((message: { method?: string }) => {
+      events.push(`send:${message.method ?? 'unknown'}`);
+    }),
+    request: vi.fn(async (method: string) => {
+      events.push(`request:${method}`);
+      return answer(method);
+    }),
+  });
+
+const calculatorSymbol = (uri: string) => ({
+  name: 'Calculator',
+  kind: 5,
+  location: {
+    uri,
+    range: {
+      start: { line: 0, character: 0 },
+      end: { line: 0, character: 10 },
+    },
+  },
+});
+
 describe('NativeLspService', () => {
   let lspService: NativeLspService;
   let mockConfig: MockConfig;
@@ -94,6 +298,69 @@ describe('NativeLspService', () => {
   let mockIdeStore: MockIdeContextStore;
   let eventEmitter: EventEmitter;
 
+  const newService = (
+    config: MockConfig = mockConfig,
+    options?: NativeLspServiceOptions,
+  ) =>
+    new NativeLspService(
+      config as unknown as CoreConfig,
+      mockWorkspace as unknown as WorkspaceContext,
+      eventEmitter,
+      mockFileDiscovery as unknown as FileDiscoveryService,
+      mockIdeStore as unknown as IdeContextStore,
+      options,
+    );
+
+  /** Service rooted at `dir` whose server manager is `{ reconcileServerConfigs, ...extra }`. */
+  function reconcilingService(
+    dir: string,
+    reconcileServerConfigs: unknown,
+    extra: object = {},
+  ) {
+    const service = newService(configAt(dir), { workspaceRoot: dir });
+    internalsOf(service).serverManager = { reconcileServerConfigs, ...extra };
+    return service;
+  }
+
+  /** One ready TypeScript server plus a TS file on disk, for replay tests. */
+  function setupTsReplay(
+    dir: string,
+    file = 'main.ts',
+    reconcileServerConfigs: unknown = vi.fn(async () =>
+      reconcile({ restarted: [TS] }),
+    ),
+    extra: object = {},
+  ) {
+    const uri = writeDoc(dir, file, TS_TEXT);
+    writeLspJson(dir);
+    const connection = makeConnection();
+    const handle = makeHandle(connection, TS, ['typescript']);
+    const service = reconcilingService(dir, reconcileServerConfigs, {
+      getHandles: () => new Map([[TS, handle]]),
+      ...extra,
+    });
+    return { service, connection, uri, internals: internalsOf(service) };
+  }
+
+  function untrustedService(dir: string) {
+    writeLspJson(dir, {
+      trusted: {
+        command: 'trusted-language-server',
+        languages: ['typescript'],
+        trustRequired: true,
+      },
+      untrusted: {
+        command: 'untrusted-language-server',
+        languages: ['javascript'],
+        trustRequired: false,
+      },
+    });
+    return newService(configAt(dir, false), {
+      requireTrustedWorkspace: false,
+      workspaceRoot: dir,
+    });
+  }
+
   beforeEach(() => {
     mockConfig = new MockConfig();
     mockWorkspace = new MockWorkspaceContext();
@@ -101,13 +368,7 @@ describe('NativeLspService', () => {
     mockIdeStore = new MockIdeContextStore();
     eventEmitter = new EventEmitter();
 
-    lspService = new NativeLspService(
-      mockConfig as unknown as CoreConfig,
-      mockWorkspace as unknown as WorkspaceContext,
-      eventEmitter,
-      mockFileDiscovery as unknown as FileDiscoveryService,
-      mockIdeStore as unknown as IdeContextStore,
-    );
+    lspService = newService();
   });
 
   test('should initialize correctly', () => {
@@ -115,13 +376,7 @@ describe('NativeLspService', () => {
   });
 
   test('discoverAndPrepare should not invoke language detection', async () => {
-    const service = new NativeLspService(
-      mockConfig as unknown as CoreConfig,
-      mockWorkspace as unknown as WorkspaceContext,
-      eventEmitter,
-      mockFileDiscovery as unknown as FileDiscoveryService,
-      mockIdeStore as unknown as IdeContextStore,
-    );
+    const service = newService();
 
     const detectLanguages = vi.fn(async () => {
       throw new Error('detectLanguages should not be called');
@@ -144,332 +399,84 @@ describe('NativeLspService', () => {
     expect(status).toBeDefined();
   });
 
-  test('reinitialize reconciles valid .lsp.json configs', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-reinit-'));
-    try {
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-            args: ['--stdio'],
-          },
-        }),
+  test('reinitialize reconciles valid .lsp.json configs', () =>
+    inTempDir('lsp-reinit-', async (dir) => {
+      writeLspJson(dir, { typescript: { command: TS, args: ['--stdio'] } });
+      const reconcileServerConfigs = vi.fn(async () =>
+        reconcile({ added: [TS] }),
       );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: ['typescript-language-server'],
-        removed: [],
-        restarted: [],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-      };
 
-      const result = await service.reinitialize();
+      const result = await reconcilingService(
+        dir,
+        reconcileServerConfigs,
+      ).reinitialize();
 
       expect(reconcileServerConfigs).toHaveBeenCalledWith([
-        expect.objectContaining({
-          name: 'typescript-language-server',
-          languages: ['typescript'],
-        }),
+        expect.objectContaining({ name: TS, languages: ['typescript'] }),
       ]);
-      expect(result.reconcile.added).toEqual(['typescript-language-server']);
+      expect(result.reconcile.added).toEqual([TS]);
       expect(result.skipped).toEqual([]);
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('reinitialize preserves runtime state on invalid .lsp.json', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-invalid-'));
-    try {
-      fs.writeFileSync(path.join(tempDir, '.lsp.json'), '{');
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
+  test('reinitialize preserves runtime state on invalid .lsp.json', () =>
+    inTempDir('lsp-invalid-', async (dir) => {
+      writeLspJson(dir, '{');
       const reconcileServerConfigs = vi.fn();
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-      };
+      const service = reconcilingService(dir, reconcileServerConfigs);
 
       await expect(service.reinitialize()).rejects.toThrow();
       expect(reconcileServerConfigs).not.toHaveBeenCalled();
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('reinitialize preserves runtime state on invalid server entries', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-invalid-'));
-    try {
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            transport: 'stdio',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
+  test('reinitialize preserves runtime state on invalid server entries', () =>
+    inTempDir('lsp-invalid-', async (dir) => {
+      writeLspJson(dir, { typescript: { transport: 'stdio' } });
       const reconcileServerConfigs = vi.fn();
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-      };
+      const service = reconcilingService(dir, reconcileServerConfigs);
 
       await expect(service.reinitialize()).rejects.toThrow(
         'Invalid LSP server config',
       );
       expect(reconcileServerConfigs).not.toHaveBeenCalled();
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('reinitialize queue continues after a failed reload', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-queue-error-'));
-    try {
-      fs.writeFileSync(path.join(tempDir, '.lsp.json'), '{');
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
+  test('reinitialize queue continues after a failed reload', () =>
+    inTempDir('lsp-queue-error-', async (dir) => {
+      writeLspJson(dir, '{');
+      const reconcileServerConfigs = vi.fn(async () =>
+        reconcile({ added: [TS] }),
       );
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: ['typescript-language-server'],
-        removed: [],
-        restarted: [],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-      };
+      const service = reconcilingService(dir, reconcileServerConfigs);
 
       await expect(service.reinitialize()).rejects.toThrow();
       expect(reconcileServerConfigs).not.toHaveBeenCalled();
 
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
+      writeLspJson(dir);
       const result = await service.reinitialize();
 
       expect(reconcileServerConfigs).toHaveBeenCalledOnce();
-      expect(result.reconcile.added).toEqual(['typescript-language-server']);
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      expect(result.reconcile.added).toEqual([TS]);
+    }));
 
-  test('reinitialize replays open documents after restarting servers', async () => {
-    vi.useFakeTimers();
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));
-    try {
-      const filePath = path.join(tempDir, 'main.ts');
-      const uri = pathToFileURL(filePath).toString();
-      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const connection = {
-        listen: vi.fn(),
-        send: vi.fn(),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
-      const handle = {
-        config: {
-          name: 'typescript-language-server',
-          languages: ['typescript'],
-          command: 'typescript-language-server',
-          args: [],
-          transport: 'stdio',
-        },
-        status: 'READY',
-        textDocumentSync: 1,
-        connection,
-      };
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: [],
-        removed: [],
-        restarted: ['typescript-language-server'],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-        getHandles: () => new Map([['typescript-language-server', handle]]),
-      };
-      const internals = service as unknown as {
-        openedDocuments: Map<
-          string,
-          Map<string, { text: string; version: number }>
-        >;
-      };
-      internals.openedDocuments.set(
-        'typescript-language-server',
-        new Map([[uri, { text: 'old', version: 1 }]]),
-      );
+  test('reinitialize replays open documents after restarting servers', () =>
+    inTempDirWithFakeTimers('lsp-replay-', async (dir) => {
+      const { service, connection, uri, internals } = setupTsReplay(dir);
+      openOld(internals, TS, uri);
 
-      const reinitialize = service.reinitialize();
-      await vi.runAllTimersAsync();
-      await reinitialize;
+      await settle(service.reinitialize());
 
-      expect(connection.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: 'textDocument/didOpen',
-          params: {
-            textDocument: expect.objectContaining({
-              uri,
-              languageId: 'typescript',
-              text: 'const value = 1;\n',
-            }),
-          },
-        }),
-      );
+      expectDidOpen(connection, uri, 'typescript', TS_TEXT);
       expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('replays URIs that were only parked when a server reloads', async () => {
-    vi.useFakeTimers();
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-parked-'));
-    try {
-      const firstPath = path.join(tempDir, 'main.ts');
-      const secondPath = path.join(tempDir, 'second.ts');
-      const firstUri = pathToFileURL(firstPath).toString();
-      const secondUri = pathToFileURL(secondPath).toString();
-      fs.writeFileSync(firstPath, 'const value = 1;\n', 'utf-8');
-      fs.writeFileSync(secondPath, 'const other = 2;\n', 'utf-8');
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const connection = {
-        listen: vi.fn(),
-        send: vi.fn(),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
-      const handle = {
-        config: {
-          name: 'typescript-language-server',
-          languages: ['typescript'],
-          command: 'typescript-language-server',
-          args: [],
-          transport: 'stdio',
-        },
-        status: 'READY',
-        textDocumentSync: 1,
-        connection,
-      };
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: [],
-        removed: [],
-        restarted: ['typescript-language-server'],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-        getHandles: () => new Map([['typescript-language-server', handle]]),
-      };
-      const internals = service as unknown as {
-        openedDocuments: Map<
-          string,
-          Map<string, { text: string; version: number }>
-        >;
-        replayUris: Map<string, Set<string>>;
-      };
-      internals.openedDocuments.set(
-        'typescript-language-server',
-        new Map([[firstUri, { text: 'old', version: 1 }]]),
-      );
-      internals.replayUris.set(
-        'typescript-language-server',
-        new Set([secondUri]),
-      );
+  test('replays URIs that were only parked when a server reloads', () =>
+    inTempDirWithFakeTimers('lsp-parked-', async (dir) => {
+      const secondUri = writeDoc(dir, 'second.ts', 'const other = 2;\n');
+      const { service, connection, uri, internals } = setupTsReplay(dir);
+      openOld(internals, TS, uri);
+      internals.replayUris.set(TS, new Set([secondUri]));
 
-      const reinitialize = service.reinitialize();
-      await vi.runAllTimersAsync();
-      await reinitialize;
+      await settle(service.reinitialize());
 
       const openedUris = connection.send.mock.calls
         .filter(([message]) => message.method === 'textDocument/didOpen')
@@ -478,313 +485,79 @@ describe('NativeLspService', () => {
             (message.params as { textDocument: { uri: string } }).textDocument
               .uri,
         );
-      expect(new Set(openedUris)).toEqual(new Set([firstUri, secondUri]));
+      expect(new Set(openedUris)).toEqual(new Set([uri, secondUri]));
       // The reload snapshot consumed the durable set.
-      expect(internals.replayUris.has('typescript-language-server')).toBe(
-        false,
-      );
+      expect(internals.replayUris.has(TS)).toBe(false);
       expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('reinitialize continues replaying documents after one server send fails', async () => {
-    vi.useFakeTimers();
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));
-    try {
-      const firstPath = path.join(tempDir, 'first.ts');
-      const secondPath = path.join(tempDir, 'second.py');
-      const firstUri = pathToFileURL(firstPath).toString();
-      const secondUri = pathToFileURL(secondPath).toString();
-      fs.writeFileSync(firstPath, 'const value = 1;\n', 'utf-8');
-      fs.writeFileSync(secondPath, 'value = 1\n', 'utf-8');
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-          python: {
-            command: 'pyright-langserver',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const firstConnection = {
-        listen: vi.fn(),
+  test('reinitialize continues replaying documents after one server send fails', () =>
+    inTempDirWithFakeTimers('lsp-replay-', async (dir) => {
+      const firstUri = writeDoc(dir, 'first.ts', TS_TEXT);
+      const secondUri = writeDoc(dir, 'second.py', 'value = 1\n');
+      writeLspJson(dir, {
+        typescript: { command: TS },
+        python: { command: PY },
+      });
+      const firstConnection = makeConnection({
         send: vi.fn(() => {
           throw new Error('broken pipe');
         }),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
-      const secondConnection = {
-        listen: vi.fn(),
-        send: vi.fn(),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
+      });
+      const secondConnection = makeConnection();
       const handles = new Map([
-        [
-          'typescript-language-server',
-          {
-            config: {
-              name: 'typescript-language-server',
-              languages: ['typescript'],
-              command: 'typescript-language-server',
-              args: [],
-              transport: 'stdio',
-            },
-            status: 'READY',
-            textDocumentSync: 1,
-            connection: firstConnection,
-          },
-        ],
-        [
-          'pyright-langserver',
-          {
-            config: {
-              name: 'pyright-langserver',
-              languages: ['python'],
-              command: 'pyright-langserver',
-              args: [],
-              transport: 'stdio',
-            },
-            status: 'READY',
-            textDocumentSync: 1,
-            connection: secondConnection,
-          },
-        ],
+        [TS, makeHandle(firstConnection, TS, ['typescript'])],
+        [PY, makeHandle(secondConnection, PY, ['python'])],
       ]);
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: [],
-        removed: [],
-        restarted: ['typescript-language-server', 'pyright-langserver'],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-        getHandles: () => handles,
-      };
-      const internals = service as unknown as {
-        openedDocuments: Map<
-          string,
-          Map<string, { text: string; version: number }>
-        >;
-        lastConnections: Map<string, unknown>;
-      };
-      internals.openedDocuments.set(
-        'typescript-language-server',
-        new Map([[firstUri, { text: 'old', version: 1 }]]),
+      const service = reconcilingService(
+        dir,
+        vi.fn(async () => reconcile({ restarted: [TS, PY] })),
+        { getHandles: () => handles },
       );
-      internals.openedDocuments.set(
-        'pyright-langserver',
-        new Map([[secondUri, { text: 'old', version: 1 }]]),
-      );
+      const internals = internalsOf(service);
+      openOld(internals, TS, firstUri);
+      openOld(internals, PY, secondUri);
 
-      const reinitialize = service.reinitialize();
-      await vi.runAllTimersAsync();
-      await expect(reinitialize).resolves.toBeDefined();
+      await expect(settle(service.reinitialize())).resolves.toBeDefined();
 
       expect(firstConnection.send).toHaveBeenCalledOnce();
-      expect(internals.lastConnections.get('typescript-language-server')).toBe(
-        firstConnection,
-      );
-      expect(internals.openedDocuments.has('typescript-language-server')).toBe(
-        false,
-      );
-      expect(internals.lastConnections.get('pyright-langserver')).toBe(
-        secondConnection,
-      );
-      expect(secondConnection.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: 'textDocument/didOpen',
-          params: {
-            textDocument: expect.objectContaining({
-              uri: secondUri,
-              languageId: 'python',
-              text: 'value = 1\n',
-            }),
-          },
-        }),
-      );
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      expect(internals.lastConnections.get(TS)).toBe(firstConnection);
+      expect(internals.openedDocuments.has(TS)).toBe(false);
+      expect(internals.lastConnections.get(PY)).toBe(secondConnection);
+      expectDidOpen(secondConnection, secondUri, 'python', 'value = 1\n');
+    }));
 
-  test('reinitialize preserves open documents for failed servers until a later restart succeeds', async () => {
-    vi.useFakeTimers();
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-failed-'));
-    try {
-      const filePath = path.join(tempDir, 'index.ts');
-      const uri = pathToFileURL(filePath).toString();
-      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
+  test('reinitialize preserves open documents for failed servers until a later restart succeeds', () =>
+    inTempDirWithFakeTimers('lsp-failed-', async (dir) => {
+      const { service, connection, uri, internals } = setupTsReplay(
+        dir,
+        'index.ts',
+        vi
+          .fn()
+          .mockResolvedValueOnce(reconcile({ failed: [TS] }))
+          .mockResolvedValueOnce(reconcile({ restarted: [TS] })),
       );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const connection = {
-        listen: vi.fn(),
-        send: vi.fn(),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
-      const handle = {
-        config: {
-          name: 'typescript-language-server',
-          languages: ['typescript'],
-          command: 'typescript-language-server',
-          args: [],
-          transport: 'stdio',
-        },
-        status: 'READY',
-        textDocumentSync: 1,
-        connection,
-      };
-      const reconcileServerConfigs = vi
-        .fn()
-        .mockResolvedValueOnce({
-          added: [],
-          removed: [],
-          restarted: [],
-          unchanged: [],
-          failed: ['typescript-language-server'],
-        })
-        .mockResolvedValueOnce({
-          added: [],
-          removed: [],
-          restarted: ['typescript-language-server'],
-          unchanged: [],
-          failed: [],
-        });
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-        getHandles: () => new Map([['typescript-language-server', handle]]),
-      };
-      const internals = service as unknown as {
-        openedDocuments: Map<
-          string,
-          Map<string, { text: string; version: number }>
-        >;
-      };
-      internals.openedDocuments.set(
-        'typescript-language-server',
+      openOld(internals, TS, uri);
+
+      await service.reinitialize();
+      expect(internals.openedDocuments.get(TS)).toEqual(
         new Map([[uri, { text: 'old', version: 1 }]]),
       );
 
-      await service.reinitialize();
-      expect(
-        internals.openedDocuments.get('typescript-language-server'),
-      ).toEqual(new Map([[uri, { text: 'old', version: 1 }]]));
+      await settle(service.reinitialize());
 
-      const reinitialize = service.reinitialize();
-      await vi.runAllTimersAsync();
-      await reinitialize;
+      expectDidOpen(connection, uri, 'typescript', TS_TEXT);
+    }));
 
-      expect(connection.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: 'textDocument/didOpen',
-          params: {
-            textDocument: expect.objectContaining({
-              uri,
-              languageId: 'typescript',
-              text: 'const value = 1;\n',
-            }),
-          },
-        }),
-      );
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  test('reinitialize serializes the full snapshot reconcile and replay flow', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-queue-'));
-    try {
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      let resolveFirstReconcile: (
-        value: Awaited<ReturnType<typeof reconcileServerConfigs>>,
-      ) => void;
-      const firstReconcile = new Promise<{
-        added: string[];
-        removed: string[];
-        restarted: string[];
-        unchanged: string[];
-        failed: string[];
-      }>((resolve) => {
-        resolveFirstReconcile = resolve;
-      });
+  test('reinitialize serializes the full snapshot reconcile and replay flow', () =>
+    inTempDir('lsp-queue-', async (dir) => {
+      writeLspJson(dir);
+      const firstReconcile = deferred<Reconcile>();
       const reconcileServerConfigs = vi
         .fn()
-        .mockReturnValueOnce(firstReconcile)
-        .mockResolvedValueOnce({
-          added: [],
-          removed: [],
-          restarted: [],
-          unchanged: ['typescript-language-server'],
-          failed: [],
-        });
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-      };
+        .mockReturnValueOnce(firstReconcile.promise)
+        .mockResolvedValueOnce(reconcile({ unchanged: [TS] }));
+      const service = reconcilingService(dir, reconcileServerConfigs);
 
       const first = service.reinitialize();
       await vi.waitFor(() => {
@@ -795,202 +568,46 @@ describe('NativeLspService', () => {
 
       expect(reconcileServerConfigs).toHaveBeenCalledOnce();
 
-      resolveFirstReconcile!({
-        added: ['typescript-language-server'],
-        removed: [],
-        restarted: [],
-        unchanged: [],
-        failed: [],
-      });
+      firstReconcile.resolve(reconcile({ added: [TS] }));
       await first;
       await vi.waitFor(() => {
         expect(reconcileServerConfigs).toHaveBeenCalledTimes(2);
       });
       await second;
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('reinitialize snapshots documents opened while reconcile is pending', async () => {
-    vi.useFakeTimers();
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-snapshot-'));
-    try {
-      const filePath = path.join(tempDir, 'index.ts');
-      const uri = pathToFileURL(filePath).toString();
-      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const connection = {
-        listen: vi.fn(),
-        send: vi.fn(),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
-      const handle = {
-        config: {
-          name: 'typescript-language-server',
-          languages: ['typescript'],
-          command: 'typescript-language-server',
-          args: [],
-          transport: 'stdio',
-        },
-        status: 'READY',
-        textDocumentSync: 1,
-        connection,
-      };
-      let resolveReconcile: (
-        value: Awaited<ReturnType<typeof reconcileServerConfigs>>,
-      ) => void;
-      const reconcilePromise = new Promise<{
-        added: string[];
-        removed: string[];
-        restarted: string[];
-        unchanged: string[];
-        failed: string[];
-      }>((resolve) => {
-        resolveReconcile = resolve;
-      });
-      const reconcileServerConfigs = vi.fn(() => reconcilePromise);
-      (service as unknown as { serverManager: unknown }).serverManager = {
+  test('reinitialize snapshots documents opened while reconcile is pending', () =>
+    inTempDirWithFakeTimers('lsp-snapshot-', async (dir) => {
+      const pending = deferred<Reconcile>();
+      const reconcileServerConfigs = vi.fn(() => pending.promise);
+      const { service, connection, uri, internals } = setupTsReplay(
+        dir,
+        'index.ts',
         reconcileServerConfigs,
-        getHandles: () => new Map([['typescript-language-server', handle]]),
-      };
-      const internals = service as unknown as {
-        openedDocuments: Map<
-          string,
-          Map<string, { text: string; version: number }>
-        >;
-      };
+      );
 
       const reinitialize = service.reinitialize();
       await vi.waitFor(() => {
         expect(reconcileServerConfigs).toHaveBeenCalledOnce();
       });
-      internals.openedDocuments.set(
-        'typescript-language-server',
-        new Map([[uri, { text: 'old', version: 1 }]]),
-      );
-      resolveReconcile!({
-        added: [],
-        removed: [],
-        restarted: ['typescript-language-server'],
-        unchanged: [],
-        failed: [],
-      });
-      await vi.runAllTimersAsync();
-      await reinitialize;
+      openOld(internals, TS, uri);
+      pending.resolve(reconcile({ restarted: [TS] }));
+      await settle(reinitialize);
 
-      expect(connection.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: 'textDocument/didOpen',
-          params: {
-            textDocument: expect.objectContaining({
-              uri,
-              languageId: 'typescript',
-              text: 'const value = 1;\n',
-            }),
-          },
-        }),
-      );
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      expectDidOpen(connection, uri, 'typescript', TS_TEXT);
+    }));
 
-  test('stop cancels an in-flight reinitialize replay delay', async () => {
-    vi.useFakeTimers();
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-stop-'));
-    try {
-      const filePath = path.join(tempDir, 'index.ts');
-      const uri = pathToFileURL(filePath).toString();
-      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      const connection = {
-        listen: vi.fn(),
-        send: vi.fn(),
-        onNotification: vi.fn(),
-        onRequest: vi.fn(),
-        request: vi.fn(),
-        initialize: vi.fn(),
-        shutdown: vi.fn(),
-        end: vi.fn(),
-      };
-      const handle = {
-        config: {
-          name: 'typescript-language-server',
-          languages: ['typescript'],
-          command: 'typescript-language-server',
-          args: [],
-          transport: 'stdio',
-        },
-        status: 'READY',
-        textDocumentSync: 1,
-        connection,
-      };
+  test('stop cancels an in-flight reinitialize replay delay', () =>
+    inTempDirWithFakeTimers('lsp-stop-', async (dir) => {
       const stopAll = vi.fn(async () => {});
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: [],
-        removed: [],
-        restarted: ['typescript-language-server'],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-        getHandles: () => new Map([['typescript-language-server', handle]]),
-        stopAll,
-      };
-      const internals = service as unknown as {
-        openedDocuments: Map<
-          string,
-          Map<string, { text: string; version: number }>
-        >;
-        lastConnections: Map<string, unknown>;
-      };
-      internals.openedDocuments.set(
-        'typescript-language-server',
-        new Map([[uri, { text: 'old', version: 1 }]]),
+      const { service, connection, uri, internals } = setupTsReplay(
+        dir,
+        'index.ts',
+        undefined,
+        { stopAll },
       );
-      internals.lastConnections.set('typescript-language-server', connection);
+      openOld(internals, TS, uri);
+      internals.lastConnections.set(TS, connection);
 
       const reinitialize = service.reinitialize();
       await vi.waitFor(() => {
@@ -1003,51 +620,17 @@ describe('NativeLspService', () => {
       expect(vi.getTimerCount()).toBe(0);
       expect(internals.openedDocuments.size).toBe(0);
       expect(internals.lastConnections.size).toBe(0);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('stop cancels queued reinitialize calls before they start', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-stop-queue-'));
-    try {
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          typescript: {
-            command: 'typescript-language-server',
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { workspaceRoot: tempDir },
-      );
-      let resolveFirstReconcile: (
-        value: Awaited<ReturnType<typeof reconcileServerConfigs>>,
-      ) => void;
-      const firstReconcile = new Promise<{
-        added: string[];
-        removed: string[];
-        restarted: string[];
-        unchanged: string[];
-        failed: string[];
-      }>((resolve) => {
-        resolveFirstReconcile = resolve;
-      });
-      const reconcileServerConfigs = vi.fn(() => firstReconcile);
+  test('stop cancels queued reinitialize calls before they start', () =>
+    inTempDir('lsp-stop-queue-', async (dir) => {
+      writeLspJson(dir);
+      const firstReconcile = deferred<Reconcile>();
+      const reconcileServerConfigs = vi.fn(() => firstReconcile.promise);
       const stopAll = vi.fn(async () => {});
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
+      const service = reconcilingService(dir, reconcileServerConfigs, {
         stopAll,
-      };
+      });
 
       const first = service.reinitialize();
       await vi.waitFor(() => {
@@ -1056,51 +639,25 @@ describe('NativeLspService', () => {
       const second = service.reinitialize();
       await service.stop();
 
-      resolveFirstReconcile!({
-        added: ['typescript-language-server'],
-        removed: [],
-        restarted: [],
-        unchanged: [],
-        failed: [],
-      });
+      firstReconcile.resolve(reconcile({ added: [TS] }));
 
       await expect(first).rejects.toThrow('LSP reinitialize cancelled');
       await expect(second).rejects.toThrow('LSP reinitialize cancelled');
       expect(reconcileServerConfigs).toHaveBeenCalledOnce();
       expect(stopAll).toHaveBeenCalledOnce();
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
   test('reinitialize stops all servers when trusted workspace is required but unavailable', async () => {
-    const tempConfig = new MockConfig();
-    vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
-    const service = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      mockWorkspace as unknown as WorkspaceContext,
-      eventEmitter,
-      mockFileDiscovery as unknown as FileDiscoveryService,
-      mockIdeStore as unknown as IdeContextStore,
-      { requireTrustedWorkspace: true },
-    );
+    const service = newService(configAt(undefined, false), {
+      requireTrustedWorkspace: true,
+    });
     const stopAll = vi.fn(async () => {});
-    const internals = service as unknown as {
-      serverManager: unknown;
-      openedDocuments: Map<
-        string,
-        Map<string, { text: string; version: number }>
-      >;
-      lastConnections: Map<string, unknown>;
-    };
+    const internals = internalsOf(service);
     internals.serverManager = {
       getHandles: () => new Map([['tsserver', {}]]),
       stopAll,
     };
-    internals.openedDocuments.set(
-      'tsserver',
-      new Map([['file:///a.ts', { text: 'old', version: 1 }]]),
-    );
+    openOld(internals, 'tsserver', 'file:///a.ts');
     internals.lastConnections.set('tsserver', {});
 
     const result = await service.reinitialize();
@@ -1111,93 +668,24 @@ describe('NativeLspService', () => {
     expect(internals.lastConnections.has('tsserver')).toBe(false);
   });
 
-  test('reinitialize skips all user-configured servers in untrusted workspaces', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-untrusted-'));
-    try {
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          trusted: {
-            command: 'trusted-language-server',
-            languages: ['typescript'],
-            trustRequired: true,
-          },
-          untrusted: {
-            command: 'untrusted-language-server',
-            languages: ['javascript'],
-            trustRequired: false,
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { requireTrustedWorkspace: false, workspaceRoot: tempDir },
-      );
-      const reconcileServerConfigs = vi.fn(async () => ({
-        added: [],
-        removed: [],
-        restarted: [],
-        unchanged: [],
-        failed: [],
-      }));
-      (service as unknown as { serverManager: unknown }).serverManager = {
-        reconcileServerConfigs,
-      };
+  test('reinitialize skips all user-configured servers in untrusted workspaces', () =>
+    inTempDir('lsp-untrusted-', async (dir) => {
+      const service = untrustedService(dir);
+      const reconcileServerConfigs = vi.fn(async () => reconcile());
+      internalsOf(service).serverManager = { reconcileServerConfigs };
 
       const result = await service.reinitialize();
 
       expect(reconcileServerConfigs).toHaveBeenCalledWith([]);
       expect(result.skipped).toEqual([
-        {
-          name: 'trusted-language-server',
-          reason: 'server_trust_required',
-        },
-        {
-          name: 'untrusted-language-server',
-          reason: 'server_trust_required',
-        },
+        { name: 'trusted-language-server', reason: 'server_trust_required' },
+        { name: 'untrusted-language-server', reason: 'server_trust_required' },
       ]);
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('discoverAndPrepare skips trust-required servers in untrusted workspaces', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-discover-'));
-    try {
-      fs.writeFileSync(
-        path.join(tempDir, '.lsp.json'),
-        JSON.stringify({
-          trusted: {
-            command: 'trusted-language-server',
-            languages: ['typescript'],
-            trustRequired: true,
-          },
-          untrusted: {
-            command: 'untrusted-language-server',
-            languages: ['javascript'],
-            trustRequired: false,
-          },
-        }),
-      );
-      const tempConfig = new MockConfig();
-      tempConfig.rootPath = tempDir;
-      vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);
-      const service = new NativeLspService(
-        tempConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        { requireTrustedWorkspace: false, workspaceRoot: tempDir },
-      );
+  test('discoverAndPrepare skips trust-required servers in untrusted workspaces', () =>
+    inTempDir('lsp-discover-', async (dir) => {
+      const service = untrustedService(dir);
 
       await service.discoverAndPrepare();
 
@@ -1211,26 +699,13 @@ describe('NativeLspService', () => {
           .keys(),
       );
       expect(handles).toEqual([]);
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
   test('stop clears document tracking caches', async () => {
     const stopAll = vi.fn(async () => {});
-    const internals = lspService as unknown as {
-      serverManager: { stopAll: () => Promise<void> };
-      openedDocuments: Map<
-        string,
-        Map<string, { text: string; version: number }>
-      >;
-      lastConnections: Map<string, unknown>;
-    };
+    const internals = internalsOf(lspService);
     internals.serverManager = { stopAll };
-    internals.openedDocuments.set(
-      'tsserver',
-      new Map([['file:///a.ts', { text: 'old', version: 1 }]]),
-    );
+    openOld(internals, 'tsserver', 'file:///a.ts');
     internals.lastConnections.set('tsserver', {});
 
     await lspService.stop();
@@ -1241,7 +716,7 @@ describe('NativeLspService', () => {
   });
 
   test('should expose a detailed status snapshot for configured servers', () => {
-    const serverManager = {
+    internalsOf(lspService).serverManager = {
       getHandles: () =>
         new Map([
           [
@@ -1287,9 +762,6 @@ describe('NativeLspService', () => {
         ]),
     };
 
-    (lspService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
     const snapshot = lspService.getStatusSnapshot();
 
     expect(snapshot).toEqual({
@@ -1331,496 +803,130 @@ describe('NativeLspService', () => {
     });
   });
 
-  test('should open document before hover requests', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-test-'));
-    const filePath = path.join(tempDir, 'main.cpp');
-    fs.writeFileSync(filePath, 'int main(){return 0;}\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
-
-    const events: string[] = [];
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn((message: { method?: string }) => {
-        events.push(`send:${message.method ?? 'unknown'}`);
-      }),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        events.push(`request:${method}`);
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-    };
-
-    (lspService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise1 = lspService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-      });
-      await vi.runAllTimersAsync();
-      await promise1;
-
-      expect(connection.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: 'textDocument/didOpen',
-          params: {
-            textDocument: expect.objectContaining({
-              uri,
-              languageId: 'cpp',
-            }),
-          },
-        }),
+  test('should open document before hover requests', () =>
+    inTempDirWithFakeTimers('lsp-test-', async (dir) => {
+      const uri = writeDoc(dir, 'main.cpp', CPP_TEXT);
+      const events: string[] = [];
+      const connection = loggingConnection(events);
+      internalsOf(lspService).serverManager = managerFor(
+        'clangd',
+        makeHandle(connection),
       );
+
+      await hover(lspService, uri);
+
+      expectDidOpen(connection, uri, 'cpp');
       expect(connection.request).toHaveBeenCalledWith(
         'textDocument/hover',
         expect.any(Object),
       );
       expect(events[0]).toBe('send:textDocument/didOpen');
 
-      const promise2 = lspService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-      });
-      await vi.runAllTimersAsync();
-      await promise2;
+      await hover(lspService, uri);
 
       expect(connection.send).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should open a workspace file before workspace symbol search', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-symbol-'));
-    const workspaceFile = path.join(tempDir, 'src', 'main.cpp');
-    fs.mkdirSync(path.dirname(workspaceFile), { recursive: true });
-    fs.writeFileSync(workspaceFile, 'int main(){return 0;}\n', 'utf-8');
-    const workspaceUri = pathToFileURL(workspaceFile).toString();
+  test('should open a workspace file before workspace symbol search', () =>
+    inTempDirWithFakeTimers('lsp-symbol-', async (dir) => {
+      const workspaceUri = writeDoc(dir, 'src/main.cpp', CPP_TEXT);
+      const events: string[] = [];
+      const opened = () => events.includes('send:textDocument/didOpen');
+      const connection = loggingConnection(events, (method) => {
+        if (method !== 'workspace/symbol') return null;
+        return opened() ? [calculatorSymbol(workspaceUri)] : [];
+      });
+      const service = workspaceService(
+        dir,
+        managerFor('clangd', makeHandle(connection), false),
+      );
 
-    const events: string[] = [];
-    let opened = false;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn((message: { method?: string }) => {
-        events.push(`send:${message.method ?? 'unknown'}`);
-        if (message.method === 'textDocument/didOpen') {
-          opened = true;
-        }
-      }),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        events.push(`request:${method}`);
-        if (method === 'workspace/symbol') {
-          return opened
-            ? [
-                {
-                  name: 'Calculator',
-                  kind: 5,
-                  location: {
-                    uri: workspaceUri,
-                    range: {
-                      start: { line: 0, character: 0 },
-                      end: { line: 0, character: 10 },
-                    },
-                  },
-                },
-              ]
-            : [];
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-      isTypescriptServer: () => false,
-    };
-
-    const tempConfig = new MockConfig();
-    tempConfig.rootPath = tempDir;
-    const tempWorkspace = new MockWorkspaceContext();
-    tempWorkspace.rootPath = tempDir;
-    const tempDiscovery = new MockFileDiscoveryService();
-    const tempIdeStore = new MockIdeContextStore();
-    const tempEmitter = new EventEmitter();
-
-    const tempService = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      tempWorkspace as unknown as WorkspaceContext,
-      tempEmitter,
-      tempDiscovery as unknown as FileDiscoveryService,
-      tempIdeStore as unknown as IdeContextStore,
-      { workspaceRoot: tempDir },
-    );
-
-    (tempService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise = tempService.workspaceSymbols('Calculator');
-      await vi.runAllTimersAsync();
-      const results = await promise;
+      const results = await settle(service.workspaceSymbols('Calculator'));
 
       expect(connection.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: 'textDocument/didOpen',
-        }),
+        expect.objectContaining({ method: 'textDocument/didOpen' }),
       );
       expect(events[0]).toBe('send:textDocument/didOpen');
       expect(results.length).toBe(1);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should retry workspace symbols after warmup when initial result is empty', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-symbol-retry-'));
-    const workspaceFile = path.join(tempDir, 'src', 'main.cpp');
-    fs.mkdirSync(path.dirname(workspaceFile), { recursive: true });
-    fs.writeFileSync(workspaceFile, 'int main(){return 0;}\n', 'utf-8');
-    const workspaceUri = pathToFileURL(workspaceFile).toString();
+  test('should retry workspace symbols after warmup when initial result is empty', () =>
+    inTempDirWithFakeTimers('lsp-symbol-retry-', async (dir) => {
+      const workspaceUri = writeDoc(dir, 'src/main.cpp', CPP_TEXT);
+      const events: string[] = [];
+      let symbolCalls = 0;
+      const connection = loggingConnection(events, (method) => {
+        if (method !== 'workspace/symbol') return null;
+        symbolCalls += 1;
+        if (!events.includes('send:textDocument/didOpen')) return [];
+        return symbolCalls === 1 ? [] : [calculatorSymbol(workspaceUri)];
+      });
+      const service = workspaceService(
+        dir,
+        managerFor('clangd', makeHandle(connection), false),
+      );
 
-    const events: string[] = [];
-    let opened = false;
-    let symbolCalls = 0;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn((message: { method?: string }) => {
-        events.push(`send:${message.method ?? 'unknown'}`);
-        if (message.method === 'textDocument/didOpen') {
-          opened = true;
-        }
-      }),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        events.push(`request:${method}`);
-        if (method === 'workspace/symbol') {
-          symbolCalls += 1;
-          if (!opened) {
-            return [];
-          }
-          if (symbolCalls === 1) {
-            return [];
-          }
-          return [
-            {
-              name: 'Calculator',
-              kind: 5,
-              location: {
-                uri: workspaceUri,
-                range: {
-                  start: { line: 0, character: 0 },
-                  end: { line: 0, character: 10 },
-                },
-              },
-            },
-          ];
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-      isTypescriptServer: () => false,
-    };
-
-    const tempConfig = new MockConfig();
-    tempConfig.rootPath = tempDir;
-    const tempWorkspace = new MockWorkspaceContext();
-    tempWorkspace.rootPath = tempDir;
-    const tempDiscovery = new MockFileDiscoveryService();
-    const tempIdeStore = new MockIdeContextStore();
-    const tempEmitter = new EventEmitter();
-
-    const tempService = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      tempWorkspace as unknown as WorkspaceContext,
-      tempEmitter,
-      tempDiscovery as unknown as FileDiscoveryService,
-      tempIdeStore as unknown as IdeContextStore,
-      { workspaceRoot: tempDir },
-    );
-
-    (tempService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise = tempService.workspaceSymbols('Calculator');
-      await vi.runAllTimersAsync();
-      const results = await promise;
+      const results = await settle(service.workspaceSymbols('Calculator'));
 
       expect(symbolCalls).toBe(2);
       expect(results.length).toBe(1);
       expect(events[0]).toBe('send:textDocument/didOpen');
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should not retry workspace symbols when no warmup file is available', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-symbol-empty-'));
-
-    let symbolCalls = 0;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn(),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        if (method === 'workspace/symbol') {
+  test('should not retry workspace symbols when no warmup file is available', () =>
+    inTempDirWithFakeTimers('lsp-symbol-empty-', async (dir) => {
+      let symbolCalls = 0;
+      const connection = makeConnection({
+        request: vi.fn(async (method: string) => {
+          if (method !== 'workspace/symbol') return null;
           symbolCalls += 1;
           return [];
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
+        }),
+      });
+      const service = workspaceService(
+        dir,
+        managerFor('clangd', makeHandle(connection), false),
+      );
 
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-      isTypescriptServer: () => false,
-    };
-
-    const tempConfig = new MockConfig();
-    tempConfig.rootPath = tempDir;
-    const tempWorkspace = new MockWorkspaceContext();
-    tempWorkspace.rootPath = tempDir;
-    const tempDiscovery = new MockFileDiscoveryService();
-    const tempIdeStore = new MockIdeContextStore();
-    const tempEmitter = new EventEmitter();
-
-    const tempService = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      tempWorkspace as unknown as WorkspaceContext,
-      tempEmitter,
-      tempDiscovery as unknown as FileDiscoveryService,
-      tempIdeStore as unknown as IdeContextStore,
-      { workspaceRoot: tempDir },
-    );
-
-    (tempService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise = tempService.workspaceSymbols('Calculator');
-      await vi.runAllTimersAsync();
-      await promise;
+      await settle(service.workspaceSymbols('Calculator'));
 
       expect(symbolCalls).toBe(1);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should reopen documents after connection changes', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-reopen-'));
-    const filePath = path.join(tempDir, 'main.cpp');
-    fs.writeFileSync(filePath, 'int main(){return 0;}\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
+  test('should reopen documents after connection changes', () =>
+    inTempDirWithFakeTimers('lsp-reopen-', async (dir) => {
+      const uri = writeDoc(dir, 'main.cpp', CPP_TEXT);
+      const connection1 = makeConnection();
+      const connection2 = makeConnection();
+      const handle = makeHandle(connection1);
+      const service = workspaceService(dir, managerFor('clangd', handle));
 
-    const connection1 = {
-      listen: vi.fn(),
-      send: vi.fn(),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async () => null),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-    const connection2 = {
-      listen: vi.fn(),
-      send: vi.fn(),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async () => null),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection: connection1,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-    };
-
-    const tempConfig = new MockConfig();
-    tempConfig.rootPath = tempDir;
-    const tempWorkspace = new MockWorkspaceContext();
-    tempWorkspace.rootPath = tempDir;
-    const tempDiscovery = new MockFileDiscoveryService();
-    const tempIdeStore = new MockIdeContextStore();
-    const tempEmitter = new EventEmitter();
-
-    const tempService = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      tempWorkspace as unknown as WorkspaceContext,
-      tempEmitter,
-      tempDiscovery as unknown as FileDiscoveryService,
-      tempIdeStore as unknown as IdeContextStore,
-      { workspaceRoot: tempDir },
-    );
-
-    (tempService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise1 = tempService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-      });
-      await vi.runAllTimersAsync();
-      await promise1;
+      await hover(service, uri);
 
       expect(connection1.send).toHaveBeenCalledWith(
         expect.objectContaining({ method: 'textDocument/didOpen' }),
       );
 
       handle.connection = connection2;
-
-      const promise2 = tempService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-      });
-      await vi.runAllTimersAsync();
-      await promise2;
+      await hover(service, uri);
 
       expect(connection2.send).toHaveBeenCalledWith(
         expect.objectContaining({ method: 'textDocument/didOpen' }),
       );
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-  test('should delay after fresh document open then send request', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-delay-'));
-    const filePath = path.join(tempDir, 'main.cpp');
-    fs.writeFileSync(filePath, 'int main(){return 0;}\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
+    }));
 
-    const timeline: Array<{ event: string; time: number }> = [];
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn((message: { method?: string }) => {
-        if (message.method === 'textDocument/didOpen') {
-          timeline.push({ event: 'didOpen', time: Date.now() });
-        }
-      }),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        if (method === 'textDocument/definition') {
+  test('should delay after fresh document open then send request', () =>
+    inTempDirWithFakeTimers('lsp-delay-', async (dir) => {
+      const uri = writeDoc(dir, 'main.cpp', CPP_TEXT);
+      const timeline: Array<{ event: string; time: number }> = [];
+      const connection = makeConnection({
+        send: vi.fn((message: { method?: string }) => {
+          if (message.method === 'textDocument/didOpen') {
+            timeline.push({ event: 'didOpen', time: Date.now() });
+          }
+        }),
+        request: vi.fn(async (method: string) => {
+          if (method !== 'textDocument/definition') return null;
           timeline.push({ event: 'definition', time: Date.now() });
           return [
             {
@@ -1831,249 +937,107 @@ describe('NativeLspService', () => {
               },
             },
           ];
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-    };
-
-    (lspService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise = lspService.definitions({
-        uri,
-        range: {
-          start: { line: 0, character: 4 },
-          end: { line: 0, character: 4 },
-        },
+        }),
       });
-      await vi.runAllTimersAsync();
-      const results = await promise;
+      internalsOf(lspService).serverManager = managerFor(
+        'clangd',
+        makeHandle(connection),
+      );
 
-      // Verify didOpen fires before the definition request
+      const results = await settle(
+        lspService.definitions({
+          uri,
+          range: {
+            start: { line: 0, character: 4 },
+            end: { line: 0, character: 4 },
+          },
+        }),
+      );
+
+      // didOpen fires before the definition request, 200ms apart.
       expect(timeline.length).toBe(2);
       expect(timeline[0]!.event).toBe('didOpen');
       expect(timeline[1]!.event).toBe('definition');
-      // The delay should have elapsed between the two events (200ms)
       expect(timeline[1]!.time - timeline[0]!.time).toBeGreaterThanOrEqual(200);
       expect(results.length).toBe(1);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should skip delay when document is already open', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-nodelay-'));
-    const filePath = path.join(tempDir, 'main.cpp');
-    fs.writeFileSync(filePath, 'int main(){return 0;}\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
-
-    let didOpenCount = 0;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn((message: { method?: string }) => {
-        if (message.method === 'textDocument/didOpen') {
-          didOpenCount += 1;
-        }
-      }),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async () => null),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'clangd',
-        languages: ['cpp'],
-        command: 'clangd',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['clangd', handle]]),
-      warmupTypescriptServer: vi.fn(),
-    };
-
-    (lspService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      // First hover opens the document
-      const promise1 = lspService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
+  test('should skip delay when document is already open', () =>
+    inTempDirWithFakeTimers('lsp-nodelay-', async (dir) => {
+      const uri = writeDoc(dir, 'main.cpp', CPP_TEXT);
+      let didOpenCount = 0;
+      const connection = makeConnection({
+        send: vi.fn((message: { method?: string }) => {
+          if (message.method === 'textDocument/didOpen') didOpenCount += 1;
+        }),
       });
-      await vi.runAllTimersAsync();
-      await promise1;
+      internalsOf(lspService).serverManager = managerFor(
+        'clangd',
+        makeHandle(connection),
+      );
+
+      await hover(lspService, uri); // opens the document
       expect(didOpenCount).toBe(1);
 
-      // Second hover should not re-open or delay
+      // Second hover should neither re-open nor delay.
       const startTime = Date.now();
-      const promise2 = lspService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-      });
-      await vi.runAllTimersAsync();
-      await promise2;
+      await hover(lspService, uri);
       const elapsed = Date.now() - startTime;
 
       expect(didOpenCount).toBe(1);
-      // No delay should have been triggered (well under 200ms with fake timers)
+      // Well under 200ms with fake timers.
       expect(elapsed).toBeLessThan(200);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should not send duplicate didOpen for warmup-opened URI on subsequent requests', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-warmup-track-'));
-    const queryFilePath = path.join(tempDir, 'main.cpp');
-    const warmupFilePath = path.join(tempDir, 'index.ts');
-    fs.writeFileSync(queryFilePath, 'int main(){return 0;}\n', 'utf-8');
-    fs.writeFileSync(warmupFilePath, 'export const x = 1;\n', 'utf-8');
-    const queryUri = pathToFileURL(queryFilePath).toString();
-    const warmupUri = pathToFileURL(warmupFilePath).toString();
-
-    const didOpenUris: string[] = [];
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn(
-        (message: {
-          method?: string;
-          params?: { textDocument?: { uri?: string } };
-        }) => {
-          if (message.method === 'textDocument/didOpen') {
-            didOpenUris.push(message.params?.textDocument?.uri ?? '');
-          }
-        },
-      ),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async () => null),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'typescript',
-        languages: ['typescript'],
-        command: 'typescript-language-server',
-        args: ['--stdio'],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    // Warmup delegates its open through the service-owned synchronization.
-    const serverManager = {
-      getHandles: () => new Map([['typescript', handle]]),
-      warmupTypescriptServer: vi.fn(async (_handle, synchronizeDocument) => {
-        synchronizeDocument(warmupUri, 'typescript');
-      }),
-    };
-
-    (lspService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      // First request: opens queryUri via ensureDocumentSynchronized, warmup opens warmupUri
-      const promise1 = lspService.hover({
-        uri: queryUri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
+  test('should not send duplicate didOpen for warmup-opened URI on subsequent requests', () =>
+    inTempDirWithFakeTimers('lsp-warmup-track-', async (dir) => {
+      const queryUri = writeDoc(dir, 'main.cpp', CPP_TEXT);
+      const warmupUri = writeDoc(dir, 'index.ts', 'export const x = 1;\n');
+      const didOpenUris: string[] = [];
+      const connection = makeConnection({
+        send: vi.fn(
+          (message: {
+            method?: string;
+            params?: { textDocument?: { uri?: string } };
+          }) => {
+            if (message.method === 'textDocument/didOpen') {
+              didOpenUris.push(message.params?.textDocument?.uri ?? '');
+            }
+          },
+        ),
       });
-      await vi.runAllTimersAsync();
-      await promise1;
+      // Warmup delegates its open through the service-owned synchronization.
+      internalsOf(lspService).serverManager = managerFor(
+        'typescript',
+        makeHandle(connection, 'typescript', ['typescript'], TS, ['--stdio']),
+        undefined,
+        vi.fn(async (_handle, synchronizeDocument) => {
+          synchronizeDocument(warmupUri, 'typescript');
+        }),
+      );
 
-      // queryUri should have been opened via ensureDocumentSynchronized
+      // First request opens queryUri via ensureDocumentSynchronized; warmup opens warmupUri.
+      await hover(lspService, queryUri);
+
       expect(didOpenUris).toContain(queryUri);
       const countAfterFirst = didOpenUris.length;
 
-      // Second request: for warmupUri which was already tracked from warmup
-      const promise2 = lspService.hover({
-        uri: warmupUri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-      });
-      await vi.runAllTimersAsync();
-      await promise2;
+      // warmupUri was tracked by the first call's warmup, so it is not reopened.
+      await hover(lspService, warmupUri);
 
-      // warmupUri should NOT have been opened again via ensureDocumentSynchronized
-      // because it was tracked from the warmup in the first call
       expect(didOpenUris.length).toBe(countAfterFirst);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should retry document operations for slow servers after fresh didOpen', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-retry-doc-'));
-    const filePath = path.join(tempDir, 'Main.java');
-    fs.writeFileSync(filePath, 'public class Main { }\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
-
-    let requestCount = 0;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn(),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        if (method === 'textDocument/documentSymbol') {
+  test('should retry document operations for slow servers after fresh didOpen', () =>
+    inTempDirWithFakeTimers('lsp-retry-doc-', async (dir) => {
+      const uri = writeDoc(dir, 'Main.java', JAVA_TEXT);
+      let requestCount = 0;
+      const connection = makeConnection({
+        request: vi.fn(async (method: string) => {
+          if (method !== 'textDocument/documentSymbol') return null;
           requestCount += 1;
           // First call returns empty (server still indexing), second returns data
-          if (requestCount === 1) {
-            return [];
-          }
+          if (requestCount === 1) return [];
           return [
             {
               name: 'Main',
@@ -2088,225 +1052,109 @@ describe('NativeLspService', () => {
               },
             },
           ];
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
+        }),
+      });
+      const service = workspaceService(
+        dir,
+        managerFor('jdtls', makeHandle(connection, 'jdtls', ['java']), false),
+      );
 
-    const handle = {
-      config: {
-        name: 'jdtls',
-        languages: ['java'],
-        command: 'jdtls',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['jdtls', handle]]),
-      warmupTypescriptServer: vi.fn(),
-      isTypescriptServer: () => false,
-    };
-
-    const tempConfig = new MockConfig();
-    tempConfig.rootPath = tempDir;
-    const tempWorkspace = new MockWorkspaceContext();
-    tempWorkspace.rootPath = tempDir;
-
-    const tempService = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      tempWorkspace as unknown as WorkspaceContext,
-      new EventEmitter(),
-      new MockFileDiscoveryService() as unknown as FileDiscoveryService,
-      new MockIdeContextStore() as unknown as IdeContextStore,
-      { workspaceRoot: tempDir },
-    );
-
-    (tempService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise = tempService.documentSymbols(uri);
-      await vi.runAllTimersAsync();
-      const results = await promise;
+      const results = await settle(service.documentSymbols(uri));
 
       // Should have retried: 2 requests total
       expect(requestCount).toBe(2);
       expect(results.length).toBe(1);
       expect(results[0]?.name).toBe('Main');
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should NOT retry document operations for TypeScript servers', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-no-retry-ts-'));
-    const filePath = path.join(tempDir, 'index.ts');
-    fs.writeFileSync(filePath, 'export const x = 1;\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
-
-    let requestCount = 0;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn(),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        if (method === 'textDocument/documentSymbol') {
+  test('should NOT retry document operations for TypeScript servers', () =>
+    inTempDirWithFakeTimers('lsp-no-retry-ts-', async (dir) => {
+      const uri = writeDoc(dir, 'index.ts', 'export const x = 1;\n');
+      let requestCount = 0;
+      const connection = makeConnection({
+        request: vi.fn(async (method: string) => {
+          if (method !== 'textDocument/documentSymbol') return null;
           requestCount += 1;
           return [];
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
+        }),
+      });
+      internalsOf(lspService).serverManager = managerFor(
+        'typescript',
+        makeHandle(connection, TS, ['typescript'], TS, ['--stdio']),
+        true,
+      );
 
-    const handle = {
-      config: {
-        name: 'typescript-language-server',
-        languages: ['typescript'],
-        command: 'typescript-language-server',
-        args: ['--stdio'],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['typescript', handle]]),
-      warmupTypescriptServer: vi.fn(),
-      isTypescriptServer: () => true,
-    };
-
-    (lspService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      const promise = lspService.documentSymbols(uri);
-      await vi.runAllTimersAsync();
-      await promise;
+      await settle(lspService.documentSymbols(uri));
 
       // Should NOT have retried: only 1 request
       expect(requestCount).toBe(1);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  test('should NOT retry when document was already open', async () => {
-    const tempDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'lsp-no-retry-open-'),
-    );
-    const filePath = path.join(tempDir, 'Main.java');
-    fs.writeFileSync(filePath, 'public class Main { }\n', 'utf-8');
-    const uri = pathToFileURL(filePath).toString();
-
-    let requestCount = 0;
-    const connection = {
-      listen: vi.fn(),
-      send: vi.fn(),
-      onNotification: vi.fn(),
-      onRequest: vi.fn(),
-      request: vi.fn(async (method: string) => {
-        if (
-          method === 'textDocument/hover' ||
-          method === 'textDocument/documentSymbol'
-        ) {
-          requestCount += 1;
+  test('should NOT retry when document was already open', () =>
+    inTempDirWithFakeTimers('lsp-no-retry-open-', async (dir) => {
+      const uri = writeDoc(dir, 'Main.java', JAVA_TEXT);
+      let requestCount = 0;
+      const connection = makeConnection({
+        request: vi.fn(async (method: string) => {
+          if (
+            method === 'textDocument/hover' ||
+            method === 'textDocument/documentSymbol'
+          ) {
+            requestCount += 1;
+          }
           return null;
-        }
-        return null;
-      }),
-      initialize: vi.fn(async () => ({})),
-      shutdown: vi.fn(async () => {}),
-      end: vi.fn(),
-    };
-
-    const handle = {
-      config: {
-        name: 'jdtls',
-        languages: ['java'],
-        command: 'jdtls',
-        args: [],
-        transport: 'stdio',
-      },
-      status: 'READY',
-      textDocumentSync: 1,
-      connection,
-    };
-
-    const serverManager = {
-      getHandles: () => new Map([['jdtls', handle]]),
-      warmupTypescriptServer: vi.fn(),
-      isTypescriptServer: () => false,
-    };
-
-    const tempConfig = new MockConfig();
-    tempConfig.rootPath = tempDir;
-    const tempWorkspace = new MockWorkspaceContext();
-    tempWorkspace.rootPath = tempDir;
-
-    const tempService = new NativeLspService(
-      tempConfig as unknown as CoreConfig,
-      tempWorkspace as unknown as WorkspaceContext,
-      new EventEmitter(),
-      new MockFileDiscoveryService() as unknown as FileDiscoveryService,
-      new MockIdeContextStore() as unknown as IdeContextStore,
-      { workspaceRoot: tempDir },
-    );
-
-    (tempService as unknown as { serverManager: unknown }).serverManager =
-      serverManager;
-
-    vi.useFakeTimers();
-    try {
-      // First call opens the document (retry is allowed on this call)
-      const promise1 = tempService.hover({
-        uri,
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
+        }),
       });
-      await vi.runAllTimersAsync();
-      await promise1;
+      const service = workspaceService(
+        dir,
+        managerFor('jdtls', makeHandle(connection, 'jdtls', ['java']), false),
+      );
 
+      // First call opens the document (retry is allowed on this call)
+      await hover(service, uri);
       requestCount = 0;
 
-      // Second call - document already open, should NOT retry even though empty
-      const promise2 = tempService.documentSymbols(uri);
-      await vi.runAllTimersAsync();
-      await promise2;
+      // Document already open: no retry even though the result is empty.
+      await settle(service.documentSymbols(uri));
 
       expect(requestCount).toBe(1);
-    } finally {
-      vi.useRealTimers();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+    }));
 
-  // PR #4333 review fold-in: cover the two error branches added in
-  // applyTextEdits — only-ENOENT read guard and the W_OK access check.
-  // The branches are reached via the private applyTextEdits, accessed
-  // through a typed cast since making them public-for-test would inflate
-  // the API surface for one verification.
+  // PR #4333 review fold-in: covers applyTextEdits' two error branches (the
+  // only-ENOENT read guard and the W_OK access check), reached through a
+  // typed cast so the private method need not be public just for tests.
   describe('applyTextEdits — error branches', () => {
     let tmpDir: string;
+    const noChmod = process.platform === 'win32' || process.getuid?.() === 0;
+
+    const applyEdit = (filePath: string, newText: string) =>
+      (
+        lspService as unknown as {
+          applyTextEdits: (uri: string, edits: unknown[]) => Promise<void>;
+        }
+      ).applyTextEdits(pathToFileURL(filePath).toString(), [
+        { range: zeroRange(), newText },
+      ]);
+
+    /** Writes a file with `mode`, edits it, restores 0o644; returns the error code and final text. */
+    async function editProtected(
+      name: string,
+      content: string,
+      mode: number,
+      newText: string,
+    ) {
+      const filePath = path.join(tmpDir, name);
+      fs.writeFileSync(filePath, content);
+      fs.chmodSync(filePath, mode);
+      let code: string | undefined;
+      try {
+        await applyEdit(filePath, newText);
+      } catch (err) {
+        code = (err as NodeJS.ErrnoException | undefined)?.code;
+      }
+      fs.chmodSync(filePath, 0o644);
+      return { code, text: fs.readFileSync(filePath, 'utf-8') };
+    }
 
     beforeEach(() => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-edits-error-'));
@@ -2334,103 +1182,40 @@ describe('NativeLspService', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    test.skipIf(noChmod)(
       'read failure on chmod 0000 file propagates EACCES (does not silently become empty content)',
       async () => {
-        const filePath = path.join(tmpDir, 'unreadable.txt');
-        fs.writeFileSync(filePath, 'original content');
-        fs.chmodSync(filePath, 0o000);
-
-        const uri = pathToFileURL(filePath).toString();
-        const edit = {
-          range: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 0 },
-          },
-          newText: 'INJECTED ',
-        };
-        const applyTextEdits = (
-          lspService as unknown as {
-            applyTextEdits: (
-              uri: string,
-              edits: Array<typeof edit>,
-            ) => Promise<void>;
-          }
-        ).applyTextEdits.bind(lspService);
-
-        let caught: NodeJS.ErrnoException | undefined;
-        try {
-          await applyTextEdits(uri, [edit]);
-        } catch (err) {
-          caught = err as NodeJS.ErrnoException;
-        }
-        expect(caught?.code).toBe('EACCES');
-
-        // File is unchanged — read fail should NOT have triggered the
-        // pre-fix "treat as empty, overwrite with edits" path.
-        fs.chmodSync(filePath, 0o644);
-        expect(fs.readFileSync(filePath, 'utf-8')).toBe('original content');
+        const { code, text } = await editProtected(
+          'unreadable.txt',
+          'original content',
+          0o000,
+          'INJECTED ',
+        );
+        expect(code).toBe('EACCES');
+        // Unchanged: a read failure must not take the pre-fix "treat as
+        // empty, overwrite with edits" path.
+        expect(text).toBe('original content');
       },
     );
 
-    test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    test.skipIf(noChmod)(
       'chmod 0444 read-only file is rejected before write (W_OK check)',
       async () => {
-        const filePath = path.join(tmpDir, 'readonly.txt');
-        fs.writeFileSync(filePath, 'do not modify me');
-        fs.chmodSync(filePath, 0o444);
-
-        const uri = pathToFileURL(filePath).toString();
-        const edit = {
-          range: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 0 },
-          },
-          newText: 'BAD ',
-        };
-        const applyTextEdits = (
-          lspService as unknown as {
-            applyTextEdits: (
-              uri: string,
-              edits: Array<typeof edit>,
-            ) => Promise<void>;
-          }
-        ).applyTextEdits.bind(lspService);
-
-        let caught: NodeJS.ErrnoException | undefined;
-        try {
-          await applyTextEdits(uri, [edit]);
-        } catch (err) {
-          caught = err as NodeJS.ErrnoException;
-        }
-        expect(caught?.code).toMatch(/^E(ACCES|PERM)$/);
-
-        // Original content untouched — atomic rename did NOT bypass perms.
-        fs.chmodSync(filePath, 0o644);
-        expect(fs.readFileSync(filePath, 'utf-8')).toBe('do not modify me');
+        const { code, text } = await editProtected(
+          'readonly.txt',
+          'do not modify me',
+          0o444,
+          'BAD ',
+        );
+        expect(code).toMatch(/^E(ACCES|PERM)$/);
+        // Unchanged: the atomic rename did NOT bypass perms.
+        expect(text).toBe('do not modify me');
       },
     );
 
     test('nonexistent file is accepted (LSP can create via edits)', async () => {
       const filePath = path.join(tmpDir, 'new-file.txt');
-      const uri = pathToFileURL(filePath).toString();
-      const edit = {
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 0 },
-        },
-        newText: 'created via edit',
-      };
-      const applyTextEdits = (
-        lspService as unknown as {
-          applyTextEdits: (
-            uri: string,
-            edits: Array<typeof edit>,
-          ) => Promise<void>;
-        }
-      ).applyTextEdits.bind(lspService);
-
-      await applyTextEdits(uri, [edit]);
+      await applyEdit(filePath, 'created via edit');
       expect(fs.existsSync(filePath)).toBe(true);
       expect(fs.readFileSync(filePath, 'utf-8')).toBe('created via edit');
     });

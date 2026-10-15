@@ -7,7 +7,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text, useIsScreenReaderEnabled } from 'ink';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { App } from './App.js';
+import { SettingsCorruptedDialog } from './components/SettingsCorruptedDialog.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
 import {
   UIActionsContext,
@@ -46,6 +51,14 @@ vi.mock('./components/QuittingDisplay.js', () => ({
   QuittingDisplay: () => <Text>Quitting...</Text>,
 }));
 
+vi.mock('./components/SettingsCorruptedDialog.js', () => ({
+  SettingsCorruptedDialog: vi.fn(() => <Text>Settings corrupted</Text>),
+}));
+
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: vi.fn(),
+}));
+
 vi.mock('./components/Footer.js', () => ({
   Footer: () => <Text>Footer</Text>,
 }));
@@ -81,18 +94,101 @@ describe('App', () => {
     refreshStatic: vi.fn(),
   } as unknown as UIActions;
 
-  const renderWithProviders = (uiState: UIState) =>
+  const renderWithProviders = (
+    uiState: UIState,
+    settings: LoadedSettings = mockSettings,
+  ) =>
     render(
       <UIActionsContext.Provider value={mockUIActions}>
         <AgentViewProvider>
           <UIStateContext.Provider value={uiState}>
-            <SettingsContext.Provider value={mockSettings}>
+            <SettingsContext.Provider value={settings}>
               <App />
             </SettingsContext.Provider>
           </UIStateContext.Provider>
         </AgentViewProvider>
       </UIActionsContext.Provider>,
     );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0).each([
+    {
+      name: 'identical 0400 original',
+      mode: 0o400,
+      original: '{broken',
+      failed: false,
+    },
+    {
+      name: 'identical 0444 original',
+      mode: 0o444,
+      original: '{broken',
+      failed: false,
+    },
+    {
+      name: 'different read-only original',
+      mode: 0o444,
+      original: '{changed',
+      failed: true,
+    },
+    {
+      name: 'unreadable original',
+      mode: 0o000,
+      original: '{broken',
+      failed: true,
+    },
+    {
+      name: 'different writable original',
+      mode: 0o600,
+      original: '{changed',
+      failed: false,
+    },
+  ])('handles Exit/restore for $name', ({ mode, original, failed }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'app-recovery-'));
+    const settingsPath = path.join(root, 'settings.json');
+    const corruptedPath = `${settingsPath}.corrupted`;
+    fs.writeFileSync(settingsPath, original, { mode });
+    fs.writeFileSync(corruptedPath, '{broken', { mode: 0o444 });
+    const originalInode = fs.statSync(settingsPath).ino;
+    const exit = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    vi.mocked(writeStderrLine).mockClear();
+    vi.mocked(SettingsCorruptedDialog).mockClear();
+    const { unmount } = renderWithProviders(
+      mockUIState as UIState,
+      {
+        ...mockSettings,
+        corruptedPath,
+      } as LoadedSettings,
+    );
+
+    try {
+      vi.mocked(SettingsCorruptedDialog).mock.calls[0][0].onExit();
+
+      expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+      expect(fs.statSync(settingsPath).mode & 0o777).toBe(
+        mode === 0o600 ? 0o444 : mode,
+      );
+      expect(fs.statSync(settingsPath).ino).toBe(originalInode);
+      if (failed) {
+        expect(writeStderrLine).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('Failed to restore corrupted file: EACCES'),
+        );
+        expect(fs.readFileSync(corruptedPath, 'utf8')).toBe('{broken');
+        expect(fs.statSync(corruptedPath).mode & 0o777).toBe(0o444);
+      } else {
+        expect(writeStderrLine).not.toHaveBeenCalled();
+        expect(fs.existsSync(corruptedPath)).toBe(false);
+      }
+      if (mode === 0) fs.chmodSync(settingsPath, 0o600);
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(
+        failed ? original : '{broken',
+      );
+    } finally {
+      unmount();
+      exit.mockRestore();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it('should render main content and composer when not quitting', () => {
     const { lastFrame } = renderWithProviders(mockUIState as UIState);

@@ -52,6 +52,7 @@ type AuthStep =
   | 'advancedConfig';
 
 interface AuthMessageProps {
+  allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onClose: () => void;
 }
@@ -141,7 +142,13 @@ function normalizeModelIds(value: string): string[] {
   ];
 }
 
-export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
+export function AuthMessage({
+  onMessage,
+  onClose,
+  allowAdd = true,
+}: AuthMessageProps) {
+  const allowAddRef = useRef(allowAdd);
+  allowAddRef.current = allowAdd;
   const { t } = useI18n();
   const fieldId = useId();
   const openExternalLink = useExternalLinkOpener();
@@ -423,7 +430,8 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   ]);
 
   const save = useCallback(() => {
-    if (!provider || saving || !validateAdvanced()) return;
+    if (!allowAddRef.current || !provider || saving || !validateAdvanced())
+      return;
     const owner = ownerRef.current;
     const operation = ++saveOperationRef.current;
     const isCurrent = () =>

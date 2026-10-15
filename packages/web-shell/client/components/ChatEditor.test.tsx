@@ -157,6 +157,7 @@ const composerCoreState = vi.hoisted(() => ({
   navigatePrevHistory: vi.fn(),
   navigateNextHistory: vi.fn(),
   hasContent: false,
+  pendingImageBatchCount: 0,
   shellMode: false,
   setShellMode: vi.fn(),
   toggleShellMode: vi.fn(),
@@ -246,7 +247,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
-        pendingImageBatchCount: 0,
+        pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
         ingestFiles: composerCoreState.ingestFiles,
@@ -385,6 +386,7 @@ afterEach(() => {
   composerCoreState.submitText.mockReset();
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
+  composerCoreState.pendingImageBatchCount = 0;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
@@ -405,6 +407,8 @@ afterEach(() => {
 interface ChatEditorRenderProps
   extends Pick<
     ComponentProps<typeof ChatEditor>,
+    | 'btwEnabled'
+    | 'isPreparing'
     | 'contextChipPlacement'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
@@ -1078,7 +1082,27 @@ describe('ChatEditor context usage ring', () => {
     expect(getContextUsage).not.toHaveBeenCalled();
   });
 
-  it('opens the context breakdown when clicked', () => {
+  it('opens the details panel when clicked', () => {
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onOpenContextUsage).toHaveBeenCalledTimes(1);
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a transcript snapshot when the host has no details panel', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
       tokenCount: 100,
@@ -1093,6 +1117,24 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the conversation hint once the click opens the details panel', async () => {
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(tooltip.textContent).toContain('Context Usage');
+    expect(tooltip.textContent).not.toContain(
+      'Click to view the breakdown in the conversation.',
+    );
   });
 
   it('shows the used/total detail in the hover card on focus', async () => {
@@ -1677,6 +1719,16 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
     ).toBe(true);
+    renderChatEditor({
+      composerScopeKey: 'managed:tenant:actor:session',
+      workspaceFeaturesEnabled: false,
+      disableLegacyHistoryFallback: true,
+      shellModeEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+    expect(latestComposerCoreOptions.current?.shellModeEnabled).toBe(false);
   });
 
   it('shows the workspace indicator when the workspace action is visible', () => {
@@ -1695,6 +1747,23 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('retains the native Workspace selector for a sole explicit Managed choice', () => {
+    const container = renderChatEditor({
+      workspaces: [
+        { id: 'ws-a', cwd: 'ws-a', label: 'A', primary: false, trusted: true },
+      ],
+      onSelectWorkspace: vi.fn(),
+      workspaceSelectorAlwaysVisible: true,
+      contextChipPlacement: 'below',
+      visibleToolbarActions: ['workspace'],
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-composer-context-row] button[aria-label="Workspace"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -2101,6 +2170,109 @@ describe('ChatEditor top composer tag tooltip', () => {
       accessibleTooltip?.id,
     );
     expect(tag?.hasAttribute('aria-describedby')).toBe(false);
+  });
+});
+
+describe('ChatEditor BTW in the add menu', () => {
+  async function openBtw(props: ChatEditorRenderProps = {}) {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      btwEnabled: true,
+      ...props,
+    });
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector('[data-testid="composer-add-menu-trigger"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    expect(portalRoot.querySelector('[role="menu"]')).not.toBeNull();
+    return portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-btw"]',
+    );
+  }
+
+  it.each(['', 'Explain this decision'])(
+    'prepares a side question from %j without sending',
+    async (draft) => {
+      composerCoreState.getText.mockReturnValue(draft);
+      const item = await openBtw({ isRunning: true });
+      expect(item?.textContent).toContain('Ask a side question');
+      expect(item?.textContent).toContain('/btw');
+      await act(async () => item!.click());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(composerCoreState.setText).toHaveBeenCalledWith(`/btw ${draft}`);
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/btw', '/btw already asked'])(
+    'keeps the existing prefix in %j',
+    async (draft) => {
+      composerCoreState.getText.mockReturnValue(draft);
+      const item = await openBtw();
+      await act(async () => item!.click());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(composerCoreState.setText).not.toHaveBeenCalled();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    },
+  );
+
+  it('normalizes an existing uppercase command for the local BTW router', async () => {
+    composerCoreState.getText.mockReturnValue('  /BTW\nquestion');
+    const item = await openBtw();
+    await act(async () => item!.click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(composerCoreState.setText).toHaveBeenCalledWith('/btw\nquestion');
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it.each([
+    { pastedImages: [{ data: 'image', media_type: 'image/png' }] },
+    {
+      pastedFiles: [
+        { name: 'note.txt', media_type: 'text/plain', text: 'note' },
+      ],
+    },
+    {
+      composerTags: [
+        { id: 'file', type: 'file', label: 'note.txt', value: 'note.txt' },
+      ],
+    },
+  ] satisfies ChatEditorRenderProps[])(
+    'explains why attachments cannot become a side question: %j',
+    async (props) => {
+      const item = await openBtw(props);
+      expect(item?.hasAttribute('data-disabled')).toBe(true);
+      expect(item?.textContent).toContain('Remove attachments first');
+      await act(async () => item!.click());
+      expect(composerCoreState.setText).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks pending image ingestion', async () => {
+    composerCoreState.pendingImageBatchCount = 1;
+    const item = await openBtw();
+    expect(item?.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('blocks preparation', async () => {
+    const item = await openBtw({ isPreparing: true });
+    expect(item?.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('requires the main chat to enable the entry', async () => {
+    expect(await openBtw({ btwEnabled: false })).toBeNull();
+  });
+
+  it('hides the entry in shell mode', async () => {
+    composerCoreState.shellMode = true;
+    expect(await openBtw()).toBeNull();
   });
 });
 
@@ -3467,6 +3639,24 @@ describe('ChatEditor mobile composer actions', () => {
     ).toBe(false);
     await clickButton('Input history');
     expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
+  });
+
+  it('hides the mobile Shell entry for Managed while retaining the ordinary default', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      shellModeEnabled: false,
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-editing-actions]'),
+    ).not.toBeNull();
+    const shellButton = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Shell mode',
+      );
+    expect(shellButton()).toBeUndefined();
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(shellButton()).toBeDefined();
   });
 
   it('returns focus to the composer after entering Shell from the drawer', async () => {

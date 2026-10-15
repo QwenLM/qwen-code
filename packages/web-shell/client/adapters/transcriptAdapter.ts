@@ -3,7 +3,7 @@ import type {
   ContentBlock,
   PermissionRequest,
   PermissionOptionKind,
-} from './types';
+} from './types.js';
 
 type PermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
@@ -73,7 +73,7 @@ function hasPermissionDiffPreview(
   });
 }
 
-function escapePreviewText(text: string): string {
+export function escapePreviewText(text: string): string {
   return text.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) =>
     character
       .split('')
@@ -122,7 +122,13 @@ function getPermissionContent(
     if (content.length > 0) return { content };
   }
   const input = getExplicitPermissionInput(toolCall);
-  if (input && !hasPermissionDiffPreview(toolCall)) {
+  // An empty input object carries no information; rendering its serialization
+  // would show a bare `{}` as the approval body.
+  if (
+    input &&
+    Object.keys(input).length > 0 &&
+    !hasPermissionDiffPreview(toolCall)
+  ) {
     return {
       content: [
         {

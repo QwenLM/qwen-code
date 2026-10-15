@@ -48,8 +48,56 @@ function runtime(
   return { parentCallId: 'parent', dispatch };
 }
 
+/** Runs `source` against `bindingPlan`, sending nested calls to `dispatch`. */
+function runWith(
+  source: string,
+  bindingPlan: CodeModeBindingPlan,
+  dispatch: ToolCallRuntimeContext['dispatch'],
+  options?: Parameters<typeof executeCodeMode>[4],
+) {
+  return executeCodeMode(
+    source,
+    bindingPlan,
+    runtime(dispatch),
+    new AbortController().signal,
+    options,
+  );
+}
+
+/** Runs `source` with no bound tools; a nested dispatch would throw. */
+function run(source: string, options?: Parameters<typeof executeCodeMode>[4]) {
+  return runWith(
+    source,
+    plan(),
+    async () => {
+      throw new Error('unused');
+    },
+    options,
+  );
+}
+
+function success(callId: string, name: string, output: string) {
+  return { callId, name, status: 'success' as const, output };
+}
+
+/** A registry (CodeModeOnly unless `config` says otherwise) of MockTools. */
+function registryWith(
+  names: string[],
+  config?: Parameters<typeof makeFakeConfig>[0],
+  params?: Record<string, unknown>,
+) {
+  const registry = new ToolRegistry(
+    makeFakeConfig(config ?? { codeModeOnly: true }),
+  );
+  for (const name of names) {
+    registry.registerTool(new MockTool({ name, params }));
+  }
+  return registry;
+}
+
 describe('CodeModeOnly exposure', () => {
   const directTools = [
+    'tool_search',
     'ask_user_question',
     'agent',
     'enter_plan_mode',
@@ -111,8 +159,8 @@ describe('CodeModeOnly exposure', () => {
     },
   );
 
-  it('keeps discovery hidden and exec non-nestable', () => {
-    for (const name of ['tool_search', 'tool_call']) {
+  it('keeps tool_call hidden and exec non-nestable', () => {
+    for (const name of ['tool_call']) {
       expect(getToolExposure(name)).toBe('hidden');
       expect(isCodeModeToolCallAllowed(name, 'model')).toBe(false);
       expect(isCodeModeToolCallAllowed(name, 'code_mode')).toBe(false);
@@ -122,10 +170,7 @@ describe('CodeModeOnly exposure', () => {
   });
 
   it('moves management and context tools out of top-level declarations', () => {
-    const registry = new ToolRegistry(makeFakeConfig({ codeModeOnly: true }));
-    for (const name of [...directTools, ...migratedTools, 'exec']) {
-      registry.registerTool(new MockTool({ name }));
-    }
+    const registry = registryWith([...directTools, ...migratedTools, 'exec']);
     const declarations = registry.getFunctionDeclarations();
     expect(declarations.map((declaration) => declaration.name).sort()).toEqual(
       [...directTools, 'exec'].sort(),
@@ -135,7 +180,13 @@ describe('CodeModeOnly exposure', () => {
     )?.description;
     for (const name of migratedTools)
       expect(description).toContain(`tools.${name}(args:`);
-    expect(description).toContain('automatically retained');
+    expect(description).toContain(
+      'are not automatically added to the exec response',
+    );
+    expect(description).toContain('Use text(value) to return text');
+    expect(description).toContain(
+      'bare return values and successful script completion produce no output',
+    );
     expect(description).toContain('terminal update_goal');
   });
 
@@ -166,39 +217,31 @@ describe('CodeModeOnly exposure', () => {
   });
 
   it('exposes exec and direct controls while retaining ordinary and hidden tools', () => {
-    const registry = new ToolRegistry(makeFakeConfig({ codeModeOnly: true }));
-    for (const name of [
+    const registry = registryWith([
       'read_file',
       'tool_search',
       'ask_user_question',
       'agent',
       'exec',
-    ]) {
-      registry.registerTool(new MockTool({ name }));
-    }
+    ]);
 
     const declarations = registry.getFunctionDeclarations();
     expect(declarations.map((item) => item.name)).toEqual([
       'agent',
       'ask_user_question',
       'exec',
+      'tool_search',
     ]);
-    expect(
-      declarations.find((item) => item.name === 'exec')?.description,
-    ).toContain('tools.read_file');
-    expect(
-      declarations.find((item) => item.name === 'exec')?.description,
-    ).not.toContain('tools.tool_search');
+    const exec = declarations.find((item) => item.name === 'exec');
+    expect(exec?.description).toContain('tools.read_file');
+    expect(exec?.description).not.toContain('tools.tool_search');
     expect(registry.getAllToolNames()).toEqual(
       expect.arrayContaining(['read_file', 'tool_search']),
     );
   });
 
   it('narrows nested tools for filtered subagent declarations', () => {
-    const registry = new ToolRegistry(makeFakeConfig({ codeModeOnly: true }));
-    for (const name of ['read_file', 'write_file', 'agent', 'exec']) {
-      registry.registerTool(new MockTool({ name }));
-    }
+    const registry = registryWith(['read_file', 'write_file', 'agent', 'exec']);
 
     const declarations = registry.getFunctionDeclarationsFiltered([
       'read_file',
@@ -209,10 +252,9 @@ describe('CodeModeOnly exposure', () => {
   });
 
   it('keeps exec structured across Gemini, OpenAI, and Anthropic tool conversion', async () => {
-    const registry = new ToolRegistry(makeFakeConfig({ codeModeOnly: true }));
-    for (const name of ['read_file', 'agent', 'exec']) {
-      registry.registerTool(new MockTool({ name, params: { type: 'object' } }));
-    }
+    const registry = registryWith(['read_file', 'agent', 'exec'], undefined, {
+      type: 'object',
+    });
     const declarations = registry.getFunctionDeclarations();
     const tools = [{ functionDeclarations: declarations }] as Tool[];
 
@@ -262,26 +304,22 @@ describe('CodeModeOnly exposure', () => {
     expect(first.collisions).toEqual([
       { jsName: 'z_tool', kept: 'z-tool', omitted: 'z_tool' },
     ]);
-    expect(buildExecDescription(first)).toContain(
+    for (const fragment of [
       'tools.z_tool(args: { "count": number })',
-    );
-    expect(buildExecDescription(first)).toContain(
       'tools.a_tool(args: { "query": string })',
-    );
-    expect(buildExecDescription(first)).toContain('ImageContent');
-    expect(buildExecDescription(first)).toContain('generatedImage');
-    expect(buildExecDescription(first)).toContain(
+      'ImageContent',
+      'generatedImage',
+      'text(result.value.output)',
       'setTimeout(callback: () => void, delayMs?: number)',
-    );
-    expect(buildExecDescription(first)).toContain(
       'Pending timeouts do not keep exec alive by themselves',
-    );
-    expect(buildExecDescription(first)).toContain(
       'clearTimeout(timeoutId?: number)',
-    );
+    ]) {
+      expect(buildExecDescription(first)).toContain(fragment);
+    }
+    expect(buildExecDescription(first)).not.toContain('text(result.value)');
   });
 
-  it('expands deferred tool schemas because nothing can reveal them later', () => {
+  it('keeps deferred tool schemas when search is unavailable', () => {
     const deferredPlan = planCodeModeBindings(
       [
         new MockTool({
@@ -307,6 +345,63 @@ describe('CodeModeOnly exposure', () => {
     );
     expect(description).not.toContain('mcp__server__fetch(args: Record');
     expect(description).toContain('"deferred":true');
+  });
+
+  it('omits deferred metadata while retaining callable bindings and stable declarations', () => {
+    const config = makeFakeConfig({ codeModeOnly: true });
+    const registry = new ToolRegistry(config);
+    for (const name of ['exec', 'tool_search', 'read_file']) {
+      registry.registerTool(new MockTool({ name }));
+    }
+    registry.registerTool(
+      new MockTool({
+        name: 'remote_lookup',
+        shouldDefer: true,
+        description: 'PRIVATE_DEFERRED_DESCRIPTION',
+        params: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query'],
+        },
+      }),
+    );
+    const before = registry.getFunctionDeclarations();
+    const description = before.find((d) => d.name === 'exec')!.description!;
+    expect(description).toContain('tools.read_file(args:');
+    expect(description).toContain('tool_search');
+    expect(description).not.toContain('remote_lookup');
+    expect(description).not.toContain('PRIVATE_DEFERRED_DESCRIPTION');
+    expect(
+      registry.getCodeModeBindingPlan().bindings.map((b) => b.name),
+    ).toContain('remote_lookup');
+
+    registry.registerTool(
+      new MockTool({ name: 'another_deferred', shouldDefer: true }),
+    );
+    expect(registry.getFunctionDeclarations()).toEqual(before);
+    const scoped = registry.getFunctionDeclarationsFiltered(['remote_lookup']);
+    expect(scoped.map((d) => d.name)).toEqual(['exec']);
+    expect(scoped[0].description).toContain('tools.remote_lookup(args:');
+    expect(scoped[0].description).not.toContain('tools.read_file(args:');
+  });
+
+  it('keeps visible deferred signatures and omits hidden collision names', () => {
+    const config = makeFakeConfig({ codeModeOnly: true });
+    vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+      new Set(['visible_tool']),
+    );
+    const registry = new ToolRegistry(config);
+    for (const name of ['exec', 'tool_search'])
+      registry.registerTool(new MockTool({ name }));
+    for (const name of ['visible_tool', 'hidden-tool', 'hidden_tool']) {
+      registry.registerTool(new MockTool({ name, shouldDefer: true }));
+    }
+    const description = registry
+      .getFunctionDeclarations()
+      .find((d) => d.name === 'exec')!.description!;
+    expect(description).toContain('tools.visible_tool(args:');
+    expect(description).not.toContain('hidden-tool');
+    expect(description).not.toContain('hidden_tool');
   });
 
   it('keeps numeric schema limits visible in nested tool declarations', () => {
@@ -383,15 +478,54 @@ describe('code mode protocol', () => {
 });
 
 describe('isolated code mode host', () => {
-  it('runs async tool calls, Promise.all, helpers, and return values', async () => {
-    const dispatch = vi.fn(async (name, args) => ({
-      callId: String(args['value']),
-      name,
-      status: 'success' as const,
-      output: String(args['value']),
-    }));
+  it('keeps a pending sibling result when allSettled handles a rejection', async () => {
+    let releaseSibling!: () => void;
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSibling = resolve;
+    });
+    const siblingStarted = vi.fn();
+    const siblingAborted = vi.fn();
+    const execution = executeCodeMode(
+      `const results = await Promise.allSettled([
+        tools.fail({}),
+        tools.read({}),
+      ]);
+      for (const result of results) {
+        text(result.status === 'fulfilled' ? result.value.output : String(result.reason));
+      }
+      return results.map(result => result.status);`,
+      plan('fail', 'read'),
+      runtime(async (name, _args, signal) => {
+        if (name === 'fail') throw new Error('read failed');
+        signal.addEventListener('abort', siblingAborted, { once: true });
+        siblingStarted();
+        await siblingGate;
+        signal.removeEventListener('abort', siblingAborted);
+        return { callId: 'read', name, status: 'success', output: 'retained' };
+      }),
+      new AbortController().signal,
+    );
+    try {
+      await vi.waitFor(() => expect(siblingStarted).toHaveBeenCalledOnce(), {
+        timeout: 10_000,
+      });
+      expect(siblingAborted).not.toHaveBeenCalled();
+    } finally {
+      releaseSibling();
+    }
+    const result = await execution;
+    expect(result.value).toEqual(['rejected', 'fulfilled']);
+    expect(result.output).toContain('read failed');
+    expect(result.output).toContain('retained');
+    expect(siblingAborted).not.toHaveBeenCalled();
+  });
 
-    const result = await executeCodeMode(
+  it('runs async tool calls, Promise.all, helpers, and return values', async () => {
+    const dispatch = vi.fn(async (name, args) =>
+      success(String(args['value']), name, String(args['value'])),
+    );
+
+    const result = await runWith(
       `const [a, b] = await Promise.all([
         tools.echo({ value: 1 }),
         tools.echo({ value: 2 }),
@@ -400,8 +534,7 @@ describe('isolated code mode host', () => {
       text('tail');
       return { second: b.output, tools: ALL_TOOLS };`,
       plan('echo'),
-      runtime(dispatch),
-      new AbortController().signal,
+      dispatch,
     );
 
     expect(result.output).toBe('1\ntail');
@@ -441,19 +574,13 @@ describe('isolated code mode host', () => {
 
   it('resumes the guest CPU budget after a nested tool settles', async () => {
     await expect(
-      executeCodeMode(
+      runWith(
         'await tools.wait({}); while (true) {}',
         plan('wait'),
-        runtime(async (name) => {
+        async (name) => {
           await new Promise((resolve) => setTimeout(resolve, 100));
-          return {
-            callId: 'wait',
-            name,
-            status: 'success',
-            output: 'finished',
-          };
-        }),
-        new AbortController().signal,
+          return success('wait', name, 'finished');
+        },
         { timeoutMs: 50 },
       ),
     ).rejects.toThrow(/interrupted|timed out/);
@@ -467,15 +594,7 @@ describe('isolated code mode host', () => {
     // grace — not the guest budget alone.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
-      const pending = executeCodeMode(
-        'await new Promise(() => {})',
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
-        { timeoutMs: 1 },
-      );
+      const pending = run('await new Promise(() => {})', { timeoutMs: 1 });
       // Keep the rejection handled while fake time advances; it is asserted
       // after the wall timer fires.
       void pending.catch(() => {});
@@ -489,12 +608,9 @@ describe('isolated code mode host', () => {
   });
 
   it('calls a deferred MCP-style tool through its normalized JavaScript name', async () => {
-    const dispatch = vi.fn(async (name: string) => ({
-      callId: 'mcp-call',
-      name,
-      status: 'success' as const,
-      output: 'mcp output',
-    }));
+    const dispatch = vi.fn(async (name: string) =>
+      success('mcp-call', name, 'mcp output'),
+    );
     const mcpPlan: CodeModeBindingPlan = {
       bindings: [
         {
@@ -508,11 +624,10 @@ describe('isolated code mode host', () => {
       collisions: [],
     };
 
-    const result = await executeCodeMode(
+    const result = await runWith(
       'return (await tools.mcp_server_read_resource({ uri: "test://item" })).output',
       mcpPlan,
-      runtime(dispatch),
-      new AbortController().signal,
+      dispatch,
     );
 
     expect(result.value).toBe('mcp output');
@@ -524,80 +639,39 @@ describe('isolated code mode host', () => {
   });
 
   it('reports invalid JavaScript and thrown errors', async () => {
+    await expect(run('if (')).rejects.toThrow();
+    await expect(run('throw new Error("guest failure")')).rejects.toThrow(
+      'guest failure',
+    );
     await expect(
-      executeCodeMode(
-        'if (',
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow();
-    await expect(
-      executeCodeMode(
-        'throw new Error("guest failure")',
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow('guest failure');
-    await expect(
-      executeCodeMode(
+      runWith(
         'await tools.echo({}).then(() => { throw new Error("job failure"); })',
         plan('echo'),
-        runtime(async (name) => ({
-          callId: 'echo',
-          name,
-          status: 'success',
-          output: 'ok',
-        })),
-        new AbortController().signal,
+        async (name) => success('echo', name, 'ok'),
       ),
     ).rejects.toThrow('job failure');
   });
 
   it('interrupts CPU loops and bounds helper output', async () => {
-    await expect(
-      executeCodeMode(
-        'while (true) {}',
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
-        { timeoutMs: 50 },
-      ),
-    ).rejects.toThrow(/interrupted|timed out/);
-
-    const result = await executeCodeMode(
-      'text("abcdefgh")',
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
-      { maxOutputChars: 3 },
+    await expect(run('while (true) {}', { timeoutMs: 50 })).rejects.toThrow(
+      /interrupted|timed out/,
     );
+
+    const result = await run('text("abcdefgh")', { maxOutputChars: 3 });
     expect(result.output).toBe('abc');
   });
 
   it('bounds return values and oversized nested tool content', async () => {
-    const result = await executeCodeMode(
+    const result = await runWith(
       `const nested = await tools.large({});
       text(typeof nested.content);
       try { await tools.fail({}); } catch (error) { text(error.message.length); }
       return 'v'.repeat(1000);`,
       plan('large', 'fail'),
-      runtime(async (name) => {
+      async (name) => {
         if (name === 'fail') throw new Error('e'.repeat(2_000_000));
         return {
-          callId: 'large',
-          name,
-          status: 'success',
-          output: 'ok',
+          ...success('large', name, 'ok'),
           content: [
             {
               type: 'image',
@@ -606,8 +680,7 @@ describe('isolated code mode host', () => {
             },
           ],
         };
-      }),
-      new AbortController().signal,
+      },
       { maxOutputChars: 100 },
     );
 
@@ -618,15 +691,10 @@ describe('isolated code mode host', () => {
 
   it('preserves media independently of the text output budget', async () => {
     const data = 'QUJD'.repeat(2_000);
-    const result = await executeCodeMode(
+    const result = await run(
       `text('before');
       image('data:image/png;base64,${data}');
       text('after');`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
       { maxOutputChars: 100 },
     );
 
@@ -637,17 +705,12 @@ describe('isolated code mode host', () => {
   });
 
   it('accepts Qwen MCP ImageContent in image()', async () => {
-    const result = await executeCodeMode(
+    const result = await run(
       `image({
         type: 'image',
         mimeType: 'image/png',
         data: 'QUJD',
       });`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
     );
 
     expect(result.content).toEqual([
@@ -656,7 +719,7 @@ describe('isolated code mode host', () => {
   });
 
   it('accepts the Qwen image_gen result in generatedImage()', async () => {
-    const result = await executeCodeMode(
+    const result = await run(
       `generatedImage({
         callId: 'image-gen',
         name: 'image_gen',
@@ -668,11 +731,6 @@ describe('isolated code mode host', () => {
           data: 'QUJD',
         }],
       });`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
     );
 
     expect(result).toEqual({
@@ -683,18 +741,18 @@ describe('isolated code mode host', () => {
 
   it('preserves generated images larger than the control frame limit', async () => {
     const data = 'QUJD'.repeat(350_000);
-    const result = await executeCodeMode(
+    const result = await runWith(
       `const generated = await tools.image_gen({ prompt: 'large poster' });
       generatedImage(generated);`,
       plan('image_gen'),
-      runtime(async (name) => ({
-        callId: 'large-image-gen',
-        name,
-        status: 'success',
-        output: 'Generated image saved to /workspace/large.png.',
+      async (name) => ({
+        ...success(
+          'large-image-gen',
+          name,
+          'Generated image saved to /workspace/large.png.',
+        ),
         content: [{ type: 'image', mimeType: 'image/png', data }],
-      })),
-      new AbortController().signal,
+      }),
     );
 
     expect(result.output).toBe(
@@ -706,24 +764,17 @@ describe('isolated code mode host', () => {
   });
 
   it('rejects malformed Qwen media helper inputs', async () => {
-    const noTools = runtime(async () => {
-      throw new Error('unused');
-    });
-
     await expect(
-      executeCodeMode(
+      run(
         `image({
           type: 'image',
           mimeType: 'audio/wav',
           data: 'QUJD',
         });`,
-        plan(),
-        noTools,
-        new AbortController().signal,
       ),
     ).rejects.toThrow('Qwen MCP ImageContent');
     await expect(
-      executeCodeMode(
+      run(
         `generatedImage({
           callId: 'other',
           name: 'other_tool',
@@ -735,9 +786,6 @@ describe('isolated code mode host', () => {
             data: 'QUJD',
           }],
         });`,
-        plan(),
-        noTools,
-        new AbortController().signal,
       ),
     ).rejects.toThrow('tools.image_gen()');
   });
@@ -748,88 +796,50 @@ describe('isolated code mode host', () => {
       'data:audio/wav;base64,QUJD',
       'data:image/png;base64,==',
     ]) {
-      await expect(
-        executeCodeMode(
-          `image(${JSON.stringify(value)})`,
-          plan(),
-          runtime(async () => {
-            throw new Error('unused');
-          }),
-          new AbortController().signal,
-        ),
-      ).rejects.toThrow('base64 data URL');
+      await expect(run(`image(${JSON.stringify(value)})`)).rejects.toThrow(
+        'base64 data URL',
+      );
     }
   });
 
   it('enforces the memory limit and rejects unavailable or recursive tools', async () => {
-    const noTools = runtime(async () => {
-      throw new Error('unused');
-    });
     await expect(
-      executeCodeMode(
-        'return new ArrayBuffer(128 * 1024 * 1024).byteLength',
-        plan(),
-        noTools,
-        new AbortController().signal,
-        { timeoutMs: 1000 },
-      ),
+      run('return new ArrayBuffer(128 * 1024 * 1024).byteLength', {
+        timeoutMs: 1000,
+      }),
     ).rejects.toThrow('out of memory');
+    await expect(run('await tools.exec({ source: "" })')).rejects.toThrow(
+      'Unknown or unavailable code mode tool: exec',
+    );
     await expect(
-      executeCodeMode(
-        'await tools.exec({ source: "" })',
-        plan(),
-        noTools,
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow('Unknown or unavailable code mode tool: exec');
-    await expect(
-      executeCodeMode(
+      run(
         'Object.prototype.hasOwnProperty = () => true; await tools.constructor({})',
-        plan(),
-        noTools,
-        new AbortController().signal,
       ),
     ).rejects.toThrow('Unknown or unavailable code mode tool: constructor');
 
-    const protoDispatch = vi.fn(async (name: string) => ({
-      callId: 'proto',
-      name,
-      status: 'success' as const,
-      output: 'proto ok',
-    }));
-    const proto = await executeCodeMode(
+    const protoDispatch = vi.fn(async (name: string) =>
+      success('proto', name, 'proto ok'),
+    );
+    const proto = await runWith(
       'return (await tools.__proto__({})).output',
       plan('__proto__'),
-      runtime(protoDispatch),
-      new AbortController().signal,
+      protoDispatch,
     );
     expect(proto.value).toBe('proto ok');
   });
 
   it('supports immediate exit without running later statements', async () => {
-    const result = await executeCodeMode(
-      'text("before"); exit(); text("after")',
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
-    );
+    const result = await run('text("before"); exit(); text("after")');
     expect(result.output).toBe('before');
   });
 
   it('supports cancellable one-shot timers', async () => {
-    const result = await executeCodeMode(
+    const result = await run(
       `const cancelled = setTimeout(() => text('cancelled'), 0);
       clearTimeout(cancelled);
       await new Promise((resolve) => setTimeout(resolve, 25));
       text('timer done');
       return [typeof setTimeout, typeof clearTimeout];`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
     );
 
     expect(result.output).toBe('timer done');
@@ -837,14 +847,9 @@ describe('isolated code mode host', () => {
   });
 
   it('does not keep exec alive for an unawaited timer', async () => {
-    const result = await executeCodeMode(
+    const result = await run(
       `setTimeout(() => text('late'), 60_000);
       text('done');`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
       { timeoutMs: 25 },
     );
 
@@ -852,14 +857,9 @@ describe('isolated code mode host', () => {
   });
 
   it('does not charge timer wait time against the guest CPU budget', async () => {
-    const result = await executeCodeMode(
+    const result = await run(
       `await new Promise((resolve) => setTimeout(resolve, 100));
       text('done');`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
       { timeoutMs: 50 },
     );
 
@@ -868,98 +868,58 @@ describe('isolated code mode host', () => {
 
   it('surfaces errors thrown by timer callbacks', async () => {
     await expect(
-      executeCodeMode(
+      run(
         `await new Promise(() => {
           setTimeout(() => { throw new Error('timer failure'); }, 0);
         });`,
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
       ),
     ).rejects.toThrow('timer failure');
   });
 
   it('bounds the number of live timers', async () => {
     await expect(
-      executeCodeMode(
+      run(
         `for (let i = 0; i < 1025; i++) {
           setTimeout(() => {}, 60_000);
         }`,
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
       ),
     ).rejects.toThrow('at most 1024 live timers');
   });
 
   it('does not expose Node, network, console, or WebAssembly', async () => {
-    const result = await executeCodeMode(
+    const result = await run(
       `return [
         typeof process, typeof require, typeof fetch, typeof console,
         typeof WebAssembly, typeof SharedArrayBuffer,
       ];`,
-      plan(),
-      runtime(async () => {
-        throw new Error('unused');
-      }),
-      new AbortController().signal,
     );
     expect(result.value).toEqual(Array(6).fill('undefined'));
 
-    await expect(
-      executeCodeMode(
-        'await import("node:fs")',
-        plan(),
-        runtime(async () => {
-          throw new Error('unused');
-        }),
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow();
+    await expect(run('await import("node:fs")')).rejects.toThrow();
   });
 
   it('uses a fresh global context for every call', async () => {
-    const noTools = runtime(async () => {
-      throw new Error('unused');
-    });
-    await executeCodeMode(
-      'globalThis.persisted = 42',
-      plan(),
-      noTools,
-      new AbortController().signal,
-    );
-    const result = await executeCodeMode(
-      'return typeof persisted',
-      plan(),
-      noTools,
-      new AbortController().signal,
-    );
+    await run('globalThis.persisted = 42');
+    const result = await run('return typeof persisted');
     expect(result.value).toBe('undefined');
   });
 
   it('cancels unawaited nested calls when the program settles', async () => {
     let aborted = false;
-    const result = await executeCodeMode(
+    const result = await runWith(
       'tools.wait({}); return "done";',
       plan('wait'),
-      runtime(
-        (_name, _args, signal) =>
-          new Promise((_resolve, reject) => {
-            signal.addEventListener(
-              'abort',
-              () => {
-                aborted = true;
-                reject(signal.reason);
-              },
-              { once: true },
-            );
-          }),
-      ),
-      new AbortController().signal,
+      (_name, _args, signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        }),
     );
     expect(result.value).toBe('done');
     expect(aborted).toBe(true);

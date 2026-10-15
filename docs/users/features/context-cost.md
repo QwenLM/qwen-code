@@ -26,7 +26,7 @@ It is independent of the model and the window, and you cannot make it look bette
 
 ### 1. Turn off features you do not use
 
-Each feature that registers a tool pays for that tool's schema on every request. The largest single built-in entries are the ones belonging to optional features, so a deployment that does not use workflows, goals, scheduled tasks, or the review tooling saves more by switching those features off than by any amount of prompt editing. This also removes the tool from subagents, which the next lever does not always do.
+Each tool declared to the model adds its schema to every request. Switching off optional features with large resident tools can therefore save request tokens. Deferred tools instead contribute short catalog entries and the cost of later discovery or invocation. Disabling a feature also removes its tools from subagents, which the next lever does not always do.
 
 ### 2. Keep the eager tool surface to what you actually use
 
@@ -59,6 +59,8 @@ Four things to know before you use it:
 
 `tools.visible` is the escape hatch for one tool you want declared up front even though it is deferred by default.
 
+Agent and Goal coordination (`agent`, `list_agents`, `get_goal`, `update_goal`, and `propose_goal`) is deferred by default; no `tools.eager` configuration is needed. The model sees short discovery entries instead of the full schemas. Their first use needs discovery through the bridge, so compare whole-task cost and successful delegation/Goal completion as well as the first request. These are ordinary deferred tools: `tools.visible`, preloading, and the incomplete-bridge eager fallback described above still apply. Preloading is all-or-nothing over the whole deferred candidate pool, and these five declarations are large, so a `tools.toolSearch.threshold` that used to reveal every deferred tool at session start can now reveal none of them. Re-take a `/context` reading after changing either one.
+
 ### 3. Move scenario guidance out of context files into skills
 
 A context file is concatenated into every request of every session it applies to, with no relevance gating. A [skill](skills.md) is listed by its name and description only — in one measured sample, 84 skills averaged about 55 tokens each — and loads its body when invoked, and a skill [gated on `paths:`](skills.md#optional-gate-a-skill-on-file-paths-paths) is not even listed until a matching file is touched.
@@ -67,12 +69,12 @@ Keep in a context file only what is always true — identity, vocabulary, a hard
 
 ### 4. The system prompt, last
 
-The base prompt is already the smallest of the resident categories, and roughly a third of it is safety and permission text that must not be edited. It also now describes only the tools the session actually declared, so trimming your tool surface shrinks it a little for free. Replacing it wholesale with `--system-prompt` is possible and is the highest-risk change on this page; if you do, diff the upstream prompt on every upgrade.
+The base prompt is already the smallest of the resident categories, and roughly a third of it is safety and permission text that must not be edited. Its gated tool guidance follows the declared set, with an exception for bridge-reachable Agent; other tools named by those entries still need declarations. Trimming your tool surface can therefore shrink that guidance as well. Replacing it wholesale with `--system-prompt` is possible and is the highest-risk change on this page; if you do, diff the upstream prompt on every upgrade.
 
 ## Traps
 
 - **Subagents get the deferred tools too.** A subagent that does not declare an explicit tool list receives every registered tool's schema, deferred ones included, and does not go through ToolSearch. `tools.eager` and `permissions.deny` are the only knobs that reach it; the preload threshold does not.
-- **The background memory agent needs six tools** (`read_file`, `grep_search`, `glob`, `run_shell_command`, `write_file`, `edit`). Denying one degrades it silently rather than erroring.
+- **The background memory agents need their full tool lists, and the two lists differ.** The project Dream worker needs six tools (`read_file`, `grep_search`, `glob`, `run_shell_command`, `write_file`, `edit`); automatic extraction needs five — the same set without `run_shell_command`, which it denies by design. Denying a tool either agent actually holds degrades it silently rather than erroring. So do not deny `run_shell_command` globally just to drop its declaration: Dream still needs it.
 - **Tokens can move rather than disappear.** Take away `grep_search` and `glob` and the model may reach for `grep` and `find` through the shell, whose output lands in the conversation. New output adds input tokens when first sent; unchanged history containing it may hit the provider's prefix cache on later requests. Judge a change by total input tokens per task, provider-reported cached and uncached input, and the actual bill, not by the prefix alone.
 - **Resumed sessions re-send what they need.** A demoted tool that appears in a resumed session's history gets its schema back automatically; a denied tool does not.
 - **Reaching a withheld tool no longer rewrites the prefix — but it used to, and old advice assumes it does.** Discovery goes through the `tool_search` → `tool_call` bridge, which leaves the declared tool list byte-stable, so the prompt-cache prefix survives a mid-session discovery; the cost is one extra round trip before a withheld tool's first use. That is why `tools.toolSearch.threshold` now defaults to `0`: carrying the deferred set every turn is no longer the cheaper side of the trade. Raise the threshold only to buy back that round trip for _ordinary_ deferred tools (MCP tools and the on-demand built-ins) in a session that will certainly need them — it never preloads a tool you demoted with `tools.eager`; those stay behind the bridge at any threshold. The preload also runs at session start, and MCP servers usually connect after it, so a fresh launch declares no MCP tools whatever the threshold; they reach the preload from the next session start (in the CLI, after `/clear`), or immediately under `QWEN_CODE_LEGACY_MCP_BLOCKING=1`.

@@ -2,7 +2,9 @@
 
 [English](web-shell-browser-notification-details.md) | [简体中文](web-shell-browser-notification-details.zh-CN.md)
 
-Following the base implementation in #11398, this enhancement lets users identify the session behind a notification, preview this turn's reply, and click to return to that session. Permissions, background triggers, and deduplication remain those of the base implementation; the built-in entry now defaults the preference on as described in the branding design. The public Web Shell branding options are described in the [branding design](web-shell-browser-notification-branding.md); no daemon route or wire field is added.
+Status: current as of 2026-10-12 for turn-end content limits, icons, and session navigation. The [action reminder design](../browser-action-notifications.md) extends triggers and updates the task label. Authorization follows the amended [branding integration contract](web-shell-browser-notification-branding.md#configuration-and-integration).
+
+Following the base implementation in #11398, this enhancement lets users identify the session behind a notification, preview this turn's reply, and click to return to that session. For turn-end reminders, background triggers and deduplication remain those of the base implementation; the built-in entry now defaults the preference on as described in the branding design. The public Web Shell branding options are described in the [branding design](web-shell-browser-notification-branding.md); no daemon route or wire field is added.
 
 ## Content and icon
 
@@ -14,7 +16,7 @@ The body also includes this turn's user prompt, with localized Prompt and Reply 
 
 The session-title component retains at most 60 Unicode code points (the application prefix is separate), prompt excerpts at most 80, and reply excerpts at most 120, ending in an ellipsis when truncated. Excerpt cleanup reads at most the first 4096 UTF-16 code units, removes common Markdown formatting and simple inline link destinations, strips control and bidi-formatting characters, and collapses whitespace. Angle-bracket text, including HTML and JSX, is preserved literally because a plain-text notification must not guess whether it is code or markup. Fenced code keeps its content. Truncation avoids splitting Unicode code points; grapheme-cluster truncation is out of scope. No extra configuration or model call is introduced. Browser/OS layout may truncate the combined body further.
 
-Notifications include a package-local copy of the project's existing 128×128 PNG mark from `packages/desktop-shell/src-tauri/icons/128x128.png`, with Vite resolving its URL. The published library inlines the PNG as a data URL so it needs no separately published asset. Business text does not append IP addresses, ports, or navigation URLs. Chrome's site attribution and its own macOS logo are controlled by the browser and OS and cannot be replaced by the business icon. Content may appear in the notification center or on the lock screen; the setting description explains that titles, prompts, and reply excerpts are shown. Shared storage continues to record only deduplication hashes, never bodies, titles, or navigation targets.
+Notifications include a package-local copy of the project's existing 128×128 PNG mark from `packages/desktop/src-tauri/icons/128x128.png`, with Vite resolving its URL. The published library inlines the PNG as a data URL so it needs no separately published asset. Business text does not append IP addresses, ports, or navigation URLs. Chrome's site attribution and its own macOS logo are controlled by the browser and OS and cannot be replaced by the business icon. Content may appear in the notification center or on the lock screen; the setting description explains that titles, prompts, and reply excerpts are shown. Shared storage continues to record only deduplication hashes, never bodies, titles, or navigation targets.
 
 ## Clicking to open a session
 

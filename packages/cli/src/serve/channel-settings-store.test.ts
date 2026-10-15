@@ -240,6 +240,50 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('persists normalized message routes and their default', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    await store.upsert('routed', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+        defaultMessageRoute: ' /QA ',
+      },
+    });
+    expect(readStoredChannel('routed')).toMatchObject({
+      messageRoutes: { '/review': 'Review code.', '/QA': '' },
+      defaultMessageRoute: '/QA',
+    });
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid managed message routing %j', async (routing) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    await expect(
+      store.upsert('routed', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'user-default-management-test', ...routing },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringMatching(/messageRoutes|defaultMessageRoute/),
+    });
+  });
+
   it('preserves an existing secret unless replace or clear is explicit', async () => {
     // The stored secret is an environment reference, so the assertion below only
     // means something with the variable defined: while it is unset, resolution
@@ -669,6 +713,12 @@ describe('WorkspaceChannelSettingsStore', () => {
       message: 'cannot use groupHistoryLimit',
     },
     {
+      label: 'session rotation',
+      type: 'user-default-management-test',
+      extra: { sessionRotation: { maxTurns: 2 } },
+      message: 'cannot use sessionRotation',
+    },
+    {
       label: 'per-group history',
       type: 'user-default-management-test',
       extra: {
@@ -688,6 +738,30 @@ describe('WorkspaceChannelSettingsStore', () => {
       code: 'channel_settings_invalid_config',
       message: expect.stringContaining(message),
     });
+  });
+
+  it('accepts bounded session rotation and rejects malformed bounds', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const saved = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        sessionRotation: { maxTurns: 2, maxAgeHours: 24 },
+      },
+    });
+    expect(saved.channels['bot']?.['sessionRotation']).toEqual({
+      maxTurns: 2,
+      maxAgeHours: 24,
+    });
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: saved.revision,
+        config: {
+          type: 'user-default-management-test',
+          sessionRotation: { maxTurns: 0 },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
   });
 
   it('rejects enabling multiSession while preserving webhook config', async () => {
@@ -2665,6 +2739,124 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('does not rewrite legacy all startup when deleting an absent name', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "all": { "type": "telegram", "token": "$ALL_TOKEN" } },
+  "serve": { "channels": ["all"] }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    const current = store.snapshot();
+
+    await expect(
+      store.remove('missing', { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+    const next = await store.remove('missing', {
+      expectedRevision: current.revision,
+    });
+
+    expect(next).toEqual(current);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it.each([['other'], ['all']])(
+    'removes only the absent channel startup name while preserving %s',
+    async (remaining) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: { [remaining]: { type: 'telegram', token: '$TEST_TOKEN' } },
+          serve: { channels: [remaining, 'missing'] },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const current = store.snapshot();
+
+      const next = await store.remove('missing', {
+        expectedRevision: current.revision,
+      });
+      const repeated = await store.remove('missing', {
+        expectedRevision: next.revision,
+      });
+
+      expect(next.channels).toEqual(current.channels);
+      expect(next.startupNames).toEqual([remaining]);
+      expect(repeated).toEqual(next);
+      const persisted = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      expect(persisted.serve.channels).toEqual([remaining]);
+    },
+  );
+
+  it('preserves filtered channel entries when removing an absent channel startup name', async () => {
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: { type: 'telegram', token: '$TEST_TOKEN' },
+          legacy: 'telegram',
+        },
+        serve: { channels: ['bot', 'ghost'] },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const current = store.snapshot();
+
+    const next = await store.remove('ghost', {
+      expectedRevision: current.revision,
+    });
+
+    expect(next.channels).toEqual(current.channels);
+    expect(next.startupNames).toEqual(['bot']);
+    const persisted = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(persisted.channels.legacy).toBe('telegram');
+    expect(persisted.serve.channels).toEqual(['bot']);
+  });
+
+  it("removes a stale startup name only from its own scope, leaving another workspace's file untouched", async () => {
+    const otherWorkspace = path.join(testRoot, 'other-workspace');
+    const otherSettingsPath = path.join(
+      otherWorkspace,
+      '.qwen',
+      'settings.json',
+    );
+    fs.mkdirSync(path.dirname(otherSettingsPath), { recursive: true });
+    fs.writeFileSync(
+      otherSettingsPath,
+      JSON.stringify({ $version: 4, serve: { channels: ['ghost'] } }),
+    );
+    writeWorkspaceSettings(
+      JSON.stringify({ $version: 4, serve: { channels: ['ghost'] } }),
+    );
+    const otherBefore = fs.readFileSync(otherSettingsPath, 'utf8');
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.remove('ghost', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.startupNames).toEqual([]);
+    expect(readWorkspaceSettings()['serve']).toEqual({ channels: [] });
+    expect(fs.readFileSync(otherSettingsPath, 'utf8')).toBe(otherBefore);
+  });
+
+  it('leaves the settings file byte-identical when deleting a channel that was never persisted', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": { "type": "telegram", "token": "$BOT_TOKEN" } },
+  "serve": { "port": 4123 }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    const next = await store.remove('missing', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.startupNames).toEqual([]);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('preserves the all sentinel when removing a legacy all config beside other instances', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
@@ -3037,6 +3229,30 @@ describe('WorkspaceChannelSettingsStore', () => {
         // Written to the workspace scope instead, the toggle is a silent no-op:
         // nothing reads that file in this layout.
         expect(readWorkspaceSettings()['serve']).not.toHaveProperty('channels');
+      } finally {
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('removes a stale startup name from the user scope without touching the workspace file', async () => {
+      // The missing-config branch writes only the resolved scope: with the
+      // workspace collapsed onto the shared user file, the stale startup name
+      // leaves the user file and the unread workspace file stays as it was.
+      const workspaceBefore = fs.readFileSync(settingsPath, 'utf8');
+      const userSettingsPath = useRedirectedUserScope({
+        $version: 4,
+        serve: { channels: ['ghost'] },
+      });
+      try {
+        const store = new WorkspaceChannelSettingsStore(workspace);
+
+        const next = await store.remove('ghost', {
+          expectedRevision: store.snapshot().revision,
+        });
+
+        expect(next.startupNames).toEqual([]);
+        expect(readUserSettings(userSettingsPath).serve?.channels).toEqual([]);
+        expect(fs.readFileSync(settingsPath, 'utf8')).toBe(workspaceBefore);
       } finally {
         resetHomeEnvBootstrapForTesting();
       }

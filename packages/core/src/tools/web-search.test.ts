@@ -87,16 +87,30 @@ interface ConfigOverrides {
   generationConfigSources?: Record<string, { kind: string; envKey?: string }>;
 }
 
+type ModelEntry = NonNullable<ConfigOverrides['models']>[number];
+type Settings = NonNullable<ConfigOverrides['settings']>;
+
+/** The DashScope `qwen3.6-plus` entry keyed by TEST_ENV_KEY. */
+const dsModel = (overrides: Partial<ModelEntry> = {}): ModelEntry => ({
+  id: 'qwen3.6-plus',
+  authType: 'openai',
+  envKey: TEST_ENV_KEY,
+  baseUrl: DASHSCOPE_BASE_URL,
+  ...overrides,
+});
+
+/** Env-declared settings: qwen3.6-plus at DASHSCOPE_BASE_URL via TEST_ENV_KEY. */
+const envSettings = (overrides: Settings = {}): Settings => ({
+  enabled: true,
+  model: 'qwen3.6-plus',
+  baseUrl: DASHSCOPE_BASE_URL,
+  apiKeyEnv: TEST_ENV_KEY,
+  ...overrides,
+});
+
 function makeConfig(overrides: ConfigOverrides = {}): Config {
   const sessionUsage = overrides.sessionUsage ?? { calls: 0 };
-  const models = overrides.models ?? [
-    {
-      id: 'qwen3.6-plus',
-      authType: 'openai',
-      envKey: TEST_ENV_KEY,
-      baseUrl: DASHSCOPE_BASE_URL,
-    },
-  ];
+  const models = overrides.models ?? [dsModel()];
   return {
     // `settings: undefined` must mean "nothing configured" (the auto path),
     // which `??` cannot express — check for the key instead.
@@ -147,7 +161,30 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
   } as unknown as Config;
 }
 
-function makeStream(events: Array<Record<string, unknown>>) {
+/** Expects the gate to pass for `config`; returns the backend. */
+function passedBackend(config: Config) {
+  const gate = evaluateWebSearchGate(config);
+  expect(gate.ok).toBe(true);
+  if (!gate.ok) throw new Error(gate.notice);
+  return gate.backend;
+}
+
+/** Expects the gate to turn `config` away; returns the failure. */
+function rejectedGate(config: Config) {
+  const gate = evaluateWebSearchGate(config);
+  expect(gate.ok).toBe(false);
+  if (gate.ok) throw new Error('gate unexpectedly passed');
+  return gate;
+}
+
+const passedFor = (overrides?: ConfigOverrides) =>
+  passedBackend(makeConfig(overrides));
+const rejectedFor = (overrides?: ConfigOverrides) =>
+  rejectedGate(makeConfig(overrides));
+
+type StreamEvent = Record<string, unknown>;
+
+function makeStream(events: StreamEvent[]) {
   return {
     async *[Symbol.asyncIterator]() {
       for (const event of events) {
@@ -157,11 +194,18 @@ function makeStream(events: Array<Record<string, unknown>>) {
   };
 }
 
+const dyingStream = (...events: StreamEvent[]) => ({
+  async *[Symbol.asyncIterator]() {
+    for (const event of events) yield event;
+    throw new Error('stream reset');
+  },
+});
+
 function completedEvents(
-  output: Array<Record<string, unknown>>,
-  usage?: Record<string, unknown>,
+  output: StreamEvent[],
+  usage?: StreamEvent,
   status = 'completed',
-): Array<Record<string, unknown>> {
+): StreamEvent[] {
   return [
     { type: 'response.created' },
     ...output.map((item) => ({ type: 'response.output_item.done', item })),
@@ -171,6 +215,20 @@ function completedEvents(
     },
   ];
 }
+
+const CREATED = { type: 'response.created' };
+const done = (item: StreamEvent) => ({
+  type: 'response.output_item.done',
+  item,
+});
+
+const respond = (items: StreamEvent[], usage?: StreamEvent, status?: string) =>
+  mockCreate.mockResolvedValueOnce(
+    makeStream(completedEvents(items, usage, status)),
+  );
+
+const respondRaw = (events: StreamEvent[]) =>
+  mockCreate.mockResolvedValueOnce(makeStream(events));
 
 const SEARCH_ITEM = {
   type: 'web_search_call',
@@ -194,16 +252,29 @@ const EXTRACTOR_ITEM = {
   output: 'page content',
 };
 
-const MESSAGE_ITEM = {
+const messageItem = (text: string) => ({
   type: 'message',
   status: 'completed',
-  content: [{ type: 'output_text', text: 'The answer is 42.' }],
-};
+  content: [{ type: 'output_text', text }],
+});
 
-async function runSearch(config: Config, query = 'test query') {
+const MESSAGE_ITEM = messageItem('The answer is 42.');
+
+const failedSearch = (query: string) => ({
+  type: 'web_search_call',
+  status: 'failed',
+  action: {
+    type: 'search',
+    queries: [query],
+    sources: [{ type: 'url', url: 'https://example.com/failed' }],
+  },
+});
+
+async function runSearch(config = makeConfig(), query = 'test query') {
   const tool = new WebSearchTool(config);
   const invocation = tool.build({ query });
-  return invocation.execute(new AbortController().signal);
+  const result = await invocation.execute(new AbortController().signal);
+  return Object.assign(result, { content: result.llmContent as string });
 }
 
 /**
@@ -230,57 +301,43 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+const DEFAULT_BACKEND = {
+  kind: 'dashscope',
+  modelId: 'qwen3.6-plus',
+  apiKeyEnvKey: TEST_ENV_KEY,
+  baseUrl: DASHSCOPE_BASE_URL,
+  webExtractor: true,
+  timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+};
+
 describe('evaluateWebSearchGate', () => {
   it('passes with a fully configured DashScope entry', () => {
-    const gate = evaluateWebSearchGate(makeConfig());
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend).toEqual({
-        kind: 'dashscope',
-        modelId: 'qwen3.6-plus',
-        apiKeyEnvKey: TEST_ENV_KEY,
-        baseUrl: DASHSCOPE_BASE_URL,
-        webExtractor: true,
-        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
-      });
-    }
+    expect(passedFor()).toEqual(DEFAULT_BACKEND);
   });
 
   it('honors webExtractor: false', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus', webExtractor: false },
-      }),
-    );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.webExtractor).toBe(false);
-    }
+    const backend = passedFor({
+      settings: { enabled: true, model: 'qwen3.6-plus', webExtractor: false },
+    });
+    expect(backend.webExtractor).toBe(false);
   });
 
   it('rejects when no model is configured', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({ settings: { enabled: true } }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('no search model');
+    const gate = rejectedFor({ settings: { enabled: true } });
+    expect(gate.notice).toContain('no search model');
   });
 
   it('pins the no-model notice: the example must pass the gate', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({ settings: { enabled: true } }),
-    );
-    expect(gate.ok).toBe(false);
-    if (gate.ok) return;
+    const { notice } = rejectedFor({ settings: { enabled: true } });
     // The notice is copy-pasteable guidance: round-trip its settings.json
     // block through the gate so a typo or drift fails the suite.
-    const start = gate.notice.indexOf('{');
+    const start = notice.indexOf('{');
     expect(start).toBeGreaterThan(-1);
     let depth = 0;
     let end = -1;
-    for (let i = start; i < gate.notice.length; i++) {
-      if (gate.notice[i] === '{') depth++;
-      else if (gate.notice[i] === '}') {
+    for (let i = start; i < notice.length; i++) {
+      if (notice[i] === '{') depth++;
+      else if (notice[i] === '}') {
         depth--;
         if (depth === 0) {
           end = i;
@@ -289,7 +346,7 @@ describe('evaluateWebSearchGate', () => {
       }
     }
     expect(end).toBeGreaterThan(start);
-    const example = JSON.parse(gate.notice.slice(start, end + 1)) as {
+    const example = JSON.parse(notice.slice(start, end + 1)) as {
       tools?: { webSearch?: { enabled?: boolean; model?: string } };
       modelProviders?: {
         openai?: Array<{ id?: string; baseUrl?: string; envKey?: string }>;
@@ -307,277 +364,152 @@ describe('evaluateWebSearchGate', () => {
     expect(entries.every((entry) => entry.baseUrl === DASHSCOPE_BASE_URL)).toBe(
       true,
     );
-    const savedKey = process.env['DASHSCOPE_API_KEY'];
-    process.env['DASHSCOPE_API_KEY'] = 'sk-test';
-    try {
-      const oracle = evaluateWebSearchGate(
-        makeConfig({
-          settings,
-          models: entries.map((entry) => ({
-            id: entry.id ?? '',
-            authType: 'openai',
-            envKey: entry.envKey,
-            baseUrl: entry.baseUrl,
-          })),
-        }),
-      );
-      if (!oracle.ok) {
-        throw new Error(`notice example failed the gate: ${oracle.notice}`);
-      }
-    } finally {
-      if (savedKey === undefined) {
-        delete process.env['DASHSCOPE_API_KEY'];
-      } else {
-        process.env['DASHSCOPE_API_KEY'] = savedKey;
-      }
+    vi.stubEnv('DASHSCOPE_API_KEY', 'sk-test');
+    const oracle = evaluateWebSearchGate(
+      makeConfig({
+        settings,
+        models: entries.map((entry) => ({
+          id: entry.id ?? '',
+          authType: 'openai',
+          envKey: entry.envKey,
+          baseUrl: entry.baseUrl,
+        })),
+      }),
+    );
+    if (!oracle.ok) {
+      throw new Error(`notice example failed the gate: ${oracle.notice}`);
     }
-    expect(gate.notice).toContain(
+    expect(notice).toContain(
       `ENABLE_WEB_SEARCH=true WEB_SEARCH_MODEL=${settings.model}`,
     );
-    expect(gate.notice).toContain(`(recommended: ${settings.model})`);
-    expect(gate.notice).toContain(`WEB_SEARCH_BASE_URL=${DASHSCOPE_BASE_URL}`);
-    expect(gate.notice).toContain('WEB_SEARCH_API_KEY');
+    expect(notice).toContain(`(recommended: ${settings.model})`);
+    expect(notice).toContain(`WEB_SEARCH_BASE_URL=${DASHSCOPE_BASE_URL}`);
+    expect(notice).toContain('WEB_SEARCH_API_KEY');
   });
 
   it('rejects a selector that matches no configured model', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({ settings: { enabled: true, model: 'qwen3.9-mega' } }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('does not match any model');
+    const gate = rejectedFor({
+      settings: { enabled: true, model: 'qwen3.9-mega' },
+    });
+    expect(gate.notice).toContain('does not match any model');
   });
 
   it('rejects a Qwen OAuth entry', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus' },
-        models: [{ id: 'qwen3.6-plus', authType: 'qwen-oauth' }],
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('OAuth');
+    const gate = rejectedFor({
+      settings: { enabled: true, model: 'qwen3.6-plus' },
+      models: [{ id: 'qwen3.6-plus', authType: 'qwen-oauth' }],
+    });
+    expect(gate.notice).toContain('OAuth');
   });
 
   it('rejects a non-DashScope endpoint', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        models: [
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            envKey: TEST_ENV_KEY,
-            baseUrl: 'https://api.openai.com/v1',
-          },
-        ],
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('non-DashScope');
+    const gate = rejectedFor({
+      models: [dsModel({ baseUrl: 'https://api.openai.com/v1' })],
+    });
+    expect(gate.notice).toContain('non-DashScope');
   });
 
   it('rejects a plain-http DashScope host, naming HTTPS as the fix', () => {
-    // The side request carries a bearer API key; the https-only guard must
-    // reject a DashScope hostname served over plaintext HTTP — and the
-    // notice must blame the protocol, not the provider.
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        models: [
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            envKey: TEST_ENV_KEY,
-            baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
-          },
-        ],
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.notice).toContain('https://');
-      expect(gate.notice).not.toContain('non-DashScope');
-    }
+    // The side request carries a bearer API key: the https-only guard must
+    // reject a DashScope hostname over plaintext HTTP, and the notice must
+    // blame the protocol, not the provider.
+    const { notice } = rejectedFor({
+      models: [
+        dsModel({
+          baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+        }),
+      ],
+    });
+    expect(notice).toContain('https://');
+    expect(notice).not.toContain('non-DashScope');
   });
 
   it('rejects an entry without envKey', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        models: [
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            baseUrl: DASHSCOPE_BASE_URL,
-          },
-        ],
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('envKey');
+    const gate = rejectedFor({
+      models: [
+        {
+          id: 'qwen3.6-plus',
+          authType: 'openai',
+          baseUrl: DASHSCOPE_BASE_URL,
+        },
+      ],
+    });
+    expect(gate.notice).toContain('envKey');
   });
 
   it('rejects when the key env var is unset', () => {
     delete process.env[TEST_ENV_KEY];
-    const gate = evaluateWebSearchGate(makeConfig());
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain(TEST_ENV_KEY);
+    expect(rejectedFor().notice).toContain(TEST_ENV_KEY);
   });
 
   it('rejects a whitespace-only key env var as unset', () => {
     process.env[TEST_ENV_KEY] = '   ';
-    const gate = evaluateWebSearchGate(makeConfig());
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain(TEST_ENV_KEY);
+    expect(rejectedFor().notice).toContain(TEST_ENV_KEY);
   });
 
   it('prefers a usable entry when several modelProviders entries share the model id', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        models: [
-          // Force-sorted-first OAuth entry and a non-DashScope twin must not
-          // shadow the usable DashScope entry with the same id.
-          { id: 'qwen3.6-plus', authType: 'qwen-oauth' },
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            envKey: TEST_ENV_KEY,
-            baseUrl: 'https://api.openai.com/v1',
-          },
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            envKey: TEST_ENV_KEY,
-            baseUrl: DASHSCOPE_BASE_URL,
-          },
-        ],
-      }),
-    );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
+    const backend = passedFor({
+      models: [
+        // Force-sorted-first OAuth entry and a non-DashScope twin must not
+        // shadow the usable DashScope entry with the same id.
+        { id: 'qwen3.6-plus', authType: 'qwen-oauth' },
+        dsModel({ baseUrl: 'https://api.openai.com/v1' }),
+        dsModel(),
+      ],
+    });
+    expect(backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
   });
 
   it('accepts an env-declared backend without any modelProviders entry', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: TEST_ENV_KEY,
-        },
-        models: [],
-      }),
+    expect(passedFor({ settings: envSettings(), models: [] })).toEqual(
+      DEFAULT_BACKEND,
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend).toEqual({
-        kind: 'dashscope',
-        modelId: 'qwen3.6-plus',
-        apiKeyEnvKey: TEST_ENV_KEY,
-        baseUrl: DASHSCOPE_BASE_URL,
-        webExtractor: true,
-        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
-      });
-    }
   });
 
   it('env-declared backend takes precedence over modelProviders resolution', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-          apiKeyEnv: TEST_ENV_KEY,
-        },
-        // A conflicting modelProviders entry must be ignored in env mode.
-      }),
-    );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.baseUrl).toBe(
-        'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-      );
-    }
+    const intl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+    // A conflicting modelProviders entry must be ignored in env mode.
+    const backend = passedFor({ settings: envSettings({ baseUrl: intl }) });
+    expect(backend.baseUrl).toBe(intl);
   });
 
   it('rejects a non-DashScope env-declared base URL', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: 'https://api.openai.com/v1',
-          apiKeyEnv: TEST_ENV_KEY,
-        },
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
+    const gate = rejectedFor({
+      settings: envSettings({ baseUrl: 'https://api.openai.com/v1' }),
+    });
+    expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
   });
 
   it('strips an authType prefix from the selector on the env-declared path', () => {
     // A selector written for the modelProviders path ("openai:<id>", as our
     // own OAuth notice suggests) must not be sent verbatim to DashScope when
     // WEB_SEARCH_BASE_URL overrides the backend.
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'openai:qwen3.6-plus',
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: TEST_ENV_KEY,
-        },
-      }),
-    );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.modelId).toBe('qwen3.6-plus');
+    const backend = passedFor({
+      settings: envSettings({ model: 'openai:qwen3.6-plus' }),
+    });
+    expect(backend.modelId).toBe('qwen3.6-plus');
   });
 
   it('rejects a plain-http env-declared base URL, naming HTTPS as the fix', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
-          apiKeyEnv: TEST_ENV_KEY,
-        },
+    const { notice } = rejectedFor({
+      settings: envSettings({
+        baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
       }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.notice).toContain('https://');
-      expect(gate.notice).not.toContain('not a DashScope-compatible');
-    }
+    });
+    expect(notice).toContain('https://');
+    expect(notice).not.toContain('not a DashScope-compatible');
   });
 
   it('rejects an env-declared backend whose key variable is unset', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: 'WS_E2E_UNSET_KEY_VAR',
-        },
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('WS_E2E_UNSET_KEY_VAR');
+    const gate = rejectedFor({
+      settings: envSettings({ apiKeyEnv: 'WS_E2E_UNSET_KEY_VAR' }),
+    });
+    expect(gate.notice).toContain('WS_E2E_UNSET_KEY_VAR');
   });
 
   it('rejects an env-declared backend when the selector cannot be resolved', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'fast',
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: TEST_ENV_KEY,
-        },
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).toContain('could not be resolved');
+    const gate = rejectedFor({ settings: envSettings({ model: 'fast' }) });
+    expect(gate.notice).toContain('could not be resolved');
   });
 
   it('accepts the US regional and Token Plan MaaS endpoints', () => {
@@ -585,36 +517,14 @@ describe('evaluateWebSearchGate', () => {
       'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     ]) {
-      const gate = evaluateWebSearchGate(
-        makeConfig({
-          models: [
-            {
-              id: 'qwen3.6-plus',
-              authType: 'openai',
-              envKey: TEST_ENV_KEY,
-              baseUrl,
-            },
-          ],
-        }),
-      );
-      expect(gate.ok).toBe(true);
+      passedFor({ models: [dsModel({ baseUrl })] });
     }
   });
 
   it('accepts internal Alibaba gateway hosts', () => {
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        models: [
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            envKey: TEST_ENV_KEY,
-            baseUrl: 'https://gw.some-team.alibaba-inc.com/v1',
-          },
-        ],
-      }),
-    );
-    expect(gate.ok).toBe(true);
+    passedFor({
+      models: [dsModel({ baseUrl: 'https://gw.some-team.alibaba-inc.com/v1' })],
+    });
   });
 });
 
@@ -658,23 +568,51 @@ describe('evaluateWebSearchGate auto derivation', () => {
     extra: Partial<ConfigOverrides> = {},
   ) => makeConfig({ settings: undefined, models, primaryModel, ...extra });
 
+  /** Auto path with `entry` as the only, primary model and its key set to `key`. */
+  const autoFor = (
+    entry: ModelEntry & { envKey: string },
+    key: string,
+    extra?: Partial<ConfigOverrides>,
+  ) => {
+    vi.stubEnv(entry.envKey, key);
+    return autoConfig([entry], entry.id, extra);
+  };
+
+  /** The auto path with only a resolved generation config (no entries). */
+  const generationOnly = (
+    generationConfig: ConfigOverrides['generationConfig'],
+    generationConfigSources?: ConfigOverrides['generationConfigSources'],
+    primaryModel = 'env-model',
+  ) =>
+    autoConfig([], primaryModel, {
+      generationConfig,
+      ...(generationConfigSources && { generationConfigSources }),
+    });
+
+  /** `entry` (key set to `key`) as the only, primary model under `settings`. */
+  const explicitWith = (
+    settings: Settings,
+    entry: ModelEntry & { envKey: string } = STANDARD,
+    key = 'sk-standard',
+  ) => {
+    vi.stubEnv(entry.envKey, key);
+    return makeConfig({ settings, models: [entry], primaryModel: entry.id });
+  };
+
+  const settingsSource = { apiKey: { kind: 'settings' } };
+
   it('carries a configured budget on the automatic path', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
     // A budget-only setting must not turn the automatic path into an
     // explicit one.
-    const gate = evaluateWebSearchGate(
-      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 90_000 } }),
+    const backend = passedBackend(
+      autoFor(STANDARD, 'sk-standard', { settings: { timeoutMs: 90_000 } }),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.timeoutMs).toBe(90_000);
-    }
+    expect(backend.timeoutMs).toBe(90_000);
   });
 
   it('normalizes an out-of-range budget on the automatic path', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
     const gate = evaluateWebSearchGate(
-      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 0 } }),
+      autoFor(STANDARD, 'sk-standard', { settings: { timeoutMs: 0 } }),
     );
     expect(gate.ok && gate.backend.timeoutMs).toBe(
       DEFAULT_WEB_SEARCH_TIMEOUT_MS,
@@ -685,34 +623,25 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(
       findProviderByCredentials(STANDARD.baseUrl, STANDARD.envKey)?.id,
     ).toBe('alibabaStandard');
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(autoConfig([STANDARD], STANDARD.id));
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend).toEqual({
-        kind: 'dashscope',
-        // Not the primary model id: the search runs on the documented
-        // search model at the same endpoint.
-        modelId: 'qwen3.8-flash',
-        apiKeyEnvKey: STANDARD.envKey,
-        baseUrl: STANDARD.baseUrl,
-        webExtractor: true,
-        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
-      });
-    }
+    expect(passedBackend(autoFor(STANDARD, 'sk-standard'))).toEqual({
+      kind: 'dashscope',
+      // Not the primary model id: the search runs on the documented
+      // search model at the same endpoint.
+      modelId: 'qwen3.8-flash',
+      apiKeyEnvKey: STANDARD.envKey,
+      baseUrl: STANDARD.baseUrl,
+      webExtractor: true,
+      timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    });
   });
 
   it('derives the backend from a Token Plan entry', () => {
     expect(
       findProviderByCredentials(TOKEN_PLAN.baseUrl, TOKEN_PLAN.envKey)?.id,
     ).toBe('token-plan');
-    vi.stubEnv(TOKEN_PLAN.envKey, 'sk-token-plan');
-    const gate = evaluateWebSearchGate(autoConfig([TOKEN_PLAN], TOKEN_PLAN.id));
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.baseUrl).toBe(TOKEN_PLAN.baseUrl);
-      expect(gate.backend.modelId).toBe('qwen3.8-flash');
-    }
+    const backend = passedBackend(autoFor(TOKEN_PLAN, 'sk-token-plan'));
+    expect(backend.baseUrl).toBe(TOKEN_PLAN.baseUrl);
+    expect(backend.modelId).toBe('qwen3.8-flash');
   });
 
   it('derives the backend for a workspace-specific Token Plan host', () => {
@@ -725,13 +654,9 @@ describe('evaluateWebSearchGate auto derivation', () => {
       baseUrl:
         'https://llm-1yxl3y53fm8pcr4z.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     };
-    vi.stubEnv(workspace.envKey, 'sk-workspace');
-    const gate = evaluateWebSearchGate(autoConfig([workspace], workspace.id));
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.baseUrl).toBe(workspace.baseUrl);
-      expect(gate.backend.apiKeyEnvKey).toBe(workspace.envKey);
-    }
+    const backend = passedBackend(autoFor(workspace, 'sk-workspace'));
+    expect(backend.baseUrl).toBe(workspace.baseUrl);
+    expect(backend.apiKeyEnvKey).toBe(workspace.envKey);
   });
 
   it('derives the backend for a hand-written DashScope entry', () => {
@@ -741,11 +666,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'MY_DASHSCOPE_KEY',
       baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     };
-    vi.stubEnv(handWritten.envKey, 'sk-hand-written');
-    const gate = evaluateWebSearchGate(
-      autoConfig([handWritten], handWritten.id),
-    );
-    expect(gate.ok).toBe(true);
+    passedBackend(autoFor(handWritten, 'sk-hand-written'));
   });
 
   it('derives the backend for a custom-provider entry on a DashScope host', () => {
@@ -757,79 +678,63 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: generateCustomEnvKey(AuthType.USE_OPENAI, DASHSCOPE_BASE_URL),
       baseUrl: DASHSCOPE_BASE_URL,
     };
-    vi.stubEnv(custom.envKey, 'sk-custom');
-    const gate = evaluateWebSearchGate(autoConfig([custom], custom.id));
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.apiKeyEnvKey).toBe(custom.envKey);
-    }
+    const backend = passedBackend(autoFor(custom, 'sk-custom'));
+    expect(backend.apiKeyEnvKey).toBe(custom.envKey);
   });
 
   it('derives the backend from an env-only generation config', () => {
     // The resolver carries the env value plus its source metadata, but no
     // apiKeyEnvKey. The source keeps searches following key rotation.
     vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'env-model', {
-        generationConfig: {
+    const backend = passedBackend(
+      generationOnly(
+        {
           model: 'env-model',
           authType: 'openai',
           baseUrl: DASHSCOPE_BASE_URL,
           apiKey: 'sk-env-only',
         },
-        generationConfigSources: {
-          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
-        },
-      }),
+        { apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' } },
+      ),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
-      expect(gate.backend.apiKeyEnvKey).toBe('OPENAI_API_KEY');
-      expect(gate.backend.apiKey).toBeUndefined();
-    }
+    expect(backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
+    expect(backend.apiKeyEnvKey).toBe('OPENAI_API_KEY');
+    expect(backend.apiKey).toBeUndefined();
   });
 
   it('carries a literal primary-model credential into the derived backend', () => {
     vi.stubEnv('OPENAI_API_KEY', '');
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'env-model', {
-        generationConfig: {
+    const backend = passedBackend(
+      generationOnly(
+        {
           model: 'env-model',
           authType: AuthType.USE_OPENAI,
           baseUrl: DASHSCOPE_BASE_URL,
           apiKey: 'sk-cli-literal',
         },
-        generationConfigSources: { apiKey: { kind: 'cli' } },
-      }),
+        { apiKey: { kind: 'cli' } },
+      ),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.apiKey).toBe('sk-cli-literal');
-      expect(gate.backend.apiKeyEnvKey).toBeUndefined();
-    }
+    expect(backend.apiKey).toBe('sk-cli-literal');
+    expect(backend.apiKeyEnvKey).toBeUndefined();
   });
 
   it('uses the generation config env key when deriving a backend', () => {
     vi.stubEnv('PLAN_KEY', 'sk-plan');
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'env-model', {
-        generationConfig: {
-          model: 'env-model',
-          authType: AuthType.USE_OPENAI,
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnvKey: 'PLAN_KEY',
-        },
+    const backend = passedBackend(
+      generationOnly({
+        model: 'env-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: DASHSCOPE_BASE_URL,
+        apiKeyEnvKey: 'PLAN_KEY',
       }),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.apiKeyEnvKey).toBe('PLAN_KEY');
+    expect(backend.apiKeyEnvKey).toBe('PLAN_KEY');
   });
 
   it('uses a literal credential when a declared env key is unset', () => {
-    vi.stubEnv(STANDARD.envKey, '');
-    const gate = evaluateWebSearchGate(
-      autoConfig([STANDARD], STANDARD.id, {
+    const backend = passedBackend(
+      autoFor(STANDARD, '', {
         primaryRegistryBaseUrl: STANDARD.baseUrl,
         generationConfig: {
           model: STANDARD.id,
@@ -838,21 +743,18 @@ describe('evaluateWebSearchGate auto derivation', () => {
           apiKeyEnvKey: STANDARD.envKey,
           apiKey: 'sk-settings-literal',
         },
-        generationConfigSources: { apiKey: { kind: 'settings' } },
+        generationConfigSources: settingsSource,
       }),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.apiKey).toBe('sk-settings-literal');
-      expect(gate.backend.apiKeyEnvKey).toBeUndefined();
-    }
+    expect(backend.apiKey).toBe('sk-settings-literal');
+    expect(backend.apiKeyEnvKey).toBeUndefined();
   });
 
   it('forwards custom headers from an env-only generation config', () => {
     const customHeaders = { 'X-DashScope-WorkSpace': 'llm-xyz' };
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'env-model', {
-        generationConfig: {
+    const backend = passedBackend(
+      generationOnly(
+        {
           model: 'env-model',
           authType: AuthType.USE_OPENAI,
           baseUrl:
@@ -860,24 +762,15 @@ describe('evaluateWebSearchGate auto derivation', () => {
           apiKey: 'sk-workspace',
           customHeaders,
         },
-        generationConfigSources: { apiKey: { kind: 'settings' } },
-      }),
+        settingsSource,
+      ),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.customHeaders).toEqual(customHeaders);
+    expect(backend.customHeaders).toEqual(customHeaders);
   });
 
   it('keeps auto-derived web extraction disabled when requested', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { webExtractor: false },
-        models: [STANDARD],
-        primaryModel: STANDARD.id,
-      }),
-    );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.webExtractor).toBe(false);
+    const backend = passedBackend(explicitWith({ webExtractor: false }));
+    expect(backend.webExtractor).toBe(false);
   });
 
   it('forwards custom headers from the selected provider entry', () => {
@@ -885,12 +778,8 @@ describe('evaluateWebSearchGate auto derivation', () => {
       ...STANDARD,
       generationConfig: { customHeaders: { 'X-Gateway-Route': 'ds' } },
     };
-    vi.stubEnv(model.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(autoConfig([model], model.id));
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.customHeaders).toEqual({ 'X-Gateway-Route': 'ds' });
-    }
+    const backend = passedBackend(autoFor(model, 'sk-standard'));
+    expect(backend.customHeaders).toEqual({ 'X-Gateway-Route': 'ds' });
   });
 
   it('uses the registry-selected entry when model ids are duplicated', () => {
@@ -901,13 +790,12 @@ describe('evaluateWebSearchGate auto derivation', () => {
     };
     vi.stubEnv(STANDARD.envKey, 'sk-standard');
     vi.stubEnv(intl.envKey, 'sk-intl');
-    const gate = evaluateWebSearchGate(
+    const backend = passedBackend(
       autoConfig([STANDARD, intl], STANDARD.id, {
         primaryRegistryBaseUrl: intl.baseUrl,
       }),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.baseUrl).toBe(intl.baseUrl);
+    expect(backend.baseUrl).toBe(intl.baseUrl);
   });
 
   it('falls back to the selected generation config instead of a keyed sibling', () => {
@@ -918,7 +806,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
       baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     };
     vi.stubEnv(sibling.envKey, 'sk-intl');
-    const gate = evaluateWebSearchGate(
+    const backend = passedBackend(
       autoConfig([selected, sibling], selected.id, {
         primaryRegistryBaseUrl: selected.baseUrl,
         generationConfig: {
@@ -927,29 +815,22 @@ describe('evaluateWebSearchGate auto derivation', () => {
           baseUrl: selected.baseUrl,
           apiKey: 'sk-selected',
         },
-        generationConfigSources: { apiKey: { kind: 'settings' } },
+        generationConfigSources: settingsSource,
       }),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.baseUrl).toBe(selected.baseUrl);
-      expect(gate.backend.apiKey).toBe('sk-selected');
-    }
+    expect(backend.baseUrl).toBe(selected.baseUrl);
+    expect(backend.apiKey).toBe('sk-selected');
   });
 
   it('does not scan other auth types before authentication is selected', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(
-      autoConfig([STANDARD], STANDARD.id, {
-        primaryAuthType: undefined,
-      }),
+    const gate = rejectedGate(
+      autoFor(STANDARD, 'sk-standard', { primaryAuthType: undefined }),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.silent).toBe(true);
+    expect(gate.silent).toBe(true);
   });
 
   it('still uses the selected generation config before authentication is resolved', () => {
-    const gate = evaluateWebSearchGate(
+    const backend = passedBackend(
       autoConfig([STANDARD], STANDARD.id, {
         primaryAuthType: undefined,
         generationConfig: {
@@ -958,14 +839,11 @@ describe('evaluateWebSearchGate auto derivation', () => {
           baseUrl: STANDARD.baseUrl,
           apiKey: 'sk-selected',
         },
-        generationConfigSources: { apiKey: { kind: 'settings' } },
+        generationConfigSources: settingsSource,
       }),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.baseUrl).toBe(STANDARD.baseUrl);
-      expect(gate.backend.apiKey).toBe('sk-selected');
-    }
+    expect(backend.baseUrl).toBe(STANDARD.baseUrl);
+    expect(backend.apiKey).toBe('sk-selected');
   });
 
   it('accepts a non-preset internal Alibaba host on the automatic path', () => {
@@ -975,10 +853,8 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'INTERNAL_MODEL_KEY',
       baseUrl: 'https://gw.some-team.alibaba-inc.com/v1',
     };
-    vi.stubEnv(internal.envKey, 'sk-internal');
-    const gate = evaluateWebSearchGate(autoConfig([internal], internal.id));
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.baseUrl).toBe(internal.baseUrl);
+    const backend = passedBackend(autoFor(internal, 'sk-internal'));
+    expect(backend.baseUrl).toBe(internal.baseUrl);
   });
 
   it('rejects a non-OpenAI primary provider on an accepted host', () => {
@@ -988,14 +864,12 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'IDEALAB_OPUS_API_KEY',
       baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
     };
-    vi.stubEnv(anthropic.envKey, 'sk-anthropic');
-    const gate = evaluateWebSearchGate(
-      autoConfig([anthropic], anthropic.id, {
+    const gate = rejectedGate(
+      autoFor(anthropic, 'sk-anthropic', {
         primaryAuthType: AuthType.USE_ANTHROPIC,
       }),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.silent).toBe(true);
+    expect(gate.silent).toBe(true);
   });
 
   it('uses the primary auth type to disambiguate duplicate model ids', () => {
@@ -1007,13 +881,12 @@ describe('evaluateWebSearchGate auto derivation', () => {
     };
     vi.stubEnv(STANDARD.envKey, 'sk-standard');
     vi.stubEnv(anthropic.envKey, 'sk-anthropic');
-    const gate = evaluateWebSearchGate(
+    const gate = rejectedGate(
       autoConfig([STANDARD, anthropic], STANDARD.id, {
         primaryAuthType: AuthType.USE_ANTHROPIC,
       }),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.silent).toBe(true);
+    expect(gate.silent).toBe(true);
   });
 
   it('never derives a side request from Qwen OAuth credentials', () => {
@@ -1023,68 +896,48 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'API_KEY',
       baseUrl: DASHSCOPE_BASE_URL,
     };
-    vi.stubEnv(oauth.envKey, 'oauth-token');
-    const gate = evaluateWebSearchGate(
-      autoConfig([oauth], oauth.id, {
-        primaryAuthType: AuthType.QWEN_OAUTH,
-      }),
+    const gate = rejectedGate(
+      autoFor(oauth, 'oauth-token', { primaryAuthType: AuthType.QWEN_OAUTH }),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.silent).toBe(true);
+    expect(gate.silent).toBe(true);
   });
 
   it('stays silently off when the env-only key variable is unset', () => {
     vi.stubEnv('OPENAI_API_KEY', '');
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'env-model', {
-        generationConfig: {
+    const gate = rejectedGate(
+      generationOnly(
+        {
           model: 'env-model',
           authType: 'openai',
           baseUrl: DASHSCOPE_BASE_URL,
           apiKey: 'stale-env-value',
         },
-        generationConfigSources: {
-          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
-        },
-      }),
+        { apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' } },
+      ),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(gate.silent).toBe(true);
   });
 
   it('stays silently off for an env-only config on a non-DashScope host', () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'env-model', {
-        generationConfig: {
-          model: 'env-model',
-          authType: 'openai',
-          baseUrl: 'https://api.openai.com/v1',
-        },
+    const gate = rejectedGate(
+      generationOnly({
+        model: 'env-model',
+        authType: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
       }),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(gate.silent).toBe(true);
   });
 
   it('stays silently off on a Coding Plan entry', () => {
     // The preset matches but declares no backend: the endpoint has not been
     // verified to serve the Responses API search tools.
-    vi.stubEnv(CODING_PLAN.envKey, 'sk-sp-coding');
+    const config = autoFor(CODING_PLAN, 'sk-sp-coding');
     expect(
       findProviderByCredentials(CODING_PLAN.baseUrl, CODING_PLAN.envKey)?.id,
     ).toBe('coding-plan');
-    const gate = evaluateWebSearchGate(
-      autoConfig([CODING_PLAN], CODING_PLAN.id),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(rejectedGate(config).silent).toBe(true);
   });
 
   it('stays silently off on a hand-written Coding Plan host', () => {
@@ -1094,14 +947,8 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'MY_CODING_KEY',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
     };
-    vi.stubEnv(handWritten.envKey, 'sk-sp-hand-written');
-    const gate = evaluateWebSearchGate(
-      autoConfig([handWritten], handWritten.id),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    const gate = rejectedGate(autoFor(handWritten, 'sk-sp-hand-written'));
+    expect(gate.silent).toBe(true);
   });
 
   it('stays silently off on a hand-written China Coding Plan host', () => {
@@ -1111,12 +958,8 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'MY_CODING_KEY',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
     };
-    vi.stubEnv(handWritten.envKey, 'sk-sp-hand-written');
-    const gate = evaluateWebSearchGate(
-      autoConfig([handWritten], handWritten.id),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.silent).toBe(true);
+    const gate = rejectedGate(autoFor(handWritten, 'sk-sp-hand-written'));
+    expect(gate.silent).toBe(true);
   });
 
   it('honors a preset veto even when its host would otherwise be accepted', () => {
@@ -1126,14 +969,9 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'IDEALAB_API_KEY',
       baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
     };
-    vi.stubEnv(idealab.envKey, 'sk-idealab');
-    const gate = evaluateWebSearchGate(autoConfig([idealab], idealab.id));
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.notice).toContain(
-        'provider "idealab" declares no built-in web search backend',
-      );
-    }
+    expect(rejectedGate(autoFor(idealab, 'sk-idealab')).notice).toContain(
+      'provider "idealab" declares no built-in web search backend',
+    );
   });
 
   it.each([
@@ -1148,27 +986,24 @@ describe('evaluateWebSearchGate auto derivation', () => {
         envKey,
         baseUrl,
       };
-      vi.stubEnv(envKey, 'sk-test');
-      const gate = evaluateWebSearchGate(autoConfig([entry], entry.id));
-      expect(gate.ok).toBe(false);
-      if (!gate.ok) expect(gate.silent).toBe(true);
+      expect(rejectedGate(autoFor(entry, 'sk-test')).silent).toBe(true);
     },
   );
 
   it('honors an endpoint preset veto for a literal credential', () => {
-    const gate = evaluateWebSearchGate(
-      autoConfig([], 'qwen3.6-plus', {
-        generationConfig: {
+    const gate = rejectedGate(
+      generationOnly(
+        {
           model: 'qwen3.6-plus',
           authType: AuthType.USE_OPENAI,
           baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
           apiKey: 'sk-literal',
         },
-        generationConfigSources: { apiKey: { kind: 'settings' } },
-      }),
+        settingsSource,
+        'qwen3.6-plus',
+      ),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.silent).toBe(true);
+    expect(gate.silent).toBe(true);
   });
 
   it.each([
@@ -1183,10 +1018,7 @@ describe('evaluateWebSearchGate auto derivation', () => {
         envKey: 'PROXY_KEY',
         baseUrl,
       };
-      vi.stubEnv(proxy.envKey, 'sk-proxy');
-      const gate = evaluateWebSearchGate(autoConfig([proxy], proxy.id));
-      expect(gate.ok).toBe(false);
-      if (!gate.ok) expect(gate.silent).toBe(true);
+      expect(rejectedGate(autoFor(proxy, 'sk-proxy')).silent).toBe(true);
     },
   );
 
@@ -1197,10 +1029,9 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'UNSAFE_URL_KEY',
       baseUrl: 'https://user:sk-secret@api.openai.com/v1',
     };
-    vi.stubEnv(unsafe.envKey, 'sk-env');
-    const gate = evaluateWebSearchGate(autoConfig([unsafe], unsafe.id));
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.notice).not.toContain('sk-secret');
+    expect(rejectedGate(autoFor(unsafe, 'sk-env')).notice).not.toContain(
+      'sk-secret',
+    );
   });
 
   it('stays silently off on a third-party provider, without falling back to another DashScope entry', () => {
@@ -1209,22 +1040,14 @@ describe('evaluateWebSearchGate auto derivation', () => {
     expect(
       findProviderByCredentials(OPENROUTER.baseUrl, OPENROUTER.envKey)?.id,
     ).toBe('openrouter');
-    const gate = evaluateWebSearchGate(
+    const gate = rejectedGate(
       autoConfig([STANDARD, OPENROUTER], OPENROUTER.id),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(gate.silent).toBe(true);
   });
 
   it('stays silently off when the entry key variable is unset', () => {
-    vi.stubEnv(STANDARD.envKey, '');
-    const gate = evaluateWebSearchGate(autoConfig([STANDARD], STANDARD.id));
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(rejectedGate(autoFor(STANDARD, '')).silent).toBe(true);
   });
 
   it('stays silently off on a plaintext-HTTP DashScope host', () => {
@@ -1234,126 +1057,66 @@ describe('evaluateWebSearchGate auto derivation', () => {
       envKey: 'MY_INSECURE_KEY',
       baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
     };
-    vi.stubEnv(insecure.envKey, 'sk-insecure');
-    const gate = evaluateWebSearchGate(autoConfig([insecure], insecure.id));
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(rejectedGate(autoFor(insecure, 'sk-insecure')).silent).toBe(true);
   });
 
   it('stays silently off when disabled explicitly', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: false },
-        models: [STANDARD],
-        primaryModel: STANDARD.id,
-      }),
-    );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(rejectedGate(explicitWith({ enabled: false })).silent).toBe(true);
   });
 
   it('still reports the no-model notice when explicitly enabled', () => {
-    vi.stubEnv(OPENROUTER.envKey, 'sk-or');
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: true },
-        models: [OPENROUTER],
-        primaryModel: OPENROUTER.id,
-      }),
+    const gate = rejectedGate(
+      explicitWith({ enabled: true }, OPENROUTER, 'sk-or'),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBeFalsy();
-      expect(gate.notice).toContain('no search model');
-    }
+    expect(gate.silent).toBeFalsy();
+    expect(gate.notice).toContain('no search model');
   });
 
   it('derives the backend when explicitly enabled without a model', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: true },
-        models: [STANDARD],
-        primaryModel: STANDARD.id,
-      }),
-    );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) expect(gate.backend.modelId).toBe('qwen3.8-flash');
+    const backend = passedBackend(explicitWith({ enabled: true }));
+    expect(backend.modelId).toBe('qwen3.8-flash');
   });
+
+  /** A Config missing most accessors, so automatic derivation throws. */
+  const brokenConfig = (settings: Settings | undefined) =>
+    ({
+      getWebSearchSettings: () => settings,
+      getModel: () => 'some-model',
+      getCurrentAuthType: () => 'openai',
+      getCurrentModelRegistryBaseUrl: () => undefined,
+      getAllConfiguredModels: () => [],
+      getModelsConfig: () => ({}),
+    }) as unknown as Config;
 
   it('stays silently off instead of throwing when the config surface is incomplete', () => {
     // The gate runs while the tool registry is being built, for whatever
     // Config shape the caller has. A missing accessor must cost web search,
     // not every other tool in the registry.
-    const broken = {
-      getWebSearchSettings: () => undefined,
-      getModel: () => 'some-model',
-      getCurrentAuthType: () => 'openai',
-      getCurrentModelRegistryBaseUrl: () => undefined,
-      getAllConfiguredModels: () => [],
-      getModelsConfig: () => ({}),
-    } as unknown as Config;
-    const gate = evaluateWebSearchGate(broken);
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBe(true);
-    }
+    expect(rejectedGate(brokenConfig(undefined)).silent).toBe(true);
   });
 
   it('reports explicit opt-in when automatic derivation throws', () => {
-    const broken = {
-      getWebSearchSettings: () => ({ enabled: true }),
-      getModel: () => 'some-model',
-      getCurrentAuthType: () => 'openai',
-      getCurrentModelRegistryBaseUrl: () => undefined,
-      getAllConfiguredModels: () => [],
-      getModelsConfig: () => ({}),
-    } as unknown as Config;
-    const gate = evaluateWebSearchGate(broken);
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBeFalsy();
-      expect(gate.notice).toContain('no search model');
-    }
+    const gate = rejectedGate(brokenConfig({ enabled: true }));
+    expect(gate.silent).toBeFalsy();
+    expect(gate.notice).toContain('no search model');
   });
 
   it('does not override a declared env backend when its model is missing', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: TEST_ENV_KEY,
-        },
-        models: [STANDARD],
-        primaryModel: STANDARD.id,
-      }),
+    const gate = rejectedGate(
+      explicitWith({ baseUrl: DASHSCOPE_BASE_URL, apiKeyEnv: TEST_ENV_KEY }),
     );
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) {
-      expect(gate.silent).toBeFalsy();
-      expect(gate.notice).toContain('no search model');
-    }
+    expect(gate.silent).toBeFalsy();
+    expect(gate.notice).toContain('no search model');
   });
 
   it('prefers an explicitly configured search model over derivation', () => {
-    vi.stubEnv(STANDARD.envKey, 'sk-standard');
-    const gate = evaluateWebSearchGate(
-      makeConfig({
-        settings: { model: 'qwen3.7-plus' },
-        models: [{ ...STANDARD, id: 'qwen3.7-plus' }],
-        primaryModel: 'qwen3.7-plus',
-      }),
+    const backend = passedBackend(
+      explicitWith(
+        { model: 'qwen3.7-plus' },
+        { ...STANDARD, id: 'qwen3.7-plus' },
+      ),
     );
-    expect(gate.ok).toBe(true);
-    if (gate.ok) {
-      expect(gate.backend.modelId).toBe('qwen3.7-plus');
-    }
+    expect(backend.modelId).toBe('qwen3.7-plus');
   });
 });
 
@@ -1393,9 +1156,7 @@ describe('WebSearchTool validation', () => {
 describe('WebSearchTool execute', () => {
   it('uses a literal credential derived from the primary model', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-    );
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
     await runSearch(
       makeConfig({
         settings: undefined,
@@ -1415,17 +1176,12 @@ describe('WebSearchTool execute', () => {
   });
 
   it('returns a structured result with answer, opened pages, candidates, queries, citation policy, and safety footer', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM], {
-          x_tools: { web_search: { count: 1 }, web_extractor: { count: 1 } },
-        }),
-      ),
-    );
+    respond([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM], {
+      x_tools: { web_search: { count: 1 }, web_extractor: { count: 1 } },
+    });
 
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    const { error, returnDisplay, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).toContain('Web search results for query: "test query"');
     expect(content).toContain('The answer is 42.');
     expect(content).toContain('Opened evidence pages');
@@ -1440,14 +1196,12 @@ describe('WebSearchTool execute', () => {
       content.indexOf('Additional search candidates'),
     );
     expect(candidatesSection).not.toContain('https://example.com/a');
-    expect(result.returnDisplay).toMatch(/^Did 1 search in \d+(\.\d+)?s$/);
+    expect(returnDisplay).toMatch(/^Did 1 search in \d+(\.\d+)?s$/);
   });
 
   it('passes instructions, store:false, and both tools to the backend', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-    );
-    await runSearch(makeConfig());
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
+    await runSearch();
     const params = mockCreate.mock.calls[0][0];
     expect(params.store).toBe(false);
     expect(params.stream).toBe(true);
@@ -1460,9 +1214,7 @@ describe('WebSearchTool execute', () => {
   });
 
   it('omits web_extractor when disabled', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-    );
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
     await runSearch(
       makeConfig({
         settings: { enabled: true, model: 'qwen3.6-plus', webExtractor: false },
@@ -1472,19 +1224,13 @@ describe('WebSearchTool execute', () => {
   });
 
   it('merges the resolved entry customHeaders into the search client headers', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-    );
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
     await runSearch(
       makeConfig({
         models: [
-          {
-            id: 'qwen3.6-plus',
-            authType: 'openai',
-            envKey: TEST_ENV_KEY,
-            baseUrl: DASHSCOPE_BASE_URL,
+          dsModel({
             generationConfig: { customHeaders: { 'X-Gateway-Route': 'ds' } },
-          },
+          }),
         ],
       }),
     );
@@ -1496,21 +1242,13 @@ describe('WebSearchTool execute', () => {
   });
 
   it('installs dynamic header expansion on the search client fetch', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-    );
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
     const config = makeConfig({
       allowDynamicHeaderValues: true,
       models: [
-        {
-          id: 'qwen3.6-plus',
-          authType: 'openai',
-          envKey: TEST_ENV_KEY,
-          baseUrl: DASHSCOPE_BASE_URL,
-          generationConfig: {
-            customHeaders: { 'X-Session': '${session_id}' },
-          },
-        },
+        dsModel({
+          generationConfig: { customHeaders: { 'X-Session': '${session_id}' } },
+        }),
       ],
     });
     const getSessionId = vi.spyOn(config, 'getSessionId');
@@ -1526,22 +1264,8 @@ describe('WebSearchTool execute', () => {
   });
 
   it('truncates an oversized answer while preserving source URLs and the safety footer', async () => {
-    const bigText = 'x'.repeat(150_000);
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([
-          SEARCH_ITEM,
-          EXTRACTOR_ITEM,
-          {
-            type: 'message',
-            status: 'completed',
-            content: [{ type: 'output_text', text: bigText }],
-          },
-        ]),
-      ),
-    );
-    const result = await runSearch(makeConfig());
-    const content = result.llmContent as string;
+    respond([SEARCH_ITEM, EXTRACTOR_ITEM, messageItem('x'.repeat(150_000))]);
+    const { content } = await runSearch();
     expect(content).toContain('answer truncated to fit');
     // The citation evidence must survive — only the answer text shrinks.
     expect(content).toContain('Opened evidence pages');
@@ -1557,39 +1281,19 @@ describe('WebSearchTool execute', () => {
     // shrink and the backstop slice must land on a character boundary or the
     // result embeds a lone surrogate that breaks the next request's
     // serialization.
-    const bigText = '😀'.repeat(60_000);
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([
-          SEARCH_ITEM,
-          EXTRACTOR_ITEM,
-          {
-            type: 'message',
-            status: 'completed',
-            content: [{ type: 'output_text', text: bigText }],
-          },
-        ]),
-      ),
-    );
-    const result = await runSearch(makeConfig());
-    const content = result.llmContent as string;
+    respond([SEARCH_ITEM, EXTRACTOR_ITEM, messageItem('😀'.repeat(60_000))]);
+    const { content } = await runSearch();
     expect(content).toContain('answer truncated to fit');
     // No high surrogate without its low surrogate anywhere in the payload.
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
   });
 
   it('salvages extracted page content as the answer when the stream dies before narration', async () => {
-    mockCreate.mockResolvedValueOnce({
-      async *[Symbol.asyncIterator]() {
-        yield { type: 'response.created' };
-        yield { type: 'response.output_item.done', item: SEARCH_ITEM };
-        yield { type: 'response.output_item.done', item: EXTRACTOR_ITEM };
-        throw new Error('stream reset');
-      },
-    });
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    mockCreate.mockResolvedValueOnce(
+      dyingStream(CREATED, done(SEARCH_ITEM), done(EXTRACTOR_ITEM)),
+    );
+    const { error, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).toContain('[Partial result:');
     // EXTRACTOR_ITEM's output/goal back-fill the missing narration.
     expect(content).toContain('page content');
@@ -1601,19 +1305,14 @@ describe('WebSearchTool execute', () => {
       type: 'url',
       url: `https://example.com/${i}`,
     }));
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([
-          {
-            ...SEARCH_ITEM,
-            action: { ...SEARCH_ITEM.action, sources: manySources },
-          },
-          MESSAGE_ITEM,
-        ]),
-      ),
-    );
-    const result = await runSearch(makeConfig());
-    const content = result.llmContent as string;
+    respond([
+      {
+        ...SEARCH_ITEM,
+        action: { ...SEARCH_ITEM.action, sources: manySources },
+      },
+      MESSAGE_ITEM,
+    ]);
+    const { content } = await runSearch();
     expect(content).toContain('15 more candidate URL(s) omitted');
   });
 
@@ -1622,22 +1321,17 @@ describe('WebSearchTool execute', () => {
       { length: 30 },
       (_, i) => `https://example.com/opened/${i}`,
     );
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([
-          SEARCH_ITEM,
-          {
-            type: 'web_extractor_call',
-            status: 'completed',
-            urls: manyOpened,
-            output: 'content',
-          },
-          MESSAGE_ITEM,
-        ]),
-      ),
-    );
-    const result = await runSearch(makeConfig());
-    const content = result.llmContent as string;
+    respond([
+      SEARCH_ITEM,
+      {
+        type: 'web_extractor_call',
+        status: 'completed',
+        urls: manyOpened,
+        output: 'content',
+      },
+      MESSAGE_ITEM,
+    ]);
+    const { content } = await runSearch();
     expect(content).toContain('Opened evidence pages');
     expect(content).toContain('https://example.com/opened/24');
     expect(content).not.toContain('https://example.com/opened/25');
@@ -1648,7 +1342,7 @@ describe('WebSearchTool execute', () => {
     mockCreate.mockRejectedValueOnce(
       Object.assign(new Error('Too many requests'), { status: 429 }),
     );
-    const result = await runSearch(makeConfig());
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_RATE_LIMITED);
   });
 
@@ -1658,21 +1352,28 @@ describe('WebSearchTool execute', () => {
         status: 400,
       }),
     );
-    const result = await runSearch(makeConfig());
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(result.error?.message).toContain('Unsupported model');
   });
 
   it('maps a pre-stream transport failure to WEB_SEARCH_BACKEND_FAILED', async () => {
     mockCreate.mockRejectedValueOnce(new Error('ENOTFOUND'));
-    const result = await runSearch(makeConfig());
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
   });
 
-  it('retries once when no search was performed, then errors with NO_SEARCH_PERFORMED', async () => {
+  /** Every attempt answers `items`; runs through the retry backoff. */
+  async function runRetrying(items: StreamEvent[], status?: string) {
     vi.useFakeTimers();
-    mockCreate.mockResolvedValue(makeStream(completedEvents([MESSAGE_ITEM])));
-    const result = await runSearchWithRetryTimers(makeConfig());
+    mockCreate.mockResolvedValue(
+      makeStream(completedEvents(items, undefined, status)),
+    );
+    return runSearchWithRetryTimers(makeConfig());
+  }
+
+  it('retries once when no search was performed, then errors with NO_SEARCH_PERFORMED', async () => {
+    const result = await runRetrying([MESSAGE_ITEM]);
     expect(mockCreate).toHaveBeenCalledTimes(2);
     expect(result.error?.type).toBe(
       ToolErrorType.WEB_SEARCH_NO_SEARCH_PERFORMED,
@@ -1681,31 +1382,18 @@ describe('WebSearchTool execute', () => {
 
   it('succeeds on the retry after an initial no-search response', async () => {
     vi.useFakeTimers();
-    mockCreate
-      .mockResolvedValueOnce(makeStream(completedEvents([MESSAGE_ITEM])))
-      .mockResolvedValueOnce(
-        makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-      );
+    respond([MESSAGE_ITEM]);
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
     const result = await runSearchWithRetryTimers(makeConfig());
     expect(result.error).toBeUndefined();
     expect(result.llmContent as string).toContain('The answer is 42.');
   });
 
   it('does not count a failed search call — retries then reports NO_SEARCH_PERFORMED', async () => {
-    vi.useFakeTimers();
-    const failedSearch = {
-      type: 'web_search_call',
-      status: 'failed',
-      action: {
-        type: 'search',
-        queries: ['test query'],
-        sources: [{ type: 'url', url: 'https://example.com/failed' }],
-      },
-    };
-    mockCreate.mockResolvedValue(
-      makeStream(completedEvents([failedSearch, MESSAGE_ITEM])),
-    );
-    const result = await runSearchWithRetryTimers(makeConfig());
+    const result = await runRetrying([
+      failedSearch('test query'),
+      MESSAGE_ITEM,
+    ]);
     expect(mockCreate).toHaveBeenCalledTimes(2);
     expect(result.error?.type).toBe(
       ToolErrorType.WEB_SEARCH_NO_SEARCH_PERFORMED,
@@ -1713,24 +1401,12 @@ describe('WebSearchTool execute', () => {
   });
 
   it('ignores a failed search call alongside a completed one', async () => {
-    const failedSearch = {
-      type: 'web_search_call',
-      status: 'failed',
-      action: {
-        type: 'search',
-        queries: ['bad query'],
-        sources: [{ type: 'url', url: 'https://example.com/failed' }],
-      },
-    };
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([failedSearch, SEARCH_ITEM, MESSAGE_ITEM])),
-    );
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    respond([failedSearch('bad query'), SEARCH_ITEM, MESSAGE_ITEM]);
+    const { error, returnDisplay, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).not.toContain('https://example.com/failed');
     expect(content).not.toContain('bad query');
-    expect(result.returnDisplay).toMatch(/^Did 1 search in/);
+    expect(returnDisplay).toMatch(/^Did 1 search in/);
   });
 
   it('keeps a failed extractor attempt in the candidate tier, not opened evidence', async () => {
@@ -1739,12 +1415,9 @@ describe('WebSearchTool execute', () => {
       status: 'failed',
       urls: ['https://example.com/a'],
     };
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, failedExtractor, MESSAGE_ITEM])),
-    );
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    respond([SEARCH_ITEM, failedExtractor, MESSAGE_ITEM]);
+    const { error, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).not.toContain('Opened evidence pages');
     const candidatesSection = content.slice(
       content.indexOf('Additional search candidates'),
@@ -1753,275 +1426,187 @@ describe('WebSearchTool execute', () => {
   });
 
   it('returns NO_RESULTS with the safety footer when the search yields nothing', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([
-          {
-            type: 'web_search_call',
-            status: 'completed',
-            action: { type: 'search', queries: ['test query'], sources: [] },
-          },
-        ]),
-      ),
-    );
-    const result = await runSearch(makeConfig());
+    respond([
+      {
+        type: 'web_search_call',
+        status: 'completed',
+        action: { type: 'search', queries: ['test query'], sources: [] },
+      },
+    ]);
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_NO_RESULTS);
     expect(result.llmContent as string).toContain('[Safety:');
   });
 
   it('surfaces a typeless in-stream error event (HTTP 200 + event:error) with the server message', async () => {
     // DashScope shape captured by live probe: no `type`, no `error` wrapper.
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        {
-          code: 'InvalidParameter',
-          message: "Unsupported model: 'qwen2.5-7b-instruct'.",
-          request_id: 'req-1',
-        },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
+    respondRaw([
+      {
+        code: 'InvalidParameter',
+        message: "Unsupported model: 'qwen2.5-7b-instruct'.",
+        request_id: 'req-1',
+      },
+    ]);
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(result.error?.message).toContain('InvalidParameter');
     expect(result.error?.message).toContain('Unsupported model');
   });
 
+  const THROTTLED = {
+    code: 'Throttling.RateQuota',
+    message: 'Requests throttled.',
+  };
+  const failedEvent = (type: 'failed' | 'cancelled') => ({
+    type: `response.${type}`,
+    response: { status: type, output: [] },
+  });
+
   it('maps an in-stream Throttling error to WEB_SEARCH_RATE_LIMITED', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { code: 'Throttling.RateQuota', message: 'Requests throttled.' },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
+    respondRaw([THROTTLED]);
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_RATE_LIMITED);
   });
 
-  it('salvages streamed results when an in-stream error follows an executed search', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        { type: 'response.output_item.done', item: SEARCH_ITEM },
-        { code: 'Throttling.RateQuota', message: 'Requests throttled.' },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
-    // The search executed (and billed) before the error — its sources must
-    // surface as a partial result, matching the transport-error path.
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+  /** A search executed (and billed) before `terminal`: its sources must surface as a partial result. */
+  async function expectSalvaged(terminal: StreamEvent) {
+    respondRaw([CREATED, done(SEARCH_ITEM), terminal]);
+    const { error, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).toContain('Partial result');
     expect(content).toContain('https://example.com/a');
-  });
+  }
 
-  it('salvages streamed results when the backend reports the request as failed', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        { type: 'response.output_item.done', item: SEARCH_ITEM },
-        { type: 'response.failed', response: { status: 'failed', output: [] } },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
-    // The search executed (and billed) before the backend gave up — its
-    // sources must surface as a partial result, same as the in-stream-error
-    // and transport-error paths.
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
-    expect(content).toContain('Partial result');
-    expect(content).toContain('https://example.com/a');
-  });
+  // Each salvage path matches the transport-error path.
+  it('salvages streamed results when an in-stream error follows an executed search', () =>
+    expectSalvaged(THROTTLED));
+
+  it('salvages streamed results when the backend reports the request as failed', () =>
+    expectSalvaged(failedEvent('failed')));
 
   it('handles a response.failed terminal event', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        {
-          type: 'response.failed',
-          response: { status: 'failed', output: [] },
-        },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
+    respondRaw([CREATED, failedEvent('failed')]);
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
   });
 
   it('maps a terminal failed status to WEB_SEARCH_BACKEND_FAILED', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([], undefined, 'failed')),
-    );
-    const result = await runSearch(makeConfig());
+    respond([], undefined, 'failed');
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
   });
 
   it('handles a response.cancelled terminal event with no prior search', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        {
-          type: 'response.cancelled',
-          response: { status: 'cancelled', output: [] },
-        },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
+    respondRaw([CREATED, failedEvent('cancelled')]);
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
   });
 
-  it('salvages streamed results when the backend cancels after an executed search', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        { type: 'response.output_item.done', item: SEARCH_ITEM },
-        {
-          type: 'response.cancelled',
-          response: { status: 'cancelled', output: [] },
-        },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
-    expect(content).toContain('Partial result');
-    expect(content).toContain('https://example.com/a');
-  });
+  it('salvages streamed results when the backend cancels after an executed search', () =>
+    expectSalvaged(failedEvent('cancelled')));
 
   it('labels an incomplete response as partial', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([SEARCH_ITEM, MESSAGE_ITEM], undefined, 'incomplete'),
-      ),
-    );
-    const result = await runSearch(makeConfig());
+    respond([SEARCH_ITEM, MESSAGE_ITEM], undefined, 'incomplete');
+    const result = await runSearch();
     expect(result.error).toBeUndefined();
     expect(result.llmContent as string).toContain('[Partial result:');
     expect(result.returnDisplay).toContain('(partial result)');
   });
 
   it('falls back to streamed items when the terminal event omits output', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        { type: 'response.output_item.done', item: SEARCH_ITEM },
-        { type: 'response.output_item.done', item: MESSAGE_ITEM },
-        { type: 'response.completed', response: { status: 'completed' } },
-      ]),
-    );
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    respondRaw([
+      CREATED,
+      done(SEARCH_ITEM),
+      done(MESSAGE_ITEM),
+      { type: 'response.completed', response: { status: 'completed' } },
+    ]);
+    const { error, returnDisplay, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).toContain('The answer is 42.');
     expect(content).toContain('https://example.com/a');
-    expect(result.returnDisplay).toMatch(/^Did 1 search in/);
+    expect(returnDisplay).toMatch(/^Did 1 search in/);
   });
 
   it('does not report an incomplete response as partial success when no search ran', async () => {
-    vi.useFakeTimers();
-    mockCreate.mockResolvedValue(
-      makeStream(completedEvents([MESSAGE_ITEM], undefined, 'incomplete')),
-    );
-    const result = await runSearchWithRetryTimers(makeConfig());
+    const result = await runRetrying([MESSAGE_ITEM], 'incomplete');
     expect(mockCreate).toHaveBeenCalledTimes(2);
     expect(result.error?.type).toBe(
       ToolErrorType.WEB_SEARCH_NO_SEARCH_PERFORMED,
     );
   });
 
+  const delta = (text: string) => ({
+    type: 'response.output_text.delta',
+    delta: text,
+  });
+
   it('returns a labeled partial result when the stream dies mid-flight', async () => {
-    mockCreate.mockResolvedValueOnce({
-      async *[Symbol.asyncIterator]() {
-        yield { type: 'response.created' };
-        yield { type: 'response.output_item.done', item: SEARCH_ITEM };
-        yield { type: 'response.output_text.delta', delta: 'partial answer' };
-        throw new Error('stream reset');
-      },
-    });
-    const result = await runSearch(makeConfig());
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    mockCreate.mockResolvedValueOnce(
+      dyingStream(CREATED, done(SEARCH_ITEM), delta('partial answer')),
+    );
+    const { error, content } = await runSearch();
+    expect(error).toBeUndefined();
     expect(content).toContain('[Partial result:');
     expect(content).toContain('partial answer');
   });
 
   it('does not salvage a mid-stream partial that contains no executed search', async () => {
-    mockCreate.mockResolvedValueOnce({
-      async *[Symbol.asyncIterator]() {
-        yield { type: 'response.created' };
-        yield { type: 'response.output_text.delta', delta: 'unaudited text' };
-        throw new Error('stream reset');
-      },
-    });
-    const result = await runSearch(makeConfig());
+    mockCreate.mockResolvedValueOnce(
+      dyingStream(CREATED, delta('unaudited text')),
+    );
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(result.llmContent as string).not.toContain('unaudited text');
   });
 
-  it('streams progress updates', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        {
-          type: 'response.output_item.added',
-          item: {
-            type: 'web_search_call',
-            action: { queries: ['test query'] },
-          },
-        },
-        { type: 'response.output_item.done', item: SEARCH_ITEM },
-        { type: 'response.output_item.done', item: MESSAGE_ITEM },
-        {
-          type: 'response.completed',
-          response: {
-            status: 'completed',
-            output: [SEARCH_ITEM, MESSAGE_ITEM],
-          },
-        },
-      ]),
-    );
-    const tool = new WebSearchTool(makeConfig());
-    const invocation = tool.build({ query: 'test query' });
+  /** Runs one search over raw `events`, collecting its string progress updates. */
+  async function progressUpdates(events: StreamEvent[]) {
+    respondRaw(events);
+    const invocation = new WebSearchTool(makeConfig()).build({
+      query: 'test query',
+    });
     const updates: string[] = [];
     await invocation.execute(new AbortController().signal, (output) => {
       if (typeof output === 'string') updates.push(output);
     });
+    return updates;
+  }
+
+  const COMPLETED = {
+    type: 'response.completed',
+    response: { status: 'completed', output: [SEARCH_ITEM, MESSAGE_ITEM] },
+  };
+
+  it('streams progress updates', async () => {
+    const updates = await progressUpdates([
+      CREATED,
+      {
+        type: 'response.output_item.added',
+        item: { type: 'web_search_call', action: { queries: ['test query'] } },
+      },
+      done(SEARCH_ITEM),
+      done(MESSAGE_ITEM),
+      COMPLETED,
+    ]);
     expect(updates).toContain('Searching: test query');
     expect(updates).toContain('Found 2 sources');
   });
 
   it('does not report sources for a failed web_search_call', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream([
-        { type: 'response.created' },
-        {
-          type: 'response.output_item.done',
-          item: {
-            type: 'web_search_call',
-            status: 'failed',
-            action: {
-              queries: ['test query'],
-              sources: [{ type: 'url', url: 'https://example.com/x' }],
-            },
-          },
+    const updates = await progressUpdates([
+      CREATED,
+      done({
+        type: 'web_search_call',
+        status: 'failed',
+        action: {
+          queries: ['test query'],
+          sources: [{ type: 'url', url: 'https://example.com/x' }],
         },
-        {
-          type: 'response.output_item.done',
-          item: SEARCH_ITEM,
-        },
-        { type: 'response.output_item.done', item: MESSAGE_ITEM },
-        {
-          type: 'response.completed',
-          response: {
-            status: 'completed',
-            output: [SEARCH_ITEM, MESSAGE_ITEM],
-          },
-        },
-      ]),
-    );
-    const tool = new WebSearchTool(makeConfig());
-    const invocation = tool.build({ query: 'test query' });
-    const updates: string[] = [];
-    await invocation.execute(new AbortController().signal, (output) => {
-      if (typeof output === 'string') updates.push(output);
-    });
+      }),
+      done(SEARCH_ITEM),
+      done(MESSAGE_ITEM),
+      COMPLETED,
+    ]);
     // The failed item's sources must not produce a progress update; only
     // the completed SEARCH_ITEM (2 sources) should.
     expect(updates.filter((u) => u.startsWith('Found'))).toEqual([
@@ -2031,7 +1616,7 @@ describe('WebSearchTool execute', () => {
 
   it('fails closed when the gate breaks at execute time', async () => {
     delete process.env[TEST_ENV_KEY];
-    const result = await runSearch(makeConfig());
+    const result = await runSearch();
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(mockCreate).not.toHaveBeenCalled();
   });
@@ -2048,10 +1633,8 @@ describe('WebSearchTool execute', () => {
 
 describe('WebSearchTool citations', () => {
   it('asks the model to cite bare URLs without titles', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
-    );
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    respond([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM]);
+    const content = (await runSearch()).content;
     expect(content).toContain('as bare URLs, one per line');
     expect(content).toContain('cannot be verified');
     expect(content).not.toContain('as markdown links');
@@ -2068,6 +1651,29 @@ describe('WebSearchTool citations', () => {
 });
 
 describe('WebSearchTool budget', () => {
+  const withBudget = (timeoutMs: number) =>
+    makeConfig({
+      settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs },
+    });
+
+  /** Streams `items`, then hangs (like a slow search) until aborted; `onHang` runs once listening. */
+  const hangAfter = (items: StreamEvent[], onHang?: () => void) =>
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield CREATED;
+            for (const item of items) yield done(item);
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+              onHang?.();
+            });
+          },
+        }),
+    );
+
   it('uses a configured budget and falls back to the default for unusable values', () => {
     expect(resolveWebSearchTimeoutMs(undefined)).toBe(120_000);
     expect(resolveWebSearchTimeoutMs(30_000)).toBe(30_000);
@@ -2080,24 +1686,15 @@ describe('WebSearchTool budget', () => {
     }
   });
 
+  const explicitAndEnvDeclared = (explicitMs: number, envMs: number) => [
+    evaluateWebSearchGate(withBudget(explicitMs)),
+    evaluateWebSearchGate(
+      makeConfig({ settings: envSettings({ timeoutMs: envMs }), models: [] }),
+    ),
+  ];
+
   it('carries a configured budget on the explicit and env-declared paths', () => {
-    const explicit = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 90_000 },
-      }),
-    );
-    const envDeclared = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: TEST_ENV_KEY,
-          timeoutMs: 45_000,
-        },
-        models: [],
-      }),
-    );
+    const [explicit, envDeclared] = explicitAndEnvDeclared(90_000, 45_000);
     expect(explicit.ok && explicit.backend.timeoutMs).toBe(90_000);
     expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(45_000);
   });
@@ -2105,23 +1702,7 @@ describe('WebSearchTool budget', () => {
   it('normalizes an out-of-range budget on the explicit and env-declared paths', () => {
     // settings.json is not re-validated at load, so the gate read sites are
     // the only guard keeping a hand-edited value from reaching the backend.
-    const explicit = evaluateWebSearchGate(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 0 },
-      }),
-    );
-    const envDeclared = evaluateWebSearchGate(
-      makeConfig({
-        settings: {
-          enabled: true,
-          model: 'qwen3.6-plus',
-          baseUrl: DASHSCOPE_BASE_URL,
-          apiKeyEnv: TEST_ENV_KEY,
-          timeoutMs: 0,
-        },
-        models: [],
-      }),
-    );
+    const [explicit, envDeclared] = explicitAndEnvDeclared(0, 0);
     expect(explicit.ok && explicit.backend.timeoutMs).toBe(
       DEFAULT_WEB_SEARCH_TIMEOUT_MS,
     );
@@ -2131,25 +1712,8 @@ describe('WebSearchTool budget', () => {
   });
 
   it('times out on the configured budget rather than a fixed one', async () => {
-    mockCreate.mockImplementation(
-      (_params: unknown, { signal }: { signal: AbortSignal }) =>
-        Promise.resolve({
-          async *[Symbol.asyncIterator]() {
-            yield { type: 'response.created' };
-            // A stream that never finishes on its own, like a slow search.
-            await new Promise((_resolve, reject) => {
-              signal.addEventListener('abort', () => reject(signal.reason), {
-                once: true,
-              });
-            });
-          },
-        }),
-    );
-    const result = await runSearch(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
-      }),
-    );
+    hangAfter([]);
+    const result = await runSearch(withBudget(200));
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(result.error?.message).toBe('Web search timed out after 0.2s.');
     // The SDK's own request timeout follows the same budget.
@@ -2157,55 +1721,17 @@ describe('WebSearchTool budget', () => {
   });
 
   it('reports a sub-second budget to the millisecond instead of rounding it to zero', async () => {
-    mockCreate.mockImplementation(
-      (_params: unknown, { signal }: { signal: AbortSignal }) =>
-        Promise.resolve({
-          async *[Symbol.asyncIterator]() {
-            yield { type: 'response.created' };
-            await new Promise((_resolve, reject) => {
-              signal.addEventListener('abort', () => reject(signal.reason), {
-                once: true,
-              });
-            });
-          },
-        }),
-    );
-    const result = await runSearch(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 40 },
-      }),
-    );
+    hangAfter([]);
+    const result = await runSearch(withBudget(40));
     expect(result.error?.message).toBe('Web search timed out after 0.04s.');
   });
 
   it('salvages the partial result when the budget expires after a search ran', async () => {
     // terminalFailure tries partial salvage before the timeout arm: a search
     // that spent its budget after collecting evidence must return it.
-    mockCreate.mockImplementation(
-      (_params: unknown, { signal }: { signal: AbortSignal }) =>
-        Promise.resolve({
-          async *[Symbol.asyncIterator]() {
-            yield { type: 'response.created' };
-            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
-            yield {
-              type: 'response.output_item.done',
-              item: { ...EXTRACTOR_ITEM, output: 'x'.repeat(20_000) },
-            };
-            await new Promise((_resolve, reject) => {
-              signal.addEventListener('abort', () => reject(signal.reason), {
-                once: true,
-              });
-            });
-          },
-        }),
-    );
-    const result = await runSearch(
-      makeConfig({
-        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
-      }),
-    );
-    expect(result.error).toBeUndefined();
-    const content = result.llmContent as string;
+    hangAfter([SEARCH_ITEM, { ...EXTRACTOR_ITEM, output: 'x'.repeat(20_000) }]);
+    const { error, content } = await runSearch(withBudget(200));
+    expect(error).toBeUndefined();
     expect(content).toContain('[Partial result:');
     expect(content).toContain('[Raw page content salvaged');
     expect(content).toContain('Truncated to 6000 characters.');
@@ -2215,21 +1741,7 @@ describe('WebSearchTool budget', () => {
     // terminalFailure checks the caller's signal before the salvage arm: an
     // aborted search must not hand the model salvaged partial evidence.
     const controller = new AbortController();
-    mockCreate.mockImplementation(
-      (_params: unknown, { signal }: { signal: AbortSignal }) =>
-        Promise.resolve({
-          async *[Symbol.asyncIterator]() {
-            yield { type: 'response.created' };
-            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
-            await new Promise((_resolve, reject) => {
-              signal.addEventListener('abort', () => reject(signal.reason), {
-                once: true,
-              });
-              controller.abort();
-            });
-          },
-        }),
-    );
+    hangAfter([SEARCH_ITEM], () => controller.abort());
     const tool = new WebSearchTool(makeConfig());
     const result = await tool
       .build({ query: 'test query' })
@@ -2241,21 +1753,16 @@ describe('WebSearchTool budget', () => {
 });
 
 describe('WebSearchTool extractor fallback', () => {
-  const streamDyingAfterPageRead = (pageText: string) => ({
-    async *[Symbol.asyncIterator]() {
-      yield { type: 'response.created' };
-      yield { type: 'response.output_item.done', item: SEARCH_ITEM };
-      yield {
-        type: 'response.output_item.done',
-        item: { ...EXTRACTOR_ITEM, output: pageText },
-      };
-      throw new Error('stream reset');
-    },
-  });
+  const streamDyingAfterPageRead = (pageText: string) =>
+    dyingStream(
+      CREATED,
+      done(SEARCH_ITEM),
+      done({ ...EXTRACTOR_ITEM, output: pageText }),
+    );
 
   it('labels salvaged page text as raw page content', async () => {
     mockCreate.mockResolvedValueOnce(streamDyingAfterPageRead('page content'));
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    const content = (await runSearch()).content;
     expect(content).toContain(
       "[Raw page content salvaged from the search agent's page reads — its narrated answer did not arrive.]",
     );
@@ -2270,7 +1777,7 @@ describe('WebSearchTool extractor fallback', () => {
     mockCreate.mockResolvedValueOnce(
       streamDyingAfterPageRead('a'.repeat(5_958) + '\u{1F600}'),
     );
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    const content = (await runSearch()).content;
     // The cut backs off one unit to keep the pair whole, and the label
     // reports the 5999 units actually delivered, not the 6000 bound.
     expect(content).toContain('Truncated to 5999 characters.]');
@@ -2282,23 +1789,19 @@ describe('WebSearchTool extractor fallback', () => {
     mockCreate.mockResolvedValueOnce(
       streamDyingAfterPageRead('x'.repeat(20_000)),
     );
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    const content = (await runSearch()).content;
     expect(content).toContain('Truncated to 6000 characters.]');
     expect(content).toContain('x'.repeat(5_000));
     expect(content).not.toContain('x'.repeat(6_000));
   });
 
   it('never uses page text when the narration arrived', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(
-        completedEvents([
-          SEARCH_ITEM,
-          { ...EXTRACTOR_ITEM, output: 'unrelated page body' },
-          MESSAGE_ITEM,
-        ]),
-      ),
-    );
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    respond([
+      SEARCH_ITEM,
+      { ...EXTRACTOR_ITEM, output: 'unrelated page body' },
+      MESSAGE_ITEM,
+    ]);
+    const content = (await runSearch()).content;
     expect(content).toContain('The answer is 42.');
     expect(content).not.toContain('unrelated page body');
     expect(content).not.toContain('[Raw page content');
@@ -2309,10 +1812,8 @@ describe('WebSearchTool citation invariants', () => {
   it('renders every evidence bullet as a bare URL and nothing else', async () => {
     // The citation policy tells the model the page lists give URLs only; a
     // bullet carrying anything else would contradict it silently.
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
-    );
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    respond([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM]);
+    const content = (await runSearch()).content;
     const evidence = content.slice(
       content.indexOf('Opened evidence pages'),
       content.indexOf('Queries executed'),
@@ -2327,10 +1828,8 @@ describe('WebSearchTool citation invariants', () => {
   });
 
   it('states the citation rules once for the description and the result footer', async () => {
-    mockCreate.mockResolvedValueOnce(
-      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
-    );
-    const content = (await runSearch(makeConfig())).llmContent as string;
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
+    const content = (await runSearch()).content;
     const description =
       new WebSearchTool(makeConfig()).schema.description ?? '';
     const critical = description.slice(

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getRelaunchEnvProvenance } from './config/environment.js';
+import {
+  getRelaunchEnvProvenance,
+  hasLoadedEnvironmentValues,
+} from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
@@ -42,7 +45,10 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import {
+  processBootLoaderEnv,
+  scrubAndReportInheritedLoaderEnv,
+} from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -72,6 +78,7 @@ import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
+  WorktreeOwnershipConflictError,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
 import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
@@ -95,6 +102,7 @@ import {
   recordAcpConfigStartupEvent,
 } from './utils/acp-startup-profiler.js';
 import {
+  exitWhenSupervisorExits,
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -112,6 +120,7 @@ import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
   UPDATE_COMPLETE_EXIT_CODE,
+  superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
 
@@ -424,6 +433,7 @@ export async function main() {
   // that never completes — reach no other scrub, so it happens here for
   // all of them. A session that does bind one re-exports its own pair.
   clearInheritedPeerMessagingEnv();
+  exitWhenSupervisorExits();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -487,6 +497,20 @@ export async function main() {
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
     conversationsRuntimeMarkerSeen;
+  // Only the daemon that spawns a Managed host can drive its sessions, and
+  // the Conversations runtime is never paired. A repeated option arrives as
+  // an array, which is refused too.
+  if (
+    argv.acpExecutionEngine !== undefined &&
+    (argv.acpExecutionEngine !== 'managed' ||
+      !isAcpMode ||
+      privateAcpParentCapability === undefined ||
+      conversationsRuntimeProvenance)
+  ) {
+    throw new Error(
+      '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+    );
+  }
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
@@ -573,7 +597,7 @@ export async function main() {
   // check corruptedPath directly to keep stderr visible in relaunch.
   if (settings.corruptedPath) {
     writeStderrLine(
-      'Warning: Settings file had invalid JSON and was reset. ' +
+      'Warning: Workspace settings had invalid JSON. ' +
         'A copy of the corrupted file has been saved at: ' +
         settings.corruptedPath,
     );
@@ -617,13 +641,27 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
-  } else {
+  } else if (
+    process.stdout.isTTY &&
+    // A TTY-attached run can still be non-interactive by output format
+    // (config.ts Priority 2: json/stream-json together with a query or
+    // prompt, unless `-i` forces interactive per Priority 1). Such a run
+    // renders no theme colors either, so it must not pay for the probe.
+    !(
+      !argv.promptInteractive &&
+      (argv.outputFormat === 'json' || argv.outputFormat === 'stream-json') &&
+      !!(argv.query || argv.prompt)
+    )
+  ) {
     // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
     // so non-interactive runs and any pre-render UI (e.g. the --resume
     // session picker) already have a sensible theme. The interactive
     // startup block refines this with an OSC 11 probe later on, which is
     // intentionally deferred to run inside the early-capture window so
     // terminal response bytes cannot leak into the TUI input.
+    // Piped output (headless automation, `--output-format json`) renders no
+    // theme colors, so it keeps the default theme instead of blocking the
+    // event loop on the macOS `defaults read` probe.
     themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
@@ -805,12 +843,27 @@ export async function main() {
         },
       );
       process.exit(0);
+    } else if (
+      memoryArgs.length === 0 &&
+      !hasLoadedEnvironmentValues() &&
+      !isAcpMode &&
+      argv.inputFormat !== InputFormat.STREAM_JSON &&
+      !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+      argv.jsonFd === undefined &&
+      typeof process.execve === 'function' &&
+      !['win32', 'os400'].includes(process.platform)
+    ) {
+      // Nothing to add to this process's flags, and no env-file values that
+      // already-loaded modules missed, so a relaunch would only load the whole
+      // CLI a second time. Restarts re-exec in place instead.
+      superviseInProcess(onUpdateRelaunch);
     } else {
       // Interactive and streaming modes keep a supervisor for in-session
       // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
         childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
+        environmentChangedSinceBoot: hasLoadedEnvironmentValues(),
         onUpdateRelaunch,
         replaceProcess:
           !isAcpMode &&
@@ -837,7 +890,12 @@ export async function main() {
     // respawn this process with process.env and still need the loader to
     // boot, and the respawned child re-runs this scrub itself. Only the
     // final process (no relaunch) reaches here.
-    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
+    scrubAndReportInheritedLoaderEnv(
+      process.env,
+      'qwen',
+      'ACP child',
+      processBootLoaderEnv,
+    );
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve
@@ -1113,6 +1171,7 @@ export async function main() {
           ),
         );
       } catch (error) {
+        if (error instanceof WorktreeOwnershipConflictError) throw error;
         debugLogger.warn(
           `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -1237,12 +1296,20 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
+      // A Managed host runs its sessions' tools in Runtime workers.
+      const managedRuntimeEnvironment =
+        argv.acpExecutionEngine === 'managed'
+          ? (await import('./serve/managed-runtime-session-worker.js'))
+              .createManagedRuntimeEnvironment
+          : undefined;
       try {
         await runAcpAgent(config, settings, argv, {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
           conversationsRuntimeProvenance,
+          executionEngine: argv.acpExecutionEngine,
+          managedRuntimeEnvironment,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&

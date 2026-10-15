@@ -63,6 +63,7 @@ const ownsQwenHome = !process.env['QWEN_HOME'];
 if (ownsQwenHome) {
   process.env['QWEN_HOME'] = hermeticQwenHome;
 }
+process.env['QWEN_CODE_MODELS_DEV_REFRESH'] = 'off';
 
 // Read after the redirect so the save/restore below, the spawned CLIs, and
 // the tests all agree on one global qwen dir.

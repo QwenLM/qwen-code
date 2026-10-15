@@ -13,11 +13,13 @@ import {
   TEXT_CACHE_MAX_ENTRIES,
   __getTextUtilsCacheSizes,
   clearStringWidthCache,
+  clipToWidth,
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
   sanitizeFilenameForDisplay,
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
+  sanitizeTerminalLine,
   sliceTextByVisualHeight,
   toCodePoints,
   truncateToWidth,
@@ -410,6 +412,49 @@ describe('textUtils', () => {
     it('bounds CJK text by display width, not character count', () => {
       // 5 CJK characters (10 cells) plus the ellipsis fit an 11-cell budget.
       expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
+    });
+  });
+
+  describe('clipToWidth', () => {
+    it('returns the full text when it fits the budget', () => {
+      expect(clipToWidth('Color', 12)).toBe('Color');
+      expect(clipToWidth('Color', 5)).toBe('Color');
+    });
+
+    it('clips to plain columns with no ellipsis when over budget', () => {
+      expect(clipToWidth('Target config', 6)).toBe('Target');
+    });
+
+    it('returns empty at a zero or negative budget', () => {
+      expect(clipToWidth('Target config', 0)).toBe('');
+      expect(clipToWidth('Target config', -3)).toBe('');
+    });
+
+    it('bounds CJK text by display width, not character count', () => {
+      expect(clipToWidth('目标配置参数设置', 10)).toBe('目标配置参');
+      // A double-width cell that would straddle the budget is dropped whole.
+      expect(clipToWidth('目标配置参数设置', 9)).toBe('目标配置');
+      expect(clipToWidth('ab目', 3)).toBe('ab');
+    });
+  });
+
+  describe('sanitizeTerminalLine', () => {
+    it('flattens the TAB/CR/LF the input buffer keeps into single spaces', () => {
+      // A surviving newline paints a second physical row the caller's width
+      // budget never charged.
+      expect(sanitizeTerminalLine(' first\n> /evil fake row')).toBe(
+        ' first > /evil fake row',
+      );
+      expect(sanitizeTerminalLine('a\tb\rc\n\nd')).toBe('a b c d');
+    });
+
+    it('strips the bidi override and isolate characters', () => {
+      expect(sanitizeTerminalLine('Ev\u202eil\u202c')).toBe('Evil');
+      expect(sanitizeTerminalLine('\u2066gnirts\u2069')).toBe('gnirts');
+    });
+
+    it('still strips ANSI sequences and the remaining control bytes', () => {
+      expect(sanitizeTerminalLine('\u001b[31mred\u001b[0m\x07')).toBe('red');
     });
   });
 

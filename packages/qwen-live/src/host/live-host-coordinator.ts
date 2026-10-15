@@ -1546,7 +1546,7 @@ export class LiveHostCoordinator {
       this.handleLanguageAction(lease, message);
       return;
     }
-    this.handleAction(message);
+    if (message.type === 'host.action') this.handleAction(message);
   }
 
   private handleLanguageAction(

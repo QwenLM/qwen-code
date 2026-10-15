@@ -29,6 +29,11 @@ vi.mock('../../ffmpeg.js', () => ({
 }));
 
 const FRAME_SIZE = 42 * 1024;
+const SCALE_768 =
+  "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease";
+
+/** Space-separated argv tokens as an array. */
+const argv = (tokens: string): string[] => tokens.split(' ');
 
 /** Realistic showinfo stderr lines, one per kept frame. */
 const showinfoStderr = (times: number[]): string =>
@@ -76,8 +81,9 @@ describe('OmniExtractKeyframesTool', () => {
 
   const run = async (
     params: Record<string, unknown> = {},
+    subject: OmniExtractKeyframesTool = tool,
   ): Promise<{ result: ToolResult; signal: AbortSignal }> => {
-    const invocation = tool.build({
+    const invocation = subject.build({
       inputPath,
       outputDir,
       ...params,
@@ -85,6 +91,21 @@ describe('OmniExtractKeyframesTool', () => {
     const signal = new AbortController().signal;
     return { result: await invocation.execute(signal), signal };
   };
+
+  /** A tool whose policyTools entry for this tool is `entry`. */
+  const configuredTool = (entry: Record<string, unknown>) =>
+    new OmniExtractKeyframesTool({
+      getOmniPolicyToolsSettings: () => ({
+        [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: entry,
+      }),
+    });
+
+  /** Frame `i`'s omniDisclosure metadata. */
+  const disclosure = (result: ToolResult, i: number) =>
+    result.artifacts?.[i]?.metadata?.['omniDisclosure'];
+
+  /** The argv of the `n`th ffmpeg run. */
+  const ffArgs = (n: number) => mocks.runFfmpeg.mock.calls[n][0] as string[];
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -106,10 +127,9 @@ describe('OmniExtractKeyframesTool', () => {
     expect(tool.name).toBe(OMNI_EXTRACT_KEYFRAMES_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
-      // Bumped with the `omniRole: 'keyframe'` annotation so pre-role
-      // cache entries and recorded executions cannot converge onto this
-      // fingerprint and keep reporting sampled frames as complete visual
-      // coverage.
+      // Bumped with the `omniRole: 'keyframe'` annotation so pre-role cache
+      // entries and recorded executions cannot converge onto this fingerprint
+      // and keep reporting sampled frames as complete visual coverage.
       version: '2',
       inputMediaTypes: ['video'],
       outputs: [
@@ -134,12 +154,10 @@ describe('OmniExtractKeyframesTool', () => {
 
   describe('bucketed extraction (known duration, maxFrames > 1)', () => {
     it('spreads one frame per equal bucket across the FULL duration', async () => {
-      // The bucket loop's budget guard calls remainingTimeoutMs() before
-      // the ffmpeg call reads it again — on a slow runner a millisecond
-      // elapses in between and the exact-equality assertion below turns
-      // flaky (observed on CI: 599999 ≠ 600000). Freeze Date so the
-      // strong assertion stays deterministic; ffmpeg is mocked and
-      // nothing in this test needs real wall-clock time.
+      // The budget guard calls remainingTimeoutMs() before the ffmpeg call
+      // reads it again; a slow runner lets a millisecond pass in between and
+      // the exact timeout assertion flakes (CI: 599999 ≠ 600000). Freeze
+      // Date: ffmpeg is mocked, so this test needs no real wall-clock time.
       vi.spyOn(Date, 'now').mockReturnValue(1_755_000_000_000);
       probe({ durationMs: 80_000, width: 1920, height: 1080 });
       // Every bucket has a scene change 3.5s into its window.
@@ -151,25 +169,11 @@ describe('OmniExtractKeyframesTool', () => {
       expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
         1,
         [
-          '-y',
-          '-ss',
-          '0.000',
-          '-t',
-          '20.000',
-          '-i',
+          ...argv('-y -ss 0.000 -t 20.000 -i'),
           inputPath,
           '-vf',
-          "select='gt(scene,0.2)'," +
-            "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease," +
-            'showinfo',
-          '-vsync',
-          'vfr',
-          '-frames:v',
-          '1',
-          '-q:v',
-          '4',
-          '-update',
-          '1',
+          `select='gt(scene,0.2)',${SCALE_768},showinfo`,
+          ...argv('-vsync vfr -frames:v 1 -q:v 4 -update 1'),
           path.join(outputDir, 'clip-keyframe-0001.jpg'),
         ],
         { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
@@ -190,10 +194,10 @@ describe('OmniExtractKeyframesTool', () => {
         path.join(outputDir, 'clip-keyframe-0004.jpg'),
       );
       expect(result.llmContent).toContain('Use read_file');
-      // Absolute timestamp = bucket start + showinfo pts_time (input
-      // seeking resets pts to ~0 within each window).
-      // Non-first frames carry ONLY their short timestamp marker; the
-      // shared header (source/resolution/sampling/hint) rides on frame 1.
+      // Absolute timestamp = bucket start + showinfo pts_time (input seeking
+      // resets pts to ~0 per window). Non-first frames carry ONLY their short
+      // marker; the shared header (source/resolution/sampling/hint) rides on
+      // frame 1.
       expect(result.artifacts?.[3]).toEqual({
         kind: 'image',
         storage: 'workspace',
@@ -207,8 +211,7 @@ describe('OmniExtractKeyframesTool', () => {
         },
       });
       // The sampling-method note appears once, on the first frame's header.
-      const firstDisclosure =
-        result.artifacts?.[0]?.metadata?.['omniDisclosure'];
+      const firstDisclosure = disclosure(result, 0);
       expect(firstDisclosure).toContain('全片分桶采样');
       expect(firstDisclosure).toContain('原视频 80s/1920×1080');
     });
@@ -218,8 +221,8 @@ describe('OmniExtractKeyframesTool', () => {
       mocks.runFfmpeg.mockImplementation(framesRun(1, [1]));
       await run({ maxFrames: 2 });
 
-      const first = mocks.runFfmpeg.mock.calls[0][0] as string[];
-      const second = mocks.runFfmpeg.mock.calls[1][0] as string[];
+      const first = ffArgs(0);
+      const second = ffArgs(1);
       // Bucket = 2441s, but the scene search only decodes 30s of it.
       expect(first.slice(1, 5)).toEqual(['-ss', '0.000', '-t', '30.000']);
       expect(second.slice(1, 5)).toEqual(['-ss', '2441.000', '-t', '30.000']);
@@ -239,31 +242,19 @@ describe('OmniExtractKeyframesTool', () => {
       expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
         2,
         [
-          '-y',
-          '-ss',
-          '10.000',
-          '-i',
+          ...argv('-y -ss 10.000 -i'),
           inputPath,
           '-vf',
-          "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease",
-          '-frames:v',
-          '1',
-          '-q:v',
-          '4',
-          '-update',
-          '1',
+          SCALE_768,
+          ...argv('-frames:v 1 -q:v 4 -update 1'),
           path.join(outputDir, 'clip-keyframe-0001.jpg'),
         ],
         { signal, timeoutMs: expect.any(Number) },
       );
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(2);
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '<00:10>',
-      );
-      expect(result.artifacts?.[1]?.metadata?.['omniDisclosure']).toContain(
-        '<00:22>',
-      );
+      expect(disclosure(result, 0)).toContain('<00:10>');
+      expect(disclosure(result, 1)).toContain('<00:22>');
     });
 
     it('tolerates individual bucket failures and keeps the surviving frames', async () => {
@@ -277,9 +268,7 @@ describe('OmniExtractKeyframesTool', () => {
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(1);
       expect(result.artifacts?.[0]?.title).toBe('Keyframe 1/1');
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '<00:25>',
-      );
+      expect(disclosure(result, 0)).toContain('<00:25>');
     });
 
     it('discloses partial bucket coverage when some buckets yield no frame (D8)', async () => {
@@ -294,7 +283,7 @@ describe('OmniExtractKeyframesTool', () => {
       expect(result.artifacts).toHaveLength(1);
       // The blanket 全片分桶采样 claim would be false here — bucket 2 was
       // never sampled, so the note must disclose the actual coverage.
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+      expect(disclosure(result, 0)).toContain(
         '静态抽帧（全片分桶采样，仅覆盖 1/2 个分桶，其余时段未采样）',
       );
     });
@@ -330,12 +319,9 @@ describe('OmniExtractKeyframesTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
-      const firstTimeout = (
-        mocks.runFfmpeg.mock.calls[0][1] as { timeoutMs: number }
-      ).timeoutMs;
-      const secondTimeout = (
-        mocks.runFfmpeg.mock.calls[1][1] as { timeoutMs: number }
-      ).timeoutMs;
+      const [firstTimeout, secondTimeout] = mocks.runFfmpeg.mock.calls.map(
+        (call) => (call[1] as { timeoutMs: number }).timeoutMs,
+      );
       // The loop's budget guard reads the clock just before the ffmpeg
       // call does — this test needs REAL time (the 50ms burn below), so
       // tolerate the guard→use drift instead of freezing Date.
@@ -351,20 +337,15 @@ describe('OmniExtractKeyframesTool', () => {
 
     it('stops looping and returns the frames gathered so far when the budget runs out', async () => {
       probe({ durationMs: 80_000 });
-      const configured = new OmniExtractKeyframesTool({
-        getOmniPolicyToolsSettings: () => ({
-          [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
-            runtime: { timeoutMs: 60 },
-          },
-        }),
-      });
       mocks.runFfmpeg.mockImplementation(async (args: string[]) => {
         // Outlive the whole 60ms budget inside the first bucket.
         await new Promise((r) => setTimeout(r, 90));
         return framesRun(1, [0])(args);
       });
-      const invocation = configured.build({ inputPath, outputDir });
-      const result = await invocation.execute(new AbortController().signal);
+      const { result } = await run(
+        {},
+        configuredTool({ runtime: { timeoutMs: 60 } }),
+      );
 
       // Buckets 2..8 were never attempted.
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
@@ -377,7 +358,7 @@ describe('OmniExtractKeyframesTool', () => {
       mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
       await run({ maxFrames: 16, sceneThreshold: 0.5, maxDimension: 512 });
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(16);
-      const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      const args = ffArgs(0);
       expect(args.join(' ')).toContain('gt(scene,0.5)');
       expect(args.join(' ')).toContain("'min(512,iw)':'min(512,ih)'");
     });
@@ -385,31 +366,18 @@ describe('OmniExtractKeyframesTool', () => {
     it('honors a zero scene threshold from tool settings', async () => {
       probe({});
       mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
-      const configured = new OmniExtractKeyframesTool({
-        getOmniPolicyToolsSettings: () => ({
-          [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
-            settings: { maxFrames: 1, sceneThreshold: 0 },
-          },
-        }),
-      });
-      const invocation = configured.build({ inputPath, outputDir });
-      await invocation.execute(new AbortController().signal);
-      const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      await run(
+        {},
+        configuredTool({ settings: { maxFrames: 1, sceneThreshold: 0 } }),
+      );
+      const args = ffArgs(0);
       expect(args.join(' ')).toContain('gt(scene,0)');
     });
 
     it('threads policyTools.<tool>.runtime.timeoutMs into runFfmpeg', async () => {
       probe({ durationMs: 63_000 });
       mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
-      const configured = new OmniExtractKeyframesTool({
-        getOmniPolicyToolsSettings: () => ({
-          [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
-            runtime: { timeoutMs: 90_000 },
-          },
-        }),
-      });
-      const invocation = configured.build({ inputPath, outputDir });
-      await invocation.execute(new AbortController().signal);
+      await run({}, configuredTool({ runtime: { timeoutMs: 90_000 } }));
       expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
         1,
         expect.any(Array),
@@ -439,19 +407,11 @@ describe('OmniExtractKeyframesTool', () => {
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
       expect(mocks.runFfmpeg).toHaveBeenCalledWith(
         [
-          '-y',
-          '-i',
+          ...argv('-y -i'),
           inputPath,
           '-vf',
-          "select='eq(n,0)+gt(scene,0.2)'," +
-            "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease," +
-            'showinfo',
-          '-vsync',
-          'vfr',
-          '-frames:v',
-          '8',
-          '-q:v',
-          '4',
+          `select='eq(n,0)+gt(scene,0.2)',${SCALE_768},showinfo`,
+          ...argv('-vsync vfr -frames:v 8 -q:v 4'),
           path.join(outputDir, 'clip-keyframe-%04d.jpg'),
         ],
         { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
@@ -460,12 +420,10 @@ describe('OmniExtractKeyframesTool', () => {
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(3);
       // Header (frame 1) carries the sampling method; later frames only the marker.
-      const header = result.artifacts?.[0]?.metadata?.['omniDisclosure'];
+      const header = disclosure(result, 0);
       expect(header).toContain('静态抽帧，时间连续性丢失');
       expect(header).not.toContain('全片分桶采样');
-      expect(result.artifacts?.[1]?.metadata?.['omniDisclosure']).toBe(
-        '<00:12>',
-      );
+      expect(disclosure(result, 1)).toBe('<00:12>');
     });
 
     it('uses a single pass when a single frame is all that was asked for', async () => {
@@ -473,7 +431,7 @@ describe('OmniExtractKeyframesTool', () => {
       mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
       const { result } = await run({ maxFrames: 1 });
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
-      const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      const args = ffArgs(0);
       expect(args[args.length - 1]).toBe(
         path.join(outputDir, 'clip-keyframe-%04d.jpg'),
       );
@@ -482,12 +440,10 @@ describe('OmniExtractKeyframesTool', () => {
 
     it('does not emit stale frames left by a prior run in a persistent outputDir', async () => {
       // A prior, LARGER extraction of the same source left higher-numbered
-      // frames behind. ffmpeg's %04d counter restarts at 1, so this
-      // shorter run writes 0001..0003; the stale 0004..0006 must not be
-      // reported as this run's output (they would carry no showinfo pts →
-      // timeSeconds: undefined). The single-pass path recovers its result
-      // by listing outputDir, so it must clear the source's stale frames
-      // first.
+      // frames behind. ffmpeg's %04d counter restarts at 1, so this run
+      // writes 0001..0003; the stale 0004..0006 (no showinfo pts →
+      // timeSeconds: undefined) must not be reported. The single-pass path
+      // lists outputDir for its result, so it must clear stale frames first.
       probe({ width: 1920, height: 1080 });
       for (const n of ['0004', '0005', '0006']) {
         await fs.writeFile(
@@ -554,20 +510,17 @@ describe('OmniExtractKeyframesTool', () => {
       });
 
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(30);
-      const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
+      const first = ffArgs(0);
       // Slice midpoints of a 60s window in 30 slices: t₀ = 1s, t₁ = 3s…
-      expect(first[0][2]).toBe('1.000');
-      const second = mocks.runFfmpeg.mock.calls[1] as [string[], unknown];
-      expect(second[0][2]).toBe('3.000');
+      expect(first[2]).toBe('1.000');
+      expect(ffArgs(1)[2]).toBe('3.000');
       // Every extraction is an input-side seek decoding exactly one frame.
-      expect(first[0]).toContain('-ss');
-      expect(first[0]).toContain('-frames:v');
+      expect(first).toContain('-ss');
+      expect(first).toContain('-frames:v');
 
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(30);
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '均匀抽帧',
-      );
+      expect(disclosure(result, 0)).toContain('均匀抽帧');
     });
 
     it('clamps the frame count at maxFrames for long videos', async () => {
@@ -594,8 +547,7 @@ describe('OmniExtractKeyframesTool', () => {
       });
       // 10s window × 1fps = 10 → clamped to 4; midpoints: 101.25, 103.75, …
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(4);
-      const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
-      expect(first[0][2]).toBe('101.250');
+      expect(ffArgs(0)[2]).toBe('101.250');
       expect(result.artifacts).toHaveLength(4);
     });
 
@@ -607,22 +559,17 @@ describe('OmniExtractKeyframesTool', () => {
         fps: 0.2,
         frameTokenBudget: 'small',
       });
-      const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
-      const vfIndex = first[0].indexOf('-vf');
+      const first = ffArgs(0);
+      const vf = first[first.indexOf('-vf') + 1];
       // 1920×1080 under the 80-token small tier (80 × 28² px), grid-snapped.
-      expect(first[0][vfIndex + 1]).toMatch(/^scale=\d+:\d+$/);
-      const [w, h] = (first[0][vfIndex + 1] as string)
-        .replace('scale=', '')
-        .split(':')
-        .map(Number);
+      expect(vf).toMatch(/^scale=\d+:\d+$/);
+      const [w, h] = vf.replace('scale=', '').split(':').map(Number);
       expect(w % 28).toBe(0);
       expect(h % 28).toBe(0);
       expect(w * h).toBeLessThanOrEqual(80 * 784 + 8 * 784);
       // The disclosure reports the SAME delivered dimensions the scale filter
       // produced — file-derived from this input + budget, not a constant.
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        `缩放至 ${w}×${h}`,
-      );
+      expect(disclosure(result, 0)).toContain(`缩放至 ${w}×${h}`);
     });
 
     it('discloses delivered dimensions derived from the source (not a constant)', async () => {
@@ -632,9 +579,7 @@ describe('OmniExtractKeyframesTool', () => {
       probe({ durationMs: 40_000, width: 640, height: 360 });
       mocks.runFfmpeg.mockImplementation(framesRun(1, [5]));
       const { result } = await run({ maxFrames: 1 });
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '缩放至 640×360',
-      );
+      expect(disclosure(result, 0)).toContain('缩放至 640×360');
     });
 
     it('falls back to the scene path when the duration is unknown', async () => {
@@ -643,8 +588,7 @@ describe('OmniExtractKeyframesTool', () => {
       const { result } = await run({ strategy: 'uniform', maxFrames: 2 });
       // Single-pass scene fallback: one ffmpeg run, no -ss seeks.
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
-      const args = (mocks.runFfmpeg.mock.calls[0] as [string[], unknown])[0];
-      expect(args).not.toContain('-ss');
+      expect(ffArgs(0)).not.toContain('-ss');
       expect(result.artifacts).toHaveLength(2);
     });
 

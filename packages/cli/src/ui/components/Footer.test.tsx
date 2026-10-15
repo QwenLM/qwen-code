@@ -287,12 +287,14 @@ describe('<Footer />', () => {
     const { lastFrame } = renderWithWidth(180, createMockUIState(), {
       getShellExecutionSandbox: () => ({
         requestedBackend: 'bwrap',
+        effectiveBackend: 'bwrap',
+        enforcement: 'full',
         filesystem: 'read-only',
         network: 'closed',
       }),
     });
     expect(lastFrame()).toContain(
-      'tools / bwrap → bwrap / read-only / command network: closed',
+      'tools / bwrap → bwrap (full) / read-only / command network: closed',
     );
   });
 

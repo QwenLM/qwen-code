@@ -14,6 +14,7 @@ import {
 } from './useQueuedPrompts';
 import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import { getTranslator } from '../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -29,6 +30,7 @@ const sdkMock = vi.hoisted(() => {
       removePendingPrompt: vi.fn(),
       getPendingPrompts: vi.fn(),
       removeMidTurnMessage: vi.fn(),
+      sendMidTurnMessagesNow: vi.fn(),
     },
     injectedBatches: [] as Array<{
       sessionId: string;
@@ -90,6 +92,8 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
 });
 
 const CLIENT_ID = 'client-self';
+const denySetup = (text: string) =>
+  text.trim() === '/auth' ? 'Model setup disabled' : undefined;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -100,6 +104,7 @@ function deferred<T>() {
 }
 
 interface HarnessOptions {
+  getPromptDispatchError?: (text: string) => string | undefined;
   connected?: boolean;
   writeBlocked?: boolean;
   sessionId?: string;
@@ -113,7 +118,7 @@ interface HarnessOptions {
   holdQueuedPromptsLocally?: boolean;
 }
 
-function createHarness() {
+function createHarness(language?: 'en' | 'zh-CN') {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root: Root = createRoot(container);
@@ -134,7 +139,9 @@ function createHarness() {
     focus: vi.fn(),
   };
   const stableEditorRef = { current: stableEditor } as never;
-  const stableT = ((key: string) => key) as never;
+  const stableT = (
+    language ? getTranslator(language) : (key: string) => key
+  ) as never;
   const stableReportError = vi.fn();
   const stableWorkspaceFileActions = {
     stat: vi.fn(async () => ({
@@ -156,6 +163,7 @@ function createHarness() {
   function TestComponent(opts: HarnessOptions) {
     latest = useQueuedPrompts({
       connected: opts.connected ?? true,
+      getPromptDispatchError: opts.getPromptDispatchError,
       writeBlocked: opts.writeBlocked ?? false,
       sessionId: opts.sessionId ?? 'session-a',
       workspaceCwd: opts.workspaceCwd ?? '/workspace',
@@ -253,6 +261,427 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     sdkMock.injectedBatches = [];
     sdkMock.pendingEvents = [];
   });
+
+  it.each(['', 'summarize the log'])(
+    'discards a refused held command without changing draft %j',
+    async (draft) => {
+      const harness = createHarness();
+      try {
+        await harness.render({ holdQueuedPromptsLocally: true });
+        harness.editor.getText.mockReturnValue(draft);
+        act(() =>
+          harness
+            .result()
+            .enqueuePrompt(
+              '/auth',
+              [{ data: 'aGVsbG8=', media_type: 'image/png' }],
+              [{ name: 'notes.txt', text: 'notes', media_type: 'text/plain' }],
+            ),
+        );
+        await harness.render({
+          streamingState: 'idle',
+          getPromptDispatchError: denySetup,
+        });
+        expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+        expect(harness.reportError).toHaveBeenCalled();
+        expect(harness.editor.setText).not.toHaveBeenCalled();
+        expect(harness.editor.restoreImages).not.toHaveBeenCalled();
+        expect(harness.editor.restoreFiles).not.toHaveBeenCalled();
+        expect(harness.result().queuedPrompts).toEqual([]);
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  it('admits a message typed during a turn without asking to send it now', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('steer later');
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'steer later',
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sdkMock.actions.sendMidTurnMessagesNow).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('still restores ordinary failed submissions beside a live draft', async () => {
+    const harness = createHarness();
+    const image = { data: 'aGVsbG8=', media_type: 'image/png' };
+    try {
+      await harness.render({ holdQueuedPromptsLocally: true });
+      harness.editor.getText.mockReturnValue('summarize the log');
+      act(() => harness.result().enqueuePrompt('retry this', [image]));
+      sdkMock.actions.submitPrompt.mockRejectedValueOnce(
+        new Error('network failed'),
+      );
+      await harness.render({ streamingState: 'idle' });
+      expect(harness.editor.setText).toHaveBeenCalledWith(
+        'retry this\nsummarize the log',
+      );
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([image]);
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('checks an arbitrary caller policy through a retained enqueue callback', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      const enqueue = harness.result().enqueuePrompt;
+      await harness.render({
+        streamingState: 'idle',
+        getPromptDispatchError: (text) =>
+          text === 'blocked prompt' ? 'Disabled by caller' : undefined,
+      });
+      await act(async () => {
+        enqueue('blocked prompt');
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    'discards a refused mid-turn command without changing the live draft (session changed=%s)',
+    async (changeSession) => {
+      const uploaded = deferred<{
+        type: string;
+        attachmentId: string;
+        mimeType: string;
+        size: number;
+      }>();
+      sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+      const removal = deferred<boolean>();
+      sdkMock.actions.removeAttachment.mockReturnValueOnce(removal.promise);
+      const harness = createHarness();
+      try {
+        await harness.render({});
+        harness.editor.getText.mockReturnValue('summarize the log');
+        const fileText = '@notes.txt';
+        await act(async () => {
+          harness
+            .result()
+            .enqueuePrompt(
+              fileText + ' /auth',
+              undefined,
+              undefined,
+              undefined,
+              [
+                {
+                  type: 'reference',
+                  start: 0,
+                  end: fileText.length,
+                  text: fileText,
+                  reference: {
+                    id: 'file:notes.txt',
+                    kind: 'file',
+                    value: 'notes.txt',
+                  },
+                },
+              ],
+            );
+        });
+        expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+        await harness.render({ getPromptDispatchError: denySetup });
+        await act(async () => {
+          uploaded.resolve({
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 5,
+          });
+        });
+        expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+        expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+          'notes.txt',
+          expect.anything(),
+        );
+        if (changeSession) {
+          await harness.render({
+            sessionId: 'session-b',
+            getPromptDispatchError: denySetup,
+          });
+        }
+        await act(async () => {
+          removal.resolve(true);
+        });
+        expect(harness.editor.setText).not.toHaveBeenCalled();
+        expect(harness.editor.restoreFiles).not.toHaveBeenCalled();
+        expect(harness.editor.restoreInputAnnotations).not.toHaveBeenCalled();
+        expect(harness.result().queuedPrompts).toEqual([]);
+        expect(harness.reportError).toHaveBeenCalled();
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  it('checks model policy before reading or uploading annotated files', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ getPromptDispatchError: denySetup });
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+        await Promise.resolve();
+      });
+      expect(harness.workspaceFileActions.readFileBytes).not.toHaveBeenCalled();
+      expect(sdkMock.actions.uploadAttachment).not.toHaveBeenCalled();
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).not.toHaveBeenCalled();
+      expect(harness.reportError).toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'reports a failed compensating attachment delete in %s',
+    async (language) => {
+      const uploaded = deferred<{
+        type: string;
+        attachmentId: string;
+        mimeType: string;
+        size: number;
+      }>();
+      sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+      const harness = createHarness(language);
+      try {
+        await harness.render({});
+        const fileText = '@notes.txt';
+        await act(async () => {
+          harness
+            .result()
+            .enqueuePrompt(
+              fileText + ' /auth',
+              undefined,
+              undefined,
+              undefined,
+              [
+                {
+                  type: 'reference',
+                  start: 0,
+                  end: fileText.length,
+                  text: fileText,
+                  reference: {
+                    id: 'file:notes.txt',
+                    kind: 'file',
+                    value: 'notes.txt',
+                  },
+                },
+              ],
+            );
+        });
+        expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+        const cleanupFailure = new Error('cleanup failed');
+        sdkMock.actions.removeAttachment.mockRejectedValue(cleanupFailure);
+        await harness.render({ getPromptDispatchError: denySetup });
+        await act(async () => {
+          uploaded.resolve({
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 5,
+          });
+        });
+        expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+        const localized = getTranslator(language)(
+          'queue.attachmentCleanupFailed',
+        );
+        const cleanupReport = harness.reportError.mock.calls.find(
+          ([, fallback]) => fallback === localized,
+        )!;
+        expect(cleanupReport).toBeDefined();
+        // Both App and ChatPane prefer an Error's message to their fallback.
+        expect(cleanupReport[0]).toBeInstanceOf(Error);
+        expect(cleanupReport[0].message).toBe(localized);
+        expect(cleanupReport[0].cause).toBe(cleanupFailure);
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'reports a compensating delete the daemon refused in %s',
+    async (language) => {
+      const uploaded = deferred<{
+        type: string;
+        attachmentId: string;
+        mimeType: string;
+        size: number;
+      }>();
+      sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+      const harness = createHarness(language);
+      try {
+        await harness.render({});
+        const fileText = '@notes.txt';
+        await act(async () => {
+          harness
+            .result()
+            .enqueuePrompt(
+              fileText + ' /auth',
+              undefined,
+              undefined,
+              undefined,
+              [
+                {
+                  type: 'reference',
+                  start: 0,
+                  end: fileText.length,
+                  text: fileText,
+                  reference: {
+                    id: 'file:notes.txt',
+                    kind: 'file',
+                    value: 'notes.txt',
+                  },
+                },
+              ],
+            );
+        });
+        expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+        // The route answers 200 {removed:false} when the store refuses the
+        // unlink, so the client resolves false instead of rejecting.
+        sdkMock.actions.removeAttachment.mockResolvedValue(false);
+        await harness.render({ getPromptDispatchError: denySetup });
+        await act(async () => {
+          uploaded.resolve({
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 5,
+          });
+        });
+        expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+        const localized = getTranslator(language)(
+          'queue.attachmentCleanupFailed',
+        );
+        const cleanupReport = harness.reportError.mock.calls.find(
+          ([, fallback]) => fallback === localized,
+        )!;
+        expect(cleanupReport).toBeDefined();
+        // Both App and ChatPane prefer an Error's message to their fallback.
+        expect(cleanupReport[0]).toBeInstanceOf(Error);
+        expect(cleanupReport[0].message).toBe(localized);
+        expect(cleanupReport[0].cause).toBe('removeAttachment returned false');
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
+
+  it('does not report a failed compensating delete after the session changed', async () => {
+    const uploaded = deferred<{
+      type: string;
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    sdkMock.actions.uploadAttachment.mockReturnValueOnce(uploaded.promise);
+    const harness = createHarness();
+    try {
+      await harness.render({});
+      const fileText = '@notes.txt';
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(fileText + ' /auth', undefined, undefined, undefined, [
+            {
+              type: 'reference',
+              start: 0,
+              end: fileText.length,
+              text: fileText,
+              reference: {
+                id: 'file:notes.txt',
+                kind: 'file',
+                value: 'notes.txt',
+              },
+            },
+          ]);
+      });
+      expect(sdkMock.actions.uploadAttachment).toHaveBeenCalledTimes(1);
+      sdkMock.actions.removeAttachment.mockRejectedValue(
+        new Error('cleanup failed'),
+      );
+      // The user switches away before the upload settles: the compensating
+      // delete still runs against the old session, but its failure belongs to
+      // that session, not to the one on screen.
+      await harness.render({ sessionId: 'session-b' });
+      await act(async () => {
+        uploaded.resolve({
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 5,
+        });
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'notes.txt',
+        expect.anything(),
+      );
+      expect(harness.reportError).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'queue.attachmentCleanupFailed',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it.each(['/model', 'please explain /auth', '/authenticate'])(
+    'keeps unrelated queued prompts enabled: %s',
+    async (text) => {
+      const harness = createHarness();
+      try {
+        await harness.render({
+          streamingState: 'idle',
+          getPromptDispatchError: denySetup,
+        });
+        await act(async () => {
+          harness.result().enqueuePrompt(text);
+        });
+        expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+          text,
+          expect.anything(),
+        );
+      } finally {
+        await harness.dispose();
+      }
+    },
+  );
 
   it('does not restore a row from a snapshot older than its injection', async () => {
     const harness = createHarness();
@@ -1032,6 +1461,72 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.result().queuedPrompts).toEqual([]);
       expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('refreshes a row that send-now finds already gone from the queue', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-sent', text: 'send me now' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+      expect(row).toMatchObject({
+        midTurnState: 'queued',
+        midTurnMessageId: 'm-sent',
+      });
+
+      // Delivered at a tool boundary before the click reached the daemon.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: ['m-sent'],
+        promotedMessageIds: [],
+      });
+      sdkMock.actions.sendMidTurnMessagesNow.mockResolvedValue({
+        requested: false,
+      });
+      await act(async () => harness.result().sendQueuedPromptNow(row.id));
+
+      expect(sdkMock.actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('asks the daemon once while a send-now request is out', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-urgent', text: 'urgent' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const answer = deferred<{ requested: boolean }>();
+    sdkMock.actions.sendMidTurnMessagesNow
+      .mockReturnValueOnce(answer.promise)
+      .mockResolvedValue({ requested: true });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+
+      let first!: Promise<void>;
+      act(() => {
+        first = harness.result().sendQueuedPromptNow(row.id);
+      });
+      await act(async () => harness.result().sendQueuedPromptNow(row.id));
+      expect(sdkMock.actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+
+      answer.resolve({ requested: true });
+      await act(async () => first);
+      // A later click asks again: new input may be waiting by then.
+      await act(async () => harness.result().sendQueuedPromptNow(row.id));
+      expect(sdkMock.actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(2);
     } finally {
       await harness.dispose();
     }

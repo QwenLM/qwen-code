@@ -6,6 +6,7 @@
 
 import fs from 'node:fs/promises';
 import type { Metadata, SharpConstructor } from 'sharp';
+import { sniffFileKind } from './binary-content.js';
 
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;
@@ -15,6 +16,12 @@ const IMAGE_JPEG_QUALITY = 92;
 export const IMAGE_MAX_SOURCE_BYTES = 100 * 1024 * 1024;
 const IMAGE_MAX_OUTPUT_BYTES = 9 * 1024 * 1024;
 const SUPPORTED_IMAGE_FORMATS = new Set(['jpeg', 'png', 'webp']);
+// The mime projection of SUPPORTED_IMAGE_FORMATS: edit the two together.
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 export interface NormalizedRegion {
   x1: number;
@@ -334,6 +341,18 @@ async function renderFullFrameView(
 }
 
 /**
+ * The mime of an image the renderer can bound, read from its magic bytes
+ * (the first 12 are enough), or null. Callers decide from this rather than
+ * from a declared label, which can be missing, mis-cased or simply wrong.
+ */
+export function sniffBoundableImageMime(header: Buffer): string | null {
+  const kind = sniffFileKind(header, '', '', '');
+  return kind.magicMatched && SUPPORTED_IMAGE_MIME_TYPES.has(kind.mimeType)
+    ? kind.mimeType
+    : null;
+}
+
+/**
  * Bound an in-memory image (an MCP tool result, say) to the same visual budget
  * `read_file` applies. Returns null when the image already fits, so small
  * images keep their original bytes, format and alpha channel.
@@ -366,6 +385,15 @@ export async function renderImageOverview(
 ): Promise<ImageView> {
   const prepared = await prepareImage(filePath, signal);
   return renderFullFrameView(filePath, prepared, signal);
+}
+
+export async function renderImageBufferOverview(
+  bytes: Buffer,
+  label: string,
+  signal: AbortSignal,
+): Promise<ImageView> {
+  const prepared = await prepareImageBuffer(bytes, label, signal);
+  return renderFullFrameView(label, prepared, signal);
 }
 
 export async function renderNormalizedImageCrop(
