@@ -29,9 +29,11 @@ import {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
@@ -196,9 +198,11 @@ export {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 };
 
@@ -562,6 +566,17 @@ export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
 ];
 export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+// #13753 I3: the read profile of a snapshot child, which reads a frozen copy
+// of its parent's Workspace. Nothing here writes, and the turn refuses any
+// call it does not declare.
+export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
+  {
+    ...HOSTED_WORKSPACE_FILE_TOOLS[0],
+    description:
+      "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
+  },
   HOSTED_GLOB_TOOL,
 ];
 
@@ -1223,9 +1238,12 @@ export const HOSTED_TEAM_AGENT_TOOL: FunctionDeclaration = {
  * #13753 I2: an Agent tool declaration with `isolation`, the legacy Agent
  * tool's name and value, for a host that serves child Workspaces. Only
  * there does the model see it; elsewhere each declaration stays exactly
- * as it was.
+ * as it was. I3 adds `snapshot` where the host also serves snapshots.
  */
-function withWorktreeIsolation(tool: FunctionDeclaration): FunctionDeclaration {
+function withIsolation(
+  tool: FunctionDeclaration,
+  snapshot: boolean,
+): FunctionDeclaration {
   const schema = tool.parametersJsonSchema as {
     properties: Record<string, unknown>;
   };
@@ -1236,26 +1254,44 @@ function withWorktreeIsolation(tool: FunctionDeclaration): FunctionDeclaration {
         'Nesting, custom subagent types and isolated workspaces are unavailable in this profile.',
         'Nesting and custom subagent types are unavailable in this profile.',
       ) +
-      ' With isolation "worktree" the child works in its own Git worktree of this Workspace\'s repository: its changes merge back into this Workspace as uncommitted changes when it completes, before its result arrives, and the result reports the merge (merged, conflicted with its paths, or blocked); a failed or cancelled child\'s worktree is discarded.',
+      ' With isolation "worktree" the child works in its own Git worktree of this Workspace\'s repository: its changes merge back into this Workspace as uncommitted changes when it completes, before its result arrives, and the result reports the merge (merged, conflicted with its paths, or blocked); a failed or cancelled child\'s worktree is discarded.' +
+      (snapshot
+        ? ' With isolation "snapshot" the child only reads, in a Git repository: it gets a frozen copy of this Workspace\'s files (ignored files excluded), taken when it starts. A background child may start before or after this turn\'s later changes, so make any change it must see before launching it. It can read files and find them by name pattern, but cannot change files, run commands or receive messages while it runs, and nothing it does reaches this Workspace.' +
+          ('name' in schema.properties
+            ? ' A team member (name) cannot run as a snapshot.'
+            : '')
+        : ''),
     parametersJsonSchema: {
       ...schema,
       properties: {
         ...schema.properties,
         isolation: {
           type: 'string',
-          enum: ['worktree'],
-          description:
-            'Run the child in its own Git worktree that merges back when it completes. Omit to share this Workspace directly.',
+          enum: snapshot ? ['worktree', 'snapshot'] : ['worktree'],
+          description: snapshot
+            ? 'Run the child in its own Git worktree that merges back when it completes ("worktree"), or as a read-only reader of a frozen copy of this Workspace ("snapshot"). Omit to share this Workspace directly.'
+            : 'Run the child in its own Git worktree that merges back when it completes. Omit to share this Workspace directly.',
         },
       },
     },
   };
 }
 
-export const HOSTED_AGENT_WORKTREE_TOOL =
-  withWorktreeIsolation(HOSTED_AGENT_TOOL);
-export const HOSTED_TEAM_AGENT_WORKTREE_TOOL = withWorktreeIsolation(
+export const HOSTED_AGENT_WORKTREE_TOOL = withIsolation(
+  HOSTED_AGENT_TOOL,
+  false,
+);
+export const HOSTED_TEAM_AGENT_WORKTREE_TOOL = withIsolation(
   HOSTED_TEAM_AGENT_TOOL,
+  false,
+);
+export const HOSTED_AGENT_SNAPSHOT_TOOL = withIsolation(
+  HOSTED_AGENT_TOOL,
+  true,
+);
+export const HOSTED_TEAM_AGENT_SNAPSHOT_TOOL = withIsolation(
+  HOSTED_TEAM_AGENT_TOOL,
+  true,
 );
 
 function physicalToolStatus(
@@ -1495,6 +1531,7 @@ export class HostedWorkspaceToolTurn {
   private readonly childAgents?: HostedChildAgentSession;
   private readonly childDepth: number;
   private readonly childWorkspaces: boolean;
+  private readonly childSnapshots: boolean;
   private readonly childConsumption: (childRunId: string) => void;
   private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
@@ -1552,6 +1589,8 @@ export class HostedWorkspaceToolTurn {
         readonly depth: number;
         /** #13753 I2: the host serves child Workspaces. */
         readonly childWorkspaces?: boolean;
+        /** #13753 I3: the host serves read-only snapshots too. */
+        readonly childSnapshots?: boolean;
         readonly queueConsumption: (childRunId: string) => void;
       };
       messages?: HostedSessionMessageSession;
@@ -1574,6 +1613,8 @@ export class HostedWorkspaceToolTurn {
     this.childAgents = extras?.childAgents?.funnel;
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
+    this.childSnapshots =
+      this.childWorkspaces && extras?.childAgents?.childSnapshots === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.messages = extras?.messages;
@@ -1631,6 +1672,13 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    // #13753 I3: a snapshot child's read profile declares its two read
+    // tools and nothing else, whatever lanes, orchestration or MCP the
+    // Session has; the refusal of every other call rests on this alone.
+    if (isHostedWorkspaceReadProfile(this.profile)) {
+      this.advertised = [...HOSTED_WORKSPACE_READ_TOOLS];
+      return this.advertised;
+    }
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
     // b3c: a member's widened send_message rides the same gate as its
@@ -1662,20 +1710,25 @@ export class HostedWorkspaceToolTurn {
       // a child's), behind the kind gate — files profiles and the public
       // files/1 flow keep their exact current vocabulary, mirrored by the
       // admission check in prepareRequests. H4e-b1's team tools follow it.
-      // #13753 I2: only a host that serves child Workspaces sees isolation.
+      // #13753 I2: only a host that serves child Workspaces sees isolation,
+      // and only one that serves snapshots too sees `snapshot` (I3).
       ...(this.teamsAdmitted()
         ? [
-            this.childWorkspaces
-              ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
-              : HOSTED_TEAM_AGENT_TOOL,
+            this.childSnapshots
+              ? HOSTED_TEAM_AGENT_SNAPSHOT_TOOL
+              : this.childWorkspaces
+                ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
+                : HOSTED_TEAM_AGENT_TOOL,
             ...HOSTED_TEAM_TOOLS,
             ...(teamPlanAdmissionsEnabled() ? [HOSTED_TEAM_PLAN_TOOL] : []),
           ]
         : this.agentsAdmitted()
           ? [
-              this.childWorkspaces
-                ? HOSTED_AGENT_WORKTREE_TOOL
-                : HOSTED_AGENT_TOOL,
+              this.childSnapshots
+                ? HOSTED_AGENT_SNAPSHOT_TOOL
+                : this.childWorkspaces
+                  ? HOSTED_AGENT_WORKTREE_TOOL
+                  : HOSTED_AGENT_TOOL,
             ]
           : []),
       // H4d-b: the same Sessions message along their lineage — a parent
@@ -3037,10 +3090,20 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (
             args['isolation'] !== undefined &&
-            args['isolation'] !== 'worktree'
+            args['isolation'] !== 'worktree' &&
+            args['isolation'] !== 'snapshot'
           ) {
+            // `snapshot` passes here on every host, as `worktree` does, so a
+            // launch committed while the host served it still replays; a
+            // host that does not serve it refuses a new one at admission.
+            validationError = this.childSnapshots
+              ? 'Hosted child agent isolation must be "worktree", "snapshot" or omitted.'
+              : 'Hosted child agent isolation must be "worktree" or omitted.';
+          } else if (named && args['isolation'] === 'snapshot') {
+            // #13753 I3: a member trades messages with its leader, which a
+            // snapshot, with no message lane, can neither send nor take.
             validationError =
-              'Hosted child agent isolation must be "worktree" or omitted.';
+              'Hosted team member cannot run as a snapshot: a member exchanges messages with the team leader, which a read-only snapshot cannot. Launch the member with isolation "worktree" or without isolation, or launch the snapshot without name.';
           } else if (
             args['plan_mode_required'] !== undefined &&
             typeof args['plan_mode_required'] !== 'boolean'
@@ -4884,6 +4947,7 @@ export class HostedWorkspaceToolTurn {
         executionCallId: callKey,
         closing: authority.currentActivation?.phase !== 'active',
         childWorkspaces: this.childWorkspaces,
+        childSnapshots: this.childSnapshots,
       });
     } catch (cause) {
       if (!isMessageRefusal(cause)) throw cause;
@@ -4931,6 +4995,7 @@ export class HostedWorkspaceToolTurn {
           executionCallId: callKey,
           closing,
           childWorkspaces: this.childWorkspaces,
+          childSnapshots: this.childSnapshots,
         });
       } catch (cause) {
         if (!isMessageRefusal(cause)) throw cause;
@@ -5188,13 +5253,17 @@ export class HostedWorkspaceToolTurn {
     // budget would refuse the launch it is already running. Both counts
     // read committed records only, so a refusal re-derives on replay.
     // #13753 I2: the launch's isolation, fixed on its record for every
-    // later revision and replay.
+    // later revision and replay; I3 adds the read-only snapshot.
+    const isolation = request.call.args['isolation'];
     const workspaceMode =
-      request.call.args['isolation'] === 'worktree' ? 'worktree' : 'shared';
+      isolation === 'worktree' || isolation === 'snapshot'
+        ? isolation
+        : 'shared';
     if (children.record(childRunId) === undefined) {
       const admission = childLaunchAdmission({
         workspaceMode,
         childWorkspaces: this.childWorkspaces,
+        childSnapshots: this.childSnapshots,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,
@@ -5206,9 +5275,13 @@ export class HostedWorkspaceToolTurn {
           request.call.name,
           request.call.callId,
           [],
-          admission.reason === 'workspace_mode'
-            ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces; launch without isolation to share this Workspace.'
-            : `Hosted child agent refused this launch (${admission.reason}).`,
+          admission.reason !== 'workspace_mode'
+            ? `Hosted child agent refused this launch (${admission.reason}).`
+            : workspaceMode !== 'snapshot'
+              ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces; launch without isolation to share this Workspace.'
+              : this.childWorkspaces
+                ? 'Hosted child agent refused this launch (workspace_mode): this host does not serve read-only snapshot children. A child launched without isolation shares this Workspace, and one with isolation "worktree" merges its changes back: neither is read-only.'
+                : 'Hosted child agent refused this launch (workspace_mode): this host does not serve isolated child Workspaces, so it cannot run a read-only snapshot child. A child launched without isolation shares this Workspace and is not read-only.',
         );
         await this.commit('tool_result', refused, model);
         return refused;
@@ -5356,6 +5429,7 @@ export class HostedWorkspaceToolTurn {
       const admission = childLaunchAdmission({
         workspaceMode: 'shared',
         childWorkspaces: false,
+        childSnapshots: false,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,

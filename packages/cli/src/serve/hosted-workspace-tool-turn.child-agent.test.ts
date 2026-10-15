@@ -29,9 +29,11 @@ import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
   HOSTED_AGENT_WORKTREE_TOOL,
+  HOSTED_AGENT_SNAPSHOT_TOOL,
   HOSTED_CHILD_MOUNT_REFUSALS,
   HOSTED_TEAM_AGENT_TOOL,
   HOSTED_TEAM_AGENT_WORKTREE_TOOL,
+  HOSTED_TEAM_AGENT_SNAPSHOT_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
@@ -125,6 +127,7 @@ function createTurn(
   attachChildAgents = true,
   hooksSession?: HostedHookSession,
   profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
+  childSnapshots = false,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -165,6 +168,7 @@ function createTurn(
               funnel: children,
               depth,
               childWorkspaces,
+              childSnapshots,
               queueConsumption: (childRunId) => consumption.push(childRunId),
             },
           }
@@ -383,19 +387,189 @@ it('refuses a worktree launch on a host without child Workspaces before any reco
   );
 });
 
-it('refuses an isolation other than worktree as an argument error', async () => {
-  for (const isolation of ['snapshot', 'shared', true]) {
+it('refuses an isolation other than worktree or snapshot as an argument error', async () => {
+  for (const isolation of ['shared', 'readonly', true]) {
     const responses = await executeAgent(
-      createTurn(0, undefined, 'prompt', false, true),
+      createTurn(
+        0,
+        undefined,
+        'prompt',
+        false,
+        true,
+        true,
+        undefined,
+        undefined,
+        true,
+      ),
       call({ description: 'audit', prompt: 'review', isolation }),
     );
     expect(JSON.stringify(responses)).toContain(
-      'isolation must be \\"worktree\\" or omitted',
+      'isolation must be \\"worktree\\", \\"snapshot\\" or omitted',
     );
   }
+  // A host that does not serve snapshots names only what it serves.
+  const worktreeOnly = await executeAgent(
+    createTurn(0, undefined, 'prompt', false, true),
+    call({ description: 'audit', prompt: 'review', isolation: 'readonly' }),
+  );
+  expect(JSON.stringify(worktreeOnly)).toContain(
+    'isolation must be \\"worktree\\" or omitted',
+  );
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
+});
+
+// #13753 I3: `snapshot` joins the enum only where the host serves
+// snapshots beside child Workspaces; the flag alone changes nothing.
+it('declares snapshot isolation only on a host that serves snapshots and child Workspaces', async () => {
+  const signal = new AbortController().signal;
+  const agentOf = async (turn: HostedWorkspaceToolTurn) =>
+    (await turn.declarations(signal)).find((tool) => tool.name === 'agent');
+  expect(
+    await agentOf(
+      createTurn(
+        0,
+        undefined,
+        'prompt',
+        false,
+        true,
+        true,
+        undefined,
+        undefined,
+        true,
+      ),
+    ),
+  ).toBe(HOSTED_AGENT_SNAPSHOT_TOOL);
+  expect(
+    await agentOf(
+      createTurn(
+        0,
+        undefined,
+        'prompt',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        true,
+      ),
+    ),
+  ).toBe(HOSTED_AGENT_TOOL);
+  expect(await agentOf(createTurn(0, undefined, 'prompt', false, true))).toBe(
+    HOSTED_AGENT_WORKTREE_TOOL,
+  );
+  for (const [tool, base] of [
+    [HOSTED_AGENT_SNAPSHOT_TOOL, HOSTED_AGENT_WORKTREE_TOOL],
+    [HOSTED_TEAM_AGENT_SNAPSHOT_TOOL, HOSTED_TEAM_AGENT_WORKTREE_TOOL],
+  ] as const) {
+    expect(tool.description).toContain('With isolation "worktree"');
+    expect(tool.description).toContain('With isolation "snapshot"');
+    expect(tool.description!.startsWith(base.description!)).toBe(true);
+    expect(tool.parametersJsonSchema).toMatchObject({
+      properties: { isolation: { enum: ['worktree', 'snapshot'] } },
+    });
+    expect(
+      Object.keys(
+        (tool.parametersJsonSchema as { properties: object }).properties,
+      ),
+    ).toEqual(
+      Object.keys(
+        (base.parametersJsonSchema as { properties: object }).properties,
+      ),
+    );
+  }
+  expect(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL.parametersJsonSchema).toMatchObject({
+    properties: { name: { type: 'string' } },
+  });
+  // Only the team's declaration, which takes a member name, says a member
+  // cannot be a snapshot.
+  const memberNote = 'A team member (name) cannot run as a snapshot.';
+  expect(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL.description).toContain(memberNote);
+  expect(HOSTED_AGENT_SNAPSHOT_TOOL.description).not.toContain(memberNote);
+});
+
+// #13753 I3: the read profile declares its two read tools even on a turn
+// that has a Shell lane and its own child orchestration at depth 0, so the
+// refusal of the Agent tool rests on the profile, not on missing lanes.
+it('declares only the read tools on the read profile, whatever the turn has', async () => {
+  const reader = createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    true,
+    true,
+    undefined,
+    'hosted-workspace-read/1',
+    true,
+  );
+  expect(
+    (await reader.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    ),
+  ).toEqual(['read_file', 'glob']);
+  await expect(
+    executeAgent(reader, call({ description: 'audit', prompt: 'review' })),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('refuses a snapshot launch on a host without snapshots before any record', async () => {
+  const withoutSnapshots = await executeAgent(
+    createTurn(0, undefined, 'prompt', false, true),
+    call({ description: 'audit', prompt: 'review', isolation: 'snapshot' }),
+  );
+  expect(JSON.stringify(withoutSnapshots)).toContain(
+    'does not serve read-only snapshot children',
+  );
+  // Without child Workspaces the snapshot flag counts for nothing.
+  const withoutWorkspaces = await executeAgent(
+    createTurn(
+      0,
+      undefined,
+      'prompt',
+      false,
+      false,
+      true,
+      undefined,
+      undefined,
+      true,
+    ),
+    call(
+      { description: 'audit', prompt: 'review', isolation: 'snapshot' },
+      'call-2',
+    ),
+  );
+  expect(JSON.stringify(withoutWorkspaces)).toContain(
+    'does not serve isolated child Workspaces',
+  );
+  // Neither refusal steers a read-only request to a child that can write.
+  for (const refused of [withoutSnapshots, withoutWorkspaces])
+    expect(JSON.stringify(refused)).not.toContain('to share this Workspace.');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('records a snapshot launch on a host that serves snapshots', async () => {
+  await executeAgent(
+    createTurn(
+      0,
+      undefined,
+      'prompt',
+      false,
+      true,
+      true,
+      undefined,
+      undefined,
+      true,
+    ),
+    call({ description: 'reader', prompt: 'review', isolation: 'snapshot' }),
+  );
+  expect(children.record('prompt:call-1')?.workspaceMode).toBe('snapshot');
 });
 
 it('records the launch isolation and replays it after the capability is gone', async () => {

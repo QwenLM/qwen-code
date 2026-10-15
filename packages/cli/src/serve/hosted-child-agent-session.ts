@@ -171,6 +171,8 @@ export function childLaunchAdmission(params: {
   readonly workspaceMode: ChildWorkspaceMode;
   /** #13753 I2: the control plane serves child Workspaces. */
   readonly childWorkspaces: boolean;
+  /** #13753 I3: it also serves read-only snapshots. */
+  readonly childSnapshots: boolean;
   readonly sameDefinition: boolean;
   readonly closing: boolean;
   readonly activeInScope: number;
@@ -185,6 +187,7 @@ export function childLaunchAdmission(params: {
     envelopeBytes: params.envelopeBytes,
     workspaceMode: params.workspaceMode,
     childWorkspaces: params.childWorkspaces,
+    childSnapshots: params.childSnapshots,
     sameDefinition: params.sameDefinition,
   });
 }
@@ -637,6 +640,9 @@ export class HostedChildAgentSession {
       readonly decision: 'approved' | 'rejected';
       readonly childRunId: string;
     };
+    /** #13753 I3: the host also serves snapshots, which a continued
+     * snapshot run needs likewise. */
+    readonly childSnapshots?: boolean;
   }): Promise<ChildMessageRoute> {
     return this.inWrites(async () => {
       const content = Buffer.from(params.text, 'utf8');
@@ -847,6 +853,15 @@ export class HostedChildAgentSession {
                   : `Member "${member.name}" is being stopped and cannot receive messages.`,
           };
         }
+        // #13753 I3: a snapshot child has no message lane, so nothing may
+        // be committed that it could never receive; once it completes, a
+        // message continues it as a new snapshot run.
+        if (head.workspaceMode === 'snapshot') {
+          return {
+            kind: 'refused',
+            reason: `${subject} is a read-only snapshot and takes no messages while it runs. Wait for its result; a message sent after it completes continues it as a new snapshot.`,
+          };
+        }
         if (params.closing) {
           return {
             kind: 'refused',
@@ -925,6 +940,7 @@ export class HostedChildAgentSession {
       const admission = childLaunchAdmission({
         workspaceMode: head.workspaceMode,
         childWorkspaces: params.childWorkspaces === true,
+        childSnapshots: params.childSnapshots === true,
         sameDefinition: true,
         closing: params.closing,
         activeInScope: this.activeChildRunsOf(head.ownerScopeId).length,

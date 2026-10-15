@@ -51,6 +51,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final WriterCredentialPolicy credentials;
     /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
     private final boolean childWorkspaces;
+    private final boolean childSnapshots;
     private volatile HostedHarnessClient client;
     private volatile boolean closed;
     private final ReentrantLock clientLock = new ReentrantLock();
@@ -96,6 +97,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.workspaceExecution = workspaceExecution;
         this.credentials = new WriterCredentialPolicy(properties);
         this.childWorkspaces = properties.getRuntimeBroker().isChildWorkspacesEnabled();
+        this.childSnapshots = childWorkspaces && properties.getRuntimeBroker().isChildSnapshotsEnabled();
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -218,7 +220,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     false, toolProfile(session), false, false,
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
-                    .withChildWorkspaces(childWorkspaces)
+                    .withChildWorkspaces(childWorkspaces, childSnapshots)
                     .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
@@ -707,7 +709,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         false, false,
                         WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                         .withAgentDefinition(agentDefinition(session, false))
-                        .withChildWorkspaces(childWorkspaces)
+                        .withChildWorkspaces(childWorkspaces, childSnapshots)
                         .withStoppedMessages());
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
@@ -922,7 +924,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                                                             session.sessionId())))
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(profile)
-                            .childWorkspaces(childWorkspaces);
+                            .childWorkspaces(childWorkspaces)
+                            .childSnapshots(childSnapshots);
             if (WorkspaceToolProfiles.isPublicShell(profile)) {
                 builder.suppressChildAgents();
             }
@@ -980,7 +983,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 driveRuntimeRecovery, cancellationTakeover,
                 WorkspaceToolProfiles.isPublicShell(profile))
                 .withAgentDefinition(agentDefinition(session, false))
-                .withChildWorkspaces(childWorkspaces));
+                .withChildWorkspaces(childWorkspaces, childSnapshots));
     }
 
     @Override
