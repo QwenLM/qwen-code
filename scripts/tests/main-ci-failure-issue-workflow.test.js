@@ -71,12 +71,13 @@ describe('main CI failure issue workflow', () => {
     // red run of any of them files an issue here. A pull-request run of a
     // watched workflow must never open an issue — that is
     // contributor-triggered, and the branch filter plus this clause are what
-    // keep it out. Pin the whole condition, folded to one line: #14205
-    // wrapped it across lines, and pinning its spans one by one let an
-    // appended `|| true` admit every event — pull requests included — while
-    // each span still matched. Only an exact pin fails on a connective or
-    // scope mutation anywhere in it.
-    expect(oneLine(String(jobs.analyze.if))).toBe(
+    // keep it out. Pin the whole condition: #14205 wrapped it across lines,
+    // and pinning its spans one by one let an appended `|| true` admit every
+    // event — pull requests included — while each span still matched. The
+    // `>-` scalar is already folded by the parser, so compare it as parsed:
+    // collapsing whitespace here would also collapse it inside the fromJSON
+    // name literals, which GitHub's contains() matches byte for byte.
+    expect(jobs.analyze.if).toBe(
       "${{ github.repository == 'QwenLM/qwen-code' && " +
         "github.event.workflow_run.conclusion == 'failure' && " +
         "github.event.workflow_run.head_branch == 'main' && " +
