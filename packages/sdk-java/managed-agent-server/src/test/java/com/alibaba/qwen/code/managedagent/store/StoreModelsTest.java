@@ -2,9 +2,13 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 class StoreModelsTest {
 
@@ -44,5 +48,60 @@ class StoreModelsTest {
         assertThat(projected.toolProfile()).isEqualTo("profile-carry");
         assertThat(projected.agentDefinitionDigest())
                 .isEqualTo("digest-carry");
+    }
+
+    // The recorder half of every command replay gate. A stamped receipt
+    // answers only its recorder; the UNATTRIBUTED stamp answers nobody, so
+    // a server-keyed command stays on the creator gate; and a receipt
+    // recorded before the stamp existed (NULL) keeps the role-gated replay
+    // it was recorded under for any caller with an actor id.
+    @Test
+    void admitsReplayByFollowsTheRecorderStamp() {
+        byte[] recorder = ManagedWorkspaceRegistry.actorKey("tenant", "actor-a");
+
+        assertThat(command(recorder).admitsReplayBy("actor-a")).isTrue();
+        assertThat(command(recorder).admitsReplayBy("actor-b")).isFalse();
+        assertThat(command(recorder).admitsReplayBy("bad\nactor")).isFalse();
+        assertThat(command(recorder).admitsReplayBy(null)).isFalse();
+
+        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy("actor-a"))
+                .isFalse();
+        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy(null))
+                .isFalse();
+
+        assertThat(command(null).admitsReplayBy("actor-b")).isTrue();
+        assertThat(command(null).admitsReplayBy(null)).isFalse();
+    }
+
+    // Every command receipt this build writes carries a recorder column: an
+    // actor-less insert stores the zero-byte UNATTRIBUTED stamp, never the
+    // NULL that marks a receipt recorded before the stamp existed.
+    @Test
+    void anActorlessCommandReceiptIsStampedUnattributed() {
+        var data = new DriverManagerDataSource("jdbc:h2:mem:receipt-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        ManagedSchema.initialize(data);
+        var jdbc = new ManagedSchemaJdbcTemplate(data);
+        ManagedReceipts.insertCommand(jdbc, "tenant", "CANCEL_TURN", "server-keyed",
+                "digest", "session", "turn", "COMPLETED", null, 1);
+        ManagedReceipts.insertCommand(jdbc, "tenant", "SUBMIT_TURN", "stamped",
+                "digest", "session", "turn", "COMPLETED", null,
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"), 1);
+
+        byte[] unattributed = (byte[]) ManagedReceipts.command(jdbc, "tenant",
+                "CANCEL_TURN", "server-keyed", false).get("actor_id");
+        byte[] stamped = (byte[]) ManagedReceipts.command(jdbc, "tenant",
+                "SUBMIT_TURN", "stamped", false).get("actor_id");
+
+        assertThat(unattributed).isNotNull().isEmpty();
+        assertThat(command(unattributed).admitsReplayBy("actor-b")).isFalse();
+        assertThat(stamped).isEqualTo(
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"));
+    }
+
+    private static CommandRecord command(byte[] actorKey) {
+        return new CommandRecord("tenant", "RENAME_SESSION", "key",
+                "digest", "session", null, "COMPLETED", "ACTIVE", actorKey,
+                1L, 1L);
     }
 }

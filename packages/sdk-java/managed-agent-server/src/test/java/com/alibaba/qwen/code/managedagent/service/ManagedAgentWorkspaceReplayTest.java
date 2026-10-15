@@ -529,6 +529,73 @@ class ManagedAgentWorkspaceReplayTest {
                                         .isEqualTo("workspace_unavailable")));
     }
 
+    // A receipt recorded before the recorder stamp existed reads back a
+    // NULL actor. Its recorder was never stored, so it keeps the role-gated
+    // replay it was recorded under: the non-creator recorder's retry across
+    // the rollout answers the recorded outcome instead of the creator
+    // gate's 409, as does any OPERATOR's, while the role gate above the
+    // replay still refuses a reader.
+    @Test
+    void aReceiptRecordedBeforeTheRecorderStampKeepsItsRoleGatedReplay() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'OPERATOR')",
+                tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'READER')",
+                tenant, "actor-r".getBytes(StandardCharsets.UTF_8));
+        ManagedAgentService service = service(new AtomicBoolean(true));
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        String turnId = transaction.execute(status -> service.submitTurn(
+                tenant, "actor-b", "submit-b", sessionId, input).turnId());
+        transaction.executeWithoutResult(status -> service.cancelTurn(tenant,
+                "actor-b", "cancel-b", sessionId, turnId));
+        transaction.executeWithoutResult(status -> service.renameSession(
+                tenant, "actor-b", "rename-b", sessionId, "his title"));
+        assertThat(jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
+                        + " WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
+                        + " AND operation IN ('SUBMIT_TURN', 'CANCEL_TURN',"
+                        + " 'RENAME_SESSION')",
+                tenant)).isEqualTo(3);
+
+        for (String actor : List.of("actor-b", "actor-c")) {
+            transaction.executeWithoutResult(status -> {
+                var replay = service.submitTurn(tenant, actor, "submit-b",
+                        sessionId, input);
+                assertThat(replay.replayed()).isTrue();
+                assertThat(replay.turnId()).isEqualTo(turnId);
+            });
+            transaction.executeWithoutResult(status -> {
+                var replay = service.cancelTurn(tenant, actor, "cancel-b",
+                        sessionId, turnId);
+                assertThat(replay.replayed()).isTrue();
+                assertThat(replay.turnId()).isEqualTo(turnId);
+            });
+            transaction.executeWithoutResult(status -> assertThat(
+                    service.renameSession(tenant, actor, "rename-b",
+                            sessionId, "his title").replayed()).isTrue());
+        }
+        // A different title falls through to beginSessionRename, whose
+        // discovery gate admits the same legacy receipt: the digest
+        // comparison answers, exactly as before the stamp.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-c", "rename-b", sessionId, "other title"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("idempotency_conflict")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-r", "rename-b", sessionId, "his title"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("session_operation_forbidden")));
+    }
+
     // The tombstone fence stands above the role and replay gates: a
     // deleted bound Session answers the reads' 404 — never the
     // live-Session 403 or 409 — to a reader with a fresh key and to a

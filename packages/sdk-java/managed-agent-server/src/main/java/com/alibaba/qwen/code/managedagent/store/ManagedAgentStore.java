@@ -56,7 +56,6 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -1211,24 +1210,15 @@ public class ManagedAgentStore implements AgentStateStore {
     // claiming a still-claimable delivery for the recorder, or failing a
     // digest comparison against a different title — would hand the
     // recorder's pending work to the racer or name the live key before
-    // authorization. A legacy Session has no per-actor mutation gate at
-    // all; its key's outcome stays answerable through the same contract
-    // as the pre-read probe. A tombstoned Session answers the reads' 404
-    // instead of the live-Session refusal.
+    // authorization. A receipt recorded before the recorder stamp keeps the
+    // role-gated replay it was recorded under (CommandRecord.admitsReplayBy).
+    // A legacy Session has no per-actor mutation gate at all; its key's
+    // outcome stays answerable through the same contract as the pre-read
+    // probe. A tombstoned Session answers the reads' 404 instead of the
+    // live-Session refusal.
     private void requireRenameReplayOwner(SessionRecord session,
             CommandRecord previous, String actorId) {
-        byte[] recorderKey = previous.actorKey();
-        boolean recordedByCaller = false;
-        if (recorderKey != null && actorId != null) {
-            try {
-                recordedByCaller = Arrays.equals(recorderKey,
-                        ManagedWorkspaceRegistry.actorKey(session.tenantId(),
-                                actorId));
-            } catch (IllegalArgumentException error) {
-                recordedByCaller = false;
-            }
-        }
-        if (!recordedByCaller && session.workspace() != null
+        if (!previous.admitsReplayBy(actorId) && session.workspace() != null
                 && !workspaces.createdSession(session.tenantId(), actorId,
                         session.sessionId())) {
             if ("DELETED".equals(session.status())) {
@@ -4959,8 +4949,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 sessionId, turnId, status, sessionStatusBefore, actorKey, now);
     }
 
-    // NULL for an actor id the registry key cannot encode: the receipt then
-    // answers to the creator gate alone.
+    // null for an actor id the registry key cannot encode: ManagedReceipts
+    // stamps the receipt UNATTRIBUTED, which answers to the creator gate
+    // alone.
     private static byte[] commandActorKey(String tenantId, String actorId) {
         if (actorId == null) {
             return null;

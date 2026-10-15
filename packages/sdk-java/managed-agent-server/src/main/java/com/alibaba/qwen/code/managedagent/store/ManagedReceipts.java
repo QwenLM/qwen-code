@@ -117,6 +117,13 @@ final class ManagedReceipts {
                 now);
     }
 
+    // A command this build records without an attributable actor — a
+    // server-keyed command, or an actor id the registry key cannot encode.
+    // Zero bytes, which no actor key equals (an actor id has at least one
+    // code point), so NULL stays reserved for receipts recorded before the
+    // recorder stamp existed.
+    static final byte[] UNATTRIBUTED = new byte[0];
+
     // The recording actor rides on the receipt so a replay answers the
     // actor who recorded the command, not only the Session's creator.
     static void insertCommand(
@@ -140,7 +147,7 @@ final class ManagedReceipts {
                 key,
                 digest,
                 operation,
-                actor,
+                actor == null ? UNATTRIBUTED : actor,
                 session,
                 turn,
                 state,

@@ -53,7 +53,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -1592,20 +1591,13 @@ public class ManagedAgentService {
     }
 
     // The recorder half of the replay admission: a command receipt names
-    // the actor whose own retry the recorded outcome answers. A receipt
-    // without one — server-keyed — leaves the creator gate alone.
+    // the actor whose own retry the recorded outcome answers. An
+    // unattributed one — server-keyed — leaves the creator gate alone, and
+    // one recorded before the stamp keeps its role-gated replay; see
+    // CommandRecord.admitsReplayBy.
     private boolean recordedByCaller(StoreModels.CommandRecord command,
             String actorId) {
-        byte[] recorded = command.actorKey();
-        if (recorded == null || actorId == null) {
-            return false;
-        }
-        try {
-            return Arrays.equals(recorded, ManagedWorkspaceRegistry
-                    .actorKey(command.tenantId(), actorId));
-        } catch (IllegalArgumentException error) {
-            return false;
-        }
+        return command.admitsReplayBy(actorId);
     }
 
     private void requireHarness() {
