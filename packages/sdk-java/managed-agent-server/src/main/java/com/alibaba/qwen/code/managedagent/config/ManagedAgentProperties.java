@@ -1303,6 +1303,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // The parent topic the per-Session LiteTopics (journal and public
         // envelopes alike) and the wake bootstrap LiteTopic live under.
         private String topic = "";
+        // The group the startup capability probe subscribes in; pre-created
+        // as a LITE group bound to the topic like the lane groups.
+        private String capabilityProbeGroup =
+                "qwen-managed-journal-capability-probe";
         // The one LiteTopic every wake.requested envelope is also sent to, so
         // a node can learn of a wake nobody owns yet. Session ids are UUIDs,
         // so this name cannot collide with a Session's LiteTopic.
@@ -1315,6 +1319,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // Unit-less operator overrides must bind in the annotated unit.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration ownerReconcileInterval = Duration.ofSeconds(1);
+
+        public String getCapabilityProbeGroup() {
+            return capabilityProbeGroup;
+        }
+
+        public void setCapabilityProbeGroup(String capabilityProbeGroup) {
+            this.capabilityProbeGroup = capabilityProbeGroup;
+        }
 
         public String getWakeBootstrapLiteTopic() {
             return wakeBootstrapLiteTopic;
