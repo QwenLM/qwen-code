@@ -1,13 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -24,8 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 final class HostedCancellationProbe implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -51,8 +53,12 @@ final class HostedCancellationProbe implements AutoCloseable {
                 new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
                     String session = args != null && args.length > 1 && args[1] instanceof RuntimeSession runtime
                             ? runtime.getHarnessSessionId() : null;
-                    if (method.getName().equals("execute")) increment(executions, session);
-                    if (method.getName().equals("cancel")) increment(cancellations, session);
+                    if (method.getName().equals("execute")) {
+                        increment(executions, session);
+                    }
+                    if (method.getName().equals("cancel")) {
+                        increment(cancellations, session);
+                    }
                     Object result;
                     try {
                         result = method.invoke(transport, args);
@@ -90,14 +96,16 @@ final class HostedCancellationProbe implements AutoCloseable {
     }
 
     private Map<String, Object> execution(String session) {
-        var rows = jdbc.queryForList("SELECT * FROM ma_tool_execution WHERE harness_session_id = ?", session);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
         assertThat(rows).hasSize(1);
         return rows.getFirst();
     }
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
-        String storageKey = sha256((tenant + "\u0000storage-" + sessions.indexOf(session)).getBytes(StandardCharsets.UTF_8));
-        return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        String storage = "storage-" + sessions.indexOf(session);
+        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                tenant, storage);
     }
 
     private Map<String, Object> check(Map<String, Object> session, String phase) throws Exception {
@@ -106,7 +114,9 @@ final class HostedCancellationProbe implements AutoCloseable {
         boolean prepared = fault.equals("prepared");
         boolean blocked = List.of("status-unavailable", "cancel-reply").contains(fault);
         var execution = execution(id);
-        if (phase.equals("state")) return Map.of("state", execution.get("execution_state"));
+        if (phase.equals("state")) {
+            return Map.of("state", execution.get("execution_state"));
+        }
         if (phase.equals("prepared")) {
             assertThat(owners.putIfAbsent(id, owner(session))).isNull();
             assertThat(execution.get("execution_state")).isEqualTo("PREPARED");
@@ -148,8 +158,11 @@ final class HostedCancellationProbe implements AutoCloseable {
         assertThat(original.get("holder_key")).isEqualTo(sha256((execution.get("binding_id") + "\u0000"
                 + execution.get("runtime_generation") + "\u0000" + execution.get("runtime_session_id"))
                 .getBytes(StandardCharsets.UTF_8)));
-        if (released) assertThat(owner.get("holder_key")).isNull();
-        else assertThat(owner).as("original owner until confirmed cancellation").isEqualTo(original);
+        if (released) {
+            assertThat(owner.get("holder_key")).isNull();
+        } else {
+            assertThat(owner).as("original owner until confirmed cancellation").isEqualTo(original);
+        }
         assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, id, execution.get("runtime_session_id")))
                 .isEqualTo(released ? "RELEASED" : "READY");
@@ -171,8 +184,7 @@ final class HostedCancellationProbe implements AutoCloseable {
     private void assertJournal(Map<String, Object> session, boolean result, boolean terminal, String phase,
             boolean cleanupConfirmed) throws Exception {
         String id = session.get("sessionId").toString();
-        var rows = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
+        var rows = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, id);
         var events = new ArrayList<JsonNode>();
         var transactions = new HashSet<String>();
         var identities = new HashSet<String>();
@@ -183,7 +195,9 @@ final class HostedCancellationProbe implements AutoCloseable {
             assertThat(transactions.add(row.get("transaction_id").toString())).isTrue();
             for (String line : new String((byte[]) row.get("record_bytes"), StandardCharsets.UTF_8).lines().toList()) {
                 JsonNode record = JSON.readTree(line);
-                if (!record.path("subtype").asText().equals("managed_session_event_v1")) continue;
+                if (!record.path("subtype").asText().equals("managed_session_event_v1")) {
+                    continue;
+                }
                 JsonNode event = record.path("managedSession");
                 assertThat(event.path("sequence").asLong()).isEqualTo(++sequence);
                 assertThat(identities.add(event.path("eventId").asText())).isTrue();
@@ -222,7 +236,7 @@ final class HostedCancellationProbe implements AutoCloseable {
             assertThat(outcome.path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
             assertThat(outcome.path("functionResponse").path("response").path("executionStatus").asText()).isEqualTo("cancelled");
         }
-        var head = jdbc.queryForMap("SELECT * FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var head = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, id);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         byte[] bytes = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"

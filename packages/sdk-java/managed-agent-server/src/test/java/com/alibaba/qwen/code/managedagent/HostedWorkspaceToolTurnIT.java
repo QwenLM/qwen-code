@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
@@ -10,9 +8,21 @@ import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -32,16 +42,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.test.system.CapturedOutput;
-import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedWorkspaceToolTurnIT {
     @TempDir
@@ -98,7 +100,9 @@ class HostedWorkspaceToolTurnIT {
         }
         runDriver(cases, "store-failure");
         for (String fault : cases) {
-            if (!fault.endsWith("-reply")) assertThat(output).contains("java.sql.SQLException: FG6B_" + fault);
+            if (!fault.endsWith("-reply")) {
+                assertThat(output).contains("java.sql.SQLException: FG6B_" + fault);
+            }
         }
     }
 
@@ -140,7 +144,9 @@ class HostedWorkspaceToolTurnIT {
             cases = List.of(selected);
         }
         runDriver(cases, "shell-output");
-        if (cases.contains("receipt-failure")) assertThat(output).contains("java.sql.SQLException: FG6F_receipt-failure");
+        if (cases.contains("receipt-failure")) {
+            assertThat(output).contains("java.sql.SQLException: FG6F_receipt-failure");
+        }
     }
 
     @Test
@@ -195,7 +201,9 @@ class HostedWorkspaceToolTurnIT {
         }
         String tenant = "hosted-tools-" + UUID.randomUUID();
         List<Path> workspaces = new ArrayList<>();
-        for (String name : cases) workspaces.add(Files.createDirectory(temporary.resolve(name)));
+        for (String name : cases) {
+            workspaces.add(Files.createDirectory(temporary.resolve(name)));
+        }
         boolean mysql = System.getProperty("mysql.url") != null;
         var arguments = new ArrayList<>(List.of(
                 "--server.address=127.0.0.1", "--server.port=0",
@@ -268,7 +276,9 @@ class HostedWorkspaceToolTurnIT {
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
                         "toolProfile", profile, "secondarySessionId", secondary,
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
-                if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
+                if (faults) {
+                    Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
+                }
             }
             if (verifiedRecovery) {
                 var guard = spring.getBean(WorkspaceStorageGuard.class);
@@ -360,17 +370,23 @@ class HostedWorkspaceToolTurnIT {
                             : faults ? "HOSTED_REPLY_LOSS_OK" : "HOSTED_WORKSPACE_TOOLS_OK");
                     JsonNode reports = faults ? new ObjectMapper().readTree(
                             Files.readString(temporary.resolve("driver.json.results"))) : null;
-                    if (faults && cases.contains("status")) assertThat(statusGate.isDone()).isTrue();
+                    if (faults && cases.contains("status")) {
+                        assertThat(statusGate.isDone()).isTrue();
+                    }
                     for (int index = 0; index < workspaces.size(); index++) {
                         Path workspace = workspaces.get(index);
                         if (operatorRecovery) {
                             continue;
                         }
-                        if (providerControl) providerProbe.assertReport(sessions.get(index), reports.get(index));
-                        else if (latency) {
+                        if (providerControl) {
+                            providerProbe.assertReport(sessions.get(index), reports.get(index));
+                        } else if (latency) {
                             boolean tool = cases.get(index).equals("tool");
-                            if (tool) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("latency-proof");
-                            else assertThat(workspace.resolve("child/proof.txt")).doesNotExist();
+                            if (tool) {
+                                assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("latency-proof");
+                            } else {
+                                assertThat(workspace.resolve("child/proof.txt")).doesNotExist();
+                            }
                             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
                                     + " WHERE harness_session_id = ?", Integer.class, sessions.get(index).get("sessionId")))
                                     .isEqualTo(tool ? 1 : 0);
@@ -383,12 +399,17 @@ class HostedWorkspaceToolTurnIT {
                             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                                     + " WHERE tenant_id = ? AND session_id = ? AND operation = 'settleTurn'",
                                     Integer.class, tenant, sessions.get(index).get("sessionId"))).isEqualTo(1);
-                        } else if (shellOutput) shellProbe.assertReport(sessions.get(index), reports.get(index));
-                        else if (sseGaps) sseProbe.assertReport(reports.get(index));
-                        else if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
-                        else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
-                        else if (index < 2) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
-                        else if (index == 2) {
+                        } else if (shellOutput) {
+                            shellProbe.assertReport(sessions.get(index), reports.get(index));
+                        } else if (sseGaps) {
+                            sseProbe.assertReport(reports.get(index));
+                        } else if (cancellations) {
+                            cancellationProbe.assertReport(sessions.get(index), reports.get(index));
+                        } else if (faults) {
+                            assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
+                        } else if (index < 2) {
+                            assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
+                        } else if (index == 2) {
                             assertThat(Files.readString(workspace.resolve("child/shell-reloaded.txt"))).isEqualTo("xx");
                             assertThat(workspace.resolve("shell-reloaded.txt")).doesNotExist();
                             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
@@ -399,7 +420,9 @@ class HostedWorkspaceToolTurnIT {
                     }
                 } finally {
                     driver.descendants().forEach(process -> process.destroyForcibly());
-                    if (driver.isAlive()) driver.destroyForcibly();
+                    if (driver.isAlive()) {
+                        driver.destroyForcibly();
+                    }
                 }
                 if (!faults && !latency && !operatorRecovery) {
                     List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
@@ -419,26 +442,39 @@ class HostedWorkspaceToolTurnIT {
                         assertThat(reader.exitValue()).as("Reader output: %s", Files.readString(readerLog)).isZero();
                         assertThat(Files.readString(readerLog)).contains("HOSTED_SHELL_RETAINED_OUTPUT_OK");
                     } finally {
-                        if (reader.isAlive()) reader.destroyForcibly();
+                        if (reader.isAlive()) {
+                            reader.destroyForcibly();
+                        }
                     }
                 }
             } finally {
                 statusGate.complete(null);
                 gateServer.stop(0);
-                if (cancellationProbe != null) cancellationProbe.close();
+                if (cancellationProbe != null) {
+                    cancellationProbe.close();
+                }
                 // Interrupt parked streams before Spring closes the executor and waits out the 60s poll.
-                if (sseGaps) spring.getBean(ExecutorService.class).shutdownNow();
-                if (sseProbe != null) sseProbe.close();
+                if (sseGaps) {
+                    spring.getBean(ExecutorService.class).shutdownNow();
+                }
+                if (sseProbe != null) {
+                    sseProbe.close();
+                }
                 RuntimeException cleanupFailure = null;
                 for (String trigger : triggers) {
                     try {
                         jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
                     } catch (RuntimeException cause) {
-                        if (cleanupFailure == null) cleanupFailure = cause;
-                        else cleanupFailure.addSuppressed(cause);
+                        if (cleanupFailure == null) {
+                            cleanupFailure = cause;
+                        } else {
+                            cleanupFailure.addSuppressed(cause);
+                        }
                     }
                 }
-                if (cleanupFailure != null) throw cleanupFailure;
+                if (cleanupFailure != null) {
+                    throw cleanupFailure;
+                }
             }
         }
     }
@@ -460,7 +496,9 @@ class HostedWorkspaceToolTurnIT {
             assertThat(execution.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
             assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(started ? 1 : 0);
             assertThat(execution.get("execution_state")).isEqualTo(fault.equals("prepare-twice") ? "PREPARED" : "SETTLED");
-            if (started) assertThat(execution.get("execution_status")).isEqualTo("success");
+            if (started) {
+                assertThat(execution.get("execution_status")).isEqualTo("success");
+            }
         }
         String storageId = "storage-" + index;
         Map<String, Object> owner = jdbc.queryForMap("SELECT o.holder_key, o.runtime_session_id"
@@ -469,15 +507,18 @@ class HostedWorkspaceToolTurnIT {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
                 tenant, storageId);
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
-        if (released) assertThat(owner.get("holder_key")).as(fault + " released owner").isNull();
-        else {
+        if (released) {
+            assertThat(owner.get("holder_key")).as(fault + " released owner").isNull();
+        } else {
             assertThat(owner.get("holder_key")).as(fault + " retained owner").isNotNull();
             assertThat(owner.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
         }
         assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
                 + " AND runtime_session_id = ?", String.class, session.get("sessionId"), report.path("promptId").asText()))
                 .isEqualTo(released ? "RELEASED" : "READY");
-        if (storeFaults) assertStoreJournal(jdbc, tenant, session, report);
+        if (storeFaults) {
+            assertStoreJournal(jdbc, tenant, session, report);
+        }
     }
 
     private void createStoreFaultTrigger(JdbcTemplate jdbc, String tenant, Map<String, Object> session,
@@ -516,8 +557,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(report.path("fault").asText()).isEqualTo(fault);
         assertThat(target.path("workspaceId").asText()).isEqualTo(session.get("workspaceId"));
         assertThat(target.path("resources").isArray()).isTrue();
-        List<Map<String, Object>> committed = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation = ? AND command_id = ?",
+        List<Map<String, Object>> committed = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND operation = ? AND command_id = ?",
                 tenant, sessionId, target.path("operation").asText(), target.path("commandId").asText());
         assertThat(committed).as(fault + " target commit").hasSize(applied ? 1 : 0);
         assertThat(report.path("receipt").isMissingNode()).isEqualTo(!applied);
@@ -543,11 +583,12 @@ class HostedWorkspaceToolTurnIT {
                     .isEqualTo(target.path("lastSequence").asLong()).isEqualTo(receipt.path("committedSequence").asLong());
         }
         for (JsonNode resource : target.path("resources")) {
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT * FROM ma_resource"
-                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                     tenant, sessionId, resource.path("resourceId").asText());
             if (!applied) {
-                if (resource.has("bytesBase64")) assertThat(stored).as(fault + " rolled-back resource").isEmpty();
+                if (resource.has("bytesBase64")) {
+                    assertThat(stored).as(fault + " rolled-back resource").isEmpty();
+                }
                 continue;
             }
             assertThat(stored).hasSize(1);
@@ -582,8 +623,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(restored).as(fault + " target restored exactly once").isEqualTo(applied ? 1 : 0);
 
         ObjectMapper mapper = new ObjectMapper();
-        List<Map<String, Object>> journal = jdbc.queryForList("SELECT * FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, sessionId);
+        List<Map<String, Object>> journal = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision", tenant, sessionId);
         var transactionIds = new HashSet<String>();
         var eventIds = new HashSet<String>();
         List<JsonNode> events = new ArrayList<>();
@@ -602,7 +642,9 @@ class HostedWorkspaceToolTurnIT {
             int count = 0;
             for (String line : new String(bytes, StandardCharsets.UTF_8).lines().toList()) {
                 JsonNode record = mapper.readTree(line);
-                if (!record.path("subtype").asText().equals("managed_session_event_v1")) continue;
+                if (!record.path("subtype").asText().equals("managed_session_event_v1")) {
+                    continue;
+                }
                 JsonNode event = record.path("managedSession");
                 assertThat(event.path("sequence").asLong()).isEqualTo(++sequence);
                 assertThat(eventIds.add(event.path("eventId").asText())).as(fault + " duplicate event").isTrue();
@@ -618,8 +660,7 @@ class HostedWorkspaceToolTurnIT {
                 checkpointId = transaction.get("latest_checkpoint_resource_id");
             }
         }
-        Map<String, Object> head = jdbc.queryForMap("SELECT * FROM ma_session_head"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        Map<String, Object> head = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
@@ -628,8 +669,11 @@ class HostedWorkspaceToolTurnIT {
                 + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
                 tenant, sessionId, checkpointId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
-        if (fault.startsWith("result-")) assertThat(phase).isEqualTo("await_runtime");
-        else assertThat(phase).isNotEqualTo("await_runtime");
+        if (fault.startsWith("result-")) {
+            assertThat(phase).isEqualTo("await_runtime");
+        } else {
+            assertThat(phase).isNotEqualTo("await_runtime");
+        }
         assertThat(events.stream().filter(event -> event.path("kind").asText().equals("input.accepted")
                 && event.path("payload").path("turnId").asText().equals(report.path("promptId").asText())).count()).isEqualTo(1);
         assertThat(events.stream().filter(event -> event.path("kind").asText().equals("turn.settled")))

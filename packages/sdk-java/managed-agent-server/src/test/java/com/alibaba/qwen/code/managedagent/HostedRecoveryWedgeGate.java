@@ -1,13 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
@@ -21,12 +29,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Issue #13533 finding A2: one recovery-blocked session wedges later turns of
@@ -60,7 +64,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * no-fault control run.
  */
 class HostedRecoveryWedgeGate {
-
     @TempDir
     private Path temporary;
 
@@ -70,6 +73,9 @@ class HostedRecoveryWedgeGate {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 "true".equals(System.getProperty("qwen.wedge.probe")),
                 "A2 reproduction probe: skipped unless -Dqwen.wedge.probe=true");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                "Linux".equals(System.getProperty("os.name")),
+                "A2 reproduction requires Linux physical workspace storage");
         assertThat(System.getProperty("mysql.url")).as("A2 reproduction requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user")).as("A2 reproduction requires -Dmysql.user").isNotBlank();
@@ -196,6 +202,19 @@ class HostedRecoveryWedgeGate {
                         // leftover execution is cheap to leave unresolved.
                         "shellCommand", index == 0 ? "sleep 2" : "printf PROBE_OK\\n"));
             }
+            var registration = new ManagedAgentProperties();
+            registration.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+            var mounts = new ArrayList<ManagedAgentProperties.RuntimeBroker.WorkspaceMount>();
+            for (int index = 0; index < workspaces.size(); index++) {
+                mounts.add(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        tenant, "storage-" + index, workspaces.get(index).toString()));
+            }
+            registration.getRuntimeBroker().setWorkspaceMounts(mounts);
+            var guard = new WorkspaceStorageGuard(jdbc,
+                    new DataSourceTransactionManager(jdbc.getDataSource()), registration);
+            for (int index = 0; index < workspaces.size(); index++) {
+                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
+            }
             EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
             Path phaseFile = temporary.resolve("phase");
             Path clearedFile = temporary.resolve("cleared");
@@ -253,7 +272,9 @@ class HostedRecoveryWedgeGate {
                         wedged = true;
                         break;
                     }
-                    if (!driver.isAlive()) break;
+                    if (!driver.isAlive()) {
+                        break;
+                    }
                     Thread.sleep(400);
                 }
                 Files.copy(driverLog, evidence.resolve("driver.log"),
@@ -374,12 +395,12 @@ class HostedRecoveryWedgeGate {
                     "SELECT tenant_id, session_id, workspace_id, state, recovery_status,"
                             + " recovery_detail_code, writer_id, writer_generation,"
                             + " journal_revision, committed_sequence, activation_epoch,"
-                            + " writer_lease_until, updated_at FROM"
+                            + " writer_lease_until, gmt_modified FROM"
                             + " ma_session_head WHERE tenant_id = ? AND"
                             + " session_id = ?", tenant, id);
             query(out, jdbc, "journal_tx " + id,
                     "SELECT session_id, operation, command_id, journal_revision, first_sequence,"
-                            + " last_sequence, created_at FROM ma_session_journal_tx"
+                            + " last_sequence, gmt_create FROM ma_session_journal_tx"
                             + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision"
                             + " DESC LIMIT 25", tenant, id);
             query(out, jdbc, "publications " + id,
@@ -416,7 +437,9 @@ class HostedRecoveryWedgeGate {
                     List<Map<String, Object>> rows = jdbc.queryForList(
                             "SELECT * FROM " + table + " WHERE " + column + " IN ("
                                     + placeholders + ") LIMIT 40", ids.toArray());
-                    for (Map<String, Object> row : rows) out.append(row).append('\n');
+                    for (Map<String, Object> row : rows) {
+                        out.append(row).append('\n');
+                    }
                     out.append("(count=").append(rows.size());
                     if (rows.size() == 40) {
                         out.append(", sample capped at 40");
@@ -460,9 +483,10 @@ class HostedRecoveryWedgeGate {
                     try {
                         int deleted = jdbc.update("DELETE FROM " + table + " WHERE " + column + " = ?",
                                 sessionId);
-                        if (deleted > 0)
+                        if (deleted > 0) {
                             out.append("deleted ").append(deleted).append(" from ").append(table)
-                                    .append('.').append(column).append('\n');
+                            .append('.').append(column).append('\n');
+                        }
                     } catch (Exception error) {
                         errors++;
                         out.append("FAILED ").append(table).append('.').append(column).append(' ')

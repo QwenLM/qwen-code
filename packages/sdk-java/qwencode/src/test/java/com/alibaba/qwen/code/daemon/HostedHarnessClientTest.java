@@ -864,6 +864,29 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void parsesAnAbandonedRuntimeRecoveryAsCancellable() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAbandonedRuntimeRecovery()));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID));
+            HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
+
+            // A terminally fenced record keeps its distinction: the report
+            // parses, and the coordinator may drive the cancellation over it.
+            assertNotNull(recovery);
+            assertEquals("await_runtime", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isCancellationReady());
+            assertFalse(recovery.isContinuationReady());
+            assertEquals("abandoned", recovery.getExecutions().get(0)
+                    .getStatus().get("state"));
+        }
+    }
+
+    @Test
     void cancelsRecoveredRuntimeWithExactWireRequest() {
         AtomicReference<String> method = new AtomicReference<>();
         AtomicReference<String> body = new AtomicReference<>();
@@ -1164,6 +1187,38 @@ class HostedHarnessClientTest {
         }
 
         assertEquals(1, closes.get());
+    }
+
+    @ParameterizedTest
+    @MethodSource("captureByteBudgets")
+    void createCarriesOptionalCaptureByteBudget(Long budget) {
+        AtomicReference<Map<String, Object>> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> {
+            payload.set(JsonSupport.parseObject(readBody(exchange), "Capture create request"));
+            sendSessionJson(exchange, 200, sessionJson());
+        });
+        CreateHarnessSession.Builder request = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .toolProfile("hosted-workspace-shell/1");
+        if (budget != null) request.captureBytes(budget);
+        try (HostedHarnessClient client = newClient()) {
+            client.createSession(request.build());
+        }
+        if (budget == null) assertFalse(payload.get().containsKey("captureBytes"));
+        else assertEquals(budget.longValue(), ((Number) payload.get().get("captureBytes")).longValue());
+    }
+
+    private static Stream<Arguments> captureByteBudgets() {
+        return Stream.of(Arguments.of((Long) null), Arguments.of(1L),
+                Arguments.of(1048576L), Arguments.of(1L << 41));
+    }
+
+    @Test
+    void rejectsCaptureByteBudgetsOutsideTheHarnessContract() {
+        for (long value : new long[] {-1, 0, (1L << 41) + 1, Long.MAX_VALUE}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CreateHarnessSession.builder().captureBytes(value));
+        }
     }
 
     @Test
@@ -1603,6 +1658,24 @@ class HostedHarnessClientTest {
                 + "\"progressCursor\":\"cursor-2\","
                 + "\"outcome\":\"known\","
                 + "\"status\":{\"state\":\"settled\"}}]}}}";
+    }
+
+    private static String sessionJsonWithAbandonedRuntimeRecovery() {
+        return "{\"sessionId\":\"" + SESSION_ID
+                + "\",\"workspaceCwd\":\"/control\","
+                + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
+                + "\",\"lastEventId\":0,\"eventEpoch\":\""
+                + EVENT_EPOCH
+                + "\",\"_meta\":{\"qwen.daemon.managedRuntimeRecovery\":{"
+                + "\"phase\":\"await_runtime\","
+                + "\"checkpointId\":\"checkpoint-1\","
+                + "\"activationId\":\"activation-1\",\"executions\":[{"
+                + "\"functionCallId\":\"function-1\","
+                + "\"toolName\":\"write_file\","
+                + "\"executionCallId\":\"execution-1\","
+                + "\"runtimeSessionId\":\"runtime-1\","
+                + "\"progressCursor\":null,\"outcome\":\"known\","
+                + "\"status\":{\"state\":\"abandoned\"}}]}}}";
     }
 
     private static String terminalEvent(long id, String promptId) {

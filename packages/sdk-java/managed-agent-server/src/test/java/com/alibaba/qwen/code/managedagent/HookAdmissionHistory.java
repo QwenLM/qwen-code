@@ -6,11 +6,12 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -25,8 +26,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
-
-import javax.sql.DataSource;
 
 /**
  * Commits a growing Hook history through the Session store, as the Session authority does, and
@@ -212,9 +211,9 @@ final class HookAdmissionHistory {
                                 + " ma_session_record (session_scope_key,"
                                 + " record_key, tenant_id, workspace_id, session_id, domain,"
                                 + " record_id, operation_hash, revision, record_resource_id,"
-                                + " created_at, hook_once_key_hash) SELECT session_scope_key, ?,"
+                                + " gmt_create, hook_once_key_hash) SELECT session_scope_key, ?,"
                                 + " tenant_id, workspace_id, session_id, 'hook_execution',"
-                                + " 'intruder', ?, 1, record_resource_id, created_at, ? FROM"
+                                + " 'intruder', ?, 1, record_resource_id, gmt_create, ? FROM"
                                 + " ma_session_record WHERE session_id = ?"
                                 + " AND record_id = ?")) {
             insert.setString(1, ExtensionRecordJournal.sha256("intruder"));

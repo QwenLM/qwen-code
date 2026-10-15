@@ -44,6 +44,133 @@ class RuntimeHarnessDrainTest {
         return source();
     }
 
+    @Test
+    void lifecycleUpsertsAdvanceModificationTimeOnlyWhenValuesChange() throws Exception {
+        JdbcRepositorySupport.transaction(source, connection -> {
+            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness", "first");
+            return null;
+        });
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT gmt_create, gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 0);
+                assertTrue(row.getLong(2) > 0);
+            }
+            statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
+            JdbcRepositorySupport.transaction(source, transaction -> {
+                JdbcRuntimeBindingRepository.beginHarnessLifecycle(transaction, "tenant", "harness", "first");
+                return null;
+            });
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getLong(1));
+            }
+            JdbcRepositorySupport.transaction(source, transaction -> {
+                JdbcRuntimeBindingRepository.beginHarnessLifecycle(transaction, "tenant", "harness", "second");
+                return null;
+            });
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 1);
+            }
+            statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
+            bindings.requestHarnessDrain("tenant", "harness");
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 1);
+            }
+            statement.executeUpdate("UPDATE ma_session_head SET gmt_modified = 1");
+            bindings.requestHarnessDrain("tenant", "harness");
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_session_head")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getLong(1));
+            }
+        }
+    }
+
+    @Test
+    void storageFenceUpsertPreservesCreationTimeAndRejectedOrRepeatedModificationTime() throws Exception {
+        bindings.requestStorageFence("tenant", "storage", "migration");
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            long created;
+            try (var row = statement.executeQuery("SELECT gmt_create, gmt_modified FROM ma_storage")) {
+                assertTrue(row.next());
+                created = row.getLong(1);
+                assertTrue(created > 0);
+                assertTrue(row.getLong(2) > 0);
+            }
+            statement.executeUpdate("UPDATE ma_storage SET fence_operation_id = NULL, gmt_modified = 1");
+            bindings.requestStorageFence("tenant", "storage", "migration");
+            try (var row = statement.executeQuery("SELECT gmt_create, gmt_modified FROM ma_storage")) {
+                assertTrue(row.next());
+                assertEquals(created, row.getLong(1));
+                assertTrue(row.getLong(2) > 1);
+            }
+            statement.executeUpdate("UPDATE ma_storage SET gmt_modified = 1");
+            bindings.requestStorageFence("tenant", "storage", "migration");
+            assertThrows(RuntimeBrokerException.class,
+                    () -> bindings.requestStorageFence("tenant", "storage", "conflict"));
+            try (var row = statement.executeQuery("SELECT gmt_modified FROM ma_storage")) {
+                assertTrue(row.next());
+                assertEquals(1, row.getLong(1));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void resourceDrainRefusesPrivateCsiBeforeCleanupOrObservation(boolean stoppedOnly) throws Exception {
+        String id = UUID.randomUUID().toString();
+        var privateRequest = CsiFilesRetirementProfile.request(
+                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                "/workspace", id);
+        var registry = new InMemoryRuntimeBindingRepository();
+        var initial = registry.findOrCreate(privateRequest);
+        var claimed = registry.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
+        var seed = claimed.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9999"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        var handle = new RuntimeResourceHandle(privateRequest.getProvisionerKind(), 1, java.util.Map.of("resource", "original"));
+        var original = registry.compareAndSet(claimed, claimed.withAttestation(lease, handle, Instant.now(), Instant.now()));
+        original = registry.releaseOperation(original.getBindingId(), "setup", original.getOperationGeneration());
+        provisioner.original = original;
+        var sessionRepository = new InMemoryRuntimeSessionRepository();
+        var saved = sessionRepository.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(id, id, "bootstrap", privateRequest.getScope()), original.getBindingId(),
+                original.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        saved = sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        registry.requestHarnessDrain("tenant", id);
+        var cleanupCalls = new AtomicInteger();
+        // An accepting cleanup SPI isolates the service's private refusal from JDBC admission.
+        var tracked = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
+                new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
+                    if (method.getName().equals("requireHarnessCleanup")) {
+                        cleanupCalls.incrementAndGet();
+                        return null;
+                    }
+                    try {
+                        return method.invoke(registry, arguments);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        try (var service = new RuntimeBrokerService(ignored -> {
+            throw new AssertionError("Resource drain must use persisted ownership");
+        }, provisioner, transport, tracked, sessionRepository, new InMemoryToolExecutionRepository(),
+                "private-drain-test", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
+            var failure = assertThrows(ExecutionException.class, () -> service.drainHarnessResources("tenant", id,
+                    new RuntimeLifecycleAuthority("operation", 1), stoppedOnly).toCompletableFuture().get(5, TimeUnit.SECONDS));
+            assertEquals("csi_finalize_required", ((RuntimeBrokerException) failure.getCause()).getCode());
+        }
+        assertEquals(0, cleanupCalls.get());
+        assertEquals(0, provisioner.observations);
+        assertEquals(0, provisioner.stops);
+        assertEquals(0, transport.releases);
+        assertSame(original, registry.findById(original.getBindingId()));
+        assertSame(saved, sessionRepository.findById(privateRequest.getScope(), id));
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void storageFenceBlocksLateSessionAdmissionAfterBindingReady(boolean jdbc) {
@@ -566,7 +693,7 @@ class RuntimeHarnessDrainTest {
             provisioner.original = original;
             replacement.requestHarnessDrain("tenant", "harness");
             try (var connection = source.getConnection(); var statement = connection.prepareStatement(
-                    "UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?")) {
+                    "UPDATE ma_runtime_binding SET operation_lease_until = 946684800000 WHERE binding_id = ?")) {
                 statement.setString(1, original.getBindingId());
                 statement.executeUpdate();
             }

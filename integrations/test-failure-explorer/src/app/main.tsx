@@ -14,6 +14,7 @@ import {
   type QueryData,
 } from '../app-contract.js';
 import { ReportApp } from './App.js';
+import { analysisRequestText, type SendAnalysis } from './analysis-request.js';
 import './styles.css';
 
 const app = new App(
@@ -29,17 +30,25 @@ let query:
 let connected = false;
 let stopped = false;
 let notice = 'Connecting to the report host…';
+let sendAnalysis: SendAnalysis | undefined;
+let knownFailureIds = new Set<string>();
+const lifetime = new AbortController();
 
 function render() {
   if (stopped) return;
   root.render(
     report ? (
       <ReportApp
-        key={report.reportId}
+        key={`${report.reportId}:${report.viewResolution.mode === 'generated' ? report.viewResolution.digest : 'fixed'}`}
         report={report}
         query={
           connected && app.getHostCapabilities()?.serverTools
             ? query
+            : undefined
+        }
+        sendAnalysis={
+          connected && app.getHostCapabilities()?.message?.text
+            ? sendAnalysis
             : undefined
         }
         connectionNotice={notice}
@@ -62,10 +71,15 @@ app.addEventListener('toolresult', (result) => {
       throw new Error(
         'Unsupported or invalid saved report. Show this report again from the conversation.',
       );
+    if (report?.reportId !== parsed.data.reportId) knownFailureIds = new Set();
     report = parsed.data;
     const reportId = report.reportId;
-    query = async (input, signal) =>
-      readQueryData(
+    const failures = knownFailureIds;
+    for (const item of report.firstPage?.items ?? []) {
+      if (item.status === 'failed') failures.add(item.itemId);
+    }
+    query = async (input, signal) => {
+      const result = readQueryData(
         readToolData(
           await app.callServerTool(
             {
@@ -78,6 +92,39 @@ app.addEventListener('toolresult', (result) => {
         reportId,
         input,
       );
+      if (result.kind === 'list') {
+        for (const item of result.items) {
+          if (item.status === 'failed') failures.add(item.itemId);
+        }
+      }
+      return result;
+    };
+    sendAnalysis = async (failureIds, signal) => {
+      if (
+        stopped ||
+        !connected ||
+        report?.reportId !== reportId ||
+        !app.getHostCapabilities()?.message?.text ||
+        signal.aborted ||
+        failureIds.some((id) => !failures.has(id))
+      ) {
+        throw new Error(
+          'This report request is unavailable. Check the host and original conversation.',
+        );
+      }
+      return app.sendMessage(
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: analysisRequestText(reportId, failureIds) },
+          ],
+        },
+        {
+          signal: AbortSignal.any([signal, lifetime.signal]),
+          timeout: 120_000,
+        },
+      );
+    };
     notice = '';
   } catch (error) {
     notice =
@@ -90,12 +137,15 @@ app.addEventListener('toolresult', (result) => {
 app.addEventListener('hostcontextchanged', theme);
 app.onclose = () => {
   connected = false;
+  lifetime.abort();
   notice =
     'Connection closed. Saved report evidence is still shown; reopen this card to reconnect.';
   render();
 };
 app.onteardown = async () => {
   stopped = true;
+  connected = false;
+  lifetime.abort();
   root.unmount();
   return {};
 };
@@ -103,6 +153,7 @@ render();
 app
   .connect()
   .then(() => {
+    if (stopped || lifetime.signal.aborted) return;
     connected = true;
     if (notice === 'Connecting to the report host…') notice = '';
     theme();

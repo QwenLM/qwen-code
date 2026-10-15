@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -18,21 +15,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.Base64;
-import java.util.HexFormat;
-import java.util.List;
-import java.util.UUID;
-import java.util.stream.Stream;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,6 +32,19 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceLifecycleStoreTest {
     @ParameterizedTest
@@ -79,19 +81,25 @@ class WorkspaceLifecycleStoreTest {
             journal.committed(request);
         }
         var operation = fixture.admit(OperationKind.DELETE);
-        if (draining) fixture.jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING'");
+        if (draining) {
+            fixture.jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING'");
+        }
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = ?",
                 granted ? "OPERATOR" : "READER");
         ObjectNode next = execution.deepCopy();
         hookState(next, after, registration.get("catalogRef"));
-        if (replacement && !batch) next.withObject("/run/runtime").put("generation", "2");
+        if (replacement && !batch) {
+            next.withObject("/run/runtime").put("generation", "2");
+        }
         assertThat(ManagedHookRecords.isExecutionSuccessor(execution, next)).isTrue();
         var first = journal.requestDomain("fenced", "hook_execution", next, List.of(), 1000);
         var request = first;
         if (batch) {
             ObjectNode resumed = next.deepCopy();
             hookState(resumed, "running_attached", registration.get("catalogRef"));
-            if (replacement) resumed.withObject("/run/runtime").put("generation", "2");
+            if (replacement) {
+                resumed.withObject("/run/runtime").put("generation", "2");
+            }
             assertThat(ManagedHookRecords.isExecutionSuccessor(next, resumed)).isTrue();
             var second = journal.requestDomain("fenced", "hook_execution", resumed, List.of(), 1000);
             String[] firstLines = new String(Base64.getDecoder().decode(first.recordBytesBase64()), StandardCharsets.UTF_8).split("\n");
@@ -122,7 +130,9 @@ class WorkspaceLifecycleStoreTest {
                 assertThat(error.getCode()).isEqualTo(accepted && batch ? "managed_session_extension_record_rejected"
                         : draining ? "workspace_lifecycle_claim_fenced" : authority && !replacement
                         ? "workspace_lifecycle_authorization_revoked" : "workspace_lifecycle_admission_closed");
-                if (accepted && batch) assertThat(error.getMessage()).contains("at most one Stage H record");
+                if (accepted && batch) {
+                    assertThat(error.getMessage()).contains("at most one Stage H record");
+                }
             });
             assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(revision);
             assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Integer.class)).isEqualTo(resources);
@@ -185,7 +195,7 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
                     assertThat(error.isRetryable()).isFalse();
                 });
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation)))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(409);
@@ -306,7 +316,7 @@ class WorkspaceLifecycleStoreTest {
             ManagedHookRecords.requireExecution(record);
             var ref = fixture.resource(event + "-record", "hook-execution", record);
             fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, created_at, first_sequence)"
+                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
                     + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                     ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
                     ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
@@ -377,7 +387,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle("tenant", fixture.session, "w".repeat(32), cleanup, authority));
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle(
                 "tenant", fixture.session, "w".repeat(32), dispatch, authority))).hasMessageContaining("writer");
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle(
                 "tenant", fixture.session, "w".repeat(32), cleanup, authority))).hasMessageContaining("blocked");
     }
@@ -409,7 +419,7 @@ class WorkspaceLifecycleStoreTest {
                 .hasMessageContaining("unavailable");
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'");
         execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary("tenant", fixture.session,
                 "w".repeat(32), legacy))).hasMessageContaining("admission is closed");
     }
@@ -490,7 +500,7 @@ class WorkspaceLifecycleStoreTest {
         fixture.bindings.requireHarnessAdmission(scope, fixture.session, WorkspaceLifecycleStore.authority(first));
         assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(scope, fixture.session, null))
                 .hasMessageContaining("closed");
-        fixture.jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMP '1970-01-01 00:00:00'");
+        fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         OperationRecord second = fixture.transactions.execute(ignored -> fixture.store.claimOperation(
                 "tenant", fixture.session, first.operationId(), "second", Duration.ofSeconds(30)).orElseThrow());
         assertThat(second.claimGeneration()).isGreaterThan(first.claimGeneration());
@@ -568,9 +578,7 @@ class WorkspaceLifecycleStoreTest {
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
-                    + " schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                    + " VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
             return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }

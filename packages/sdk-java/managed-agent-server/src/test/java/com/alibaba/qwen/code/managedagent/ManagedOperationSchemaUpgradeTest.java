@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
@@ -9,13 +7,14 @@ import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Clock;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Optional operation variant fields are present in the fresh baseline. */
 class ManagedOperationSchemaUpgradeTest {
@@ -40,7 +39,7 @@ class ManagedOperationSchemaUpgradeTest {
         jdbc.update(
                 "INSERT INTO ma_operation"
                     + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,session_id,"
-                    + "target_kind,target_key,request_digest,request_json,state,phase,admission_stage,delivery_state,session_status_before,created_at,updated_at)"
+                    + "target_kind,target_key,request_digest,request_json,state,phase,admission_stage,delivery_state,session_status_before,gmt_create,gmt_modified)"
                     + " VALUES (?,?,?,'CLOSE',?,?,'SESSION',?,'digest','{}',"
                     + "'PENDING','PENDING','JAVA_DURABLE','PENDING','ACTIVE',0,0)",
                 ManagedSchemaKeys.key("operation"),

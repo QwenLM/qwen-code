@@ -1,14 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
@@ -16,7 +13,17 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWr
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -30,15 +37,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkspaceSessionCloseMySqlIT {
     private static final String OWNER = "owner";
@@ -77,7 +79,7 @@ class WorkspaceSessionCloseMySqlIT {
     private void seedAction(String tenant, String session, String action, String state, String options) {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
-                        + "domain,record_id,action_id,revision,action_version,state,options_json,created_at,first_sequence)"
+                        + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
                         + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
                 scope, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, "ACTION", action),
                 tenant, session, action, action, state, options);
@@ -89,7 +91,7 @@ class WorkspaceSessionCloseMySqlIT {
         var tenant = "mysql-close-expiry-" + UUID.randomUUID();
         var session = create(store, tenant);
         var action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
-        long now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).getTime();
+        long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class).getTime();
         seedAction(tenant, session, action, "requested", "{\"expiresAt\":" + (now + 86_400_000) + "}");
         assertCode(outcome(() -> transaction(() -> store.beginWorkspaceClose(tenant, session, OWNER,
                 ACTOR_DIGEST, "close", "digest", true))), "turn_active");
@@ -192,8 +194,7 @@ class WorkspaceSessionCloseMySqlIT {
         String id = admitted.operation().operationId();
         var claimed = transaction(() -> first.claimOperation(tenant, session, id, "first", Duration.ofMinutes(1))).orElseThrow();
         assertThat(transaction(() -> second.claimOperation(tenant, session, id, "second", Duration.ofMinutes(1)))).isEmpty();
-        jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6))"
-                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", tenant, session, id);
+        jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", tenant, session, id);
         assertThat(transaction(() -> first.renewLifecycleOperation(tenant, session, id, "first", claimed.claimGeneration(), Duration.ofMinutes(1)))).isFalse();
         assertThat(transaction(() -> first.completeOperation(tenant, session, id, "first", claimed.claimGeneration(), true))).isFalse();
         var takeover = transaction(() -> second.claimOperation(tenant, session, id, "second", Duration.ofMinutes(1))).orElseThrow();
@@ -218,8 +219,7 @@ class WorkspaceSessionCloseMySqlIT {
                 new AcquireWriterRequest("workspace", "original", 60_000L))).writerGeneration();
         transaction(() -> first.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close", "digest", true));
         assertThat(first.requireSession(tenant, session).status()).isEqualTo("CLOSING");
-        jdbc.update("UPDATE ma_session_head SET writer_lease_until ="
-                + " TIMESTAMPADD(MICROSECOND, 750000, CURRENT_TIMESTAMP(6)) WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + 750) WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         var renewed = new CountDownLatch(1);
         var commit = new CountDownLatch(1);
@@ -239,13 +239,11 @@ class WorkspaceSessionCloseMySqlIT {
             try {
                 assertThat(renewed.await(5, TimeUnit.SECONDS)).isTrue();
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                while (Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                        + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                while (Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                         Boolean.class, tenant, session)) && System.nanoTime() < deadline) {
                     Thread.sleep(20);
                 }
-                assertThat(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                        + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                assertThat(jdbc.queryForObject("SELECT writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                         Boolean.class, tenant, session)).isFalse();
                 var checked = new CountDownLatch(1);
                 var live = pool.submit(() -> {
@@ -299,7 +297,11 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     private static Object outcome(Supplier<Object> operation) {
-        try { return operation.get(); } catch (ApiException rejected) { return rejected; }
+        try {
+            return operation.get();
+        } catch (ApiException rejected) {
+            return rejected;
+        }
     }
 
     private static void assertCode(Object result, String code) {
@@ -312,7 +314,9 @@ class WorkspaceSessionCloseMySqlIT {
 
     private static String required(String name) {
         String value = System.getProperty(name);
-        if (value == null || value.isBlank()) throw new IllegalStateException(name + " is required");
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(name + " is required");
+        }
         return value;
     }
 }

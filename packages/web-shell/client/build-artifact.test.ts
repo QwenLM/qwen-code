@@ -506,14 +506,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     // the 1,325,251 measurement was taken, so the entry was already past the
     // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
     // Managed task panel's copy (#13936) stays stubbed out of this entry.
-    // Measured on the merged build (this branch's ru locale over main's
-    // read-only Excel preview): the transcript entry is 1,334,649 characters
-    // after stripping the injected CSS line. The ru goal/goals catalog
-    // (#13391) adds its strings to the same shared i18n table both locales
-    // use — the ru locale is per-key en-fallback, so only the goal/goals
-    // copy ships in this entry — on top of main's Excel copy. The ceiling
-    // keeps a ~2k margin around that intentional UI; re-measure and lower
-    // it if the entry gets leaner.
+    // Measured on the merged build (this branch's ru locale over
+    // upstream main at c24e99e9cb): the transcript entry is 1,335,719
+    // characters after stripping the injected CSS line. The ru goal/goals
+    // catalog (#13391) adds its strings to the same shared i18n table
+    // both locales use — the ru locale is per-key en-fallback, so only
+    // the goal/goals copy ships in this entry — on top of main's current
+    // shared-table copy (Excel preview plus the features merged since).
+    // The 1,337,000 ceiling leaves 1,281 units of margin around that
+    // intentional UI; re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
@@ -605,6 +606,18 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]settings\./);
+  });
+
+  it('keeps MCP App message review strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]mcpApp\.message\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('mcpApp.message.title');
+    expect(interactive).toContain('Review App message');
+    expect(interactive).toContain('审阅 App 消息');
   });
 
   it('keeps trajectory filter strings in the interactive entry only', () => {

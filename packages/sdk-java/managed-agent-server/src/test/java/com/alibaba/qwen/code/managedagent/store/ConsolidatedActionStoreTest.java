@@ -1,29 +1,32 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ConsolidatedActionStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -42,11 +45,11 @@ class ConsolidatedActionStoreTest {
         jdbc = new JdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
-        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,created_at,updated_at)"
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,?,'ACTIVE','manual',0,0)", "tenant", "session", "agent");
         AgentStateStore state = mock(AgentStateStore.class);
         when(state.findOperation(anyString(), anyString(), anyString())).thenAnswer(call -> jdbc.query(
-                "SELECT * FROM ma_operation WHERE tenant_id=? AND session_id=? AND operation_id=? AND operation_kind='ACTION_RESPONSE'",
+                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE tenant_id=? AND session_id=? AND operation_id=? AND operation_kind='ACTION_RESPONSE'",
                 (row, n) -> new OperationRecord(row.getString("tenant_id"), row.getString("session_id"), row.getString("operation_id"),
                         OperationKind.ACTION_RESPONSE, row.getString("request_digest"), row.getString("state"), row.getString("admission_stage"),
                         row.getString("delivery_state"), row.getString("session_status_before"), row.getString("receipt_id"),
@@ -58,7 +61,9 @@ class ConsolidatedActionStoreTest {
 
     @AfterEach
     void closeFixture() {
-        if (fixture != null) fixture.close();
+        if (fixture != null) {
+            fixture.close();
+        }
     }
 
     @Test
@@ -82,7 +87,7 @@ class ConsolidatedActionStoreTest {
         assertThatThrownBy(() -> admit("key3", "request3", response("deny"))).isInstanceOf(ApiException.class);
         assertThatThrownBy(() -> admit("key1", "changed", response("allow"))).isInstanceOf(ApiException.class);
         jdbc.update("UPDATE ma_operation SET claim_owner='worker',claim_generation=2,claim_until=?,state='RUNNING',delivery_state='LEASED'",
-                new java.sql.Timestamp(0));
+                0L);
         assertThatThrownBy(() -> admit("key4", "request4", response("deny"))).isInstanceOf(ApiException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind='ACTION_RESPONSE'", Long.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace='ACTION_DECISION'", Long.class)).isEqualTo(1);
@@ -91,7 +96,7 @@ class ConsolidatedActionStoreTest {
     @Test
     void staleWorkerCannotSettleReclaimedActionAndUnknownIsNotDeliverable() {
         OperationRecord original = admit("key1", "request1", response("allow")).operation();
-        jdbc.update("UPDATE ma_operation SET claim_owner=?,claim_generation=2,claim_until=TIMESTAMPADD(MICROSECOND,100000000,CURRENT_TIMESTAMP(6)),state='RUNNING',delivery_state='LEASED'",
+        jdbc.update("UPDATE ma_operation SET claim_owner=?,claim_generation=2,claim_until=(" + ManagedSchemaTime.SQL_NOW + " + 100000),state='RUNNING',delivery_state='LEASED'",
                 "worker");
         actions.complete(original, "worker", null, "decision", 100);
         assertThat(actions.response("tenant", "session", original.operationId()).decisionReceiptId()).isNull();
@@ -99,7 +104,7 @@ class ConsolidatedActionStoreTest {
                 "request1", "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "worker", 2, 0);
         actions.complete(current, "worker", null, "decision", 100);
         assertThat(actions.response("tenant", "session", original.operationId()).decisionReceiptId()).isEqualTo("decision");
-        jdbc.update("UPDATE ma_operation SET state='UNKNOWN',delivery_state='LEASED',claim_until=?", new java.sql.Timestamp(0));
+        jdbc.update("UPDATE ma_operation SET state='UNKNOWN',delivery_state='LEASED',claim_until=?", 0L);
         assertThat(actions.deliverable(100)).isEmpty();
     }
 
@@ -121,6 +126,15 @@ class ConsolidatedActionStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Long.class)).isZero();
     }
 
+    @Test
+    void preservesThePersistedDecisionDigestAndItsFieldOrder() {
+        JsonNode response = JSON.createObjectNode()
+                .put("policyRevision", "p1").put("inputRevision", 7).put("optionId", "allow");
+
+        assertThat(ManagedActionStore.decisionDigest(response)).isEqualTo(
+                "d61ff840d95b8aaa9b24999e2910fc687098d73b225c0837b6ec6718fb038ae5");
+    }
+
     private StoreModels.OperationAdmission admit(String key, String digest, JsonNode response) {
         return transactions.execute(status -> actions.admit("tenant", "session", null, "anonymous", key, digest, ACTION, response, 10));
     }
@@ -138,32 +152,37 @@ class ConsolidatedActionStoreTest {
                     .put("inputRevision", 1).put("policyRevision", "hosted-tool-approval/1");
             decision = storeBody("decision", "managed-action-decision", body);
         }
-        ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:"+sequence)
+        ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:" + sequence)
                 .put("kind", "action.changed").put("occurredAt", sequence);
         envelope.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", "session");
         ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
                 .put("inputRevision", 1).put("state", state);
         payload.set("optionsRef", optionsRef);
-        if (decision == null) payload.putNull("decisionRef"); else payload.set("decisionRef", decision);
+        if (decision == null) {
+            payload.putNull("decisionRef");
+        }
+        else {
+            payload.set("decisionRef", decision);
+        }
         ObjectNode record = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
         record.set("managedSession", envelope);
         transactions.executeWithoutResult(status -> actions.apply("tenant", "workspace", "session", sequence, 1,
-                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT * FROM ma_resource WHERE resource_key=?",
-                        (row,n) -> new StoredResource(id,row.getString("kind"),row.getInt("schema_version"),row.getLong("byte_length"),
-                                row.getString("sha256"),row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope,id))));
+                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key=?",
+                        (row, n) -> new StoredResource(id, row.getString("kind"), row.getInt("schema_version"), row.getLong("byte_length"),
+                                row.getString("sha256"), row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope, id))));
     }
 
     private ObjectNode storeBody(String id, String kind, JsonNode body) throws Exception {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
-                        + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,created_at)"
-                        + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                ManagedSchemaKeys.key(scope,id), scope,"tenant","workspace","session",id,kind,bytes.length,digest,bytes);
-        return JSON.createObjectNode().put("resourceId",id).put("kind",kind).put("schemaVersion",1).put("byteLength",bytes.length).put("digest",digest);
+                        + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
+                        + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                ManagedSchemaKeys.key(scope, id), scope, "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
+        return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
     }
 
     private ObjectNode response(String option) {
-        return JSON.createObjectNode().put("optionId",option).put("inputRevision",1).put("policyRevision","hosted-tool-approval/1");
+        return JSON.createObjectNode().put("optionId", option).put("inputRevision", 1).put("policyRevision", "hosted-tool-approval/1");
     }
 }

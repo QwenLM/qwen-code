@@ -1,16 +1,25 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -22,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -35,15 +45,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.io.CleanupMode;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @EnabledOnOs(OS.LINUX)
 class HostedShellLifecycleRecoveryIT {
@@ -102,8 +106,11 @@ class HostedShellLifecycleRecoveryIT {
             this.cut = cut;
             root = Files.createDirectory(temporary.resolve(cut)).toRealPath();
             Files.createDirectories(root.resolve("workspace/child"));
+            // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+            Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
             Files.createDirectory(root.resolve("broker"), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
             Files.createDirectory(root.resolve("decoy"));
+            Files.createDirectory(root.resolve("objects"));
             var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
                     System.getProperty("mysql.password", ""));
             jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
@@ -140,8 +147,7 @@ class HostedShellLifecycleRecoveryIT {
             });
             assertThat(Files.readString(root.resolve("workspace/child/lifecycle-marker.txt"))).isEqualTo("once\n");
             assertThat(models.get()).isEqualTo(2);
-            var executions = jdbc.queryForList("SELECT * FROM ma_tool_execution"
-                    + " WHERE harness_session_id = ?", session);
+            var executions = jdbc.queryForList("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution WHERE harness_session_id = ?", session);
             assertThat(executions).hasSize(1);
             assertThat(executions.getFirst().get("execution_state")).isEqualTo("SETTLED");
             assertThat(((Number) executions.getFirst().get("dispatch_generation")).longValue()).isEqualTo(1);
@@ -151,6 +157,9 @@ class HostedShellLifecycleRecoveryIT {
             worker = ProcessHandle.of(registration.path("pid").asLong()).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
             writer = writerIdentity();
+            var publications = jdbc.queryForList("SELECT publication_id FROM ma_output_capture"
+                    + " WHERE tenant_id = ? AND session_id = ? AND capture_bytes = 1048576", String.class, tenant, session);
+            assertThat(publications).hasSize(1);
             var manifests = jdbc.queryForList("SELECT resource_id, sha256, inline_bytes FROM ma_resource"
                     + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-manifest'", tenant, session);
             assertThat(manifests).hasSize(1);
@@ -158,12 +167,14 @@ class HostedShellLifecycleRecoveryIT {
             JsonNode capture = JSON.readTree((byte[]) manifest.get("inline_bytes"));
             var execution = executions.getFirst();
             var reference = JSON.readTree(execution.get("reference_json").toString());
+            assertThat(reference.path("dispatchMode").asText()).isEqualTo("deferred_v3");
+            assertThat(reference.path("argsDigest").asText()).matches("sha256:[0-9a-f]{64}");
             assertThat(capture.path("tenantId").asText()).isEqualTo(tenant);
             assertThat(capture.path("sessionId").asText()).isEqualTo(session);
             assertThat(capture.path("turnId").asText()).isEqualTo(execution.get("turn_id"));
             assertThat(capture.path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
             assertThat(capture.path("callId")).isEqualTo(reference.path("callId"));
-            assertThat(capture.path("invocationDigest")).isEqualTo(reference.path("inputDigest"));
+            assertThat(capture.path("invocationDigest")).isEqualTo(reference.path("argsDigest"));
             assertThat(capture.path("bindingGeneration").asLong()).isEqualTo(originalBinding.getGeneration());
             assertThat(capture.path("captureStatus").asText()).isEqualTo("complete");
             assertThat(capture.path("executionStatus").asText()).isEqualTo("success");
@@ -175,13 +186,21 @@ class HostedShellLifecycleRecoveryIT {
             }
             assertThat(streams).containsExactlyInAnyOrder("stdout", "stderr");
             assertManifestUnchanged();
-            var outputs = jdbc.queryForList("SELECT resource_id, byte_length FROM ma_resource r"
-                    + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-content'"
-                    + " AND storage_kind = 'MYSQL_INLINE' AND state = 'PUBLISHED' AND LOCATE('L4_CAPTURE_STDOUT', inline_bytes) > 0"
-                    + " AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
-                    + " WHERE f.session_scope_key = r.session_scope_key AND f.resource_id = r.resource_id)",
+            var outputs = jdbc.queryForList("SELECT capture_object_key, byte_length, sha256, slot_key, capture_state"
+                    + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND capture_object_key IS NOT NULL",
                     tenant, session);
-            assertThat(outputs).as("real foreground stdout before lifecycle admission").isNotEmpty();
+            assertThat(outputs).as("real foreground capture before lifecycle admission").isNotEmpty();
+            boolean stdout = false;
+            for (var output : outputs) {
+                assertThat(output.get("capture_state")).isEqualTo("VERIFIED");
+                byte[] bytes = Files.readAllBytes(root.resolve("objects").resolve(output.get("capture_object_key").toString()));
+                assertThat(bytes).hasSize(((Number) output.get("byte_length")).intValue());
+                assertThat(java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)))
+                        .isEqualTo(output.get("sha256"));
+                stdout |= output.get("slot_key").toString().startsWith("segment:stdout:")
+                        && new String(bytes, StandardCharsets.UTF_8).contains("L4_CAPTURE_STDOUT");
+            }
+            assertThat(stdout).isTrue();
             String companion = create("companion");
             await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
@@ -193,7 +212,9 @@ class HostedShellLifecycleRecoveryIT {
                     : request("DELETE", "/v1/agents/sessions/" + session, null, "delete", 202);
             operation = admitted.path(web ? "operationId" : "id").asText();
             assertThat(operation).isNotBlank();
-            if (cut.equals("resident-expiry") || cut.equals("spring-kill")) recoverExpiredResident();
+            if (cut.equals("resident-expiry") || cut.equals("spring-kill")) {
+                recoverExpiredResident();
+            }
             await().atMost(Duration.ofSeconds(70)).failFast(() -> control.failure() != null).untilAsserted(() -> {
                 var result = request("GET", "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, 200);
                 assertThat(result.path("status").asText()).isEqualTo("completed");
@@ -231,20 +252,21 @@ class HostedShellLifecycleRecoveryIT {
             request("GET", "/v1/agents/sessions/" + session, null, null, 404);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                     Integer.class, tenant, session)).isEqualTo(1);
-            await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
+            // The restarted ledger scan and capture GC each retry on a one-minute cadence.
+            await().atMost(Duration.ofSeconds(150)).untilAsserted(() -> {
                 var collections = jdbc.queryForList("SELECT completed_at AS collected_at, CAST(JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.collectedBytes')) AS UNSIGNED) AS collected_bytes FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
                         + " AND tenant_id = ? AND session_id = ?", tenant, session);
                 assertThat(collections).hasSize(1);
                 assertThat(collections.getFirst().get("collected_at")).isNotNull();
                 assertThat(((Number) collections.getFirst().get("collected_at")).longValue()).isPositive();
-                assertThat(((Number) collections.getFirst().get("collected_bytes")).longValue()).isGreaterThanOrEqualTo(
-                        outputs.stream().mapToLong(row -> ((Number) row.get("byte_length")).longValue()).sum());
+                var publication = jdbc.queryForMap("SELECT retention_state, collected_at FROM ma_output_capture"
+                        + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ?", tenant, session, publications.getFirst());
+                assertThat(publication.get("retention_state")).isEqualTo("COLLECTED");
+                assertThat(publication.get("collected_at")).isNotNull();
                 for (var output : outputs) {
-                    var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM ma_resource"
-                            + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", tenant, session, output.get("resource_id"));
-                    assertThat(stored.get("state")).isEqualTo("COLLECTED");
-                    assertThat(stored.get("inline_bytes")).isNull();
-                    assertThat(stored.get("byte_length")).isEqualTo(output.get("byte_length"));
+                    assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE capture_object_key = ?",
+                            String.class, output.get("capture_object_key"))).isEqualTo("COLLECTED");
+                    assertThat(root.resolve("objects").resolve(output.get("capture_object_key").toString())).doesNotExist();
                 }
             });
             assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
@@ -273,7 +295,11 @@ class HostedShellLifecycleRecoveryIT {
             evidence.put("finalWriterGeneration", writerIdentity().get("writer_generation"));
             evidence.put("finalClaimGeneration", jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_id = ?",
                     Long.class, operation));
-            if (oldRequest.get() != null) evidence.put("oldClaimGeneration", JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong());
+            if (oldRequest.get() != null) {
+                evidence.put("oldClaimGeneration", JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong());
+            }
+            evidence.put("publicationId", publications.getFirst());
+            evidence.put("collectedObjects", outputs.size());
             evidence.put("manifestId", manifest.get("resource_id"));
             evidence.put("manifestDigest", manifest.get("sha256"));
             evidence.put("originalStopProofVerified", true);
@@ -285,8 +311,12 @@ class HostedShellLifecycleRecoveryIT {
         private void installFault() {
             control.fault(new HostedLifecycleRelay.Fault() {
                 public boolean before(HostedLifecycleRelay.Request request) throws Exception {
-                    if (!phase(request).equals("prepare_resources")) return true;
-                    if (!cut.equals("resident-expiry") && !cut.equals("spring-kill")) return true;
+                    if (!phase(request).equals("prepare_resources")) {
+                        return true;
+                    }
+                    if (!cut.equals("resident-expiry") && !cut.equals("spring-kill")) {
+                        return true;
+                    }
                     if (oldRequest.compareAndSet(null, request)) {
                         firstPrepare.countDown();
                         assertThat(releaseFirst.await(40, TimeUnit.SECONDS)).as("first prepare gate released").isTrue();
@@ -302,11 +332,15 @@ class HostedShellLifecycleRecoveryIT {
                 public boolean after(HostedLifecycleRelay.Request request, int status) throws Exception {
                     if (phase(request).equals("prepare_resources") && status == 200) {
                         successfulPrepare.incrementAndGet();
-                        if (!cut.equals("detach-ack") || dropped.get() == 0) assertThat(writerIdentity()).isEqualTo(writer);
+                        if (!cut.equals("detach-ack") || dropped.get() == 0) {
+                            assertThat(writerIdentity()).isEqualTo(writer);
+                        }
                         assertThat(liveWriter()).isTrue();
                         assertManifestUnchanged();
                     }
-                    if (phase(request).equals("settle_resources") && status == 200) assertManifestUnchanged();
+                    if (phase(request).equals("settle_resources") && status == 200) {
+                        assertManifestUnchanged();
+                    }
                     boolean lose = cut.equals("settle-ack") && phase(request).equals("settle_resources")
                             || cut.equals("detach-ack") && request.path().equals("/session/" + session + "/detach");
                     if (cut.equals("detach-ack") && lose && status == 204 && dropped.get() == 0) {
@@ -338,8 +372,7 @@ class HostedShellLifecycleRecoveryIT {
                 assertThat(harness.isAlive()).isTrue();
                 releaseFirst.countDown();
                 await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                        "SELECT claim_until <= CURRENT_TIMESTAMP(6) FROM ma_operation"
-                                + " WHERE operation_id = ?", Boolean.class, operation)).isTrue());
+                        "SELECT claim_until <= " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE operation_id = ?", Boolean.class, operation)).isTrue());
                 startSpring();
                 assertThat(secondPrepare.await(30, TimeUnit.SECONDS)).as("second Spring resource claim").isTrue();
                 long oldGeneration = JSON.readTree(oldRequest.get().body()).at("/authority/claimGeneration").asLong();
@@ -359,7 +392,9 @@ class HostedShellLifecycleRecoveryIT {
                         + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session)).isEqualTo(revision);
                 assertThat(bindings.findById(originalBinding.getBindingId()).getResourceHandle()).isEqualTo(originalBinding.getResourceHandle());
                 releaseSecond.countDown();
-            } else releaseFirst.countDown();
+            } else {
+                releaseFirst.countDown();
+            }
         }
 
         private HttpResponse<String> replay(HostedLifecycleRelay.Request saved) throws Exception {
@@ -367,7 +402,9 @@ class HostedShellLifecycleRecoveryIT {
                     .method(saved.method(), HttpRequest.BodyPublishers.ofByteArray(saved.body()));
             saved.headers().forEach((name, values) -> {
                 if (name.equalsIgnoreCase("authorization") || name.equalsIgnoreCase("content-type")
-                        || name.toLowerCase(java.util.Locale.ROOT).startsWith("x-qwen-")) values.forEach(value -> request.header(name, value));
+                        || name.toLowerCase(java.util.Locale.ROOT).startsWith("x-qwen-")) {
+                    values.forEach(value -> request.header(name, value));
+                }
             });
             return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
         }
@@ -393,8 +430,7 @@ class HostedShellLifecycleRecoveryIT {
         }
 
         private boolean liveWriter() {
-            return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > CURRENT_TIMESTAMP(6)"
-                    + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
+            return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
         }
 
         private String create(String key) throws Exception {
@@ -406,7 +442,9 @@ class HostedShellLifecycleRecoveryIT {
             var actions = request("GET", "/v1/agents/sessions/" + session + "/actions", null, null, 200);
             for (var action : actions.path("data")) {
                 String id = action.path("id").asText();
-                if (approvals.contains(id)) continue;
+                if (approvals.contains(id)) {
+                    continue;
+                }
                 request("POST", "/v1/agents/sessions/" + session + "/actions/" + id + "/responses",
                         Map.of("kind", "permission", "option_id", "allow", "input_revision", action.path("input_revision").asLong(),
                                 "policy_revision", action.path("policy_revision").asText()), id, 202);
@@ -419,7 +457,9 @@ class HostedShellLifecycleRecoveryIT {
                     .header("X-Qwen-Tenant-Id", tenant).header("X-G0-Fixture-Actor", "actor")
                     .header("Content-Type", "application/json").method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                             : HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body)));
-            if (key != null) request.header("Idempotency-Key", key);
+            if (key != null) {
+                request.header("Idempotency-Key", key);
+            }
             var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
             assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(status);
             return JSON.readTree(response.body());
@@ -471,8 +511,9 @@ class HostedShellLifecycleRecoveryIT {
             properties.put(prefix + "tool-publication.oss-region", "cn-hangzhou");
             properties.put(prefix + "tool-publication.oss-bucket", "private-test-bucket");
             properties.put(prefix + "tool-publication.service-base-url", store.uri());
-            for (String quota : List.of("execution-bytes", "session-bytes", "tenant-bytes"))
-                properties.put(prefix + "tool-publication." + quota, 1073741824);
+            properties.put(prefix + "tool-publication.execution-bytes", 1048576);
+            properties.put(prefix + "tool-publication.session-bytes", 1073741824);
+            properties.put(prefix + "tool-publication.tenant-bytes", 1073741824);
             properties.put(prefix + "tool-publication.active-captures", 4);
             properties.put(prefix + "tool-publication.entry-concurrency", 4);
             properties.put(prefix + "tool-publication.operation-timeout", "10s");
@@ -485,7 +526,8 @@ class HostedShellLifecycleRecoveryIT {
             Path config = root.resolve("spring-" + boot + ".json");
             Path ready = root.resolve("ready-" + boot + ".json");
             properties.replaceAll((key, value) -> value.toString());
-            JSON.writeValue(config.toFile(), Map.of("tenant", tenant, "properties", properties, "ready", ready.toString()));
+            JSON.writeValue(config.toFile(), Map.of("tenant", tenant, "properties", properties, "ready", ready.toString(),
+                    "objects", root.resolve("objects").toString()));
             Files.setPosixFilePermissions(config, PosixFilePermissions.fromString("rw-------"));
             String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
             var process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-cp", classpath,
@@ -529,8 +571,9 @@ class HostedShellLifecycleRecoveryIT {
             environment.put("QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST);
             environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
             environment.put("TMPDIR", root.toString());
-            for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH", "QWEN_CODE_TRUSTED_FOLDERS_PATH"))
+            for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH", "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
                 environment.put(name, root.resolve(name + ".json").toString());
+            }
             harness = builder.start();
             await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> assertThat(http.send(
                     HttpRequest.newBuilder(harnessUri.resolve("/capabilities")).timeout(Duration.ofSeconds(2))
@@ -543,15 +586,21 @@ class HostedShellLifecycleRecoveryIT {
                 JsonNode request = JSON.readTree(exchange.getRequestBody());
                 int call = models.getAndIncrement();
                 assertThat(call).isLessThan(2);
-                if (call == 1) assertThat(request.path("messages").toString()).contains("L4_CAPTURE_STDOUT");
+                if (call == 1) {
+                    assertThat(request.path("messages").toString()).contains("L4_CAPTURE_STDOUT");
+                }
                 var chunk = JSON.createObjectNode().put("id", "l4").put("object", "chat.completion.chunk").put("created", 0).put("model", "l4-fixture");
                 var choice = chunk.putArray("choices").addObject().put("index", 0);
                 var delta = choice.putObject("delta").put("role", "assistant");
-                if (call == 0) delta.putArray("tool_calls").addObject().put("index", 0).put("id", "l4-shell")
-                        .put("type", "function").putObject("function").put("name", "run_shell_command")
-                        .put("arguments", JSON.writeValueAsString(Map.of("command",
-                                "printf 'once\\n' >> lifecycle-marker.txt; printf 'L4_CAPTURE_STDOUT\\n'", "description", "L4 Shell proof")));
-                else delta.put("content", "L4_DONE");
+                if (call == 0) {
+                    delta.putArray("tool_calls").addObject().put("index", 0).put("id", "l4-shell")
+                            .put("type", "function").putObject("function").put("name", "run_shell_command")
+                            .put("arguments", JSON.writeValueAsString(Map.of("command",
+                                    "printf 'once\\n' >> lifecycle-marker.txt; printf 'L4_CAPTURE_STDOUT\\n'", "description", "L4 Shell proof")));
+                }
+                else {
+                    delta.put("content", "L4_DONE");
+                }
                 choice.putNull("finish_reason");
                 String first = "data: " + JSON.writeValueAsString(chunk) + "\n\n";
                 choice.putObject("delta");
@@ -562,7 +611,9 @@ class HostedShellLifecycleRecoveryIT {
                 exchange.getResponseBody().write(response);
             } catch (Exception | AssertionError error) {
                 modelFailure.compareAndSet(null, error);
-            } finally { exchange.close(); }
+            } finally {
+                exchange.close();
+            }
         }
 
         @Override
@@ -570,10 +621,12 @@ class HostedShellLifecycleRecoveryIT {
             releaseFirst.countDown();
             releaseSecond.countDown();
             var cleanup = new ArrayList<org.junit.jupiter.api.function.Executable>();
-            for (Process process : springs) cleanup.add(() -> {
-                process.destroyForcibly();
-                assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
-            });
+            for (Process process : springs) {
+                cleanup.add(() -> {
+                    process.destroyForcibly();
+                    assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
+                });
+            }
             cleanup.add(() -> {
                 if (harness != null) {
                     harness.destroyForcibly();
@@ -583,7 +636,9 @@ class HostedShellLifecycleRecoveryIT {
             cleanup.add(control::close);
             cleanup.add(store::close);
             cleanup.add(broker::close);
-            cleanup.add(() -> { if (model != null) model.stop(0); });
+            cleanup.add(() -> { if (model != null) {
+                    model.stop(0);
+                } });
             cleanup.add(() -> HostedDurableWorkers.stop(root.resolve("broker"), JSON));
             cleanup.add(http::shutdownNow);
             try {
@@ -592,23 +647,30 @@ class HostedShellLifecycleRecoveryIT {
                 Path evidence = Path.of("target/l4-shell-lifecycle", cut);
                 Files.createDirectories(evidence);
                 try (var files = Files.list(root)) {
-                    for (Path file : files.filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList())
+                    for (Path file : files.filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
                         Files.copy(file, evidence.resolve(file.getFileName()), StandardCopyOption.REPLACE_EXISTING);
+                    }
                 }
             }
         }
     }
 
     private static int freePort() throws IOException {
-        try (var socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) { return socket.getLocalPort(); }
+        try (var socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+            return socket.getLocalPort();
+        }
     }
 
     private static boolean running(ProcessHandle process) throws IOException {
-        if (!process.isAlive()) return false;
+        if (!process.isAlive()) {
+            return false;
+        }
         try {
             String stat = Files.readString(Path.of("/proc", Long.toString(process.pid()), "stat"));
             return stat.charAt(stat.lastIndexOf(')') + 2) != 'Z';
-        } catch (java.nio.file.NoSuchFileException exited) { return false; }
+        } catch (java.nio.file.NoSuchFileException exited) {
+            return false;
+        }
     }
 
     private static String required(String property) {

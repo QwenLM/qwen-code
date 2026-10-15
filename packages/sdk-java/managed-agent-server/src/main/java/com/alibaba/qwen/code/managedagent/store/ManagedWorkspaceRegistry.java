@@ -7,17 +7,16 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.HexFormat;
-import java.util.List;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.List;
 
 @Repository
 public class ManagedWorkspaceRegistry {
@@ -322,7 +321,7 @@ public class ManagedWorkspaceRegistry {
                 record.getPolicyRef());
     }
 
-    static byte[] actorKey(String tenantId, String actorId) {
+    public static byte[] actorKey(String tenantId, String actorId) {
         return new WorkspaceActor(tenantId, actorId).getActorId()
                 .getBytes(StandardCharsets.UTF_8);
     }
@@ -331,9 +330,8 @@ public class ManagedWorkspaceRegistry {
         try {
             byte[] bytes = (configRef + "\u0000" + policyRef)
                     .getBytes(StandardCharsets.UTF_8);
-            return "sha256:" + HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException error) {
+            return "sha256:" + DigestUtils.sha256Hex(bytes);
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }

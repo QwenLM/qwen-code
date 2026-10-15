@@ -5,6 +5,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore.WakeFence;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Closeable;
 import java.util.Optional;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -15,8 +18,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The wake consumer role (design 2026-10-04-managed-agent-event-transport,
@@ -32,8 +33,15 @@ import org.slf4j.LoggerFactory;
  * Harness round trip, runs on a small bounded pool, because the bootstrap
  * lane is one ordered LiteTopic and a load held on its listener would delay
  * every other Session's wake. Every outcome is final for the message (the
- * consumer always acknowledges); SQL-side scans and the activated Session's
- * own wake pump recover anything a notice missed.
+ * consumer always acknowledges). A wake a notice missed — lost, or claimed
+ * and then not loaded — recovers exactly as with the transport off: the
+ * ledger of the source that committed its input, where that source has one,
+ * re-drives the Session (the public Turn dispatcher, the session-message
+ * consume loop, the child and automation relays), and a loaded Session's
+ * wake pump runs what its journal holds. No generic scan backs the
+ * transport; the MQ2 design records the sources without a ledger and the
+ * gaps the ledgers already have. A claim never blocks a later wake: the
+ * watermark refuses only its own and older sequences.
  */
 public class TransportWakeActivator implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(
@@ -62,7 +70,7 @@ public class TransportWakeActivator implements Closeable {
         DUPLICATE,
         /** Claimed, and the load handed to the load pool. */
         SCHEDULED,
-        /** Claimed, but the load pool was full; SQL-side scans recover it. */
+        /** Claimed, but the load pool was full; left to its source's ledger. */
         DROPPED
     }
 
@@ -74,7 +82,7 @@ public class TransportWakeActivator implements Closeable {
         ALREADY_ATTACHED,
         /** The load failed and SQL now shows another live writer. */
         FENCED,
-        /** The load failed otherwise; SQL-side scans recover the wake. */
+        /** The load failed otherwise; left to its source's ledger. */
         FAILED
     }
 
@@ -167,7 +175,7 @@ public class TransportWakeActivator implements Closeable {
             return Outcome.SCHEDULED;
         } catch (RejectedExecutionException full) {
             LOG.warn("transport wake load pool is full; the wake is left to"
-                    + " the SQL-side scans tenant={} session={} sequence={}",
+                    + " its source's ledger tenant={} session={} sequence={}",
                     tenantId, sessionId, envelope.sequence());
             return Outcome.DROPPED;
         }

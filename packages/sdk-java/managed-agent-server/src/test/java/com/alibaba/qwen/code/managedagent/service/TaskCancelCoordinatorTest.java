@@ -1,19 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockingDetails;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -27,6 +13,11 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -41,10 +32,20 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * H4f delivery: every outcome is read from the task's committed record,
@@ -490,6 +491,42 @@ class TaskCancelCoordinatorTest {
                 eq(0L));
     }
 
+    // H4f-b: a workflow run rides the same record-first delivery — the
+    // kind gate admits it and every outcome is read from its record.
+    @Test
+    void aLiveWorkflowRunTakesTheStopRequestAndCompletesFromTheRecord() {
+        target.set(workflowRun("running", false));
+        afterSend.set(workflowRun("running", true));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).hasSize(1);
+        assertThat(sent.getFirst()).containsEntry("kind", "cancel")
+                .containsEntry("childRunId", "run-1");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    @Test
+    void aWorkflowStopAlreadyRecordedCoalescesWithoutDelivery() {
+        target.set(workflowRun("running", true));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    @Test
+    void aWorkflowRunThatEndedWithoutAStopFailsDefinitively() {
+        target.set(workflowRun("completed", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+    }
+
     @Test
     void aParkedCancelResolvesOnlyFromEvidence() {
         when(store.findParkedTaskCancels(anyInt()))
@@ -522,6 +559,13 @@ class TaskCancelCoordinatorTest {
     private static TaskTarget childRun(String state, boolean stopRequested) {
         return new TaskTarget("child_run", "run-1", "child_agent", state, 3,
                 JSON.createObjectNode().put("kind", "child_agent")
+                        .put("stopRequested", stopRequested));
+    }
+
+    private static TaskTarget workflowRun(String state,
+            boolean stopRequested) {
+        return new TaskTarget("child_run", "run-1", "workflow", state, 3,
+                JSON.createObjectNode().put("kind", "workflow")
                         .put("stopRequested", stopRequested));
     }
 

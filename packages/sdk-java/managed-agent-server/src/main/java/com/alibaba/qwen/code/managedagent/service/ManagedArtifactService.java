@@ -14,18 +14,21 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletResponse;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.HexFormat;
-import java.util.concurrent.Semaphore;
-import java.util.regex.Pattern;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.regex.Pattern;
 
 @Service
 public class ManagedArtifactService {
@@ -90,7 +93,7 @@ public class ManagedArtifactService {
         Long watermark = null;
         Long before = null;
         String beforeId = null;
-        if (cursor != null && !cursor.isBlank()) {
+        if (StringUtils.isNotBlank(cursor)) {
             try {
                 if (cursor.length() > 2048) {
                     throw new IllegalArgumentException();
@@ -195,7 +198,7 @@ public class ManagedArtifactService {
             Artifact artifact = stored(tenant, sessionId, artifactId);
             requireContent(tenant, artifact);
             outcome = "rejected";
-            if (revision == null || revision.isBlank()) {
+            if (StringUtils.isBlank(revision)) {
                 throw badRequest("revision_required", "A fixed revision is required.");
             }
             var descriptor = artifact.descriptor();
@@ -214,8 +217,7 @@ public class ManagedArtifactService {
             Selection selection;
             try {
                 selection = select(range, size);
-            }
-            catch (ApiException error) {
+            } catch (ApiException error) {
                 if (error.getStatus() == HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE) {
                     response.setHeader("Content-Range", "bytes */" + size);
                 }
@@ -328,28 +330,20 @@ public class ManagedArtifactService {
         if (range.contains(",")) {
             throw badRequest("unsupported_range", "Only one byte range is supported.");
         }
-        var matcher = RANGE.matcher(range.trim());
+        String value = range.trim();
+        // HttpRange also accepts signs and whitespace inside the range.
+        var matcher = RANGE.matcher(value);
         if (!matcher.matches() || matcher.group(1).isEmpty() && matcher.group(2).isEmpty()) {
             throw badRequest("invalid_range", "Invalid byte range.");
         }
-        long start;
-        long end;
+        HttpRange parsed;
         try {
-            if (matcher.group(1).isEmpty()) {
-                long suffix = Long.parseLong(matcher.group(2));
-                start = Math.max(0, size - suffix);
-                end = size - 1;
-            } else {
-                start = Long.parseLong(matcher.group(1));
-                end = matcher.group(2).isEmpty() ? size - 1 : Long.parseLong(matcher.group(2));
-                if (!matcher.group(2).isEmpty() && end < start) {
-                    throw badRequest("invalid_range", "Invalid byte range.");
-                }
-                end = Math.min(size - 1, end);
-            }
-        } catch (NumberFormatException error) {
+            parsed = HttpRange.parseRanges(value).getFirst();
+        } catch (IllegalArgumentException error) {
             throw badRequest("invalid_range", "Invalid byte range.");
         }
+        long start = parsed.getRangeStart(size);
+        long end = parsed.getRangeEnd(size);
         if (size == 0 || start >= size || end < start) {
             throw new ApiException(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
                     "The range does not intersect this representation.");

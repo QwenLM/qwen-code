@@ -1,15 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doCallRealMethod;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.when;
-
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -26,9 +17,20 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.CannotCreateTransactionException;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -43,17 +45,16 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.CannotCreateTransactionException;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
 
 class WorkspaceCsiRuntimeIdentityTest {
     private static final String IMAGE = "registry.example/worker@sha256:" + "a".repeat(64);
@@ -70,7 +71,7 @@ class WorkspaceCsiRuntimeIdentityTest {
     private Api api;
     private RuntimeTransport transport;
     private final AtomicInteger attestations = new AtomicInteger();
-    private Runnable afterAttestation = () -> { };
+    private Runnable afterAttestation = () -> {};
 
     @BeforeEach
     void setUp() {
@@ -123,6 +124,11 @@ class WorkspaceCsiRuntimeIdentityTest {
             WorkspaceCsiRuntimeIdentity.verify(original);
             assertThat(WorkspaceCsiRuntimeIdentity.expectedPod(original).get("uid")).isEqualTo(UID);
             assertThat(WorkspaceCsiRuntimeIdentity.boot(original).get("version")).isEqualTo(3);
+            com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.verify(original);
+            assertThat(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.expectedPod(original))
+                    .isEqualTo(WorkspaceCsiRuntimeIdentity.expectedPod(original));
+            assertThat(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity.boot(original))
+                    .isEqualTo(WorkspaceCsiRuntimeIdentity.boot(original));
             assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
                     .doesNotContain(original.getProvisionSeed().getToken());
             var pod = api.objects.get("pods");
@@ -359,7 +365,7 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = provider()) {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             provider.reserveResource(original);
-            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+            new ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET operation_lease_until = 946684800000");
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(api.creates).isZero();
         }
@@ -513,8 +519,8 @@ class WorkspaceCsiRuntimeIdentityTest {
         private final Map<String, Map<String, Object>> objects = new LinkedHashMap<>();
         private int creates;
         private String loseReply;
-        private Consumer<Map<String, Object>> changeCreatedPod = ignored -> { };
-        private Consumer<Map<String, Object>> observePod = ignored -> { };
+        private Consumer<Map<String, Object>> changeCreatedPod = ignored -> {};
+        private Consumer<Map<String, Object>> observePod = ignored -> {};
         private CompletableFuture<Map<String, Object>> secretReply;
 
         private Api() {

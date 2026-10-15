@@ -1,11 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
@@ -15,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
@@ -25,15 +18,9 @@ import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -52,6 +39,20 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-retention;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -271,7 +272,7 @@ class WorkspaceSessionRetentionTest {
     }
 
     @Test
-    void unarchiveKeysAreScopedBySessionAndCaseAndCannotReplayAfterDeletion() throws Exception {
+    void unarchiveKeysAreScopedBySessionAndCaseAndReplayAfterDeletion() throws Exception {
         String tenant = tenant();
         String first = closed(tenant, false);
         String second = closed(tenant, false);
@@ -282,12 +283,42 @@ class WorkspaceSessionRetentionTest {
         }
         archive(tenant, first, "Archive");
         web("unarchive", tenant, first, "owner", "Same").andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"));
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"))
+                .andExpect(jsonPath("$.capabilities.tasks").value(true));
         String id = json(request(delete(PUBLIC + first), tenant, "owner", "delete")
                 .andExpect(status().isAccepted())).path("id").asText();
         await().untilAsserted(() -> assertThat(store.findOperation(tenant, first, id).orElseThrow().state())
                 .isEqualTo("COMPLETED"));
-        web("unarchive", tenant, first, "owner", "same").andExpect(status().isNotFound());
+        // A migration fence on the Session's storage must not turn the
+        // tombstone's answers into the retryable 409: the fence gates work
+        // the Session could still accept, and a deleted Session accepts
+        // none. The recorded unarchive below keeps answering through it,
+        // while the fresh key meets the same 404 every other read gets.
+        String fence = UUID.randomUUID().toString();
+        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
+                fence, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                JdbcRuntimeBindingRepository.storageFenceKey("storage")) == 0) {
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
+                            + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
+                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+                    JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                    JdbcRuntimeBindingRepository.storageFenceKey("storage"), tenant, fence);
+        }
+        // Replay-first, like every other mutation path: the recorded
+        // success answers its body with the Session as last visible
+        // (closed), never a 404 for the later delete — and the tombstone's
+        // capabilities stop advertising the routes that now 404.
+        web("unarchive", tenant, first, "owner", "same").andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.status").value("closed"))
+                .andExpect(jsonPath("$.capabilities.tasks").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
+        web("unarchive", tenant, first, "owner", "fenced-fresh")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         assertThat(count(tenant, first, "session.unarchived")).isEqualTo(2);
     }
 
@@ -380,7 +411,7 @@ class WorkspaceSessionRetentionTest {
         jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant, session);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json, phase, tenant_id, session_id, operation_id, operation_kind,"
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
-                + " session_status_before, available_at, created_at, updated_at)"
+                + " session_status_before, available_at, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'SESSION', ?, ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
                 + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
         web("archive", tenant, session, "owner", "fresh").andExpect(status().isConflict())
@@ -439,7 +470,9 @@ class WorkspaceSessionRetentionTest {
 
     private ResultActions request(MockHttpServletRequestBuilder request, String tenant, String actor, String key) throws Exception {
         request.header(TenantContextFilter.HEADER, tenant).principal(actor(tenant, actor));
-        if (key != null) { request.header("Idempotency-Key", key); }
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
         return mvc.perform(request);
     }
 
@@ -490,9 +523,14 @@ class WorkspaceSessionRetentionTest {
         public CompletionStage<Void> warm(String id) { throw new AssertionError("Unexpected warm"); }
         public CompletionStage<Void> drain(String id) { throw new AssertionError("Unexpected drain"); }
         public void requestWorkspaceClose(String tenant, String id) { throw new AssertionError("Unexpected legacy close"); }
-        public CompletionStage<Void> closeWorkspace(String tenant, String id) { record(id); return CompletableFuture.completedFuture(null); }
+        public CompletionStage<Void> closeWorkspace(String tenant, String id) {
+            record(id);
+            return CompletableFuture.completedFuture(null);
+        }
         private void record(String id) {
-            if (calls.merge(id, 1, Integer::sum) > 1) { throw new AssertionError("Cleanup repeated after close"); }
+            if (calls.merge(id, 1, Integer::sum) > 1) {
+                throw new AssertionError("Cleanup repeated after close");
+            }
         }
     }
 }
