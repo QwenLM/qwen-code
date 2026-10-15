@@ -1,5 +1,20 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.RuntimeRetentionConfiguration;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+
+import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
@@ -10,20 +25,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.config.RuntimeRetentionConfiguration;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
-import java.time.Duration;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Test;
-import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
-import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 class RuntimeRetentionJobTest {
     @Test
@@ -95,12 +96,16 @@ class RuntimeRetentionJobTest {
 
         @Scheduled(fixedDelay = 10)
         public void ordinary() {
-            if (entered.getCount() == 0) { ordinary.countDown(); }
+            if (entered.getCount() == 0) {
+                ordinary.countDown();
+            }
         }
 
         @Scheduled(fixedDelay = 10, scheduler = "runtimeRecoveryScheduler")
         public void recovery() {
-            if (entered.getCount() == 0) { recovery.countDown(); }
+            if (entered.getCount() == 0) {
+                recovery.countDown();
+            }
         }
     }
 }

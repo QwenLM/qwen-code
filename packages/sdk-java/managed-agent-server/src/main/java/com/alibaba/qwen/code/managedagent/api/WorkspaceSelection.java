@@ -3,8 +3,9 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import com.fasterxml.jackson.databind.JsonNode;
-import java.util.regex.Pattern;
 import org.springframework.http.HttpStatus;
+
+import java.util.regex.Pattern;
 
 public record WorkspaceSelection(String workspaceId, String cwdRelative) {
     private static final Pattern IDENTIFIER =

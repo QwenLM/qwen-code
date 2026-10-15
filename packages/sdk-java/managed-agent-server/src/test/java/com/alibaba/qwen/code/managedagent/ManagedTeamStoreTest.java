@@ -1,13 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.childAgent;
-import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.childRun;
-import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.commitDomain;
-import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.hookRef;
-import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.hookResource;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
@@ -17,17 +9,26 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.UUID;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.UUID;
+
+import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.childAgent;
+import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.childRun;
+import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.commitDomain;
+import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.hookRef;
+import static com.alibaba.qwen.code.managedagent.ManagedExtensionRecordStoreTest.hookResource;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The store-side rules of H4e-a (docs/design/2026-10-10-managed-agent-teams.md):
