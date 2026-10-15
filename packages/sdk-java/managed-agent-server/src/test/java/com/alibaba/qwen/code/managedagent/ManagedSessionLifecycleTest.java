@@ -872,9 +872,10 @@ class ManagedSessionLifecycleTest {
         doAnswer(call -> {
             harness.setAvailable(false);
             return store.beginSessionRename(call.getArgument(0), call.getArgument(1),
-                    call.getArgument(2), call.getArgument(3), call.getArgument(4));
+                    call.getArgument(2), call.getArgument(3), call.getArgument(4),
+                    call.getArgument(5));
         }).when(faulted).beginSessionRename(anyString(), anyString(), anyString(),
-                anyString(), anyString());
+                anyString(), anyString(), any());
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
         if ("cleanup".equals(phase)) {
