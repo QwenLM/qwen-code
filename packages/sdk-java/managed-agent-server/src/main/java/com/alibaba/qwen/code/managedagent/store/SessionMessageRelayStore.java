@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -303,7 +304,7 @@ public class SessionMessageRelayStore {
         jdbc.update("UPDATE ma_delivery SET attempt_count = ?, available_at = ?, last_error = ?,"
                         + " claim_until = ?, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
                         + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                row.attempts() + 1, nextRetryAt, truncate(lastError), leaseUntil, now,
+                row.attempts() + 1, nextRetryAt, StringUtils.truncate(lastError, 1024), leaseUntil, now,
                 deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()), owner, row.claimGeneration(), now);
     }
 
@@ -315,12 +316,7 @@ public class SessionMessageRelayStore {
                         + " consumption_state = CASE WHEN ? = 'done' THEN 'consumed' ELSE consumption_state END,"
                         + " last_error = ?, updated_at = ? WHERE delivery_key = ? AND delivery_kind = 'SESSION_MESSAGE'"
                         + " AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                state, state, truncate(lastError), now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
+                state, state, StringUtils.truncate(lastError, 1024), now, deliveryKey(row.tenantId(), row.senderSessionId(), row.messageId()),
                 owner, row.claimGeneration(), now);
-    }
-
-    private static String truncate(String text) {
-        return text == null ? null
-                : text.substring(0, Math.min(text.length(), 1024));
     }
 }

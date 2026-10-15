@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '47 19 * * *'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Immutable source commit selected by the release preflight.'
+        required: true
+        type: 'string'
 
 permissions:
   contents: 'read'
@@ -13,10 +19,9 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.event.pull_request.number || github.ref }}'
-  # Post-merge runs must not cancel each other: cancelled push runs would erase
-  # the only post-merge regression evidence (see e2e.yml / pnpm-worktree-smoke.yml).
-  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+  group: 'sdk-java-${{ github.workflow }}-${{ github.ref }}'
+  # Release callers and daily runs must not displace each other's validation.
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -153,7 +158,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.sha }}'
+          ref: '${{ inputs.ref || github.sha }}'
 
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
@@ -386,6 +391,8 @@ jobs:
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
 
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
@@ -546,6 +553,8 @@ jobs:
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -670,15 +679,15 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (45 + 9×10 + 20 + 50 = 205 — the Verify, admission
+    # The step ceilings (45 + 16×10 + 20 + 50 = 275 — the Verify, admission
     # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
     # classes raised the hosted fork 900→1200 s and the L4 recovery class
     # 1200→1800 s; the admission gates share a 2400 s fork for both witness
     # classes)) plus ~13 minutes for the uncapped setup steps
-    # (Checkout..Install MySQL binaries, the report checks) need ~218; 220
+    # (Checkout..Install MySQL binaries, the report checks) need ~288; 290
     # keeps a thin margin, and each arm buys its own 10 instead of sharing
     # an envelope.
-    timeout-minutes: 220
+    timeout-minutes: 290
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     services:
@@ -697,6 +706,8 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -801,6 +812,41 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-frozen-owner-failover
+      # G3 Step 3's packaged gates: a replaced Harness finishes a parked
+      # approval wait (Allow, Deny, Cancel, expiry) or model continuation on
+      # its original identities, then the original cleanup, a next Turn and
+      # close complete. Evidence lands under .qwen/investigations.
+      - name: 'Run Harness-restart approval Allow recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-allow
+      - name: 'Run Harness-restart approval Deny recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-deny
+      - name: 'Run Harness-restart approval Cancel recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cancel
+      - name: 'Run Harness-restart approval expiry recovery E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-expiry
+      - name: 'Run Harness-restart continuation closeout E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-closeout
+      # The first model round of a no-tool Session survives two Harness
+      # replacements; the frozen arm wakes a still-alive former control
+      # plane after its Turn moved on (#12952 Q2, binding half).
+      - name: 'Run Harness-restart model-round failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-model-round-failover
+      - name: 'Run frozen former control-plane fencing E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-frozen-control-plane-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -811,6 +857,17 @@ jobs:
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
             packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
+          retention-days: 7
+      # A separate artifact keeps the reports' layout: a .qwen/ path in the
+      # same upload would move their common root to the repository root.
+      - name: 'Upload G3 Step 3 gate evidence'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'hosted-harness-g3-step3-evidence'
+          path: '.qwen/investigations/g3-step3-implementation/'
+          # upload-artifact skips hidden paths such as .qwen/ unless asked.
+          include-hidden-files: true
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
@@ -873,6 +930,8 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -928,7 +987,8 @@ jobs:
           name: 'event-transport-broker-gate-reports'
           path: |-
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
-            packages/sdk-java/managed-agent-server/target/event-transport-latency.json
+            packages/sdk-java/managed-agent-server/target/event-transport-latency*.json
+            packages/sdk-java/managed-agent-server/target/event-transport-latency.jfr
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
@@ -962,6 +1022,8 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -1175,7 +1237,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.sha }}'
+          ref: '${{ inputs.ref || github.sha }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22 (hosted)'
