@@ -100,6 +100,10 @@ let rootDir: string;
 let session: ManagedSession;
 let children: HostedChildAgentSession;
 let commands: HostedSessionCommandSession;
+const executions: Array<{
+  controller: AbortController;
+  result: Promise<Part[]>;
+}> = [];
 let sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
 const lineage: HostedSessionLineage = {
   parentSessionId: PARENT,
@@ -180,18 +184,23 @@ function createTurn(
   );
 }
 
-async function execute(
+function execute(
   turn: HostedWorkspaceToolTurn,
   batch: ToolCallRequestInfo[],
 ): Promise<Part[]> {
-  return turn.execute(
+  const controller = new AbortController();
+  const result = turn.execute(
     batch,
     batch.map((entry) => ({
       functionCall: { id: entry.callId, name: entry.name, args: entry.args },
     })),
     'model',
-    new AbortController().signal,
+    controller.signal,
   );
+  executions.push({ controller, result });
+  // Observe failures even when an earlier assertion prevents the await.
+  void result.catch(() => undefined);
+  return result;
 }
 
 function commandIdOf(callId: string, promptName = 'prompt'): string {
@@ -296,6 +305,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const { controller } of executions) controller.abort();
+  await Promise.allSettled(executions.map(({ result }) => result));
+  executions.length = 0;
   vi.useRealTimers();
   await session?.close();
   await rm(rootDir, { recursive: true, force: true });

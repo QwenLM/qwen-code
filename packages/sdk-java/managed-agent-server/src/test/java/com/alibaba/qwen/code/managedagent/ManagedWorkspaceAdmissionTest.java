@@ -1413,7 +1413,7 @@ class ManagedWorkspaceAdmissionTest {
         // A Session pinned to a compiled stored definition (D8c-1) passes
         // the later-Turn gate exactly like qwen-code.
         String agentId = "agent_" + "b".repeat(32);
-        new ManagedAgentDefinitionStore(jdbc).create(tenant, "def",
+        new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create(tenant, "def",
                 "def-digest", agentId, "c".repeat(64),
                 "{\"model\":{},\"instructions\":\"\","
                         + "\"tools\":[{\"type\":\"hosted_profile\","
