@@ -45,6 +45,7 @@ import {
   tmuxPadsWithCaptureN,
 } from './lib/tui-capture.js';
 import { validateAssetContent } from './lib/assets.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const tmuxVersionProbe = spawnSync('tmux', ['-V'], {
   encoding: 'utf8',
@@ -2313,7 +2314,9 @@ exit 0
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  // Where permission bits do not bind, the r-x directory still takes the
+  // link and the staging failure this test needs never happens.
+  it.skipIf(!arePermissionBitsEnforced())(
     'degrades rather than falsely claiming a swap when staging itself fails',
     async () => {
       // R20-2 set `ansLost` unconditionally in the staging catch, conflating

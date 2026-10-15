@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import java.util.UUID;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
+import java.util.UUID;
 
 class ManagedRuntimeRetentionGuardMySqlIT {
     private JdbcTemplate admin;

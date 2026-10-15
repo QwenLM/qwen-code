@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Produces broker signatures for the integration tests. SignatureAuthFilterTest
