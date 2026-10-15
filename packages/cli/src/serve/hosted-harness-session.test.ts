@@ -245,6 +245,7 @@ const state = vi.hoisted(() => ({
       resumeFromToolResults?: readonly unknown[];
       textDeltas?: import('./hosted-text-deltas.js').HostedTextDeltaStream;
       workspaceContext?: { read(): string | undefined };
+      modelSelection?: { modelId: string; revision: number };
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -1273,6 +1274,148 @@ describe('Hosted Harness no-tool session', () => {
     );
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
+  });
+
+  it('persists model selection and refuses changed resident and cold prompt replays', async () => {
+    let server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    let clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'model selection' }];
+    const request = {
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      modelSelection: { modelId: 'model-a', revision: 1 },
+    };
+    const send = (body = request) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send(body);
+    const idle = () =>
+      vi.waitFor(async () => {
+        const result = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(result.body.hasActivePrompt).toBe(false);
+      });
+    await send().expect(202);
+    await idle();
+    expect(state.model.mock.calls[0][0].modelSelection).toEqual(
+      request.modelSelection,
+    );
+    await send({
+      ...request,
+      modelSelection: { modelId: 'model-b', revision: 2 },
+    }).expect(409);
+    await send().expect(202);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    clientId = loaded.body.clientId as string;
+    await send({
+      ...request,
+      modelSelection: { modelId: 'model-b', revision: 2 },
+    }).expect(409);
+    await send().expect(202);
+    await send({
+      ...request,
+      promptId: randomUUID(),
+      modelSelection: { modelId: 'model-b', revision: 2 },
+    }).expect(202);
+    await idle();
+    expect(
+      state.model.mock.calls.map(([input]) => input.modelSelection),
+    ).toEqual([request.modelSelection, { modelId: 'model-b', revision: 2 }]);
+  });
+
+  it('restores the accepted model selection before re-running an interrupted model', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    state.model.mockImplementationOnce(async (input) => {
+      const prepare = (
+        input as unknown as {
+          prepareModel(
+            prepared: LlmPreparedRequest,
+            round: number,
+            pending: boolean,
+          ): Promise<
+            | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
+            | undefined
+          >;
+        }
+      ).prepareModel;
+      const ref = await prepare(
+        {
+          request: {
+            model: 'model-b',
+            contents: [
+              { role: 'user', parts: [{ text: 'restore model selection' }] },
+            ],
+            config: {},
+          },
+          history: [],
+          completedToolCallIds: [],
+          routeSelector: 'openai:model-b',
+          providerPin: 'a'.repeat(64),
+          promptTokensForClamp: 0,
+        },
+        0,
+        false,
+      );
+      await input.modelScope!.beginMainAttempt('model-b', ref);
+      throw new HostedToolRecoveryRequiredError('interrupted');
+    });
+    const prompt = [{ type: 'text', text: 'restore model selection' }];
+    const modelSelection = { modelId: 'model-b', revision: 2 };
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        modelSelection,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', created.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .expect(204);
+    const replacement = await app();
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+      .expect(200);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(replacement).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
+    });
+    expect(
+      state.model.mock.calls.map(([input]) => input.modelSelection),
+    ).toEqual([modelSelection, modelSelection]);
   });
 
   it('re-answers a drive takeover while the resident model turn is active', async () => {

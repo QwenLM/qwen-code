@@ -222,11 +222,13 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
+  modelControlsDisabled?: boolean;
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
@@ -273,6 +275,8 @@ interface ChatEditorProps {
   contextWindow?: number;
   /** Keep Context Usage available before a restored session reports usage. */
   contextUsageAlwaysVisible?: boolean;
+  /** Explicit observation state permits zero; omission keeps legacy inference. */
+  contextUsageKnown?: boolean;
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
@@ -1415,10 +1419,12 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
+      availableModes,
       planMode = false,
       modeControlsDisabled = false,
       onTogglePlan,
       currentModel = '',
+      modelControlsDisabled = false,
       gitBranch,
       gitWorktree,
       gitCwd,
@@ -1441,6 +1447,7 @@ export const ChatEditor = memo(
       tokenCount = 0,
       contextWindow = 0,
       contextUsageAlwaysVisible = false,
+      contextUsageKnown,
       onShowContextUsage,
       onOpenContextUsage,
       contextUsageControls,
@@ -1994,6 +2001,9 @@ export const ChatEditor = memo(
       if (modeControlsDisabled) setModeDropdownOpen(false);
     }, [modeControlsDisabled]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    useEffect(() => {
+      if (modelControlsDisabled) setModelDropdownOpen(false);
+    }, [modelControlsDisabled]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
     const [mobileFocused, setMobileFocused] = useState(false);
@@ -2100,13 +2110,16 @@ export const ChatEditor = memo(
 
     const modeItems = useMemo<DropdownItem[]>(
       () =>
-        DAEMON_APPROVAL_MODES.filter((id) => id !== 'plan').map((id) => ({
+        DAEMON_APPROVAL_MODES.filter(
+          (id) =>
+            id !== 'plan' && (!availableModes || availableModes.includes(id)),
+        ).map((id) => ({
           id,
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
-      [t],
+      [t, availableModes],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2124,6 +2137,8 @@ export const ChatEditor = memo(
     // its only way to read the breakdown, and only that case advertises it.
     const contextRingAction = onOpenContextUsage ?? onShowContextUsage;
     const contextRingHint = Boolean(onShowContextUsage) && !onOpenContextUsage;
+    const knownContextUsage =
+      contextUsageKnown ?? (contextWindow > 0 && tokenCount > 0);
     const showModeAction = showToolbarAction('approvalMode');
     const showPlanAction = Boolean(
       onTogglePlan && visibleActionSet?.has('plan'),
@@ -2182,12 +2197,16 @@ export const ChatEditor = memo(
 
     const handleModeSelect = useCallback(
       (modeId: string) => {
-        if (modeControlsDisabled) return;
+        if (
+          modeControlsDisabled ||
+          (availableModes && !availableModes.includes(modeId))
+        )
+          return;
         onSelectMode?.(modeId);
         setModeDropdownOpen(false);
         core.focus();
       },
-      [onSelectMode, core, modeControlsDisabled],
+      [onSelectMode, core, modeControlsDisabled, availableModes],
     );
 
     // The add menu closes before this runs and leaves focus to the caller. The
@@ -2200,11 +2219,12 @@ export const ChatEditor = memo(
 
     const handleModelSelect = useCallback(
       (modelId: string) => {
+        if (modelControlsDisabled) return;
         onSelectModel?.(modelId);
         setModelDropdownOpen(false);
         core.focus();
       },
-      [onSelectModel, core],
+      [onSelectModel, core, modelControlsDisabled],
     );
     const showCancelButton = isRunning && !core.hasContent;
     const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
@@ -3635,6 +3655,7 @@ export const ChatEditor = memo(
                               showModelLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-model-button
+                            disabled={modelControlsDisabled}
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3725,12 +3746,12 @@ export const ChatEditor = memo(
                     </button>
                   )}
                 {showToolbarAction('contextUsage') &&
-                  (contextUsageAlwaysVisible ||
-                    (contextWindow > 0 && tokenCount > 0)) && (
+                  (contextUsageAlwaysVisible || knownContextUsage) && (
                     <ContextUsagePopover
                       key={sessionId}
                       tokenCount={tokenCount}
                       contextWindow={contextWindow}
+                      known={contextUsageKnown}
                       controls={contextUsageControls}
                       onOpenDetails={onOpenContextUsage}
                       showSnapshotHint={contextRingHint}
@@ -3743,9 +3764,11 @@ export const ChatEditor = memo(
                           e.stopPropagation();
                           contextRingAction?.();
                         }}
-                        disabled={!contextRingAction}
+                        disabled={
+                          !contextRingAction && contextUsageKnown === undefined
+                        }
                         aria-label={
-                          contextWindow > 0 && tokenCount > 0
+                          knownContextUsage
                             ? t('status.contextUsed', {
                                 pct: (
                                   (tokenCount / contextWindow) *
@@ -3758,13 +3781,13 @@ export const ChatEditor = memo(
                         <span className={styles.toolBtnIcon}>
                           <ContextUsageRing
                             pct={
-                              contextWindow > 0
+                              knownContextUsage
                                 ? (tokenCount / contextWindow) * 100
                                 : 0
                             }
                           />
                         </span>
-                        {contextWindow > 0 && tokenCount > 0 && (
+                        {knownContextUsage && (
                           <span
                             className={styles.contextUsagePercentage}
                             data-level={getContextUsageLevel(

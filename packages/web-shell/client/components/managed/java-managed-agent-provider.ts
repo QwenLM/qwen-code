@@ -11,6 +11,7 @@ import {
   toTimestamp,
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
+import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type {
@@ -21,6 +22,9 @@ import type {
   ManagedAgentSessionPhase,
   ManagedAgentSessionSummary,
   ManagedTaskCancelOperation,
+  ManagedApprovalMode,
+  ManagedModelContext,
+  ManagedModelSelection,
 } from './managed-agent-provider';
 
 export interface JavaManagedAgentProviderOptions
@@ -102,6 +106,7 @@ export function createJavaManagedAgentProvider(
       workspaceId: string;
       cwdRelative: string;
       text?: string;
+      approvalMode?: ManagedApprovalMode;
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -110,6 +115,9 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.approvalMode === undefined
+          ? {}
+          : { approvalMode: request.approvalMode }),
         input:
           request.text === undefined
             ? []
@@ -190,6 +198,62 @@ export function createJavaManagedAgentProvider(
     },
     ...(options.productScope?.trim()
       ? {
+          modelChange: {
+            async queryOptions(sessionId, request) {
+              const result = await client.getSessionModels(
+                sessionId,
+                request.signal,
+              );
+              const selection = modelSelection(result.modelSelection);
+              if (
+                !selection ||
+                typeof result.supported !== 'boolean' ||
+                !Array.isArray(result.models) ||
+                result.models.some(
+                  (item) =>
+                    !modelId(item.modelId) ||
+                    typeof item.label !== 'string' ||
+                    !item.label.trim(),
+                ) ||
+                new Set(result.models.map((item) => item.modelId)).size !==
+                  result.models.length
+              )
+                throw new Error('Invalid Session model options');
+              return {
+                supported: result.supported,
+                modelSelection: selection,
+                models: result.models.map(({ modelId, label }) => ({
+                  modelId,
+                  label,
+                })),
+              };
+            },
+            async submit(sessionId, request, command) {
+              const result = await client.changeModel(
+                {
+                  ...request,
+                  sessionId,
+                  idempotencyKey: command.idempotencyKey,
+                  requestId: managedRequestId(),
+                },
+                command.signal,
+              );
+              const selection = modelSelection(result.modelSelection);
+              if (
+                result.sessionId !== sessionId ||
+                !selection ||
+                selection.modelId !== request.modelId ||
+                selection.revision <= request.expectedRevision ||
+                typeof result.replayed !== 'boolean'
+              )
+                throw new Error('Model change identity mismatch');
+              return {
+                sessionId,
+                modelSelection: selection,
+                replayed: result.replayed,
+              };
+            },
+          },
           cwdChange: {
             async submit(sessionId, request, command) {
               return requireCwdOperation(
@@ -303,14 +367,28 @@ export function createJavaManagedAgentProvider(
                 defaultWorkspace: page.defaultWorkspace,
                 nextCursor: page.nextCursor ?? undefined,
                 supported: page.capabilities?.workspaceBinding === true,
+                canCreateWorkspace:
+                  page.capabilities?.workspaceCreation === true,
+                supportsApprovalModeSelection:
+                  page.capabilities?.approvalModeSelection === true,
               };
             },
             async get(workspaceId, request) {
               return client.getWorkspace(workspaceId, request.signal);
             },
-            createEmpty: ({ agentId, workspaceId, cwdRelative }, command) =>
+            createWorkspace: (request, command) =>
+              client.createWorkspace(
+                { ...request, idempotencyKey: command.idempotencyKey },
+                command.signal,
+              ),
+            getSessionOptions: (agentId, request) =>
+              client.getSessionOptions(agentId, request.signal),
+            createEmpty: (
+              { agentId, workspaceId, cwdRelative, approvalMode },
+              command,
+            ) =>
               createWorkspaceSession(
-                { agentId, workspaceId, cwdRelative },
+                { agentId, workspaceId, cwdRelative, approvalMode },
                 command,
               ),
             createSession: createWorkspaceSession,
@@ -444,9 +522,16 @@ function toSessionSummary(
     Boolean(session.workspace) && session.capabilities?.workspaceTurns === true;
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
+  const observation = modelContext(session.modelContext);
+  const selectedModel = modelSelection(session.modelSelection);
   return {
     sessionId: session.sessionId,
     agentId: session.agentId,
+    ...(isManagedApprovalMode(session.approvalMode)
+      ? { approvalMode: session.approvalMode }
+      : {}),
+    ...(observation ? { modelContext: observation } : {}),
+    ...(selectedModel ? { modelSelection: selectedModel } : {}),
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
     workspace: session.workspace,
@@ -472,9 +557,69 @@ function toSessionSummary(
       canCancel: sessionActive && active && turnStatus !== 'cancelling',
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
+      ...(session.capabilities?.modelChange === true
+        ? { modelChange: true }
+        : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
+  };
+}
+
+function modelId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    Boolean(value.trim()) &&
+    new TextEncoder().encode(value).length <= 512 &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || (code >= 127 && code <= 159);
+    })
+  );
+}
+
+function modelSelection(value: unknown): ManagedModelSelection | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const data = value as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(data['revision']) ||
+    Number(data['revision']) < 0 ||
+    (data['modelId'] !== undefined && !modelId(data['modelId'])) ||
+    (Number(data['revision']) > 0 && data['modelId'] === undefined)
+  )
+    return undefined;
+  return {
+    revision: Number(data['revision']),
+    ...(modelId(data['modelId']) ? { modelId: data['modelId'] } : {}),
+  };
+}
+
+function modelContext(value: unknown): ManagedModelContext | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const data = value as Record<string, unknown>;
+  if (
+    typeof data['modelId'] !== 'string' ||
+    !data['modelId'].trim() ||
+    typeof data['observedAt'] !== 'number' ||
+    !Number.isSafeInteger(data['observedAt']) ||
+    data['observedAt'] < 0
+  )
+    return undefined;
+  const inputTokens = data['inputTokens'];
+  const contextWindowSize = data['contextWindowSize'];
+  return {
+    modelId: data['modelId'],
+    observedAt: data['observedAt'],
+    ...(typeof inputTokens === 'number' &&
+    Number.isSafeInteger(inputTokens) &&
+    inputTokens >= 0
+      ? { inputTokens }
+      : {}),
+    ...(typeof contextWindowSize === 'number' &&
+    Number.isSafeInteger(contextWindowSize) &&
+    contextWindowSize > 0
+      ? { contextWindowSize }
+      : {}),
   };
 }
 

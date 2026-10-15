@@ -1,5 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelOption;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelSelection;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
@@ -112,6 +117,24 @@ public interface AgentStateStore {
 
     Optional<Admission> findWorkspaceCreateReplay(String tenantId,
             String actorId, String idempotencyKey, String requestDigest);
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode) {
+        if (approvalMode != null) {
+            throw new UnsupportedOperationException("Approval mode selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, selection);
+    }
+
+    default WebShellSessionOptions workspaceSessionOptions(
+            String tenantId, String agentId) {
+        throw new UnsupportedOperationException("Approval mode selection is unavailable");
+    }
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
@@ -414,6 +437,25 @@ public interface AgentStateStore {
     /** The latest Turn of each given Session, in one round trip. */
     Map<String, TurnSummary> findLatestTurns(String tenantId,
             List<String> sessionIds);
+
+    default Map<String, WebShellModelContext> findModelContexts(
+            String tenantId, List<String> sessionIds) {
+        return Map.of();
+    }
+
+    default List<WebShellModelOption> modelOptions() { return List.of(); }
+
+    default Map<String, WebShellModelSelection> findModelSelections(
+            String tenantId, List<String> sessionIds) { return Map.of(); }
+
+    default WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
+            String sessionId, String key, String digest, String modelId, long expectedRevision,
+            boolean supported) {
+        throw new UnsupportedOperationException("Model selection is unavailable");
+    }
+
+    default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
+            String promptId) { return null; }
 
     /**
      * The latest environment event of each Session's latest Turn, in one

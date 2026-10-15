@@ -434,6 +434,7 @@ interface ChatEditorRenderProps
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
+  availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
@@ -441,6 +442,7 @@ interface ChatEditorRenderProps
   onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
   onCancel?: () => void;
   currentModel?: string;
+  modelControlsDisabled?: boolean;
   availableModels?: Array<{ id: string; label?: string }>;
   sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
@@ -454,6 +456,7 @@ interface ChatEditorRenderProps
   }) => void;
   tokenCount?: number;
   contextWindow?: number;
+  contextUsageKnown?: boolean;
   onShowContextUsage?: () => void;
   contextUsageAlwaysVisible?: boolean;
   commands?: ComponentProps<typeof ChatEditor>['commands'];
@@ -969,6 +972,48 @@ describe('ChatEditor context usage ring', () => {
     container.querySelector<HTMLButtonElement>(
       '[data-web-shell-context-usage]',
     );
+
+  it('shows observed zero and enables a read-only popup without inventing action handlers', async () => {
+    const container = renderChatEditor({
+      tokenCount: 0,
+      contextWindow: 1000,
+      contextUsageKnown: true,
+      visibleToolbarActions: ['contextUsage'],
+    });
+    expect(ring(container)!.disabled).toBe(false);
+    expect(ring(container)!.textContent).toBe('0.0%');
+    await act(async () => ring(container)!.click());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')?.textContent).toContain('0 tokens');
+    expect(card.querySelectorAll('button')).toHaveLength(0);
+    await act(async () => ring(container)!.click());
+    expect(
+      document.querySelector('[data-web-shell-context-popover]'),
+    ).toBeNull();
+  });
+
+  it('keeps explicit unknown separate from Local inferred counts and preserves the Local details action', async () => {
+    const openDetails = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 123,
+      contextWindow: 1000,
+      contextUsageKnown: false,
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage: openDetails,
+    });
+    expect(ring(container)!.textContent).toBe('');
+    await act(async () => ring(container)!.click());
+    expect(openDetails).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-web-shell-context-popover]'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      tokenCount: 123,
+      contextWindow: 1000,
+      onOpenContextUsage: openDetails,
+    });
+    expect(ring(container)!.textContent).toBe('12.3%');
+  });
 
   it('renders in toolbarRight before the voice actions', () => {
     const container = renderChatEditor({
@@ -2806,6 +2851,84 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     expect(
       document.querySelector('[data-web-shell-toolbar-popover]'),
     ).toBeNull();
+  });
+
+  it('disables a pinned model and closes an existing model menu without changing Local defaults', () => {
+    const select = vi.fn();
+    const props = {
+      visibleToolbarActions: ['model'] as const,
+      currentModel: 'pinned-model',
+      availableModels: [{ id: 'pinned-model' }, { id: 'other-model' }],
+      onSelectModel: select,
+    };
+    const container = renderChatEditor(props);
+    const trigger = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-button]',
+      )!;
+    expect(trigger().disabled).toBe(false);
+    act(() => trigger().click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    rerenderChatEditor(container, { ...props, modelControlsDisabled: true });
+    expect(trigger().disabled).toBe(true);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    act(() => trigger().click());
+    expect(select).not.toHaveBeenCalled();
+    rerenderChatEditor(container, props);
+    act(() => trigger().click());
+    const option = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ].find((button) => button.textContent?.includes('other-model'))!;
+    act(() => option.click());
+    expect(select).toHaveBeenCalledWith('other-model');
+  });
+
+  it('filters policies for a host while retaining all Local policies when omitted', () => {
+    const onSelectMode = vi.fn();
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      currentMode: 'default',
+      onSelectMode,
+    };
+    const container = renderChatEditor({
+      ...props,
+      availableModes: ['default', 'auto-edit'],
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const choices = () => [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ];
+    expect(choices().map((item) => item.textContent)).toHaveLength(2);
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Classifier');
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
+    ).not.toContain('Full Access');
+    const edit = choices().find((item) =>
+      item.textContent?.includes('Auto Edit'),
+    )!;
+    act(() => edit.click());
+    expect(onSelectMode).toHaveBeenCalledWith('auto-edit');
+    rerenderChatEditor(container, props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    expect(choices()).toHaveLength(4);
   });
 
   it('omits Plan from permissions and retains every execution policy', () => {
