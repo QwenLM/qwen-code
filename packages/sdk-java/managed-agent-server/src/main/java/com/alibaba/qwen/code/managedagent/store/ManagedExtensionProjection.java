@@ -1,13 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static java.util.Map.entry;
-
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.codec.digest.DigestUtils;
+
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -15,6 +12,8 @@ import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+
+import static java.util.Map.entry;
 
 /**
  * H0c of #12827: how the control plane keys, chains and projects the Stage H
@@ -175,11 +174,10 @@ public final class ManagedExtensionProjection {
     public static String recordKey(String sessionId, String domain,
             String recordId) {
         try {
-            return HexFormat.of().formatHex(MessageDigest
-                    .getInstance("SHA-256").digest((sessionId + "\u0000"
-                            + domain + "\u0000" + recordId)
-                            .getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException error) {
+            return DigestUtils.sha256Hex((sessionId + "\u0000"
+                    + domain + "\u0000" + recordId)
+                    .getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }

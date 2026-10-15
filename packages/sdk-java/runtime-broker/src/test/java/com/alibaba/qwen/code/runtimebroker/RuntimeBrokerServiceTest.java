@@ -1392,6 +1392,49 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cancellationWhilePublicationInstallIsPendingBlocksLateBackgroundDispatch() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            CompletableFuture<Void> installed = new CompletableFuture<>();
+            fixture.transport.installPublicationResult = installed;
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            CompletableFuture<ToolExecutionRecord> starting = fixture.service.startExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), payload, "pub-1", "token")
+                    .toCompletableFuture();
+            assertFalse(starting.isDone());
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", "runtime", prepared.getExecutionCallId()));
+            assertTrue(cancelled.isCancelRequested());
+            assertEquals("not_started", cancelled.getExecutionStatus());
+
+            installed.complete(null);
+            assertEquals("not_started", join(starting).getExecutionStatus());
+            assertNull(fixture.executionRepository.findByExecutionCallId(
+                    prepared.getExecutionCallId() + ":process"));
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+        }
+    }
+
+    @Test
     void v3GateAdmitsTheNativeMonitorPayloadAndStillRefusesOthers() throws Exception {
         String payload = "{\"toolName\":\"monitor\",\"input\":{\"command\":\"du -sh .\"}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
@@ -6459,6 +6502,7 @@ class RuntimeBrokerServiceTest {
                 CompletableFuture.completedFuture(
                         Map.of("executionStatus", "success"));
         volatile CompletableFuture<Map<String, Object>> executeV3Result;
+        volatile CompletableFuture<Void> installPublicationResult;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
@@ -6525,6 +6569,9 @@ class RuntimeBrokerServiceTest {
         @Override
         public CompletionStage<Void> installPublication(RuntimeLease lease,
                 RuntimeSession session, RuntimePublicationGrant grant) {
+            if (installPublicationResult != null) {
+                return installPublicationResult;
+            }
             return executeV3Result == null ? RuntimeTransport.super.installPublication(lease, session, grant)
                     : CompletableFuture.completedFuture(null);
         }

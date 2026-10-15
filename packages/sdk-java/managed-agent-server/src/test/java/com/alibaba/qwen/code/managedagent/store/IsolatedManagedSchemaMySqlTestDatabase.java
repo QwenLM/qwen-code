@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
 import java.sql.SQLException;
 import java.util.UUID;
-import javax.sql.DataSource;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /** Each test owns one database; no existing test or application tables are cleared. */
 public final class IsolatedManagedSchemaMySqlTestDatabase implements AutoCloseable {
