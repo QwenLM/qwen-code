@@ -16,6 +16,7 @@ async function openFiles(
   workspaceCwd = '/tmp/qwen-web-shell-e2e',
   afterOpen?: () => Promise<void>,
   primary = true,
+  uploadEnabled = false,
 ) {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd,
@@ -36,6 +37,11 @@ async function openFiles(
       turnCompleteEvent('files-ready', { id: 3 }),
     ],
   });
+  if (uploadEnabled)
+    scenario.capabilities.features.push(
+      'workspace_file_upload',
+      'workspace_qualified_rest_core',
+    );
   await page.setViewportSize({ width: 1600, height: 1000 });
   await installMockDaemon(page, scenario, { baseURL });
   const contents: Record<string, string> = {
@@ -1058,4 +1064,440 @@ test('scrolls the entire deep tree horizontally without squeezing names', async 
   ).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(leaf).toBeFocused();
+});
+
+async function dropLocalFiles(
+  page: Page,
+  target: import('@playwright/test').Locator,
+  names: string[],
+  directory = false,
+) {
+  const dataTransfer = await page.evaluateHandle(
+    ({ names, directory }) => {
+      const transfer = new DataTransfer();
+      for (const name of names) {
+        transfer.items.add(new File([new Uint8Array([0, 255, 128, 10])], name));
+      }
+      if (directory)
+        Object.defineProperty(transfer, 'items', {
+          value: Array.from(transfer.items).map((item) => {
+            item.webkitGetAsEntry = () =>
+              ({ isDirectory: true }) as FileSystemEntry;
+            return item;
+          }),
+        });
+      return transfer;
+    },
+    { names, directory },
+  );
+  const canceled = await target.evaluate((element, transfer) => {
+    const dispatch = (type: string) => {
+      const event = new DragEvent(type, {
+        dataTransfer: transfer,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    return { dragover: dispatch('dragover'), drop: dispatch('drop') };
+  }, dataTransfer);
+  await dataTransfer.dispose();
+  return canceled;
+}
+
+test('@smoke uploads dropped files into root and directory rows with bottom progress', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    false,
+    true,
+  );
+  const sidebar = browser.getByTestId('workspace-file-sidebar');
+  const uploads: { url: string; path: string; bytes: number[] }[] = [];
+  let finish: (() => void) | undefined;
+  await page.route('**/file/upload?*', async (route) => {
+    const request = route.request();
+    uploads.push({
+      url: new URL(request.url()).pathname,
+      path: new URL(request.url()).searchParams.get('path')!,
+      bytes: [...request.postDataBuffer()!],
+    });
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    await route.fulfill({
+      json: {
+        kind: 'file_upload',
+        path: uploads.at(-1)!.path,
+        sizeBytes: 4,
+        hash: 'sha256:test',
+      },
+    });
+  });
+  await browser.screenshot({ path: test.info().outputPath('before.png') });
+  await dropLocalFiles(page, sidebar, ['root.bin', 'second.bin']);
+  await expect.poll(() => uploads.length).toBe(1);
+  expect(uploads[0]).toEqual({
+    url: '/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/file/upload',
+    path: 'root.bin',
+    bytes: [0, 255, 128, 10],
+  });
+  const progress = sidebar.getByRole('progressbar', { name: 'Uploading' });
+  await expect(progress).toBeVisible();
+  const barBox = (await progress.boundingBox())!;
+  const sidebarBox = (await sidebar.boundingBox())!;
+  expect(barBox.height).toBe(3);
+  expect(barBox.y + barBox.height).toBeCloseTo(
+    sidebarBox.y + sidebarBox.height,
+    0,
+  );
+  finish!();
+  await expect.poll(() => uploads.length).toBe(2);
+  expect(uploads[1].path).toBe('second.bin');
+  await expect(progress).toHaveAttribute('aria-valuenow', '50');
+  await browser.screenshot({ path: test.info().outputPath('progress.png') });
+  // Wait for the hook's success row dismissal while the second upload stays pending.
+  await expect(
+    browser.getByTestId('workspace-file-upload-status'),
+  ).not.toContainText('root.bin');
+  await expect(progress).toHaveAttribute('aria-valuenow', '50');
+  finish!();
+  await expect(progress).toBeHidden();
+  await expect(
+    sidebar.getByRole('treeitem', { name: 'root.bin', exact: true }),
+  ).toBeVisible();
+
+  const folder = sidebar.getByRole('treeitem', { name: 'empty', exact: true });
+  await expect(
+    browser.getByTestId('workspace-file-upload-status'),
+  ).toContainText('second.bin');
+  await dropLocalFiles(page, folder, ['nested.bin']);
+  await expect.poll(() => uploads.length).toBe(3);
+  expect(uploads[2].path).toBe('empty/nested.bin');
+  await expect(progress).toHaveAttribute('aria-valuenow', '0');
+  finish!();
+  await expect(progress).toBeHidden();
+  await page.route('**/list?path=empty', (route) =>
+    route.fulfill({
+      json: {
+        kind: 'list',
+        path: 'empty',
+        entries: [{ name: 'nested.bin', kind: 'file', ignored: false }],
+        truncated: false,
+      },
+    }),
+  );
+  await folder.click();
+  await expect(
+    sidebar.getByRole('treeitem', { name: 'nested.bin', exact: true }),
+  ).toBeVisible();
+  await expect(sidebar).not.toContainText('empty: Empty folder');
+  await expect(sidebar.getByRole('alert')).toBeHidden();
+  await browser.screenshot({ path: test.info().outputPath('completed.png') });
+});
+
+test('@smoke file-row drops preserve preview and use server-confirmed collision names', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const sidebar = browser.getByTestId('workspace-file-sidebar');
+  await sidebar.getByRole('treeitem', { name: 'src', exact: true }).click();
+  const row = sidebar.getByRole('treeitem', { name: 'guide.md', exact: true });
+  await row.click();
+  await expect(browser.getByTestId('workspace-file-content')).toContainText(
+    'Nested guide',
+  );
+  let uploadPath: string | null = null;
+  await page.route('**/file/upload?*', async (route) => {
+    uploadPath = new URL(route.request().url()).searchParams.get('path');
+    await route.fulfill({
+      json: {
+        kind: 'file_upload',
+        path: 'src/guide (1).md',
+        sizeBytes: 4,
+        hash: 'sha256:test',
+      },
+    });
+  });
+  await dropLocalFiles(page, row, ['guide.md']);
+  await expect.poll(() => uploadPath).toBe('src/guide.md');
+  await expect(
+    sidebar.getByRole('treeitem', { name: 'guide (1).md', exact: true }),
+  ).toBeVisible();
+  await expect(browser.getByTestId('workspace-file-content')).toContainText(
+    'Nested guide',
+  );
+  await expect(sidebar.getByRole('progressbar')).toBeHidden();
+});
+
+test('@smoke retains upload errors and ignores folders and text drags', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const sidebar = browser.getByTestId('workspace-file-sidebar');
+  let requests = 0;
+  await page.route('**/file/upload?*', async (route) => {
+    requests++;
+    await route.fulfill({ status: 403, json: { error: 'Upload denied' } });
+  });
+  await dropLocalFiles(page, sidebar, ['local-folder'], true);
+  const textTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.setData('text/plain', 'hello');
+    return transfer;
+  });
+  const dragoverCanceled = await sidebar.evaluate((element, transfer) => {
+    const event = new DragEvent('dragover', {
+      dataTransfer: transfer,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    element.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, textTransfer);
+  expect(dragoverCanceled).toBe(false);
+  await expect(sidebar).not.toContainText('Drop files');
+  const dropCanceled = await sidebar.evaluate((element, transfer) => {
+    const event = new DragEvent('drop', {
+      dataTransfer: transfer,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    element.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, textTransfer);
+  expect(dropCanceled).toBe(false);
+  await textTransfer.dispose();
+  await expect(sidebar.getByRole('progressbar')).toBeHidden();
+  expect(requests).toBe(0);
+  await dropLocalFiles(page, sidebar, ['denied.bin']);
+  await expect(
+    browser.getByTestId('workspace-file-upload-status'),
+  ).toContainText('Upload denied');
+  await expect(sidebar.getByRole('progressbar')).toBeHidden();
+  await browser.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(
+    browser.getByTestId('workspace-file-upload-status'),
+  ).not.toContainText('Upload denied');
+});
+
+test('@smoke prevents navigation and upload when tree upload capability is unavailable', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(page, baseURL!);
+  const url = page.url();
+  let requests = 0;
+  await page.route('**/file/upload?*', async (route) => {
+    requests++;
+    await route.abort();
+  });
+  expect(
+    await dropLocalFiles(page, browser.getByTestId('workspace-file-sidebar'), [
+      'disabled.bin',
+    ]),
+  ).toEqual({ dragover: true, drop: true });
+  await expect(browser).toBeVisible();
+  expect(page.url()).toBe(url);
+  expect(requests).toBe(0);
+  await expect(browser.getByRole('progressbar')).toBeHidden();
+});
+
+test('@smoke targets restored directories while refresh and upload overlap', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const sidebar = browser.getByTestId('workspace-file-sidebar');
+  const paths: string[] = [];
+  let finishUpload!: () => void;
+  await page.route('**/file/upload?*', async (route) => {
+    const path = new URL(route.request().url()).searchParams.get('path')!;
+    paths.push(path);
+    await new Promise<void>((resolve) => {
+      finishUpload = resolve;
+    });
+    await route.fulfill({
+      json: { kind: 'file_upload', path, sizeBytes: 4, hash: 'sha256:test' },
+    });
+  });
+  await dropLocalFiles(
+    page,
+    sidebar.getByRole('treeitem', { name: 'empty', exact: true }),
+    ['first.bin'],
+  );
+  await expect.poll(() => paths.length).toBe(1);
+  let finishListing!: () => void;
+  let listingPending = false;
+  await page.route('**/list?path=.', async (route) => {
+    listingPending = true;
+    await new Promise<void>((resolve) => {
+      finishListing = resolve;
+    });
+    await route.fulfill({
+      json: {
+        kind: 'list',
+        path: '.',
+        entries: [{ name: 'empty', kind: 'directory', ignored: false }],
+        truncated: false,
+      },
+    });
+  });
+  await browser.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect.poll(() => listingPending).toBe(true);
+  finishUpload();
+  const restored = sidebar.getByRole('treeitem', {
+    name: 'empty',
+    exact: true,
+  });
+  await expect(restored).toBeVisible();
+  await dropLocalFiles(page, restored, ['second.bin']);
+  await expect.poll(() => paths.length).toBe(2);
+  expect(paths).toEqual(['empty/first.bin', 'empty/second.bin']);
+  finishUpload();
+  finishListing();
+  await expect(sidebar.getByRole('progressbar')).toBeHidden();
+  await restored.click();
+  await expect(
+    sidebar.getByRole('treeitem', { name: 'first.bin', exact: true }),
+  ).toBeVisible();
+  await expect(
+    sidebar.getByRole('treeitem', { name: 'second.bin', exact: true }),
+  ).toBeVisible();
+  await expect(sidebar.getByRole('alert')).toBeHidden();
+  await expect(sidebar).not.toContainText('empty: Empty folder');
+});
+
+test('@smoke guards preview drops and keeps progress and errors visible with the tree collapsed', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const sidebar = browser.getByTestId('workspace-file-sidebar');
+  await sidebar
+    .getByRole('treeitem', { name: 'README.md', exact: true })
+    .click();
+  const content = browser.getByTestId('workspace-file-content');
+  await expect(content).toContainText('Workspace guide');
+  let requests = 0;
+  let finish!: () => void;
+  await page.route('**/file/upload?*', async (route) => {
+    requests++;
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    await route.fulfill({ status: 403, json: { error: 'Upload denied' } });
+  });
+  for (const target of [content, browser.locator('header')]) {
+    expect(await dropLocalFiles(page, target, ['ignored.bin'])).toEqual({
+      dragover: true,
+      drop: true,
+    });
+  }
+  expect(requests).toBe(0);
+  await dropLocalFiles(page, sidebar, ['denied.bin']);
+  await expect.poll(() => requests).toBe(1);
+  await browser
+    .getByRole('button', { name: 'Toggle file tree', exact: true })
+    .click();
+  await expect(sidebar).toBeHidden();
+  await expect(browser.getByRole('progressbar')).toBeVisible();
+  await browser.screenshot({
+    path: test.info().outputPath('collapsed-progress.png'),
+  });
+  finish();
+  await expect(browser.getByRole('progressbar')).toBeHidden();
+  await expect(
+    browser.getByTestId('workspace-file-upload-status'),
+  ).toContainText('denied.bin');
+  await expect(
+    browser.getByRole('button', { name: 'Dismiss', exact: true }).locator('..'),
+  ).toBeVisible();
+  await browser.screenshot({
+    path: test.info().outputPath('collapsed-error.png'),
+  });
+  await browser.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await expect(
+    browser.getByTestId('workspace-file-upload-status'),
+  ).not.toContainText('denied.bin');
+});
+
+test('@smoke shows readable root, directory and file-parent drop hints and clears on leave', async ({
+  page,
+  baseURL,
+}) => {
+  const { browser } = await openFiles(
+    page,
+    baseURL!,
+    undefined,
+    undefined,
+    true,
+    true,
+  );
+  const sidebar = browser.getByTestId('workspace-file-sidebar');
+  await sidebar.getByRole('treeitem', { name: 'src', exact: true }).click();
+  const transfer = await page.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.items.add(new File(['x'], 'hint.bin'));
+    return data;
+  });
+  for (const [target, destination] of [
+    [sidebar, 'qwen-web-shell-e2e'],
+    [sidebar.getByRole('treeitem', { name: 'empty', exact: true }), 'empty'],
+    [sidebar.getByRole('treeitem', { name: 'guide.md', exact: true }), 'src'],
+  ] as const) {
+    await target.dispatchEvent('dragover', {
+      dataTransfer: transfer,
+      composed: true,
+    });
+    await expect(sidebar).toContainText(
+      `Drop files to upload into: ${destination}`,
+    );
+    await sidebar.dispatchEvent('dragleave', {
+      dataTransfer: transfer,
+      relatedTarget: null,
+      composed: true,
+    });
+    await expect(sidebar).not.toContainText('Drop files to upload into:');
+  }
+  await transfer.dispose();
 });

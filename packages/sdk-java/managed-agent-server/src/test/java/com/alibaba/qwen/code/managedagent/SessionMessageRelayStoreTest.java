@@ -270,6 +270,87 @@ class SessionMessageRelayStoreTest {
                 .isFalse();
     }
 
+    private static String owed(String messageId) {
+        return "{\"direction\":\"outbound\",\"route\":\"to_child\","
+                + "\"childRunId\":\"r\",\"messageId\":\"" + messageId + "\"}";
+    }
+
+    /** The ids of the sender's older messages the store reports owed. */
+    private List<String> olderOwed(String sender, String messageId) {
+        return store.olderOwedMessages(TENANT, sender, messageId).stream()
+                .map(resource -> records.readResource(TENANT, sender,
+                        resource))
+                .map(body -> body.replaceAll(
+                        ".*\"messageId\":\"([^\"]+)\".*", "$1"))
+                .toList();
+    }
+
+    // A message waits behind the sender's older ones that still owe their
+    // handover or receipt: older by commit order, never the hashed id's
+    // spelling, and only while the record and its row are both open.
+    @Test
+    void listsTheSendersOlderMessagesStillOwedByCommitOrder() {
+        String sender = UUID.randomUUID().toString();
+        message(sender, "msg_z_consumed", "consumed", owed("msg_z_consumed"));
+        message(sender, "msg_y_accepting", "accepting",
+                owed("msg_y_accepting"));
+        message(sender, "msg_x_given_up", "planned", owed("msg_x_given_up"));
+        message(sender, "msg_w_unknown", "unknown", owed("msg_w_unknown"));
+        // Rows the relay finished with, over records still owing: a closed
+        // sender's or target's leftovers, never scanned again.
+        message(sender, "msg_v_done", "accepting", owed("msg_v_done"));
+        message(sender, "msg_u_orphaned", "planned", owed("msg_u_orphaned"));
+        command(sender, "cmd_open", "planned", "{\"route\":\"to_parent\"}");
+        message(sender, "msg_b_planned", "planned", owed("msg_b_planned"));
+        message(sender, "msg_a_new", "planned", owed("msg_a_new"));
+        store.claim(TENANT, sender, "msg_y_accepting", "owner-a", 31_000,
+                1_000);
+        store.classify(store.claim(TENANT, sender, "msg_x_given_up",
+                "owner-a", 31_000, 1_000), "owner-a", "unknown", "gave up",
+                1_000);
+        store.classify(store.claim(TENANT, sender, "msg_v_done", "owner-a",
+                31_000, 1_000), "owner-a", "done", "target closed", 1_000);
+        store.classify(store.claim(TENANT, sender, "msg_u_orphaned",
+                "owner-a", 31_000, 1_000), "owner-a", "orphaned",
+                "sender closed", 1_000);
+        assertThat(olderOwed(sender, "msg_a_new")).containsExactlyInAnyOrder(
+                "msg_y_accepting", "msg_w_unknown", "msg_b_planned");
+        assertThat(olderOwed(sender, "msg_b_planned"))
+                .containsExactlyInAnyOrder("msg_y_accepting", "msg_w_unknown");
+        assertThat(olderOwed(sender, "msg_y_accepting")).isEmpty();
+        // An entry past the attempt bound holds nothing, even before its
+        // give-up landed on a sender that takes no further revision.
+        String bound = "UPDATE ma_delivery SET attempt_count = ?"
+                + " WHERE source_session_id = ? AND delivery_id = ?";
+        byte[] accepting = "msg_y_accepting".getBytes(StandardCharsets.UTF_8);
+        jdbc.update(bound, SessionMessageRelayStore.MAX_ATTEMPTS - 1, sender,
+                accepting);
+        assertThat(olderOwed(sender, "msg_b_planned"))
+                .contains("msg_y_accepting");
+        jdbc.update(bound, SessionMessageRelayStore.MAX_ATTEMPTS, sender,
+                accepting);
+        assertThat(olderOwed(sender, "msg_b_planned"))
+                .containsExactly("msg_w_unknown");
+    }
+
+    // One commit can open several entries at the same millisecond: the
+    // handover page then takes them in commit order, so the younger one
+    // never meets the older one still owed.
+    @Test
+    void pagesASendersSameMillisecondEntriesInCommitOrder() {
+        String sender = UUID.randomUUID().toString();
+        message(sender, "msg_z_first", "planned", outbound("to_child", "r"));
+        message(sender, "msg_a_second", "planned", outbound("to_child", "r"));
+        jdbc.update("UPDATE ma_session_record SET created_at = 5"
+                + " WHERE session_scope_key = ?",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(TENANT, sender));
+        assertThat(store.findPendingMessages("owner-a", 1_000, 50).stream()
+                .filter(entry -> entry.senderSessionId().equals(sender))
+                .map(PendingMessage::messageId))
+                .containsExactly("msg_z_first", "msg_a_second");
+    }
+
     @Test
     void leasesAdvancesDefersAndClassifiesOnlyForTheClaimant() {
         String sender = UUID.randomUUID().toString();
