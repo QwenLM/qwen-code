@@ -180,14 +180,18 @@ function encodeIndexPathTarget(value: string): string {
 /**
  * Render one index entry. The link target is never shortened, because it is the
  * entry's only functional part; the title yields to {@link MAX_INDEX_LINE_CHARS}
- * so `- [title](target)` fits whenever the path leaves room for at least
+ * so `- [title](target)` fits whenever the encoded path leaves room for at least
  * {@link MIN_INDEX_TITLE_CHARS}, and the description takes whatever room the
- * link leaves — dropped entirely when that room is too small to be useful. An
- * entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} (a path longer
- * than the whole budget) is therefore allowed to run long — a resolving long
- * link beats a short dead one. Grouped siblings reserve their space before the
- * description is rendered; targets that do not fit are dropped whole, never
- * sliced.
+ * link leaves — dropped entirely when that room is too small to be useful.
+ *
+ * "Fits" ends earlier than it looks. The title is floored at
+ * {@link MIN_INDEX_TITLE_CHARS}, so any encoded target longer than
+ * `MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - MIN_INDEX_TITLE_CHARS` — 120
+ * characters — already pushes the line past {@link MAX_INDEX_LINE_CHARS}, not
+ * just a path longer than the whole budget. A resolving long link beats a short
+ * dead one, so those lines are allowed to run long. Grouped siblings reserve
+ * their space before the description is rendered; targets that do not fit are
+ * dropped whole, never sliced.
  */
 function docIndexLine(
   doc: ScannedAutoMemoryDocument,
@@ -195,10 +199,10 @@ function docIndexLine(
 ): string {
   const target = encodeIndexPathTarget(doc.relativePath);
   // The title shares the line budget with the link. Cap it so the assembled
-  // `- [title](target)` fits MAX_INDEX_LINE_CHARS whenever the path leaves room
-  // for even MIN_INDEX_TITLE_CHARS; a path long enough to starve the title is
-  // kept whole (a resolving long link beats a short dead one) and the line runs
-  // long instead, with the title clamped to the floor.
+  // `- [title](target)` fits MAX_INDEX_LINE_CHARS whenever the encoded path
+  // leaves room for even MIN_INDEX_TITLE_CHARS; beyond that the line runs long
+  // instead, with the title clamped to the floor (a resolving long link beats a
+  // short dead one).
   const titleLimit = Math.max(
     MIN_INDEX_TITLE_CHARS,
     MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - target.length,

@@ -459,6 +459,9 @@ describe('managed auto-memory indexer', () => {
     expect(line.length).toBeLessThanOrEqual(150);
     expect(line).toContain('— a hook');
     expect(decodeURIComponent(linkTarget(line))).toBe(relativePath);
+    // Pin the title byte-exactly too: length, hook and target alone stay green
+    // under a budget that over-truncates the title.
+    expect(line.startsWith(`- [${'T'.repeat(120)}](`)).toBe(true);
   });
 
   it('leaves a short title and its hook byte-identical', () => {
@@ -484,11 +487,82 @@ describe('managed auto-memory indexer', () => {
     expect(line).toBe('- [Short title](notes/short.md) — hook');
   });
 
-  it('keeps the whole target and a readable title stub when the path alone exceeds the budget', () => {
-    // Trade-off (issue #13910): when the path is longer than the whole line
-    // budget, no title length can pull the line under 150. The target is kept
-    // whole — a resolving long link beats a short dead one — and the title is
-    // clamped to MIN_INDEX_TITLE_CHARS so the entry stays identifiable.
+  it('runs long as soon as the encoded path passes 120 chars, not only past the whole budget', () => {
+    // The title floor is what ends "fits", and it ends well before the target
+    // alone exceeds MAX_INDEX_LINE_CHARS. With a 120-char target the line lands
+    // on exactly 150; one more character pushes it to 151. The 121–150 band used
+    // to be neither documented nor tested.
+    const build = (pathChars: number) => {
+      const relativePath = `deep/${'d'.repeat(pathChars)}.md`; // pathChars + 8
+      return buildManagedAutoMemoryIndex([
+        {
+          scope: 'project',
+          type: 'feedback',
+          filePath: `/tmp/${relativePath}`,
+          relativePath,
+          filename: `${'d'.repeat(pathChars)}.md`,
+          title: 'T'.repeat(120),
+          description: 'hook',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body: '',
+          mtimeMs: 0,
+        },
+      ]).split('\n')[0];
+    };
+
+    const atBudget = build(112);
+    expect(atBudget.length).toBe(150);
+    expect(atBudget.startsWith(`- [${'T'.repeat(23)}…](`)).toBe(true);
+
+    const oneOver = build(113);
+    expect(oneOver.length).toBe(151);
+    expect(oneOver.startsWith(`- [${'T'.repeat(23)}…](`)).toBe(true);
+  });
+
+  it('budgets the title against the encoded target, not the raw path', () => {
+    // `#` is not URL-safe, so each one costs three characters in the link. A
+    // path that is short in the source but long once encoded still has to shrink
+    // the title; measuring `relativePath.length` instead would leave it whole.
+    const relativePath = `notes/${'#'.repeat(40)}.md`;
+    // `#` is not URL-safe, so each one costs three characters in the link:
+    // `notes/` + 40 x `%23` + `.md` is 129, against a 49-character source path.
+    // (Not `encodeURIComponent`, which also escapes the `/` the indexer keeps.)
+    const encodedTargetLength = 6 + 40 * 3 + 3;
+    expect(relativePath.length).toBe(49);
+
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: `${'#'.repeat(40)}.md`,
+        title: 'T'.repeat(120),
+        description: 'hook',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    // The title is clamped to the 24-char floor, which is only reachable from the
+    // encoded length — the raw length would leave a 95-char title and a 230-char
+    // line.
+    expect(line.length).toBe(6 + 24 + encodedTargetLength);
+    expect(line.startsWith(`- [${'T'.repeat(23)}…](`)).toBe(true);
+  });
+
+  it('keeps the whole target and a readable title stub once the path outgrows the title floor', () => {
+    // Trade-off (issue #13910): the title is floored at MIN_INDEX_TITLE_CHARS,
+    // so once the encoded path passes 120 chars no title length can pull the
+    // line under 150. The target is kept whole — a resolving long link beats a
+    // short dead one — and the title is clamped to the floor so the entry stays
+    // identifiable.
     const relativePath = `deep/${'d'.repeat(160)}.md`;
     const content = buildManagedAutoMemoryIndex([
       {

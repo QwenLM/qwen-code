@@ -223,7 +223,9 @@ describe('managed auto-memory prompt helpers', () => {
       // MAX_INDEX_CHARS — the writer-budget path this test exercises. It was 250
       // spaces before the index title was budgeted against the line (issue
       // #13910); the shorter title shrinks each long line, so the run grew to
-      // keep the fixture over budget.
+      // keep the fixture over budget. It is split across two components rather
+      // than one 293-byte run: a single component is capped at 255 bytes
+      // (NAME_MAX), which the 14 above already sit on exactly.
       const longDocs = ['A', 'B', 'C'].map((label) =>
         doc(
           `reference/${[
@@ -231,7 +233,8 @@ describe('managed auto-memory prompt helpers', () => {
               { length: 14 },
               (_, i) => `${label}${' '.repeat(253)}${i % 10}`,
             ),
-            `${label}${' '.repeat(288)}b.md`,
+            `${label}${' '.repeat(250)}b.md`,
+            `${label}${' '.repeat(37)}c.md`,
           ].join('/')}`,
           label.repeat(120),
         ),
