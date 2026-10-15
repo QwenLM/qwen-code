@@ -19,6 +19,7 @@ import {
   isRetryableUpstreamError,
 } from './retryErrorClassification.js';
 import { retryContext } from './retryContext.js';
+import { beginRetryWait } from './retry-wait.js';
 import { ResponsesHttpError } from './responses-http-error.js';
 
 const debugLogger = createDebugLogger('RETRY');
@@ -231,6 +232,22 @@ async function sleepWithHeartbeat(
 }
 
 /**
+ * Runs one retry-owned backoff sleep as a single announced retry wait, so the
+ * request's owner can tell a scheduled backoff from a hung request.
+ */
+async function observedDelay(
+  delayMs: number,
+  sleep: () => Promise<void>,
+): Promise<void> {
+  const endWait = beginRetryWait(delayMs);
+  try {
+    await sleep();
+  } finally {
+    endWait();
+  }
+}
+
+/**
  * Retries a function with exponential backoff and jitter.
  * Supports persistent retry mode for unattended/CI environments where transient
  * capacity errors (429/529) should be retried indefinitely rather than failing.
@@ -325,7 +342,7 @@ export async function retryWithBackoff<T>(
           `Attempt ${iterationCount}: response rejected by content check. ` +
             `Retrying with backoff in ${Math.ceil(delayMs / 1000)}s...`,
         );
-        await delay(delayMs, signal);
+        await observedDelay(delayMs, () => delay(delayMs, signal));
         // Note: this inflates retryTotalDelayMs beyond what onRetry/ApiRetryEvent
         // reports — content-retry delays are invisible in the api_retry telemetry
         // channel (onRetry only fires from the catch-block error path). The LLM
@@ -482,13 +499,15 @@ export async function retryWithBackoff<T>(
         }
 
         // Heartbeat sleep — chunked to keep CI alive
-        await sleepWithHeartbeat(delayMs, {
-          attempt: reportedAttempt,
-          error,
-          heartbeatInterval,
-          heartbeatFn,
-          signal,
-        });
+        await observedDelay(delayMs, () =>
+          sleepWithHeartbeat(delayMs, {
+            attempt: reportedAttempt,
+            error,
+            heartbeatInterval,
+            heartbeatFn,
+            signal,
+          }),
+        );
         retryTotalDelayMs += delayMs;
 
         // Clamp attempt so the while-loop never exits
@@ -557,7 +576,7 @@ export async function retryWithBackoff<T>(
 
         // Abort-aware: a cancelled request must not stay parked for the full
         // delay (including a provider-directed Retry-After wait).
-        await delay(actualDelayMs, signal);
+        await observedDelay(actualDelayMs, () => delay(actualDelayMs, signal));
         retryTotalDelayMs += actualDelayMs;
       }
     }

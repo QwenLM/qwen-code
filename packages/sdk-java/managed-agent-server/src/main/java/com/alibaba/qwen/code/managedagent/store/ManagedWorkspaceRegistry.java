@@ -3,9 +3,15 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -13,10 +19,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.List;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Repository;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
 public class ManagedWorkspaceRegistry {
@@ -26,17 +28,7 @@ public class ManagedWorkspaceRegistry {
         this.jdbc = jdbc;
     }
 
-    public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
-        if (actorId == null) {
-            return false;
-        }
-        return Integer.valueOf(1).equals(jdbc.queryForObject("SELECT COUNT(*)"
-                + " FROM managed_workspace_create_command WHERE tenant_id = ? AND session_id = ? AND actor_id = ?",
-                Integer.class, tenantId, sessionId, actorKey(tenantId, actorId)));
-    }
-
-    public boolean canRead(String tenantId, String actorId,
-            String workspaceId) {
+    public boolean createdSession(String tenantId, String actorId, String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
@@ -46,40 +38,90 @@ public class ManagedWorkspaceRegistry {
         } catch (IllegalArgumentException error) {
             return false;
         }
-        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_access"
-                + " WHERE tenant_id = ? AND workspace_id = ?"
-                + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND actor_id = ? AND can_read = TRUE",
-                Integer.class, tenantId, workspaceId, tenantId, workspaceId,
-                key).isEmpty();
+        List<byte[]> creators = jdbc.queryForList(
+                "SELECT creator_actor_key FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        return creators.size() == 1 && java.util.Arrays.equals(creators.getFirst(), key);
+    }
+
+    public boolean isSessionOwner(String tenantId, String actorId, String sessionId) {
+        if (actorId == null || actorId.isEmpty()) {
+            return false;
+        }
+        byte[] key;
+        try {
+            key = actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+        List<byte[]> owners = jdbc.queryForList(
+                "SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        return owners.size() == 1 && java.util.Arrays.equals(owners.getFirst(), key);
+    }
+
+    /**
+     * The actor's role on the Workspace; {@link WorkspaceAccess#NONE} for no
+     * grant row or an actor id the registry key cannot encode.
+     */
+    public WorkspaceAccess accessOf(String tenantId, String actorId,
+            String workspaceId) {
+        if (actorId == null || actorId.isEmpty()) {
+            return WorkspaceAccess.NONE;
+        }
+        byte[] key;
+        try {
+            key = actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return WorkspaceAccess.NONE;
+        }
+        java.util.Set<String> visited = new java.util.HashSet<>();
+        while (true) {
+            if (!visited.add(workspaceId)) {
+                return WorkspaceAccess.NONE;
+            }
+            List<String> parents = jdbc.queryForList(
+                    "SELECT parent_workspace_id FROM ma_workspace"
+                            + " WHERE tenant_id = ? AND workspace_id = ? AND workspace_kind = 'CHILD_GIT'",
+                    String.class, tenantId, workspaceId);
+            if (parents.isEmpty()) {
+                break;
+            }
+            if (parents.size() != 1 || parents.getFirst() == null) {
+                return WorkspaceAccess.NONE;
+            }
+            workspaceId = parents.getFirst();
+        }
+        List<String> roles = jdbc.queryForList(
+                "SELECT role FROM ma_workspace_access"
+                        + " WHERE tenant_id = ? AND workspace_id = ?"
+                        + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
+                        + " 'OWNER')",
+                String.class, tenantId, workspaceId,
+                key);
+        // An out-of-enum stored value (only reachable by an out-of-band
+        // write past V53's CHECK) fails closed exactly like a revoked
+        // grant, never into valueOf's IllegalArgumentException.
+        return roles.isEmpty() ? WorkspaceAccess.NONE
+                : WorkspaceAccess.valueOf(roles.getFirst());
+    }
+
+    /** The read half of {@link #accessOf}: one grant read per decision. */
+    public boolean canRead(String tenantId, String actorId,
+            String workspaceId) {
+        return accessOf(tenantId, actorId, workspaceId).canRead();
     }
 
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
         byte[] key = actorKey(tenantId, actorId);
-        return jdbc.query("SELECT r.workspace_id, r.display_name, r.state,"
-                        + " a.can_create FROM managed_workspace_registry r"
-                        + " JOIN managed_workspace_access a ON"
-                        + " a.tenant_id = r.tenant_id"
-                        + " AND a.workspace_id = r.workspace_id"
-                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
-                        + " WHERE r.tenant_id = ?"
-                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND a.actor_id = ? AND a.can_read = TRUE"
-                        + " AND (? IS NULL OR"
-                        + " CAST(CONCAT(r.workspace_id, '!') AS BINARY(513)) >"
-                        + " CAST(CONCAT(?, '!') AS BINARY(513)))"
-                        + " ORDER BY CAST(CONCAT(r.workspace_id, '!')"
-                        + " AS BINARY(513)) LIMIT ?",
-                (result, row) -> summary(result), tenantId, tenantId, key,
-                afterId, afterId, limit);
+        byte[] after = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
+        return jdbc.query("SELECT r.workspace_id, r.display_name, r.state, a.role FROM ma_workspace r"
+                        + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
+                        + " WHERE r.tenant_id = ? AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
+                        + " AND r.workspace_id > ? ORDER BY r.workspace_id LIMIT ?",
+                (result, row) -> summary(result), tenantId, key, after, limit);
     }
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
@@ -87,33 +129,63 @@ public class ManagedWorkspaceRegistry {
         byte[] key = actorKey(tenantId, actorId);
         List<WorkspaceSummary> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
-                        + " a.can_create FROM managed_workspace_registry r"
-                        + " JOIN managed_workspace_access a ON"
+                        + " a.role FROM ma_workspace r"
+                        + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
-                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
                         + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
-                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND a.actor_id = ? AND a.can_read = TRUE",
-                (result, row) -> summary(result), tenantId, workspaceId,
-                tenantId, workspaceId, key);
+                        + " AND a.actor_id = ? AND a.role IN ('READER',"
+                        + " 'OPERATOR', 'OWNER')",
+                (result, row) -> summary(result), tenantId, workspaceId, key);
         return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /**
+     * The batch twin of findReadable for a page of Workspace ids. It carries
+     * the registry's current binding stamp as well, so a page answers the
+     * creator-submit gate from this one read instead of a per-row
+     * bindingCurrent.
+     */
+    public java.util.Map<String, ReadableGrant> findReadable(
+            String tenantId, String actorId,
+            java.util.Collection<String> workspaceIds) {
+        if (workspaceIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        byte[] key = actorKey(tenantId, actorId);
+        String plain = String.join(", ", java.util.Collections.nCopies(
+                workspaceIds.size(), "?"));
+        List<Object> arguments = new java.util.ArrayList<>(
+                workspaceIds.size() + 2);
+        arguments.add(tenantId);
+        arguments.addAll(workspaceIds);
+        arguments.add(key);
+        List<ReadableGrant> rows = jdbc.query(
+                "SELECT r.workspace_id, r.workspace_generation,"
+                        + " r.storage_id, r.state, a.role"
+                        + " FROM ma_workspace r"
+                        + " JOIN ma_workspace_access a ON"
+                        + " a.tenant_id = r.tenant_id"
+                        + " AND a.workspace_id = r.workspace_id"
+                        + " WHERE r.tenant_id = ? AND r.workspace_id IN ("
+                        + plain + ")"
+                        + " AND a.actor_id = ? AND a.role IN ('READER',"
+                        + " 'OPERATOR', 'OWNER')",
+                (result, row) -> readableGrant(result), arguments.toArray());
+        java.util.Map<String, ReadableGrant> result =
+                new java.util.HashMap<>(rows.size() * 2);
+        for (ReadableGrant row : rows) {
+            result.put(row.workspaceId(), row);
+        }
+        return result;
     }
 
     public WorkspaceSummary readableDefault(String tenantId,
             String actorId) {
         List<String> ids = jdbc.queryForList(
-                "SELECT workspace_id FROM managed_workspace_default"
-                        + " WHERE tenant_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))",
-                String.class, tenantId, tenantId);
+                "SELECT workspace_id FROM ma_workspace"
+                        + " WHERE tenant_id = ? AND is_default = TRUE",
+                String.class, tenantId);
         if (ids.isEmpty()) {
             return null;
         }
@@ -127,12 +199,46 @@ public class ManagedWorkspaceRegistry {
         String state = result.getString("state");
         return new WorkspaceSummary(result.getString("workspace_id"),
                 result.getString("display_name"), state,
-                result.getBoolean("can_create")
+                WorkspaceAccess.valueOf(result.getString("role"))
+                        .atLeast(WorkspaceAccess.OPERATOR)
                         && "ACTIVE".equals(state));
+    }
+
+    private static ReadableGrant readableGrant(ResultSet result)
+            throws SQLException {
+        String state = result.getString("state");
+        return new ReadableGrant(result.getString("workspace_id"),
+                result.getLong("workspace_generation"),
+                result.getString("storage_id"),
+                WorkspaceAccess.valueOf(result.getString("role"))
+                        .atLeast(WorkspaceAccess.OPERATOR)
+                        && "ACTIVE".equals(state));
+    }
+
+    /**
+     * Whether the registry still holds the Workspace generation and storage a
+     * Session was bound to; a re-registration changes them.
+     */
+    public boolean bindingCurrent(String tenantId, String workspaceId,
+            long generation, String storageId) {
+        return !jdbc.queryForList("SELECT 1 FROM ma_workspace"
+                + " WHERE tenant_id = ? AND workspace_id = ?"
+                + " AND workspace_generation = ? AND storage_id = ?",
+                Integer.class, tenantId, workspaceId, generation, storageId)
+                .isEmpty();
     }
 
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession) {
+    }
+
+    /**
+     * A readable Workspace with the generation and storage the registry holds
+     * now, so a batch caller can tell whether a Session's recorded binding is
+     * still the current one.
+     */
+    public record ReadableGrant(String workspaceId, long workspaceGeneration,
+            String storageId, boolean canCreateSession) {
     }
 
     public ResolvedBinding resolveForCreation(String tenantId,
@@ -155,11 +261,9 @@ public class ManagedWorkspaceRegistry {
         String workspaceId;
         if (selection == null) {
             List<String> defaults = jdbc.queryForList(
-                    "SELECT workspace_id FROM managed_workspace_default"
-                            + " WHERE tenant_id = ?"
-                            + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                            + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
-                    String.class, tenantId, tenantId);
+                    "SELECT workspace_id FROM ma_workspace"
+                            + " WHERE tenant_id = ? AND is_default = TRUE FOR UPDATE",
+                    String.class, tenantId);
             if (defaults.isEmpty()) {
                 throw workspaceRequired();
             }
@@ -170,14 +274,10 @@ public class ManagedWorkspaceRegistry {
         List<WorkspaceRecord> records = jdbc.query(
                 "SELECT workspace_generation, storage_id, display_name,"
                         + " config_ref, policy_ref, state FROM"
-                        + " managed_workspace_registry WHERE tenant_id = ?"
-                        + " AND workspace_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513)) FOR UPDATE",
+                        + " ma_workspace WHERE tenant_id = ?"
+                        + " AND workspace_id = ? FOR UPDATE",
                 (result, row) -> workspaceRow(tenantId, workspaceId,
-                        result), tenantId, workspaceId, tenantId, workspaceId);
+                        result), tenantId, workspaceId);
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -186,24 +286,21 @@ public class ManagedWorkspaceRegistry {
                     "workspace_not_found", "Workspace not found.");
         }
         List<AccessRow> access = jdbc.query(
-                "SELECT can_read, can_create FROM managed_workspace_access"
+                "SELECT role FROM ma_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND actor_id = ? FOR UPDATE",
-                (result, row) -> new AccessRow(result.getBoolean("can_read"),
-                        result.getBoolean("can_create")), tenantId,
-                workspaceId, tenantId, workspaceId, key);
-        if (access.isEmpty() || !access.getFirst().canRead()) {
+                        + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
+                        + " 'OWNER') FOR UPDATE",
+                (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
+                        result.getString("role"))), tenantId,
+                workspaceId, key);
+        if (access.isEmpty() || !access.getFirst().value().canRead()) {
             if (selection == null) {
                 throw workspaceRequired();
             }
             throw new ApiException(HttpStatus.NOT_FOUND,
                     "workspace_not_found", "Workspace not found.");
         }
-        if (!access.getFirst().canCreate()) {
+        if (!access.getFirst().value().canCreate()) {
             if (selection == null) {
                 throw workspaceRequired();
             }
@@ -267,6 +364,6 @@ public class ManagedWorkspaceRegistry {
             String policyRef) {
     }
 
-    private record AccessRow(boolean canRead, boolean canCreate) {
+    private record AccessRow(WorkspaceAccess value) {
     }
 }

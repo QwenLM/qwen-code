@@ -656,6 +656,15 @@ describe('acpRouteTable – matchRoute', () => {
     });
   });
 
+  it('POST /workspace/trust/grant maps to _qwen/workspace/trust/grant', () => {
+    const result = matchRoute('/workspace/trust/grant', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust/grant');
+    expect(result!.mapping.extractParams(result!.segments, {}, 'POST')).toEqual(
+      {},
+    );
+  });
+
   it('GET /workspace/permissions maps to _qwen/workspace/permissions', () => {
     const result = matchRoute('/workspace/permissions', 'GET');
     expect(result).not.toBeNull();

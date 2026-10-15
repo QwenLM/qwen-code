@@ -47,7 +47,7 @@ import {
   type JournalEntry,
   type WorkflowJournal,
 } from './workflow-journal.js';
-import { resolveBuiltinToolName } from '../../tools/tool-names.js';
+import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
 import { fnCall, fnResponse } from '../../test-utils/model-fixtures.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
@@ -75,6 +75,7 @@ const {
     agentId?: string | null;
     taskName?: string;
     subagentId?: string;
+    executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean };
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): simulates non-GOAL modes, on which the dispatch throws.
@@ -186,9 +187,11 @@ vi.mock('./agent-headless.js', () => ({
       execute: async (
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
+        executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean },
       ) => {
         const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
+          executeOptions,
           name,
           prompt: ctx.get('task_prompt') as string,
           signal,
@@ -1858,6 +1861,9 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
     expect(created[0]!.taskName).toBe('hello');
     expect(created[0]!.subagentId).toBe(created[0]!.agentId);
+    expect(created[0]!.executeOptions).toEqual({
+      enforceTimeLimitDuringRetryWait: true,
+    });
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -2065,6 +2071,23 @@ describe('createProductionDispatch', () => {
       'exit_plan_mode',
       'agent',
     ]);
+  });
+
+  // #13858 S1: the hosted workflow child's subagents carry no tools at
+  // all — the fast path must declare an empty list instead of the
+  // ordinary '*' floor, so no tool-bearing agent() can run against this
+  // Harness's own host from inside a managed child.
+  it('refuseSubagentTools declares an empty tool list on the fast path', async () => {
+    await createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )('hello', { label: 'h1' });
+    expect(created[0]!.toolConfig?.tools).toEqual([]);
+    expect(created[0]!.toolConfig?.disallowedTools).toEqual([]);
   });
 
   // T10 (PR #4732 R1): a non-GOAL terminate mode must throw; otherwise
@@ -2942,11 +2965,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     options?: {
       runConfigOverrides?: unknown;
       modelConfigOverrides?: unknown;
+      toolConfigOverride?: unknown;
       taskName?: string;
       subagentId?: string;
     };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
+    executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean };
   };
 
   /** The minimal surface read after createAgentHeadless returns. */
@@ -3074,6 +3099,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
             modelConfigOverrides?: unknown;
+            toolConfigOverride?: unknown;
             taskName?: string;
             subagentId?: string;
           },
@@ -3089,6 +3115,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               modelConfigOverrides: options?.modelConfigOverrides,
+              toolConfigOverride: options?.toolConfigOverride,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -3101,11 +3128,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               execute: async (
                 _ctx: unknown,
                 signal?: AbortSignal,
+                executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean },
               ): Promise<void> => {
                 const { getCurrentAgentId } = await import(
                   './agent-context.js'
                 );
                 call.executeAgentId = getCurrentAgentId();
+                call.executeOptions = executeOptions;
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   await outcome.runWithEmitter(
                     options.eventEmitter as Emits,
@@ -3410,6 +3439,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
     expect(calls[0].options?.taskName).toBe('find foo');
     expect(calls[0].options?.subagentId).toBe(calls[0].executeAgentId);
+    expect(calls[0].executeOptions).toEqual({
+      enforceTimeLimitDuringRetryWait: true,
+    });
     // The workflow floor must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining(FLOOR),
@@ -3857,6 +3889,98 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         expect.arrayContaining(['agent', 'ask_user_question']),
       );
     });
+
+    // #13858 S1: a host refusing this run's tools (the managed workflow
+    // child) denies every requested tool by its own name at narrow time —
+    // the call is refused with the named reason, never provisioning a
+    // subagent on the wrong host.
+    it('refuseSubagentTools refuses a tool-bearing agent by name before provisioning', async () => {
+      const mgr = dispatchVia(
+        {},
+        'scan',
+        { tools: ['run_shell_command'] },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      await expect(mgr.result).rejects.toThrow(
+        /tools no workflow subagent may use/,
+      );
+      expect(mgr.calls).toHaveLength(0);
+    });
+
+    // #13858 R4-1: a dispatch that names no tools still takes the override
+    // path for any dispatch-affecting option. The definition allowlist
+    // cannot carry an empty list (the manager reads [] as "inherit
+    // everything" and converts it to '*'), so the refusing host hands the
+    // manager the runtime list itself. hosted-workflow-turn.integration.test
+    // pins the same through the real manager.
+    it('refuseSubagentTools declares an empty tool list on the override path', async () => {
+      const { calls } = await dispatched(
+        {},
+        'scan',
+        { model: 'qwen3-coder-plus' },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.options?.toolConfigOverride).toEqual({
+        tools: [],
+        disallowedTools: [],
+      });
+    });
+
+    it('refuseSubagentTools keeps only structured_output for a schema dispatch', async () => {
+      const mgr = dispatchVia(
+        {},
+        'scan',
+        { schema: { type: 'object' } },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      // The fake agent never answers through structured_output; only its
+      // declaration matters here.
+      await mgr.result.catch(() => undefined);
+      expect(mgr.calls).toHaveLength(1);
+      expect(mgr.calls[0]!.options?.toolConfigOverride).toEqual({
+        tools: [ToolNames.STRUCTURED_OUTPUT],
+        disallowedTools: [],
+      });
+    });
+
+    it.each([
+      [{ agentType: 'Explore' }, 'agentType'],
+      [{ isolation: 'worktree' as const }, 'isolation'],
+      [{ workingDir: '/elsewhere' }, 'workingDir'],
+    ])(
+      'refuseSubagentTools refuses %o before resolving anything on this host',
+      async (opts, name) => {
+        const lookup = vi.fn(async () => null);
+        const mgr = dispatchVia(
+          { lookup },
+          'scan',
+          opts,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+        );
+        await expect(mgr.result).rejects.toThrow(
+          `agent({${name}}): unavailable in this workflow`,
+        );
+        expect(lookup).not.toHaveBeenCalled();
+        expect(mgr.calls).toHaveLength(0);
+      },
+    );
 
     it.each([
       [

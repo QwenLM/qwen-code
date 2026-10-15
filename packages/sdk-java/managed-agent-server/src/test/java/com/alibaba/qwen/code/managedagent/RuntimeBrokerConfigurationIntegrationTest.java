@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -15,6 +13,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:runtime-broker-config;MODE=MySQL;"
@@ -34,6 +34,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "qwen.managed-agent.runtime-broker.credential-key="
                 + "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
         "qwen.managed-agent.runtime-broker.provisioner=static",
+        "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
         "qwen.managed-agent.runtime-broker.workspace-id=workspace",
         "qwen.managed-agent.runtime-broker.workspace-cwd=workspace",
         "qwen.managed-agent.runtime-broker.isolation-class=workspace",
@@ -53,6 +54,18 @@ class RuntimeBrokerConfigurationIntegrationTest {
     private SecretProtector secretProtector;
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private org.springframework.context.ApplicationContext context;
+
+    @Test
+    void recoveryTickRunsOnADedicatedScheduler() throws Exception {
+        assertThat(context.containsBean("runtimeRecoveryScheduler")).isTrue();
+        assertThat(context.getBean("runtimeRecoveryScheduler"))
+                .isNotSameAs(context.getBean("taskScheduler"));
+        var scheduled = EmbeddedRuntimeBroker.class.getMethod("recoverSavedRuntimes")
+                .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
+        assertThat(scheduled.scheduler()).isEqualTo("runtimeRecoveryScheduler");
+    }
 
     @Test
     void selectsTheEmbeddedBrokerAsTheRuntimeWarmer() {
@@ -72,7 +85,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     private Integer columnCount(String columnName) {
         return jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.columns "
-                        + "WHERE table_name = 'qwen_runtime_binding' "
+                        + "WHERE table_name = 'ma_runtime_binding' "
                         + "AND column_name = ?",
                 Integer.class, columnName);
     }

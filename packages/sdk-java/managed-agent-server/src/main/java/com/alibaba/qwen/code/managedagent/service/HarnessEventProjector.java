@@ -1,13 +1,15 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
+import com.alibaba.qwen.code.managedagent.store.EventIdentity;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import org.springframework.stereotype.Component;
+
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
-import org.springframework.stereotype.Component;
 
 @Component
 public class HarnessEventProjector {
@@ -87,10 +89,14 @@ public class HarnessEventProjector {
         if (callId == null) {
             callId = string(update.get("callId"));
         }
-        String identity = callId == null
-                ? turnId + ":source:" + sourceId : turnId + ":" + callId;
-        safe.put("itemId", "item_tool_" + UUID.nameUUIDFromBytes(
-                identity.getBytes(StandardCharsets.UTF_8)));
+        // EventIdentity.toolCallItemId is the version-1 rule the stored
+        // event and the published tool result share; only the no-id fallback
+        // diverges, to a separator that no "turnId:callId" can spell.
+        safe.put("itemId", callId == null
+                ? "item_tool_" + UUID.nameUUIDFromBytes(
+                        (turnId + "#source:" + sourceId)
+                                .getBytes(StandardCharsets.UTF_8))
+                : EventIdentity.toolCallItemId(turnId, callId));
         return Map.copyOf(safe);
     }
 

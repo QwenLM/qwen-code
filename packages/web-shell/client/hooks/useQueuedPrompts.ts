@@ -37,6 +37,7 @@ import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
 } from '@qwen-code/sdk/daemon';
+import { IMAGE_ONLY_PROMPT_TEXT } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { EditorHandle } from './useComposerCore';
 import { removeInjectedFromQueue } from '../midTurnDedup';
@@ -391,8 +392,6 @@ function toStoreFiles(
 // The daemon renders a text-less prompt with an image block as this
 // placeholder (`extractPromptText` in packages/acp-bridge/src/bridge.ts); a
 // text-less prompt without one renders as ''.
-const IMAGE_ONLY_PROMPT_TEXT = '[image]';
-
 function pendingPromptTextsMatch(localText: string, serverText: string) {
   return (
     localText === serverText ||
@@ -499,6 +498,8 @@ export interface UseQueuedPromptsResult {
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
+  /** Ask the daemon to deliver the queued mid-turn messages now. */
+  sendQueuedPromptNow: (id: number) => Promise<void>;
   editQueuedPrompt: (id: number) => Promise<void>;
   editLastQueuedPrompt: () => boolean;
   clearQueuedPrompts: () => boolean;
@@ -603,7 +604,9 @@ export function useQueuedPrompts({
   const latestConnectedRef = useRef(connected);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const explicitInsertGenerationsRef = useRef<Map<number, number>>(new Map());
-  const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
+  const submitAbortControllersRef = useRef<Map<number, AbortController>>(
+    new Map(),
+  );
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
   const displayedServerPromptIdsRef = useRef<Set<string>>(new Set());
   const settledServerPromptIdsRef = useRef<Set<string>>(new Set());
@@ -1925,7 +1928,7 @@ export function useQueuedPrompts({
     completedPromptIdOrderRef.current = [];
     appendedBeforeResponsePromptIdsRef.current = new Set();
     removedBeforeResponsePromptIdsRef.current = new Set();
-    for (const controller of submitAbortControllersRef.current) {
+    for (const controller of submitAbortControllersRef.current.values()) {
       controller.abort();
     }
     submitAbortControllersRef.current.clear();
@@ -2252,7 +2255,7 @@ export function useQueuedPrompts({
       const { id: localId, sessionId: targetSessionId } = prompt;
       const ownerToken = ownerTokenRef.current;
       const submitAbort = new AbortController();
-      submitAbortControllersRef.current.add(submitAbort);
+      submitAbortControllersRef.current.set(localId, submitAbort);
       let admissionStarted = false;
       let refreshedInBody = false;
 
@@ -2272,7 +2275,9 @@ export function useQueuedPrompts({
           },
         })
         .then(async (result) => {
-          submitAbortControllersRef.current.delete(submitAbort);
+          if (submitAbortControllersRef.current.get(localId) === submitAbort) {
+            submitAbortControllersRef.current.delete(localId);
+          }
           if (
             !isCurrentOwnerTokenRef.current(ownerToken) ||
             latestSessionIdRef.current !== targetSessionId
@@ -2837,7 +2842,9 @@ export function useQueuedPrompts({
           }
         })
         .catch((error: unknown) => {
-          submitAbortControllersRef.current.delete(submitAbort);
+          if (submitAbortControllersRef.current.get(localId) === submitAbort) {
+            submitAbortControllersRef.current.delete(localId);
+          }
           if (
             !isCurrentOwnerTokenRef.current(ownerToken) ||
             latestSessionIdRef.current !== targetSessionId
@@ -3991,13 +3998,30 @@ export function useQueuedPrompts({
   const removeQueuedPrompt = useCallback(
     (id: number) => {
       const target = queuedPromptsRef.current.find((p) => p.id === id);
-      if (target?.isInserting) return;
-      if (
-        target?.serverState === 'submitting' ||
-        target?.midTurnState === 'submitting'
-      )
-        return;
       if (!target) return;
+      if (target.isInserting || target.isRemoving || target.isEditing) return;
+      if (target.midTurnState === 'submitting') return;
+      if (target.serverState === 'submitting') {
+        let handedOffRemoval = false;
+        for (const [promptId, rowId] of returnedUnboundPromptIdsRef.current) {
+          if (rowId === id) {
+            clearedUnconfirmedPromptIdsRef.current.set(
+              promptId,
+              refreshRequestSeqRef.current,
+            );
+            handedOffRemoval = true;
+            break;
+          }
+        }
+        const next = queuedPromptsRef.current.filter(
+          (prompt) => prompt.id !== id,
+        );
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+        submitAbortControllersRef.current.get(id)?.abort();
+        if (handedOffRemoval) void refreshPendingPrompts(target.sessionId);
+        return;
+      }
       if (target.midTurnState) {
         void removeMidTurnPromptForAction(
           target,
@@ -4020,7 +4044,12 @@ export function useQueuedPrompts({
         t('queue.deleteFailed'),
       );
     },
-    [removeMidTurnPromptForAction, removeServerPromptForAction, t],
+    [
+      refreshPendingPrompts,
+      removeMidTurnPromptForAction,
+      removeServerPromptForAction,
+      t,
+    ],
   );
 
   const insertQueuedPrompt = useCallback(
@@ -4470,7 +4499,7 @@ export function useQueuedPrompts({
       // before it DELETEs, and the sync skips every marked id.
       if (handedOffClear) void refreshPendingPrompts(clearSessionId);
     }
-    for (const controller of submitAbortControllersRef.current) {
+    for (const controller of submitAbortControllersRef.current.values()) {
       controller.abort();
     }
     const serverPrompts = clearablePrompts.filter(
@@ -4585,12 +4614,47 @@ export function useQueuedPrompts({
     sessionActions,
   ]);
 
+  const sendingNowIdsRef = useRef(new Set<number>());
+  const sendQueuedPromptNow = useCallback(
+    async (id: number) => {
+      const target = queuedPromptsRef.current.find(
+        (prompt) => prompt.id === id,
+      );
+      // The daemon delivers every user message waiting in its queue, not
+      // only this row.
+      if (
+        target?.midTurnState !== 'queued' ||
+        !target.midTurnMessageId ||
+        sendingNowIdsRef.current.has(id)
+      ) {
+        return;
+      }
+      sendingNowIdsRef.current.add(id);
+      try {
+        const result = await sessionActions.sendMidTurnMessagesNow({
+          sessionId: target.sessionId,
+        });
+        // None of the user's messages was waiting, so this row has already
+        // left the daemon's queue: refresh it instead of leaving it queued.
+        if (!result.requested && canQueryMidTurn && target.sessionId) {
+          await reconcileMidTurnMessages(target.sessionId);
+        }
+      } catch (error) {
+        reportError(error, t('queue.sendNowFailed'));
+      } finally {
+        sendingNowIdsRef.current.delete(id);
+      }
+    },
+    [canQueryMidTurn, reconcileMidTurnMessages, reportError, sessionActions, t],
+  );
+
   return {
     queuedPrompts: visibleQueuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
