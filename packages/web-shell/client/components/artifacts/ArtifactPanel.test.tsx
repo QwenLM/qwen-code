@@ -39,6 +39,7 @@ const {
     readWorkspaceFileBytes: vi.fn(),
     fileStat: vi.fn(),
     dirList: vi.fn(),
+    uploadWorkspaceFile: vi.fn(),
   };
   return {
     mockActions: {
@@ -459,6 +460,7 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockSecondaryWorkspaceActions.dirList.mockReset();
+  mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
   mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
@@ -648,6 +650,122 @@ describe('ArtifactPanel web previews', () => {
 });
 
 describe('artifact workspace authority', () => {
+  it.each(['/primary', '/secondary'])(
+    'uploads only through the qualified advertised owner for %s',
+    async (cwd) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_upload',
+        'workspace_qualified_rest_core',
+      ];
+      const result = {
+        kind: 'file_upload',
+        path: 'src/file.bin',
+        sizeBytes: 1,
+        hash: 'sha256:test',
+      };
+      mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockResolvedValue(
+        result,
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      const request = { path: 'src/file.bin', data: new Blob(['x']) };
+      await expect(
+        latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile!(request),
+      ).resolves.toEqual(result);
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(
+        mockSecondaryWorkspaceActions.uploadWorkspaceFile,
+      ).toHaveBeenCalledWith(request, undefined);
+    },
+  );
+
+  it.each([[], ['workspace_file_upload'], ['workspace_qualified_rest_core']])(
+    'does not expose uploads without both capabilities: %j',
+    (features) => {
+      mockWorkspace.capabilities.features = features;
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      expect(
+        latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile,
+      ).toBeUndefined();
+    },
+  );
+
+  it('does not expose uploads for an id-less legacy workspace even with both capabilities', () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+      features: ['workspace_file_upload', 'workspace_qualified_rest_core'],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd="/primary" />,
+      ),
+    );
+    expect(
+      latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile,
+    ).toBeUndefined();
+    expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it.each(['capability', 'owner'])(
+    'rejects captured and pending uploads after %s revocation',
+    async (revocation) => {
+      mockWorkspace.capabilities.features = [
+        'workspace_file_upload',
+        'workspace_qualified_rest_core',
+      ];
+      let finish!: (value: unknown) => void;
+      mockSecondaryWorkspaceActions.uploadWorkspaceFile.mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+      const upload =
+        latestArtifactWorkspaceTarget!.actions.uploadWorkspaceFile!;
+      const request = { path: 'file.bin', data: new Blob(['x']) };
+      const pending = upload(request);
+      if (revocation === 'capability') mockWorkspace.capabilities.features = [];
+      else
+        mockWorkspace.capabilities = {
+          ...mockWorkspace.capabilities,
+          workspaces: mockWorkspace.capabilities.workspaces.filter(
+            (entry) => entry.cwd !== '/secondary',
+          ),
+        };
+      act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+      finish({
+        kind: 'file_upload',
+        path: 'file.bin',
+        sizeBytes: 1,
+        hash: 'sha256:test',
+      });
+      await expect(pending).rejects.toThrow(/no longer available/);
+      await expect(upload(request)).rejects.toThrow(/no longer available/);
+      expect(
+        mockSecondaryWorkspaceActions.uploadWorkspaceFile,
+      ).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each(['/primary', '/secondary'])(
     'lists directories through the advertised owner for %s',
     async (cwd) => {

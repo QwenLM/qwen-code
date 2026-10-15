@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import org.junit.jupiter.api.Test;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -11,7 +11,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class SessionEventHubTest {
     @Test

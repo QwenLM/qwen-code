@@ -1,15 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.ManagedArtifactController;
@@ -42,6 +32,16 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class ManagedArtifactApiIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -209,12 +209,12 @@ class ManagedArtifactApiIntegrationTest {
                 .isEqualTo("SEALED");
         assertThat(fixture.sessions().findEvents("tenant-1", "session-1", 0, 100)).hasSize(1);
 
-            var fixtureJson = JSON.createObjectNode();
-            fixtureJson.set("toolResult", JSON.readTree(result));
-            fixtureJson.set("artifactList", JSON.readTree(list));
-            fixtureJson.set("transcript", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", null, 100)));
-            String before = Long.toString(fixture.sessions().requireSession("tenant-1", "session-1").lastSequence() + 1);
-            fixtureJson.set("events", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", before, 100).events()));
+        var fixtureJson = JSON.createObjectNode();
+        fixtureJson.set("toolResult", JSON.readTree(result));
+        fixtureJson.set("artifactList", JSON.readTree(list));
+        fixtureJson.set("transcript", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", null, 100)));
+        String before = Long.toString(fixture.sessions().requireSession("tenant-1", "session-1").lastSequence() + 1);
+        fixtureJson.set("events", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", before, 100).events()));
         String output = System.getProperty("qwen.o3.fixture-output");
         if (output != null) {
             Files.writeString(Path.of(output), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(fixtureJson));

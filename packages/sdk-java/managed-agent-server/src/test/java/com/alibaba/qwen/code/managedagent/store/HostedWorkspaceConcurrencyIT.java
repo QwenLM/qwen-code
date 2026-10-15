@@ -1,25 +1,33 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.tools.Server;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
@@ -42,16 +50,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.h2.tools.Server;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedWorkspaceConcurrencyIT {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -159,7 +159,9 @@ class HostedWorkspaceConcurrencyIT {
                 var executionStore = new JdbcToolExecutionRepository(source);
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
                 while (executionStore.findByExecutionCallId(execution).getResult() == null) {
-                    if (System.nanoTime() > deadline) throw new AssertionError("Tool did not settle");
+                    if (System.nanoTime() > deadline) {
+                        throw new AssertionError("Tool did not settle");
+                    }
                     Thread.sleep(10);
                 }
                 assertThat(executionStore.findByExecutionCallId(execution).getResult())
@@ -229,9 +231,13 @@ class HostedWorkspaceConcurrencyIT {
                 failure.addSuppressed(cleanupFailure);
             } finally {
                 try {
-                    if (h2 != null) h2.stop();
+                    if (h2 != null) {
+                        h2.stop();
+                    }
                 } catch (RuntimeException | Error stopFailure) {
-                    if (failure == null) throw stopFailure;
+                    if (failure == null) {
+                        throw stopFailure;
+                    }
                     failure.addSuppressed(stopFailure);
                 }
             }
@@ -244,7 +250,7 @@ class HostedWorkspaceConcurrencyIT {
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        return new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> { },
+        return new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
                 new ManagedWorkspaceRegistry(jdbc), properties);
     }
 
@@ -273,10 +279,14 @@ class HostedWorkspaceConcurrencyIT {
     private static WorkspaceStorageGuard guard(DriverManagerDataSource source, ManagedAgentProperties properties) {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
-        if (LINUX) return new WorkspaceStorageGuard(jdbc, manager, properties);
+        if (LINUX) {
+            return new WorkspaceStorageGuard(jdbc, manager, properties);
+        }
         return new WorkspaceStorageGuard(jdbc, manager, properties, root -> {
             var attributes = Files.readAttributes(root, BasicFileAttributes.class);
-            if (!attributes.isDirectory() || !root.equals(root.toRealPath())) throw new java.io.IOException("Invalid root");
+            if (!attributes.isDirectory() || !root.equals(root.toRealPath())) {
+                throw new java.io.IOException("Invalid root");
+            }
             return new WorkspaceStorageGuard.Identity(root.toString(), "synthetic-host", "synthetic-device",
                     attributes.fileKey().toString(), attributes.creationTime().toInstant().toString());
         });
@@ -291,7 +301,9 @@ class HostedWorkspaceConcurrencyIT {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
         while (!Files.exists(path)) {
             assertThat(process.isAlive()).as("Broker exited before %s", path).isTrue();
-            if (System.nanoTime() > deadline) throw new AssertionError("Barrier timeout: " + path);
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Barrier timeout: " + path);
+            }
             Thread.sleep(10);
         }
     }
@@ -306,8 +318,10 @@ class HostedWorkspaceConcurrencyIT {
         Broker(String name, Map<String, Object> configuration) throws Exception {
             directory = Files.createDirectory(temporary.resolve(name));
             Files.createDirectory(directory.resolve("state"));
-            if (LINUX) Files.setPosixFilePermissions(directory.resolve("state"),
-                    PosixFilePermissions.fromString("rwx------"));
+            if (LINUX) {
+                Files.setPosixFilePermissions(directory.resolve("state"),
+                        PosixFilePermissions.fromString("rwx------"));
+            }
             JSON.writeValue(directory.resolve("config.json").toFile(), configuration);
             process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(),
                     "-Dnode.executable=" + System.getProperty("node.executable", "node"),
@@ -388,7 +402,9 @@ class HostedWorkspaceConcurrencyIT {
                     throw new AssertionError("Request returned before the physical claim barrier: status="
                             + response.statusCode() + " body=" + response.body());
                 }
-                if (System.nanoTime() > deadline) throw new AssertionError("Barrier timeout: " + path);
+                if (System.nanoTime() > deadline) {
+                    throw new AssertionError("Barrier timeout: " + path);
+                }
                 Thread.sleep(10);
             }
         }
@@ -412,7 +428,9 @@ class HostedWorkspaceConcurrencyIT {
             awaitFile(directory.resolve("result.json"), process);
             JsonNode result = JSON.readTree(directory.resolve("result.json").toFile());
             assertThat(result.get("ok").asBoolean()).as("%s", result).isEqualTo(success);
-            if (!success) assertThat(result.get("code").asText()).isEqualTo("workspace_unavailable");
+            if (!success) {
+                assertThat(result.get("code").asText()).isEqualTo("workspace_unavailable");
+            }
         }
         @Override public void close() throws Exception {
             var workers = process.descendants().toList();
@@ -449,15 +467,21 @@ class HostedWorkspaceConcurrencyIT {
                 private void pause(String stage) {
                     try {
                         Path armed = directory.resolve("armed");
-                        if (!Files.exists(armed) || !Files.readString(armed).equals(stage)) return;
+                        if (!Files.exists(armed) || !Files.readString(armed).equals(stage)) {
+                            return;
+                        }
                         Files.delete(armed);
                         Files.writeString(directory.resolve("reached"), stage);
                         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
                         while (!Files.exists(directory.resolve("resume"))) {
-                            if (System.nanoTime() > deadline) throw new IllegalStateException("Barrier timeout " + stage);
+                            if (System.nanoTime() > deadline) {
+                                throw new IllegalStateException("Barrier timeout " + stage);
+                            }
                             Thread.sleep(10);
                         }
-                    } catch (Exception error) { throw new IllegalStateException(error); }
+                    } catch (Exception error) {
+                        throw new IllegalStateException(error);
+                    }
                 }
                 @Override public void claim(ContextBinding binding, RuntimeSessionRecord session) {
                     pause("before-claim");
@@ -520,7 +544,9 @@ class HostedWorkspaceConcurrencyIT {
                             default -> throw new IllegalArgumentException("Unknown fixture command");
                         }
                         result = Map.of("ok", true);
-                    } catch (RuntimeBrokerException error) { result = Map.of("ok", false, "code", error.getCode()); }
+                    } catch (RuntimeBrokerException error) {
+                        result = Map.of("ok", false, "code", error.getCode());
+                    }
                     publish(directory.resolve("result.json"), result);
                 }
             }

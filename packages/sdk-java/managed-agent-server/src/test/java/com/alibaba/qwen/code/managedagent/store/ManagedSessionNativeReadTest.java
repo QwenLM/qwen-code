@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -39,6 +36,9 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSessionNativeReadTest {
     private static final String TOKEN = "csi-original-writer-token-for-test";
@@ -97,7 +97,7 @@ class ManagedSessionNativeReadTest {
 
     @AfterEach
     void closeOwnedDatabase() {
-        source.onFetch = () -> { };
+        source.onFetch = () -> {};
         source.closeFailure = "";
         jdbc.execute("SHUTDOWN");
     }
@@ -200,7 +200,7 @@ class ManagedSessionNativeReadTest {
     @Test
     void completionIdentityFailurePreservesOpenAndOriginalFetchError() {
         source.onFetch = () -> {
-                    tamperReadWriter();
+            tamperReadWriter();
             throw new IllegalArgumentException("owned fetch failure");
         };
         assertThatThrownBy(this::read).isInstanceOf(IllegalArgumentException.class)
@@ -346,7 +346,7 @@ class ManagedSessionNativeReadTest {
     }
 
     private static final class FaultSource extends DelegatingDataSource {
-        private Runnable onFetch = () -> { };
+        private Runnable onFetch = () -> {};
         private String closeFailure = "";
 
         private FaultSource(DriverManagerDataSource source) {
