@@ -7,9 +7,12 @@
 The user approved this first-release scope on 2026-10-14. The resident branches
 are implemented. Local checks and independent worker protocol, Java data and
 Spring configuration validation have passed. The ordinary public Hosted handoff
-has passed locally with H2 and declared placement. The ACK application starts,
-but its first Turn failed during worker admission and normal close remains
-blocked; the complete ACK handoff remains unverified. This
+has passed locally with H2 and declared placement. The latest ACK trial started
+the original worker, but its first Turn failed because the resident adapter
+dropped the durable provision seed. Normal close remained blocked; the approved
+synthetic test state and all trial resources were normally cleaned up. The seed
+forwarding fix has independent local verification; the complete ACK handoff
+remains unverified. This
 document supersedes the automatic retirement
 and volume reuse requirements of the earlier K2 completion plan for this release.
 Those designs and their evidence remain future work, not acceptance evidence for
@@ -60,6 +63,10 @@ The selected request uses Workspace isolation with a null isolation key, the
 IDs remain real independent IDs. The shared request key is never written into
 `ma_session.runtime_request_key`: that column belongs to the old private CSI
 retirement lane and is covered by its generated guard.
+
+The resident adapter forwards both the original request and Broker-persisted
+provision seed to the selected CSI provider. The unseeded entry point remains
+unavailable; it cannot reconstruct or replace the original credentials.
 
 The existing CSI reservation pins the shared binding and generation. The actual
 Runtime Session row owns the logical context; Session release changes that row

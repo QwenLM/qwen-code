@@ -81,6 +81,11 @@ final class ResidentWorkspaceProvisioner implements RuntimeProvisioner {
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) { return selected(request).provision(request); }
 
     @Override
+    public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return selected(request).provision(request, seed);
+    }
+
+    @Override
     public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle handle) { return selected(request).ensureResource(request, seed, handle); }
 

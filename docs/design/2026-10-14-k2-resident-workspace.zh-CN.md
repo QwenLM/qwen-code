@@ -6,8 +6,10 @@
 
 用户于 2026-10-14 批准这一首版范围。常驻分支已实现，本地检查和独立 worker
 协议、Java 数据及 Spring 配置验证均通过；普通公开 Hosted 切换已在 H2 和明示
-测试放置下通过本地验证。ACK 应用已启动，但首个 Turn 在 worker 接入时失败，
-正常关闭仍被阻塞，完整 ACK 切换尚未验收。本设计替代此前 K2
+测试放置下通过本地验证。最新 ACK 实验已启动原 worker，但常驻适配层丢失了
+持久化 provision seed，导致首个 Turn 失败，正常关闭仍被阻塞。已按批准范围
+丢弃合成测试状态并正常清理全部实验资源。seed 转发修复已有独立本地验证，
+完整 ACK 切换尚未验收。本设计替代此前 K2
 完成计划中本版的自动退役和卷复用要求。原设计及证据保留为后续工作，不能作为
 本版验收证据。
 
@@ -48,6 +50,9 @@ DNSCache 自动注入。provisioner 只接受 `nameservers`、`searches` 和 `op
 摘要和固定 storage ID。Session ID 始终是独立的真实 ID。共享 request key 不写入
 `ma_session.runtime_request_key`：该列属于旧私有 CSI 退役路径，并受其生成字段
 guard 约束。
+
+常驻适配层把原请求和 Broker 持久化的 provision seed 一并转发给选中的 CSI
+provider。无 seed 的入口保持不可用，不能重新构造或替换原凭据。
 
 现有 CSI reservation 钉住共享绑定和代数。真实 Runtime Session 行拥有逻辑
 上下文；Session 释放把该行改为 RELEASED，不写物理 owner，保留
