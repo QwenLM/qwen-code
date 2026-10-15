@@ -6,6 +6,9 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -14,6 +17,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.security.GeneralSecurityException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -338,7 +342,7 @@ final class ManagedSnapshotStore {
                             status -> {
                                 Root root;
                                 Cursor position;
-                                if (cursor == null || cursor.isBlank()) {
+                                if (StringUtils.isBlank(cursor)) {
                                     lockStream(tenant, session);
                                     List<Root> roots = current(tenant, session);
                                     if (roots.isEmpty()) {
@@ -401,7 +405,7 @@ final class ManagedSnapshotStore {
                         Root root = start.root();
                         Cursor position = start.cursor();
                         Manifest manifest = manifest(root, tenant, session);
-                        if (cursor != null && !cursor.isBlank()) {
+                        if (StringUtils.isNotBlank(cursor)) {
                             verifyCursor(cursor, manifest);
                         }
                         if (position.page() < 0
@@ -411,7 +415,7 @@ final class ManagedSnapshotStore {
                         }
                         int page = position.page();
                         int offset = position.offset();
-                        if (cursor == null || cursor.isBlank()) {
+                        if (StringUtils.isBlank(cursor)) {
                             List<Integer> starts =
                                     jdbc.query(
                                             "SELECT snapshot_page_ordinal FROM ma_resource WHERE"
@@ -785,13 +789,13 @@ final class ManagedSnapshotStore {
 
     private static byte[] cursorMac(byte[] payload, String secret) {
         try {
-            var mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(
-                    new javax.crypto.spec.SecretKeySpec(
-                            Base64.getDecoder().decode(secret), "HmacSHA256"));
-            return mac.doFinal(payload);
-        } catch (java.security.GeneralSecurityException error) {
-            throw new IllegalStateException("Snapshot cursor signing is unavailable", error);
+            return new HmacUtils(HmacAlgorithms.HMAC_SHA_256,
+                    Base64.getDecoder().decode(secret)).hmac(payload);
+        } catch (IllegalArgumentException error) {
+            if (error.getCause() instanceof GeneralSecurityException cause) {
+                throw new IllegalStateException("Snapshot cursor signing is unavailable", cause);
+            }
+            throw error;
         }
     }
 
