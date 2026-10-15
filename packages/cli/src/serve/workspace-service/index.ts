@@ -1627,6 +1627,7 @@ export function createDaemonWorkspaceService(
         }
         return await refreshExtensionsForAllSessionsOnBridge(sessionIds);
       } catch (err) {
+        if (err instanceof SessionNotFoundError) throw err;
         writeStderrLine(
           `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
         );

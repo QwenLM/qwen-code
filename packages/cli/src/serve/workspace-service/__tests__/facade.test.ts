@@ -3509,6 +3509,17 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('refreshExtensionsForAllSessions', () => {
+    it('propagates a session lookup rejection from the refresh callback', async () => {
+      const error = new SessionNotFoundError('session-gone');
+      const refreshExtensionsForAllSessions = vi.fn().mockRejectedValue(error);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ refreshExtensionsForAllSessions }),
+      );
+      await expect(
+        svc.refreshExtensionsForAllSessions(['session-1', 'session-gone']),
+      ).rejects.toBe(error);
+    });
+
     it('passes selected sessions to the refresh callback', async () => {
       const refreshExtensionsForAllSessions = vi
         .fn()

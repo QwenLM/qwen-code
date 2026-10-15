@@ -5861,15 +5861,11 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
-  it('refreshes only selected extensions and validates every id before refreshing', async () => {
+  it('refreshes only selected extensions', async () => {
     const handle = makeChannel();
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    const foreign = makeBridge({
-      boundWorkspace: WS_B,
-      channelFactory: async () => makeChannel().channel,
-    });
     try {
-      const first = await bridge.spawnOrAttach({
+      await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
@@ -5881,17 +5877,9 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
         sessionScope: 'thread',
       });
-      const other = await foreign.spawnOrAttach({ workspaceCwd: WS_B });
       await expect(
         bridge.refreshExtensionsForAllSessions(undefined, { sessionIds: [] }),
       ).resolves.toEqual({ refreshed: 0, failed: 0 });
-      for (const invalid of ['missing', other.sessionId]) {
-        await expect(
-          bridge.refreshExtensionsForAllSessions(undefined, {
-            sessionIds: [first.sessionId, invalid],
-          }),
-        ).rejects.toBeInstanceOf(SessionNotFoundError);
-      }
       expect(handle.agent.extMethodCalls).toEqual([]);
       await expect(
         bridge.refreshExtensionsForAllSessions(undefined, {
@@ -5909,7 +5897,44 @@ describe('createAcpSessionBridge', () => {
         },
       ]);
     } finally {
-      await Promise.all([bridge.shutdown(), foreign.shutdown()]);
+      await bridge.shutdown();
+    }
+  });
+
+  it('refreshes survivors when a selected extension session closes after admission', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      bridge.getSessionSummary(first.sessionId);
+      bridge.getSessionSummary(second.sessionId);
+      await bridge.killSession(second.sessionId);
+      await expect(
+        bridge.refreshExtensionsForAllSessions(undefined, {
+          sessionIds: [first.sessionId, second.sessionId, second.sessionId],
+        }),
+      ).resolves.toEqual({ refreshed: 1, failed: 1 });
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method ===
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        ),
+      ).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          params: { sessionId: first.sessionId },
+        },
+      ]);
+    } finally {
+      await bridge.shutdown();
     }
   });
 

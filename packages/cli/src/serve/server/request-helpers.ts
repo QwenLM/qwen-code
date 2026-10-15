@@ -129,11 +129,19 @@ export function safeBody(req: Request): Record<string, unknown> {
 }
 
 export function parseRefreshSessionIds(
-  body: Record<string, unknown>,
+  body: unknown,
   res: Response,
   bridge: Pick<AcpSessionBridge, 'getSessionSummary'>,
 ): { sessionIds?: string[] } | undefined {
-  const sessionIds = body['sessionIds'];
+  if (body === undefined) return {};
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    res.status(400).json({
+      error: 'request body must be a JSON object',
+      code: 'invalid_request_body',
+    });
+    return undefined;
+  }
+  const sessionIds = (body as Record<string, unknown>)['sessionIds'];
   if (sessionIds === undefined) return {};
   if (
     !Array.isArray(sessionIds) ||

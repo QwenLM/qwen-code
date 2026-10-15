@@ -16,7 +16,7 @@ Extension REST 刷新可以选择 workspace runtime，但会刷新其中全部�
 
 ## 分层实现
 
-REST 在提交工作前验证请求形状与会话归属。Workspace service 和 Extension operation controller 透传选择条件。Extension bridge 在现有 bootstrap 去重、逐会话刷新、重试和事件处理之前筛选会话记录。计数描述选中的会话；workspace 事件仍是 workspace 范围的通知。
+REST 在提交工作前验证请求形状与会话归属。Workspace service 和 Extension operation controller 透传选择条件。Extension bridge 在现有 bootstrap 去重、逐会话刷新、重试和事件处理之前筛选会话记录。计数描述选中的会话；workspace 事件仍是 workspace 范围的通知。HTTP 接收请求时检查会话归属。如果选中的 Extension 会话在排队期间关闭，执行时将其计入失败并继续刷新其余选中会话。请求携带非对象 JSON 时，在任何刷新前拒绝。
 
 Skill ACP 命令接受 `sessionIds`，在重载设置或缓存前验证全部选中的本地会话。Bridge 收到指定会话的 Skill 刷新时，按会话所属 channel 分组，只向这些 channel 调用命令。该路径绕过常规 workspace-change 广播，避免刷新未选中的 execution engine。省略字段时的路径保持不变。各 channel 的结果计数合并，channel 失败计入该 channel 选中的会话数。
 

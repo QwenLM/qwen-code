@@ -1515,7 +1515,7 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
-        const input = parseRefreshSessionIds(safeBody(req), res, bridge);
+        const input = parseRefreshSessionIds(req.body, res, bridge);
         if (!input) return;
         if (
           !ctrl.validateExtensionMutationClient(req, res, {
@@ -2738,7 +2738,7 @@ export function registerWorkspaceExtensionRoutes(
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
         let input: { sessionIds?: string[] } | undefined;
         try {
-          input = parseRefreshSessionIds(safeBody(req), res, runtime.bridge);
+          input = parseRefreshSessionIds(req.body, res, runtime.bridge);
         } catch (error) {
           sendBridgeError(res, error, {
             route: 'POST /workspaces/:workspace/extensions/refresh',

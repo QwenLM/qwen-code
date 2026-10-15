@@ -236,6 +236,20 @@ describe('workspace Skill management routes', () => {
     '/workspace/skills/refresh',
     '/workspaces/workspace-1/skills/refresh',
   ])('explicit refresh at %s', (path) => {
+    it.each(['[]', '["session-1"]'])(
+      'rejects the bare array %s before refreshing',
+      async (body) => {
+        const h = createHarness();
+        const response = await request(h.app)
+          .post(path)
+          .set('Content-Type', 'application/json')
+          .send(body);
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_request_body');
+        expect(h.refreshWorkspaceSkills).not.toHaveBeenCalled();
+      },
+    );
+
     it('invalidates config status when the refresh loses its channel', async () => {
       const h = createHarness();
       h.refreshWorkspaceSkills.mockRejectedValue(

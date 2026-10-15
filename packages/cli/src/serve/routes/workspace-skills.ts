@@ -487,11 +487,7 @@ export function registerWorkspaceSkillsRoutes(
       if (clientId === null) return;
       const refreshRoute = 'POST /workspace/skills/refresh';
       try {
-        const input = parseRefreshSessionIds(
-          deps.safeBody(req),
-          res,
-          runtime.bridge,
-        );
+        const input = parseRefreshSessionIds(req.body, res, runtime.bridge);
         if (!input) return;
         const result = await runtime.workspaceService.refreshWorkspaceSkills(
           buildWorkspaceCtx(refreshRoute, clientId),
@@ -665,11 +661,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       if (clientId === null) return;
       const refreshRoute = 'POST /workspaces/:workspace/skills/refresh';
       try {
-        const input = parseRefreshSessionIds(
-          deps.safeBody(req),
-          res,
-          runtime.bridge,
-        );
+        const input = parseRefreshSessionIds(req.body, res, runtime.bridge);
         if (!input) return;
         const result = await runtime.workspaceService.refreshWorkspaceSkills(
           createBuildWorkspaceCtx(runtime.workspaceCwd)(refreshRoute, clientId),

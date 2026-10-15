@@ -1983,6 +1983,40 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it.each([false, true])(
+    'rejects bare array refresh bodies before submission (qualified=%s)',
+    async (qualified) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      try {
+        const route = qualified
+          ? '/workspaces/' +
+            encodeURIComponent(h.secondary.workspaceId) +
+            '/extensions/refresh'
+          : '/workspace/extensions/refresh';
+        for (const body of ['[]', '["selected-session"]']) {
+          const response = await auth(
+            request(h.app)
+              .post(route)
+              .set('Content-Type', 'application/json')
+              .send(body),
+          );
+          expect(response.status).toBe(400);
+          expect(response.body.code).toBe('invalid_request_body');
+          expect(response.body.operationId).toBeUndefined();
+        }
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
     { sessionIds: [] },
     { sessionIds: ['selected-session', 'selected-session'] },

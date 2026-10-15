@@ -14122,14 +14122,18 @@ export function createSessionControlPlane(
 
     async refreshExtensionsForAllSessions(data, options) {
       const skillsOnly = options?.skillsOnly === true;
-      const sessions =
+      const selectedIds =
         options?.sessionIds === undefined
+          ? undefined
+          : [...new Set(options.sessionIds)];
+      const sessions =
+        selectedIds === undefined
           ? Array.from(byId.values())
-          : [...new Set(options.sessionIds)].map((id) => {
+          : selectedIds.flatMap((id) => {
               const entry = byId.get(id);
-              if (!entry) throw new SessionNotFoundError(id);
-              return entry;
+              return entry ? [entry] : [];
             });
+      const missing = selectedIds ? selectedIds.length - sessions.length : 0;
       const bootstrapRefreshConnections = new Set<
         (typeof sessions)[number]['connection']
       >();
@@ -14247,7 +14251,10 @@ export function createSessionControlPlane(
         (sum, result) => sum + result.refreshed,
         0,
       );
-      const failed = results.reduce((sum, result) => sum + result.failed, 0);
+      const failed = results.reduce(
+        (sum, result) => sum + result.failed,
+        missing,
+      );
 
       if (refreshed > 0 || failed > 0 || data?.status !== undefined) {
         broadcastWorkspaceEvent({

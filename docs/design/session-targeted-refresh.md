@@ -16,7 +16,7 @@ Advertise `workspace_session_refresh` for the new Skill routes and session selec
 
 ## Implementation by layer
 
-REST validates request shape and session ownership before submitting work. Workspace services and the Extension operation controller pass the selection through. The Extension bridge filters its session entries before its existing bootstrap deduplication, per-session refresh, retry and event handling. Counts describe the selected sessions; workspace events remain workspace-wide notifications.
+REST validates request shape and session ownership before submitting work. Workspace services and the Extension operation controller pass the selection through. The Extension bridge filters its session entries before its existing bootstrap deduplication, per-session refresh, retry and event handling. Counts describe the selected sessions; workspace events remain workspace-wide notifications. Ownership is checked at HTTP admission. If a selected Extension session closes while queued, execution counts it as failed and continues refreshing the surviving selections. Present non-object JSON bodies are rejected before any refresh.
 
 The Skill ACP command accepts `sessionIds` and validates all selected local sessions before reloading settings or caches. When the bridge receives a selected Skill refresh, it groups selected sessions by their owner channel and invokes the command only on those channels. It bypasses the normal workspace-change broadcast, which would otherwise refresh unrelated execution engines. The omitted-field path remains unchanged. Channel result counts are combined, and failures count against that channel's selected sessions.
 

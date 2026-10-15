@@ -28,6 +28,29 @@ describe('requireSessionId', () => {
 });
 
 describe('parseRefreshSessionIds', () => {
+  it.each([undefined, {}])('accepts an omitted selection in %j', (body) => {
+    const { res, status } = mockRes();
+    const getSessionSummary = vi.fn();
+    expect(parseRefreshSessionIds(body, res, { getSessionSummary })).toEqual(
+      {},
+    );
+    expect(status).not.toHaveBeenCalled();
+    expect(getSessionSummary).not.toHaveBeenCalled();
+  });
+
+  it.each(['[]', '["session-1"]', 'null', '42', '"session-1"', 'true'])(
+    'rejects a non-object request body %s without looking up sessions',
+    (json) => {
+      const { res, status } = mockRes();
+      const getSessionSummary = vi.fn();
+      expect(
+        parseRefreshSessionIds(JSON.parse(json), res, { getSessionSummary }),
+      ).toBeUndefined();
+      expect(status).toHaveBeenCalledWith(400);
+      expect(getSessionSummary).not.toHaveBeenCalled();
+    },
+  );
+
   it('normalizes caller UUIDs before deduplication and lookup', () => {
     const { res, status } = mockRes();
     const getSessionSummary = vi.fn();
