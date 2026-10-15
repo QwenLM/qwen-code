@@ -109,7 +109,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
       );
       expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+        { test: 7, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
       );
       if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
