@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -22,7 +23,7 @@ public final class WorkspaceCsiRegistrationMain {
         String url = System.getenv("K2_JDBC_URL");
         String user = System.getenv("K2_JDBC_USER");
         String password = System.getenv("K2_JDBC_PASSWORD");
-        if (url == null || url.isBlank() || user == null || user.isBlank() || password == null) {
+        if (StringUtils.isBlank(url) || StringUtils.isBlank(user) || password == null) {
             throw new IllegalStateException("K2_JDBC_URL, K2_JDBC_USER and K2_JDBC_PASSWORD are required");
         }
         ObjectMapper json = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)

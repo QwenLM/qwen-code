@@ -9,6 +9,7 @@ import {
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
+import { rejectionDetail } from './hosted-never-started-reconcile.js';
 
 import {
   readHostedFileHistory,
@@ -156,6 +157,7 @@ import {
   hostedPromptKey,
   hostedRouteDetails,
   memberPreambleIdentity,
+  lostMessagesAction,
   neverStartedClause,
   neverStartedPhrase,
   teamMemberPreamble,
@@ -742,26 +744,25 @@ type HostedChildMessageRoute = Awaited<
 type HostedSentRoute = Exclude<HostedChildMessageRoute, { kind: 'refused' }>;
 
 /**
- * H4e-b2: the continuation taken before this one never started, so the
- * work it carried and the messages it lost are asked for again — unless
- * the send carries them, or, when this send did not arrive either, the
- * resend it asks for.
+ * H4e-b2: the continuation taken before this one never started, so its
+ * work is asked for again unless this send carries it. A lost message is
+ * asked for only when its own answer has not already done so.
  */
 function previousNote(route: HostedSentRoute): string {
   const previous = route.previousNeverStarted;
   if (previous === undefined) return '';
-  const lost = previous.lostMessages > 0;
-  const what = `that work${lost ? ' and those messages' : ''}`;
-  const them = lost ? 'them' : 'it';
   const carrier =
     route.ownNeverStarted === undefined
       ? 'this message'
       : 'your resend of this message';
-  return ` Its previous continuation ${neverStartedClause(previous)}; ${
-    previous.cancelled
-      ? `send ${what} again only if ${lost ? 'they are' : 'it is'} still wanted and ${carrier} does not carry ${them}`
-      : `send ${what} again unless ${carrier} carries ${them}`
-  }.`;
+  const action = previous.cancelled
+    ? `send that work again only if it is still wanted and ${carrier} does not carry it`
+    : `send that work again unless ${carrier} carries it`;
+  const lost =
+    previous.lostMessages === 0
+      ? ''
+      : ` ${lostMessagesAction(previous.lostMessages)}.`;
+  return ` Its previous continuation ${neverStartedClause(previous)}; ${action}.${lost}`;
 }
 
 /**
@@ -794,6 +795,15 @@ export function hostedRouteAnswer(
           : ` Member "${member.name}" has ended; ${own.cancelled ? 'if this work is still wanted, launch a new member under a new name for it' : 'for more work, launch a new member under a new name'}.`;
     return told + resend + previousNote(route);
   }
+  if (route.deliveryUnconfirmed) {
+    const recipient =
+      member === undefined
+        ? `child agent ${task}`
+        : `member "${member.name}" (task ${task})`;
+    const check =
+      member === undefined ? 'the child agent' : `member "${member.name}"`;
+    return `Message was queued for ${recipient}, but its delivery could not be confirmed. Check with ${check} before sending it again.`;
+  }
   // A message whose delivery ended with no receipt did not arrive; what a
   // resend meets depends on the chain now.
   if (route.deliveryFailed !== undefined) {
@@ -805,6 +815,10 @@ export function hostedRouteAnswer(
       return `${told} Send it again with send_message to ${address} if it is still needed.`;
     if (chain === 'settling')
       return `${told} Its latest continuation is being stopped before it started; if that continuation ends without starting, send it again with send_message to ${address} if it is still needed.`;
+    if (chain === 'stopping')
+      return member === undefined
+        ? `${told} That child agent is being stopped; launch a new agent for this work after it ends if it is still needed.`
+        : `${told} Member "${member.name}" is being stopped; for more work after it ends, launch a new member under a new name.`;
     return member === undefined
       ? `${told} That child agent has ended; launch a new agent for this work if it is still needed.`
       : `${told} Member "${member.name}" has ended; for more work, launch a new member under a new name.`;
@@ -827,8 +841,14 @@ export function hostedRouteAnswer(
 /** Whether a committed send reached its recipient as far as is known. */
 function hostedRouteArrived(route: HostedSentRoute): boolean {
   return (
-    route.ownNeverStarted === undefined && route.deliveryFailed === undefined
+    route.ownNeverStarted === undefined &&
+    route.deliveryFailed === undefined &&
+    !route.deliveryUnconfirmed
   );
+}
+
+function hostedRouteUnconfirmed(route: HostedSentRoute): boolean {
+  return route.deliveryUnconfirmed === true;
 }
 
 /** H4e-b2: one broadcast recipient's line in the call's answer. */
@@ -841,10 +861,12 @@ function hostedRouteLine(
   const own = route.ownNeverStarted;
   if (route.kind === 'message')
     return own !== undefined
-      ? `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`
-      : route.deliveryFailed !== undefined
-        ? `queued for task ${task}, but its delivery was ${route.deliveryFailed.state}, so the message did not arrive.${route.deliveryFailed.chain === 'ended' ? ' It has ended and takes no messages.' : ''}`
-        : `queued for its running task ${task}.`;
+      ? `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.${route.member !== undefined && own.predecessorChildRunId === null ? ` Member "${route.member.name}" has ended and takes no messages.` : ''}`
+      : route.deliveryUnconfirmed
+        ? `queued for task ${task}, but its delivery could not be confirmed. Check with the member before sending it again.`
+        : route.deliveryFailed !== undefined
+          ? `queued for task ${task}, but its delivery was ${route.deliveryFailed.state}, so the message did not arrive.${route.deliveryFailed.chain === 'ended' ? ' It has ended and takes no messages.' : route.deliveryFailed.chain === 'stopping' ? ' It is being stopped and takes no messages.' : ''}`
+          : `queued for its running task ${task}.`;
   return (
     (own === undefined
       ? `had completed; continued as task ${task}.`
@@ -860,9 +882,11 @@ export interface HostedBroadcastRecipient {
   readonly name: string | undefined;
   /** The roster entry's run the recipient's chain started from. */
   readonly rootChildRunId: string;
-  /** False when the run it reached proved it never started, or the
-   * message's delivery ended with no receipt. */
+  /** False when the run never started, delivery failed, or delivery is
+   * unconfirmed. Mutually exclusive with `unconfirmed`. */
   readonly arrived: boolean;
+  /** The message may have arrived, so it is neither arrived nor failed. */
+  readonly unconfirmed: boolean;
   readonly text: string;
 }
 
@@ -927,6 +951,7 @@ export function hostedBroadcastCommitted(input: {
         input.authority,
         sent,
         sent.kind === 'message' ? sent.messageId : undefined,
+        chains,
       ),
     };
     const rootChildRunId = chains.root(route.childRunId);
@@ -935,6 +960,7 @@ export function hostedBroadcastCommitted(input: {
       name: hostedTeamMembership(teams, rootChildRunId)?.name,
       rootChildRunId,
       arrived: hostedRouteArrived(route),
+      unconfirmed: hostedRouteUnconfirmed(route),
       text: hostedRouteLine(input.children, route),
     });
   }
@@ -4455,13 +4481,23 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      await Promise.allSettled(
-        [...reserved.values()].map((id) => this.broker.cancel(id)),
+      const cancellationBarriers = new Set<string>();
+      const reservedIds = [...reserved.values()];
+      const cancellationResults = await Promise.allSettled(
+        reservedIds.map((id) => this.broker.cancel(id)),
       );
+      cancellationResults.forEach((result, index) => {
+        if (result.status === 'fulfilled')
+          cancellationBarriers.add(reservedIds[index]!);
+      });
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
         let proven = false;
+        let grantOwnerState: unknown;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -4475,11 +4511,9 @@ export class HostedWorkspaceToolTurn {
             },
             saved.publicationToken,
           );
-          if (
-            typeof closed !== 'object' ||
-            closed === null ||
-            (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
-          )
+          if (typeof closed === 'object' && closed !== null)
+            grantOwnerState = (closed as Record<string, unknown>)['state'];
+          if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
           proven = true;
         } catch (closeCause) {
@@ -4488,15 +4522,26 @@ export class HostedWorkspaceToolTurn {
               String(closeCause),
           );
         }
+        if (
+          !proven &&
+          grantOwnerState === undefined &&
+          request?.background &&
+          cancellationBarriers.has(executionCallId)
+        ) {
+          try {
+            proven =
+              (await this.broker.backgroundProcessStatus(executionCallId)) ===
+              undefined;
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${rejectionDetail(cause)}).`,
+            );
+          }
+        }
         if (!proven) continue;
-        // The grant owner proved this start never happened, yet the run
-        // record admitted for the same execution was already committed
-        // dispatch_started — and nothing beyond this catch can ever settle
-        // it again. Settle it under the same proof so the projection stops
-        // reporting a run that never started.
-        const request = requests.find(
-          (_, index) => reserved.get(index) === executionCallId,
-        );
+        // The grant owner proved a Shell or Monitor start never happened,
+        // or the original process ledger proved it for a background Shell.
+        // Publication absence alone proves nothing.
         if (request?.background)
           await this.childRuns
             ?.settleFailed(executionCallId, {
@@ -4994,11 +5039,23 @@ export class HostedWorkspaceToolTurn {
       // delivery fail, which only a replay can find.
       let sent = 0;
       let arrived = 0;
+      let unconfirmed = 0;
       // A cancelled Turn sends to no further member: each send may launch
       // a continuation, which spends the Session's launches.
       let cancelled = false;
+      const committedByPosition = new Map(
+        committed.map((each) => [each.position, each]),
+      );
       for (const [index, member] of team.members.entries()) {
         const position = index + 1;
+        const replayed = committedByPosition.get(position);
+        if (replayed !== undefined) {
+          sent += 1;
+          if (replayed.arrived) arrived += 1;
+          if (replayed.unconfirmed) unconfirmed += 1;
+          lines.push(`- ${member.name}: ${replayed.text}`);
+          continue;
+        }
         if (signal.aborted) {
           cancelled = true;
           lines.push(`- ${member.name}: not sent: the turn was cancelled.`);
@@ -5017,6 +5074,7 @@ export class HostedWorkspaceToolTurn {
         if (route.kind !== 'refused') {
           sent += 1;
           if (hostedRouteArrived(route)) arrived += 1;
+          if (hostedRouteUnconfirmed(route)) unconfirmed += 1;
         }
         lines.push(`- ${member.name}: ${hostedRouteLine(children, route)}`);
       }
@@ -5026,10 +5084,11 @@ export class HostedWorkspaceToolTurn {
           true,
         );
       this.agentDispatched.add(callId);
+      const notArrived = sent - arrived - unconfirmed;
       return answer(
         arrived === team.members.length
           ? `Message sent to every member of team "${team.name}". There is no inline reply: each member answers through its result notification or a message to you.\n${lines.join('\n')}`
-          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${arrived < sent ? `, but it did not arrive at ${sent - arrived} of them` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name to any member below that did not get it and still needs it.\n${lines.join('\n')}`,
+          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${notArrived > 0 ? `, but it did not arrive at ${notArrived} of them` : ''}${unconfirmed > 0 ? `; delivery could not be confirmed for ${unconfirmed}` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name only to a member whose line says it did not get it, that can still take messages, and still needs it.${unconfirmed > 0 ? ' Check with a member before resending any unconfirmed delivery.' : ''}\n${lines.join('\n')}`,
         false,
       );
     }

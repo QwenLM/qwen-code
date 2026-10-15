@@ -50,6 +50,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -66,6 +67,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -286,8 +288,7 @@ public class ManagedAgentService {
                         : "[" + description + "]\n\n" + prompt));
         List<Map<String, Object>> input = input(blocks, false);
         String title = description.isBlank() ? "child agent"
-                : description.length() > 256 ? description.substring(0, 256)
-                        : description;
+                : StringUtils.truncate(description, 256);
         return insertChildSession(tenantId, parentSessionId, childRunId,
                 title, input, isolated);
     }
@@ -317,9 +318,7 @@ public class ManagedAgentService {
             block.put("args", args);
         }
         List<Map<String, Object>> input = List.of(block);
-        String title =
-                definitionId.length() > 256 ? definitionId.substring(0, 256)
-                        : definitionId;
+        String title = StringUtils.truncate(Objects.requireNonNull(definitionId), 256);
         return insertChildSession(tenantId, parentSessionId, childRunId,
                 title, input, false);
     }
@@ -845,7 +844,7 @@ public class ManagedAgentService {
         SessionRecord session = requireReadableSession(tenantId, actorId,
                 sessionId);
         int limit = eventLimit(requestedLimit);
-        if (cursor == null || cursor.isBlank()) {
+        if (StringUtils.isBlank(cursor)) {
             SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
                     .orElse(null);
             if (snapshot != null) {
@@ -1810,7 +1809,7 @@ public class ManagedAgentService {
     }
 
     private static SessionCursor decodeCursor(String cursor) {
-        if (cursor == null || cursor.isBlank()) {
+        if (StringUtils.isBlank(cursor)) {
             return null;
         }
         try {
@@ -1840,7 +1839,7 @@ public class ManagedAgentService {
     }
 
     private static TurnCursor decodeTurnCursor(String cursor) {
-        if (cursor == null || cursor.isBlank()) {
+        if (StringUtils.isBlank(cursor)) {
             return null;
         }
         String decoded;
@@ -1864,7 +1863,7 @@ public class ManagedAgentService {
     }
 
     private static Long transcriptCursor(String cursor) {
-        if (cursor == null || cursor.isBlank()) {
+        if (StringUtils.isBlank(cursor)) {
             return null;
         }
         try {
