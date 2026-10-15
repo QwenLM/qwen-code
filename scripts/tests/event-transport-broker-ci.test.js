@@ -104,14 +104,10 @@ describe('EventTransport broker gates CI', () => {
   });
 
   it('still runs the gate on its only live triggers', () => {
-    // #14205 moved the whole SDK Java workflow off pull_request/push, so the
-    // provisioning script no longer has a per-change trigger: the daily
-    // schedule is now the only run that boots the broker these steps
-    // drive, and dropping it would retire the gate with every pin above
-    // still green. The cron itself is pinned once, in
-    // sdk-java-workflow.test.js; this gate only needs one to exist.
+    // Keep both daily coverage and the release caller after leaving PR CI.
     expect(Object.keys(workflow.on).sort()).toEqual([
       'schedule',
+      'workflow_call',
       'workflow_dispatch',
     ]);
     expect(workflow.on.schedule).toContainEqual({ cron: expect.any(String) });

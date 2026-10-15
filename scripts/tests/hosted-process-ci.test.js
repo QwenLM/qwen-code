@@ -128,13 +128,10 @@ describe('Hosted real-process gates', () => {
     expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
       /^mariadb:/,
     );
-    // #14205 moved the whole SDK Java workflow off pull_request/push: these
-    // MySQL lanes no longer run per change to the SDK or its embedding
-    // surfaces — the daily schedule is the only live trigger, and a
-    // regression in them surfaces through the next daily run (filed by the
-    // main-failure watcher) instead of on the pull request.
+    // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
+      'workflow_call',
       'workflow_dispatch',
     ]);
     const run = job.steps.find(
