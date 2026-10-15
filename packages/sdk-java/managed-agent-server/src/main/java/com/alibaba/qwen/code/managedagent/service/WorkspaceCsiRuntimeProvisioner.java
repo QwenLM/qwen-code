@@ -1,26 +1,11 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.VERSION;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_VERSION;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.bytes;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.context;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.digest;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.dns;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.lease;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.name;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.require;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.same;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.text;
-import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.uuid;
-
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -32,6 +17,9 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+import org.springframework.dao.DataAccessException;
+import org.springframework.transaction.TransactionException;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -51,8 +39,21 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
-import org.springframework.dao.DataAccessException;
-import org.springframework.transaction.TransactionException;
+
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.bytes;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.context;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.digest;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.dns;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.lease;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.name;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.require;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.same;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.text;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.uuid;
 
 /** Private CSI placement; ambiguous creation never authorizes adoption or replacement. */
 public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner {

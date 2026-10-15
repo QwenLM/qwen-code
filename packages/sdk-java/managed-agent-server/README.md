@@ -152,6 +152,16 @@ Design and client migration contract:
 [English](../../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
 [简体中文](../../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md).
 
+## Experimental reference distribution
+
+The independent Hosted Java reference distribution packages the runnable
+server, operator-recovery entry point, embedded Broker component, provenance
+manifest, checksums, and deployment/upgrade instructions. Pull requests and
+manual dry runs build and boot the same Linux archive; only a protected-main
+production dispatch publishes an immutable prerelease. See
+[Managed Agent reference deployment](../../../docs/users/managed-agent-reference-deployment.md)
+and the [distribution design](../../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
+
 ## Prerequisites
 
 - Java 21

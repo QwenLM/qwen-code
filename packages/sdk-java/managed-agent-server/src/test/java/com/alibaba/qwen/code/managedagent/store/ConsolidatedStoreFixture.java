@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import java.util.UUID;
-import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
+import java.util.UUID;
 
 /** The explicit port enables task-local MySQL tests with a new owned database per test. */
 final class ConsolidatedStoreFixture implements AutoCloseable {

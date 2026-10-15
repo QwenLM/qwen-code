@@ -1,5 +1,23 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer.MaterializeOutcome;
+import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator.Outcome;
+import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
+import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
+import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
+import org.apache.rocketmq.client.apis.message.MessageView;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.OptionalLong;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -8,23 +26,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.service.EventTransportConsumer.MaterializeOutcome;
-import com.alibaba.qwen.code.managedagent.service.TransportWakeActivator.Outcome;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
-import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.OptionalLong;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
-import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
-import org.apache.rocketmq.client.apis.message.MessageView;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 
 class EventTransportConsumerTest {
     private static final String DIGEST = "b".repeat(64);
