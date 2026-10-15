@@ -49,7 +49,6 @@ import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { ConditionalRulesRegistry } from '../config/rulesDiscovery.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import {
   createHookOutput,
@@ -4006,30 +4005,12 @@ describe('Gemini Client (client.ts)', () => {
    * Install a mock ConditionalRulesRegistry with a spyable `resetInjected`
    * and return the spy so tests can assert on marker resets.
    */
-  function mockConditionalRulesReset(): ReturnType<typeof vi.fn> & {
-    resetInjected: ReturnType<typeof vi.fn>;
-    reconcileInjected: ReturnType<typeof vi.fn>;
-  } {
+  function mockConditionalRulesReset(): ReturnType<typeof vi.fn> {
     const resetInjected = vi.fn();
-    const reconcileInjected = vi.fn();
-    const combined = vi.fn();
-    resetInjected.mockImplementation(() => {
-      combined();
-    });
-    reconcileInjected.mockImplementation(() => {
-      combined();
-    });
-    const originalMockClear = combined.mockClear.bind(combined);
-    combined.mockClear = () => {
-      resetInjected.mockClear();
-      reconcileInjected.mockClear();
-      return originalMockClear();
-    };
     vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue({
       resetInjected,
-      reconcileInjected,
     } as unknown as ReturnType<Config['getConditionalRulesRegistry']>);
-    return Object.assign(combined, { resetInjected, reconcileInjected });
+    return resetInjected;
   }
 
   /**
@@ -4595,50 +4576,6 @@ describe('Gemini Client (client.ts)', () => {
       // The blanked tool results were the carriers of any conditional-rule
       // reminder, so their markers must go with them.
       expect(resetInjected).toHaveBeenCalled();
-    });
-
-    it('preserves consumed markers for rules whose reminder is in pending content during size-only microcompaction', async () => {
-      const ruleFile = {
-        filePath: '/mock/project/.qwen/rules/active.md',
-        paths: ['**/*'],
-        content: 'Active rule.',
-      };
-      const registry = new ConditionalRulesRegistry(
-        [ruleFile],
-        '/mock/project',
-      );
-      await registry.matchAndConsume('/mock/project/test.ts');
-      expect(registry.injectedCount).toBe(1);
-
-      vi.mocked(mockConfig.getConditionalRulesRegistry).mockReturnValue(
-        registry,
-      );
-      vi.spyOn(client, 'consumeManagedAutoMemoryRecall').mockResolvedValue(
-        null,
-      );
-      await arrangeReads(Date.now(), undefined, 4, 120_000);
-      sizeBudget(1);
-
-      // Pending content contains the reminder envelope for active.md
-      const pendingOutput =
-        'Y'.repeat(140_000) +
-        '\n--- Rule from: .qwen/rules/active.md ---\nActive rule.\n--- End of Rule from: .qwen/rules/active.md ---';
-
-      await run(
-        [
-          fnResponse(
-            'run_shell_command',
-            { output: pendingOutput },
-            'pending-shell-with-rule',
-          ),
-        ],
-        'prompt-pending-rule',
-        { type: SendMessageType.ToolResult },
-      );
-
-      // Even though older reads were cleared (tokensSaved > 0), the pending reminder
-      // preserved its marker and was not wiped.
-      expect(registry.injectedCount).toBe(1);
     });
 
     it('omits the soft-exceeded marker when clearing lands exactly on the watermark', async () => {

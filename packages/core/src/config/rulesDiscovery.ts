@@ -17,7 +17,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import picomatch from 'picomatch';
-import type { Content } from '@google/genai';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import { normalizeContent, stripHtmlComments } from '../utils/textUtils.js';
 import { QWEN_DIR } from '../utils/paths.js';
@@ -201,26 +200,19 @@ async function loadRulesFromDir(
  * Format loaded rules into a single string with source markers,
  * consistent with the `--- Context from: ... ---` format used for QWEN.md.
  */
-/**
- * Computes the canonical display path for a rule, normalized to forward slashes.
- * Used for both prompt formatting and residency tracking.
- */
-export function computeRuleDisplayPath(
-  rule: RuleFile,
-  projectRoot: string,
-): string {
-  const rawDisplayPath =
-    rule.displayPath ??
-    (path.isAbsolute(rule.filePath)
-      ? path.relative(projectRoot, rule.filePath)
-      : rule.filePath);
-  return rawDisplayPath.replace(/\\/g, '/');
-}
-
 export function formatRules(rules: RuleFile[], projectRoot: string): string {
   return rules
     .map((rule) => {
-      const displayPath = computeRuleDisplayPath(rule, projectRoot);
+      const rawDisplayPath =
+        rule.displayPath ??
+        (path.isAbsolute(rule.filePath)
+          ? path.relative(projectRoot, rule.filePath)
+          : rule.filePath);
+      // Normalize to forward slashes for cross-platform consistency in the
+      // system prompt. Glob patterns in `paths:` use forward slashes, so
+      // display paths should match — otherwise Windows shows `.qwen\rules\foo.md`
+      // and Linux shows `.qwen/rules/foo.md`, which is confusing in diffs/tests.
+      const displayPath = rawDisplayPath.replace(/\\/g, '/');
       return (
         `--- Rule from: ${displayPath} ---\n` +
         `${rule.content}\n` +
@@ -228,50 +220,6 @@ export function formatRules(rules: RuleFile[], projectRoot: string): string {
       );
     })
     .join('\n\n');
-}
-
-// The envelope markers {@link formatRules} writes into a tool result. Used by
-// {@link collectResidentRuleDisplayPaths} to read marker residency back out of
-// history. The end marker (`--- End of Rule from: ... ---`) cannot match: the
-// pattern requires the `--- Rule from: ` prefix verbatim.
-const RULE_ENVELOPE_PATTERN = /--- Rule from: (.+?) ---/g;
-
-/**
- * Collect the display paths of every conditional-rule reminder still visible
- * in `history` (plus optional in-flight text that has not been committed yet,
- * e.g. the pending tool result of the send currently being assembled).
- *
- * Both places {@link appendAdditionalContext} can put the envelope are scanned:
- * plain text parts and the `functionResponse.response.output` string. This is
- * the residency ground truth the marker set is reconciled against — mirror of
- * `collectResidentMemoryBodies()` for memory bodies.
- */
-export function collectResidentRuleDisplayPaths(
-  history: Iterable<Content>,
-  extraText?: string,
-): Set<string> {
-  const resident = new Set<string>();
-  const scan = (text: unknown) => {
-    if (typeof text !== 'string' || !text.includes('--- Rule from: ')) {
-      return;
-    }
-    for (const match of text.matchAll(RULE_ENVELOPE_PATTERN)) {
-      resident.add(match[1]);
-    }
-  };
-  scan(extraText);
-  for (const content of history) {
-    for (const part of content.parts ?? []) {
-      scan(part.text);
-      const response = part.functionResponse?.response;
-      if (typeof response === 'string') {
-        scan(response);
-      } else if (response && typeof response === 'object') {
-        scan((response as Record<string, unknown>)['output']);
-      }
-    }
-  }
-  return resident;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -346,7 +294,7 @@ export class ConditionalRulesRegistry {
   }
 
   /**
-   * Re-derive the consumed-marker set from what history actually contains.
+   * Drop ALL consumed markers so rules can be injected again.
    *
    * A reminder rides the tool result that triggered the match. Anything that
    * evicts that result — pre-send microcompaction, `/compress`,
@@ -355,51 +303,10 @@ export class ConditionalRulesRegistry {
    * but not the marker, and the marker would then suppress every later
    * re-injection for the rest of the session.
    *
-   * Rather than clearing markers by hand at every eviction site (a blanket
-   * clear re-arms rules whose reminder never left, so a still-resident rule
-   * duplicates on its next match), the marker set is set to exactly the rules
-   * whose reminder envelope is resident — the same contract the memory-body
-   * state derives from history (`restoreMemoryBodiesPresentInHistory`). This
-   * also re-seeds markers on `/resume`, where the restored transcript keeps
-   * the envelopes but the registry is not rebuilt.
-   *
-   * @param residentDisplayPaths - Envelope paths still visible in history
-   *   (plus in-flight pending text where the caller has it). Unknown paths —
-   *   e.g. a transcript resumed against a since-deleted rule — are ignored.
-   * @param site - Where the reconcile fired; logged for debuggability.
-   */
-  reconcileInjected(
-    residentDisplayPaths: ReadonlySet<string>,
-    site: string,
-  ): void {
-    if (this.compiledRules.length === 0) {
-      return;
-    }
-    const next = new Set<string>();
-    for (const { rule } of this.compiledRules) {
-      if (
-        residentDisplayPaths.has(computeRuleDisplayPath(rule, this.projectRoot))
-      ) {
-        next.add(rule.filePath);
-      }
-    }
-    const dropped = this.injected.size - countIntersection(this.injected, next);
-    const added = next.size - countIntersection(this.injected, next);
-    this.injected.clear();
-    for (const filePath of next) {
-      this.injected.add(filePath);
-    }
-    logger.debug(
-      `[COND_RULES] reconcile(${site}): resident=${residentDisplayPaths.size} markers=${this.injected.size} (re-armed=${dropped}, re-seeded=${added})`,
-    );
-  }
-
-  /**
-   * Drop ALL consumed markers so every rule can be injected again.
-   *
-   * Only correct when history is going away wholesale (`/clear`, `/reset`) —
-   * eviction of *some* tool results must use {@link reconcileInjected}, which
-   * keeps markers whose reminder is still resident.
+   * This is intentionally a blanket clear: callers evict only *some* tool
+   * results, so rules whose reminder is still resident get re-armed too.
+   * The trade-off is deliberate — a duplicate injection (bounded text cost)
+   * is far cheaper than a silently suppressed rule (the bug this fixes).
    */
   resetInjected(): void {
     if (this.injected.size === 0) {
@@ -418,17 +325,6 @@ export class ConditionalRulesRegistry {
   get injectedCount(): number {
     return this.injected.size;
   }
-}
-
-function countIntersection(
-  a: ReadonlySet<string>,
-  b: ReadonlySet<string>,
-): number {
-  let count = 0;
-  for (const value of a) {
-    if (b.has(value)) count++;
-  }
-  return count;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
