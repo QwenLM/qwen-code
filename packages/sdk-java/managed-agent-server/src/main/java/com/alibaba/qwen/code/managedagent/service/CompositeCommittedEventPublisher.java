@@ -3,10 +3,11 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.store.EventTransport;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
-import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 /**
  * Sole CommittedEventPublisher bean: the local hub fan-out first (unchanged

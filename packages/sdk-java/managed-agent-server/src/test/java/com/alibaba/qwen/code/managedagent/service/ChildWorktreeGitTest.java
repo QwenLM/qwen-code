@@ -1,13 +1,12 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anySet;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.CALLS_REAL_METHODS;
-import static org.mockito.Mockito.mockStatic;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -22,13 +21,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.DisabledOnOs;
-import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.io.TempDir;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
 /**
  * The physical steps of a child Workspace against real repositories
@@ -741,7 +742,6 @@ class ChildWorktreeGitTest {
         git.apply(root, repository, merge.parentTree(), merge.mergedTree());
         assertThat(project.resolve("café.txt")).hasContent("child");
         assertThat(project.resolve("中文.txt")).hasContent("child");
-
     }
 
     @Test
@@ -958,7 +958,9 @@ class ChildWorktreeGitTest {
                 assertCode(() -> guarded.discard(root, "project", "c1", false), ChildWorkspaceException.LAYOUT);
                 assertThat(marker).doesNotExist();
                 assertThat(outside.resolve("important/data.txt")).hasContent("precious");
-                if (linkedEntry) Files.delete(admin.resolve("planted"));
+                if (linkedEntry) {
+                    Files.delete(admin.resolve("planted"));
+                }
                 Files.delete(admin);
             }
             Path bare = root.resolve("bare.git");

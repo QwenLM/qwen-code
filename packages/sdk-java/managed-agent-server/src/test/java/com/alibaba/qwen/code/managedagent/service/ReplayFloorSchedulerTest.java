@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.annotation.Scheduled;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The first pass after an operator opts in drains every Session with a

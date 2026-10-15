@@ -1,13 +1,15 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.druid.pool.DruidDataSource;
-import java.net.URI;
-import java.util.Set;
-import java.util.UUID;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.Assumptions;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import javax.sql.DataSource;
+
+import java.net.URI;
+import java.util.Set;
+import java.util.UUID;
 
 /** Creates and drops only a fresh, explicitly named O4 test database. */
 final class O4MySqlDatabase implements AutoCloseable {
@@ -19,7 +21,9 @@ final class O4MySqlDatabase implements AutoCloseable {
 
     O4MySqlDatabase() {
         String base = System.getProperty("qwen.o4.mysql.url");
-        if (!Boolean.getBoolean("qwen.o4.required")) { Assumptions.assumeTrue(base != null, "O4 MySQL not configured"); }
+        if (!Boolean.getBoolean("qwen.o4.required")) {
+            Assumptions.assumeTrue(base != null, "O4 MySQL not configured");
+        }
         validateUrl(base);
         database = "qwen_o4_" + UUID.randomUUID().toString().replace("-", "");
         user = System.getProperty("qwen.o4.mysql.user", "root");
@@ -35,8 +39,11 @@ final class O4MySqlDatabase implements AutoCloseable {
             config.setMaxActive(4);
             source = config;
         } catch (RuntimeException error) {
-            try { admin.execute("DROP DATABASE `" + database + "`"); }
-            catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+            try {
+                admin.execute("DROP DATABASE `" + database + "`");
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
     }
@@ -44,9 +51,13 @@ final class O4MySqlDatabase implements AutoCloseable {
     static void validateUrl(String base) {
         URI uri;
         try {
-            if (base == null || !base.startsWith("jdbc:mysql://")) { throw new IllegalArgumentException(); }
+            if (base == null || !base.startsWith("jdbc:mysql://")) {
+                throw new IllegalArgumentException();
+            }
             uri = URI.create(base.substring(5));
-        } catch (IllegalArgumentException error) { throw invalidUrl(); }
+        } catch (IllegalArgumentException error) {
+            throw invalidUrl();
+        }
         if (uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawFragment() != null
                 || uri.getPort() == 0 || uri.getPort() > 65535
                 || uri.getRawPath() == null || !uri.getRawPath().matches("/qwen_o4_[a-zA-Z0-9_]+")) {
