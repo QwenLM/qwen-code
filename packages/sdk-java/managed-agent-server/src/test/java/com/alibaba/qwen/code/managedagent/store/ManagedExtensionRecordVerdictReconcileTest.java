@@ -1,16 +1,17 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The never-started verdict's mint arbitration: a terminal revision
@@ -46,7 +47,7 @@ class ManagedExtensionRecordVerdictReconcileTest {
                         + " workspace_id, session_id, record_kind, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
-                        + " delivery_state, created_at)"
+                        + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, 'workspace', ?, 'DOMAIN', 'child_run',"
                         + " 'run-1', 'h', 1, 'res-x', 'child_agent',"
                         + " 'running', 'session', 'planned', 1)",
@@ -58,8 +59,8 @@ class ManagedExtensionRecordVerdictReconcileTest {
 
     private void plantLineage(String sessionId, String childId) {
         jdbc.update("INSERT INTO ma_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at, parent_session_id,"
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified, parent_session_id,"
                         + " parent_child_run_id) VALUES (?, ?, 'qwen-code',"
                         + " 'ACTIVE', 1, 1, ?, 'run-1')",
                 TENANT, childId, sessionId);

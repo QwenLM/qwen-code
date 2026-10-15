@@ -1,19 +1,14 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -24,6 +19,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Hook admission checks once keys, occurrence ordinals and catalog pins through indexed
@@ -163,12 +161,12 @@ class ManagedHookAdmissionIndexTest {
                                             "INSERT INTO ma_session_record (session_scope_key,"
                                                 + " record_key, tenant_id, workspace_id,"
                                                 + " session_id, domain, record_id, operation_hash,"
-                                                + " revision, record_resource_id, created_at,"
+                                                + " revision, record_resource_id, gmt_create,"
                                                 + " hook_once_key_hash, hook_occurrence_hash,"
                                                 + " hook_ordinal) SELECT session_scope_key, ?,"
                                                 + " tenant_id, workspace_id, session_id, domain,"
                                                 + " 'duplicate', ?, 1, record_resource_id,"
-                                                + " created_at, "
+                                                + " gmt_create, "
                                                     + (column.equals("hook_once_key_hash")
                                                             ? "hook_once_key_hash, 'x', 0"
                                                             : "NULL, hook_occurrence_hash,"

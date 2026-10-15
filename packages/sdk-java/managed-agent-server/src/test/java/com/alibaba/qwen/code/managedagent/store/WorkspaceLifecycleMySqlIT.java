@@ -1,13 +1,21 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -19,16 +27,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.parallel.ResourceLock;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     private DriverManagerDataSource source;
@@ -67,7 +69,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         String scope = ManagedSessionStore.sessionScopeKey("neighbor", "other-session");
         String record = ManagedExtensionProjection.recordKey("other-session", "hook_execution", "other-hook");
         fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, created_at, first_sequence)"
+                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, gmt_create, first_sequence)"
                 + " VALUES (?, ?, 'neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)",
                 scope, record, "a".repeat(64));
         var entered = new CountDownLatch(1);
@@ -82,7 +84,9 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                         }
                     }.hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind.DELETE, true);
                     entered.countDown();
-                    if (!release.await(10, TimeUnit.SECONDS)) throw new AssertionError("Lifecycle hold was not released");
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Lifecycle hold was not released");
+                    }
                     return null;
                 } catch (Exception error) {
                     throw new IllegalStateException(error);
@@ -134,7 +138,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(
                     "tenant", fixture.session, "w".repeat(32), ordinary))).isInstanceOfSatisfying(ApiException.class,
                             error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
-            fixture.jdbc.update("UPDATE ma_operation SET claim_until = CURRENT_TIMESTAMP(6) - INTERVAL 1 SECOND WHERE operation_id = ?", id);
+            fixture.jdbc.update("UPDATE ma_operation SET claim_until = " + ManagedSchemaTime.SQL_NOW + " - 1000 WHERE operation_id = ?", id);
             assertThat(fixture.transactions.<Boolean>execute(ignored -> WorkspaceLifecycleStore.legacyClose(fixture.jdbc, "tenant", fixture.session)))
                     .isFalse();
             assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary(

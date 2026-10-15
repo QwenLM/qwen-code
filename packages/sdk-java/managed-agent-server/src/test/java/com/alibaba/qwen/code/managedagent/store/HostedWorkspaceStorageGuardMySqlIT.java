@@ -1,12 +1,19 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -14,16 +21,9 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.condition.EnabledOnOs;
-import org.junit.jupiter.api.condition.OS;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @EnabledOnOs(OS.LINUX)
 class HostedWorkspaceStorageGuardMySqlIT {
@@ -58,16 +58,14 @@ class HostedWorkspaceStorageGuardMySqlIT {
             assertUnavailable(() -> guard.verify(binding));
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
-            var original = jdbc.queryForMap("SELECT * FROM ma_storage_owner"
-                    + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
+            var original = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
             guard.verify(binding);
             assertThat(original.get("mount_birth_time")).isEqualTo(Files.readAttributes(root,
                     java.nio.file.attribute.BasicFileAttributes.class).creationTime().toInstant().toString());
             assertThat(original.get("mount_host_id")).isNotEqualTo(Files.readString(Path.of("/etc/machine-id")).strip());
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner"
-                    + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage)).isEqualTo(original);
+            assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE tenant_id = ? AND storage_id = ?", tenant, storage)).isEqualTo(original);
             String operation = UUID.randomUUID().toString();
             try (var executor = Executors.newFixedThreadPool(2)) {
                 var first = executor.submit(() -> guard.fence(tenant, storage, 1, operation));
@@ -115,7 +113,9 @@ class HostedWorkspaceStorageGuardMySqlIT {
             assertThat(process.waitFor(15, TimeUnit.SECONDS)).isTrue();
             assertThat(process.exitValue()).as("%s", Files.readString(log)).isZero();
         } finally {
-            if (process.isAlive()) process.destroyForcibly();
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
         }
     }
 

@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -12,21 +8,34 @@ import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -43,18 +52,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The W2 controlled cwd change: store admission, durable settlement,
@@ -437,8 +437,7 @@ class ManagedCwdChangeOperationTest {
         disabled.getRuntimeBroker().setProvisioner("local-process");
         disabled.getRuntimeBroker().setIsolationClass("session");
         ManagedAgentStore gated = new ManagedAgentStore(fixture.jdbc,
-                fixture.mapper, fixture.clock, ignored -> {
-                }, new ManagedWorkspaceRegistry(fixture.jdbc), disabled);
+                fixture.mapper, fixture.clock, ignored -> {}, new ManagedWorkspaceRegistry(fixture.jdbc), disabled);
         OperationAdmission replay = gated.beginCwdChangeOperation(TENANT,
                 sessionId, ACTOR, ACTOR_DIGEST, "key", "digest",
                 "services/b", 1);
@@ -509,7 +508,7 @@ class ManagedCwdChangeOperationTest {
         // A pending mutation command is the same barrier.
         String secondId = fixture.createBoundSession(TENANT, WS);
         fixture.jdbc.update("INSERT INTO ma_request_receipt (receipt_key, tenant_key, scope_kind, scope_id, scope_key, namespace, operation, idempotency_key, idempotency_digest,"
-                        + " tenant_id, request_digest, session_id, state, created_at, updated_at) VALUES (?, ?, 'TENANT', 'RENAME', ?, 'SESSION_COMMAND',"
+                        + " tenant_id, request_digest, session_id, state, gmt_create, gmt_modified) VALUES (?, ?, 'TENANT', 'RENAME', ?, 'SESSION_COMMAND',"
                         + " 'RENAME', 'rename', ?, ?, 'digest', ?, 'PENDING', 0, 0)",
                 ManagedSchemaKeys.key("test-pending-receipt", TENANT, secondId), ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(TENANT, "RENAME"),
                 ManagedSchemaKeys.key("rename"), TENANT, secondId);
@@ -908,7 +907,7 @@ class ManagedCwdChangeOperationTest {
         // The lease gates run on database time; expire the dead claim
         // directly instead of advancing the fixture clock.
         fixture.jdbc.update("UPDATE ma_operation SET"
-                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
+                + " claim_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         OperationRecord alive = fixture.store.claimOperation(TENANT,
                 sessionId, operationId, "owner", Duration.ofMillis(60_000))
@@ -956,7 +955,7 @@ class ManagedCwdChangeOperationTest {
                 thirdId, thirdOp, "owner", Duration.ofMillis(60_000))
                 .orElseThrow();
         fixture.jdbc.update("UPDATE ma_operation SET"
-                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
+                + " claim_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, thirdId, thirdOp);
         assertThat(fixture.store.failCwdChangeOperation(TENANT, thirdId,
                 thirdOp, "owner", expiring.claimGeneration(),
@@ -1489,7 +1488,7 @@ class ManagedCwdChangeOperationTest {
                 Duration.ofMillis(100)).orElseThrow();
         assertThat(dead.deliveryState()).isEqualTo("LEASED");
         fixture.jdbc.update("UPDATE ma_operation SET"
-                + " claim_until = TIMESTAMP '1970-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?"
+                + " claim_until = 0 WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_id = ?", TENANT, sessionId, operationId);
         // The recovery scan itself must see an expired cwd claim: a row it
         // cannot see would strand the Session behind session_context_busy
@@ -1586,8 +1585,7 @@ class ManagedCwdChangeOperationTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         ManagedAgentStore store = new ManagedAgentStore(jdbc, mapper, clock,
-                ignored -> {
-                }, new ManagedWorkspaceRegistry(jdbc), properties);
+                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         return new Fixture(store, jdbc, mapper, properties, clock);
     }
 
@@ -1654,7 +1652,7 @@ class ManagedCwdChangeOperationTest {
             String target = ManagedSchemaKeys.key(sessionId);
             jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind, target_key, target_id, request_json,"
                             + " tenant_id, session_id, operation_id, operation_kind, request_digest, state, phase, admission_stage,"
-                            + " delivery_state, session_status_before, task_id, created_at, updated_at)"
+                            + " delivery_state, session_status_before, task_id, gmt_create, gmt_modified)"
                             + " VALUES (?, ?, 'SESSION', ?, ?, '{}', ?, ?, ?, ?, 'digest', ?, ?, 'JAVA_DURABLE', ?, 'ACTIVE', ?, 0, 0)",
                     ManagedSchemaKeys.operationKey(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.valueOf(kind),
                             scope, target, operationId), scope, target, sessionId, TENANT, sessionId, operationId, kind, state, state, delivery, taskId);
@@ -1663,7 +1661,7 @@ class ManagedCwdChangeOperationTest {
         void insertAction(String sessionId, String actionId,
                 long expiresAtMillis) {
             jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, record_kind, domain, record_id, tenant_id,"
-                            + " workspace_id, session_id, action_id, action_version, revision, state, options_json, created_at)"
+                            + " workspace_id, session_id, action_id, action_version, revision, state, options_json, gmt_create)"
                             + " VALUES (?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, 1, 1, 'requested', ?, 0)",
                     ManagedSessionStore.sessionScopeKey(TENANT, sessionId), ManagedSchemaKeys.key("action", actionId),
                     actionId, TENANT, WS, sessionId, actionId,
@@ -1674,8 +1672,8 @@ class ManagedCwdChangeOperationTest {
         void insertTurn(String sessionId, String turnId, String status) {
             jdbc.update("INSERT INTO ma_turn (tenant_id,"
                             + " session_id, turn_id, prompt_id, input_json,"
-                            + " payload_digest, status, created_at,"
-                            + " updated_at) VALUES (?, ?, ?, ?, '[]',"
+                            + " payload_digest, status, gmt_create,"
+                            + " gmt_modified) VALUES (?, ?, ?, ?, '[]',"
                             + " 'digest', ?, 0, 0)", TENANT, sessionId,
                     turnId, UUID.randomUUID().toString(), status);
         }
@@ -1725,6 +1723,8 @@ class ManagedCwdChangeOperationTest {
                             store,
                             new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
                             warmer),
+                    org.mockito.Mockito.mock(
+                            com.alibaba.qwen.code.managedagent.service.ManagedAgentService.class),
                     org.mockito.Mockito.mock(
                             org.springframework.beans.factory.ObjectProvider.class),
                     new AbstractExecutorService() {
@@ -1809,5 +1809,4 @@ class ManagedCwdChangeOperationTest {
             behaviors.clear();
         }
     }
-
 }

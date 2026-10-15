@@ -1,16 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.managedagent.config.EventTransportConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -29,22 +18,11 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Clock;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordingFile;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
@@ -65,6 +43,33 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * The MQ2d broker gates (design 2026-10-12-managed-agent-event-transport-mq2):
@@ -102,6 +107,7 @@ class EventTransportBrokerGate {
     private static final String WORKSPACE = "workspace-broker-gate";
     private static final String WRITER = "gate-writer";
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
     private static final Duration DELIVERY = Duration.ofSeconds(60);
     // Long enough for a broker to deliver a message it is going to deliver.
     private static final Duration QUIET = Duration.ofSeconds(8);
@@ -344,7 +350,7 @@ class EventTransportBrokerGate {
         List<String> staleSaw = new CopyOnWriteArrayList<>();
         List<ConsumeResult> staleAnswers = new CopyOnWriteArrayList<>();
         TransportWakeActivator staleWakes = new TransportWakeActivator(
-                consumerStore, staleHarness, ignored -> { });
+                consumerStore, staleHarness, ignored -> {});
         EventTransportConsumer staleNode = new EventTransportConsumer(
                 staleWakes, consumerStore, mock(MessageMaterializer.class));
         opened.add(staleWakes);
@@ -417,6 +423,25 @@ class EventTransportBrokerGate {
      */
     @Test
     void thePostCommitPathDoesNotRegress() throws Exception {
+        Throwable gateFailure = null;
+        try {
+            verifyPostCommitPath();
+        } catch (Exception | AssertionError failure) {
+            gateFailure = failure;
+            throw failure;
+        } finally {
+            try {
+                capturePostCommitDiagnostics();
+            } catch (Exception | AssertionError failure) {
+                if (gateFailure == null) {
+                    throw failure;
+                }
+                gateFailure.addSuppressed(failure);
+            }
+        }
+    }
+
+    private void verifyPostCommitPath() throws Exception {
         String session = session("ACTIVE");
         SessionEventHub flagOffHub = new SessionEventHub();
         CompositeCommittedEventPublisher flagOff =
@@ -468,6 +493,107 @@ class EventTransportBrokerGate {
                 .isLessThanOrEqualTo(offDeliveryP95 + budget);
         assertThat(journalP95).as("journal hand-off p95 (ns)")
                 .isLessThanOrEqualTo(Duration.ofMillis(20).toNanos());
+    }
+
+    private void capturePostCommitDiagnostics() throws Exception {
+        String session = session("ACTIVE");
+        SessionEventHub flagOffHub = new SessionEventHub();
+        CompositeCommittedEventPublisher flagOff =
+                new CompositeCommittedEventPublisher(flagOffHub, List.of());
+        int rounds = 300;
+        List<Long> onPublish = new ArrayList<>();
+        List<Long> offPublish = new ArrayList<>();
+        List<Long> onDelivery = new ArrayList<>();
+        List<Long> offDelivery = new ArrayList<>();
+        List<Long> journalHandOff = new ArrayList<>();
+        List<Map<String, Object>> samples = new ArrayList<>();
+        Files.createDirectories(Path.of("target"));
+        Recording recording = new Recording();
+        recording.enable("com.qwen.ManagedEventPublish").withThreshold(Duration.ZERO);
+        recording.enable("jdk.ExecutionSample").withPeriod(Duration.ofMillis(1));
+        recording.enable("jdk.ThreadPark").withThreshold(Duration.ZERO).withStackTrace();
+        recording.enable("jdk.JavaMonitorEnter").withThreshold(Duration.ZERO).withStackTrace();
+        recording.enable("jdk.GCPhasePause").withThreshold(Duration.ZERO);
+        recording.start();
+        Throwable measurementFailure = null;
+        try (SessionEventHub.Subscription onHub = hub.subscribe(TENANT, session);
+                SessionEventHub.Subscription offHub =
+                        flagOffHub.subscribe(TENANT, session)) {
+            for (int round = 1; round <= rounds; round++) {
+                EventRecord event = publicEvent(session, round,
+                        "item.output_text.delta");
+                measureDiagnostics(publisher, onHub, event, onPublish, onDelivery, "on", samples);
+                measureDiagnostics(flagOff, offHub, event, offPublish, offDelivery, "off", samples);
+                JsonNode journal = journalEvent(session, round, "message.delta");
+                byte[] record = journalRecord(List.of(journal));
+                long cpuStarted = cpuTime();
+                long started = System.nanoTime();
+                journalTransport.publishCommitted(record);
+                long completed = System.nanoTime();
+                long cpuCompleted = cpuTime();
+                journalHandOff.add(completed - started);
+                samples.add(Map.of("path", "journal", "sequence", round,
+                        "threadId", Thread.currentThread().threadId(),
+                        "startedNanos", started, "publishNanos", completed - started,
+                        "publishCpuNanos", cpuStarted < 0 ? -1 : cpuCompleted - cpuStarted));
+            }
+        } catch (Exception | AssertionError failure) {
+            measurementFailure = failure;
+            throw failure;
+        } finally {
+            try {
+                recording.stop();
+                Path flightRecording = Path.of("target/event-transport-latency.jfr");
+                recording.dump(flightRecording);
+                Files.writeString(Path.of("target/event-transport-latency-samples.json"),
+                        JSON.writerWithDefaultPrettyPrinter().writeValueAsString(samples));
+                List<Map<String, Object>> stages = new ArrayList<>();
+                try (RecordingFile events = new RecordingFile(flightRecording)) {
+                    while (events.hasMoreEvents()) {
+                        var event = events.readEvent();
+                        if (event.getEventType().getName().equals("com.qwen.ManagedEventPublish")) {
+                            Map<String, Object> stage = new LinkedHashMap<>();
+                            stage.put("sessionId", event.getString("sessionId"));
+                            stage.put("sequence", event.getLong("sequence"));
+                            stage.put("threadId", event.getThread().getJavaThreadId());
+                            stage.put("startTime", event.getStartTime().toString());
+                            stage.put("durationNanos", event.getDuration().toNanos());
+                            stage.put("transportCount", event.getInt("transportCount"));
+                            stage.put("hubNanos", event.getLong("hubNanos"));
+                            stage.put("transportNanos", event.getLong("transportNanos"));
+                            stages.add(stage);
+                        }
+                    }
+                }
+                Files.writeString(Path.of("target/event-transport-latency-stages.json"),
+                        JSON.writerWithDefaultPrettyPrinter().writeValueAsString(stages));
+            } catch (Exception failure) {
+                if (measurementFailure == null) {
+                    throw failure;
+                }
+                measurementFailure.addSuppressed(failure);
+            } finally {
+                recording.close();
+            }
+        }
+        // Discard the warm-up quarter.
+        long onP95 = p95(onPublish.subList(rounds / 4, rounds));
+        long offP95 = p95(offPublish.subList(rounds / 4, rounds));
+        long onDeliveryP95 = p95(onDelivery.subList(rounds / 4, rounds));
+        long offDeliveryP95 = p95(offDelivery.subList(rounds / 4, rounds));
+        long journalP95 = p95(journalHandOff.subList(rounds / 4, rounds));
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("rounds", rounds);
+        record.put("flightRecordingEnabled", true);
+        record.put("cpuTimeAvailable", cpuTime() >= 0);
+        record.put("publishP95Micros", Map.of("on", onP95 / 1000,
+                "off", offP95 / 1000));
+        record.put("hubDeliveryP95Micros", Map.of("on", onDeliveryP95 / 1000,
+                "off", offDeliveryP95 / 1000));
+        record.put("journalHandOffP95Micros", journalP95 / 1000);
+        Files.createDirectories(Path.of("target"));
+        Files.writeString(Path.of("target/event-transport-latency-diagnostics.json"),
+                JSON.writerWithDefaultPrettyPrinter().writeValueAsString(record));
     }
 
     /**
@@ -591,6 +717,46 @@ class EventTransportBrokerGate {
         delivery.add(received - started);
     }
 
+    private static void measureDiagnostics(CommittedEventPublisher composite,
+            SessionEventHub.Subscription subscription, EventRecord event,
+            List<Long> publish, List<Long> delivery, String path,
+            List<Map<String, Object>> samples) throws Exception {
+        long cpuStarted = cpuTime();
+        long started = System.nanoTime();
+        composite.publish(List.of(event));
+        long published = System.nanoTime();
+        long cpuPublished = cpuTime();
+        long readStarted = System.nanoTime();
+        SessionEventHub.Delivery delivered;
+        try {
+            delivered = subscription.await(event.sequence() - 1, Duration.ofSeconds(5));
+        } finally {
+            long received = System.nanoTime();
+            long cpuReceived = cpuTime();
+            Map<String, Object> sample = new LinkedHashMap<>();
+            sample.put("path", path);
+            sample.put("sequence", event.sequence());
+            sample.put("threadId", Thread.currentThread().threadId());
+            sample.put("startedNanos", started);
+            sample.put("publishNanos", published - started);
+            sample.put("readStartedNanos", readStarted);
+            sample.put("hubReadNanos", received - readStarted);
+            sample.put("observedDeliveryNanos", received - started);
+            sample.put("publishCpuNanos", cpuStarted < 0 ? -1 : cpuPublished - cpuStarted);
+            sample.put("hubReadCpuNanos", cpuPublished < 0 ? -1 : cpuReceived - cpuPublished);
+            samples.add(sample);
+            publish.add(published - started);
+            delivery.add(received - started);
+        }
+        assertThat(delivered.events()).extracting(EventRecord::sequence)
+                .contains(event.sequence());
+    }
+
+    private static long cpuTime() {
+        return THREADS.isCurrentThreadCpuTimeSupported() && THREADS.isThreadCpuTimeEnabled()
+                ? THREADS.getCurrentThreadCpuTime() : -1;
+    }
+
     private static long p95(List<Long> samples) {
         List<Long> sorted = new ArrayList<>(samples);
         Collections.sort(sorted);
@@ -601,35 +767,19 @@ class EventTransportBrokerGate {
 
     private String session(String status) {
         String session = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id,"
-                + " agent_id, status, created_at, updated_at,"
-                + " workspace_storage_id, workspace_id, workspace_generation,"
-                + " cwd_relative, context_config_ref, context_revision,"
-                + " workspace_config_ref, workspace_policy_ref) VALUES (?, ?,"
-                + " 'qwen-code', ?, 1, 1, ?, ?, 1, '.', ?, 1, ?, ?)",
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, workspace_storage_id, workspace_id, workspace_generation, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref) VALUES (?, ?, 'qwen-code', ?, 1, 1, ?, ?, 1, '.', ?, 1, ?, ?)",
                 TENANT, session, status, "storage-" + session, WORKSPACE,
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
-                + " session_id, stream_kind, stream_id, covered_sequence, updated_at)"
-                + " VALUES (?, ?, 'SESSION', X'', 0, 1)",
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', X'', 0, 1)",
                 TENANT, session);
         return session;
     }
 
     private void head(String session, String state, long committed,
             int leaseOffsetSeconds, String writer) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
-                + " workspace_id, session_id, storage_version, state,"
-                + " writer_generation, writer_id, writer_lease_until,"
-                + " journal_revision, committed_sequence, activation_epoch,"
-                + " compacted_through_revision, recovery_status, created_at,"
-                + " updated_at, tenant_key, harness_key, harness_session_id,"
-                + " head_kind) VALUES (?, ?, ?, 1, ?, 1, ?, TIMESTAMPADD("
-                + "SECOND, " + leaseOffsetSeconds + ", CURRENT_TIMESTAMP(6)),"
-                + " 3, ?, 0, 0, 'READY', CURRENT_TIMESTAMP(6),"
-                + " CURRENT_TIMESTAMP(6), ?, ?, ?, 'MANAGED_SESSION')",
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified, tenant_key, harness_key, harness_session_id, head_kind) VALUES (?, ?, ?, 1, ?, 1, ?, (" + ManagedSchemaTime.SQL_NOW + " + " + (leaseOffsetSeconds * 1000L) + "), 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
                 TENANT, WORKSPACE, session, state, writer, committed,
                 ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
                 session);
@@ -673,10 +823,7 @@ class EventTransportBrokerGate {
     private EventRecord storedPublicEvent(String session, long sequence,
             String type) {
         EventRecord event = publicEvent(session, sequence, type);
-        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
-                + " sequence_id, event_id, turn_id, event_type, data_json,"
-                + " terminal, source_key, created_at) VALUES (?, ?, ?, ?, ?,"
-                + " ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json, terminal, source_key, gmt_create) VALUES (?, ?, ?, ?, ?, ?, '{}', FALSE, NULL, ?)", TENANT, session, sequence,
                 event.eventId(), event.turnId(), type, event.createdAt());
         jdbc.update("UPDATE ma_event_stream SET last_sequence = ? WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind ="

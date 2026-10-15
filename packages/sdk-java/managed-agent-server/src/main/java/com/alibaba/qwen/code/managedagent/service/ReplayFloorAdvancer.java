@@ -3,13 +3,14 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Raises each Session's replay floor as far as its Snapshot proves safe, the
@@ -41,7 +42,7 @@ public class ReplayFloorAdvancer {
             return;
         }
         // A pass drains the backlog, not just the first batch: the candidate
-        // query orders by updated_at, which the advance never moves, so a
+        // query orders by gmt_modified, which the advance never moves, so a
         // Session that keeps appending would sort last of every full batch
         // and starve while more than TARGET_LIMIT candidates remain. A target
         // whose advance keeps failing stays a candidate, so the attempted set

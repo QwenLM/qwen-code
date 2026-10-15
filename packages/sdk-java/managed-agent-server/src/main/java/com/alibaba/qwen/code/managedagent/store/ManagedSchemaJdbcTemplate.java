@@ -2,19 +2,19 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.jdbc.core.RowMapper;
+
+import javax.sql.DataSource;
 
 import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.Map;
-
-import javax.sql.DataSource;
 
 /** Preserves byte-exact schema identities at the JDBC map boundary. */
 public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
@@ -28,6 +28,14 @@ public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
     }
 
     @Override
+    protected <T> RowMapper<T> getSingleColumnRowMapper(Class<T> requiredType) {
+        if (requiredType == java.sql.Timestamp.class) {
+            return (row, index) -> requiredType.cast(ManagedSchemaTime.timestamp(row, 1));
+        }
+        return super.getSingleColumnRowMapper(requiredType);
+    }
+
+    @Override
     protected PreparedStatementSetter newArgPreparedStatementSetter(Object[] arguments) {
         return new ArgumentPreparedStatementSetter(arguments) {
             private ParameterMetaData parameters;
@@ -36,6 +44,10 @@ public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
             @Override
             protected void doSetValue(PreparedStatement statement, int index, Object value)
                     throws SQLException {
+                if (value instanceof java.sql.Timestamp timestamp) {
+                    super.doSetValue(statement, index, timestamp.getTime());
+                    return;
+                }
                 if (value instanceof String text) {
                     byte[] utf8 = ManagedSchemaKeys.identity(text);
                     if (h2 == null) {

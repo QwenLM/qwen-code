@@ -1,11 +1,20 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.HmacAlgorithms;
+import org.apache.commons.codec.digest.HmacUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -20,19 +29,11 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 @Component
 public class WorkspaceStorageGuard {
@@ -291,8 +292,8 @@ public class WorkspaceStorageGuard {
     private void prepareAlias(String tenant, String storage, String physical, String operation) {
         String request = "{\"schemaVersion\":1,\"operationId\":\"" + operation + "\"}";
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                + " storage_kind, registration_json) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', ?)"
-                + " ON DUPLICATE KEY UPDATE physical_key = COALESCE(physical_key, VALUES(physical_key)),"
+                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
+                + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_key IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_key = COALESCE(physical_key, VALUES(physical_key)),"
                 + " storage_kind = CASE WHEN storage_kind = 'UNREGISTERED' THEN 'LOCAL' ELSE storage_kind END,"
                 + " registration_json = COALESCE(registration_json, VALUES(registration_json))",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
@@ -308,8 +309,7 @@ public class WorkspaceStorageGuard {
     }
 
     private void completeAlias(String tenant, String storage, String physical) {
-        if (jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1)"
-                + " WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
+        if (jdbc.update("UPDATE ma_storage SET gmt_modified = CASE WHEN registration_state <> 'REGISTERED' OR registration_revision IS NULL THEN " + ManagedSchemaTime.SQL_NOW + " ELSE gmt_modified END, registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1) WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage), physical) != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -423,8 +423,8 @@ public class WorkspaceStorageGuard {
     }
 
     private void verifyHistory(String tenantId, String storageId, boolean probe) {
-        var migrations = jdbc.query("SELECT * FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
-                + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED' ORDER BY updated_at DESC LIMIT 1",
+        var migrations = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
+                + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED' ORDER BY gmt_modified DESC LIMIT 1",
                 (row, index) -> WorkspaceOperations.operation(row), tenantId,
                 JdbcRuntimeBindingRepository.storageAliasKey(tenantId, storageId));
         if (!migrations.isEmpty()) {
@@ -698,8 +698,7 @@ public class WorkspaceStorageGuard {
                     + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, ?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
                     physical, physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
                     target.birthTime(), registration, source.mountRevision() + 1, operation);
-            if (created != 1 || jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_revision = registration_revision + 1"
-                    + " WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
+            if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_key = ?, registration_revision = registration_revision + 1 WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
                     physical, JdbcRuntimeBindingRepository.storageAliasKey(source.tenantId(), source.storageId()), previous) != 1) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -748,12 +747,14 @@ public class WorkspaceStorageGuard {
         }
         String host;
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(machineId.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            host = HexFormat.of().formatHex(mac.doFinal(
-                    "Qwen-Code/verified-workspace/v2".getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException error) {
-            throw new IOException("Host identity is unavailable", error);
+            host = new HmacUtils(HmacAlgorithms.HMAC_SHA_256,
+                    machineId.getBytes(StandardCharsets.UTF_8)).hmacHex(
+                            "Qwen-Code/verified-workspace/v2".getBytes(StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException error) {
+            if (error.getCause() instanceof GeneralSecurityException cause) {
+                throw new IOException("Host identity is unavailable", cause);
+            }
+            throw error;
         }
         String device = Long.toUnsignedString(((Number) attributes.get("dev")).longValue());
         String inode = Long.toUnsignedString(((Number) attributes.get("ino")).longValue());

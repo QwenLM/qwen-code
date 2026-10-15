@@ -6,8 +6,13 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -15,9 +20,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /** Two-process manual acceptance fixture; only the coordinating operator may reboot its host. */
 public final class WorkspaceMaintenanceLinuxAcceptanceMain {
@@ -98,8 +100,7 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
             state.put("keeperPid", keeper.pid());
             Files.write(stateFile, JSON.writeValueAsBytes(state));
             requireBlocked(() -> recovery.reconcileAfterReboot(binding, claimed.childWorkspaceId(), claimed.claimGeneration(), (String) original.get("executionId")));
-            jdbc.update("UPDATE ma_operation SET claim_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6))"
-                    + " WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ? AND claim_generation = ? AND tenant_id = ?",
+            jdbc.update("UPDATE ma_operation SET claim_until = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ? AND claim_generation = ? AND tenant_id = ?",
                     claimed.childWorkspaceId(), claimed.claimGeneration(), tenant);
             if (children.claim(child, "replacement-before-reboot", System.currentTimeMillis(), 60_000) != null) {
                 throw new IllegalStateException("Expiry replaced an original physical hold");

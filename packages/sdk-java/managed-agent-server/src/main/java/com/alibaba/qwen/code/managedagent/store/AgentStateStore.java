@@ -15,15 +15,16 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -109,6 +110,9 @@ public interface AgentStateStore {
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection);
 
+    Optional<Admission> findWorkspaceCreateReplay(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest);
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
@@ -116,16 +120,54 @@ public interface AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest);
 
+    /**
+     * The actor-carrying variant records the caller on the command receipt,
+     * so the receipt's replay answers the actor who recorded it — an
+     * OPERATOR's own retry of his own key — and not only the creator. The
+     * default drops the actor for implementations that cannot record it.
+     */
+    default Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            String actorId) {
+        return insertTurnCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, input, payloadDigest);
+    }
+
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId);
+
+    /** The actor-carrying twin of {@link #insertTurnCommand}. */
+    default Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, String actorId) {
+        return insertCancelCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, turnId);
+    }
 
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
 
+    /** The actor-carrying twin of {@link #insertTurnCommand}. */
+    default SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId) {
+        return beginSessionMutation(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, kind);
+    }
+
     SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
             String requestDigest, String sessionId, String title);
+
+    /** The actor-carrying twin: the recorded rename answers its recorder. */
+    default SessionMutationCommand beginSessionRename(String tenantId,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String title, String actorId) {
+        return beginSessionRename(tenantId, idempotencyKey, requestDigest,
+                sessionId, title);
+    }
 
     SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
             String sessionId, String title, String harnessBootId, long revision);
@@ -359,7 +401,7 @@ public interface AgentStateStore {
     Optional<SessionRecord> findSessionById(String sessionId);
 
     SessionPage listSessions(String tenantId, String actorId,
-            Long beforeUpdatedAt,
+            Long beforeCreatedAt,
             String beforeSessionId, int limit);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
@@ -428,7 +470,7 @@ public interface AgentStateStore {
 
     /**
      * Rotates a stale materialization target behind the fresher ones by
-     * touching only {@code updated_at} on its progress row — never
+     * touching only {@code gmt_modified} on its progress row — never
      * {@code covered_sequence}, which the gap guard must freeze on failure.
      */
     void deferMaterializationTarget(String tenantId, String sessionId);
@@ -443,6 +485,9 @@ public interface AgentStateStore {
 
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
+
+    void deferTurnRetry(String tenantId, String sessionId, String turnId,
+            String owner, long retryAfter);
 
     void scheduleTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
@@ -516,4 +561,7 @@ public interface AgentStateStore {
             String type, Map<String, Object> data, String sourceKey);
 
     SessionRecord requireSession(String tenantId, String sessionId);
+
+    Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
+            String sessionId);
 }

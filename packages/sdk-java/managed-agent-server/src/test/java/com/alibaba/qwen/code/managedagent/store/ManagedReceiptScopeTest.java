@@ -1,18 +1,19 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ManagedReceiptScopeTest {
     @Test
@@ -44,7 +45,7 @@ class ManagedReceiptScopeTest {
                         Integer.class, tenant)).isOne();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
                         Integer.class, tenant)).isEqualTo(2);
-                assertThat(ManagedReceipts.creation(jdbc, tenant, actorBytes, "create").get("session_id"))
+                assertThat(ManagedReceipts.creation(jdbc, tenant, actorBytes, "create").sessionId())
                         .isEqualTo(admission.sessionId());
             }
         }
@@ -61,7 +62,7 @@ class ManagedReceiptScopeTest {
             }
             for (String actor : List.of("actor", "Actor", "actor ")) {
                 assertThat(ManagedReceipts.creation(jdbc, "tenant", actor.getBytes(StandardCharsets.UTF_8), "same-key")
-                        .get("session_id")).isEqualTo(actor);
+                        .sessionId()).isEqualTo(actor);
             }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt", Integer.class)).isEqualTo(3);
         }
