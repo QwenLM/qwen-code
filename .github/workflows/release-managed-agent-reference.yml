@@ -129,6 +129,14 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
+      - name: 'Grant Flyway probe access'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          docker exec "${{ job.services.mysql.id }}" \
+            mysql -uroot -proot \
+            --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
+
       - name: 'Test the packager'
         run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
 
@@ -255,6 +263,24 @@ jobs:
             remote_size="$(jq -er --arg name "${name}" '.assets[] | select(.name == $name) | .size' <<< "${release_json}")"
             if [[ "${remote_size}" != "${local_size}" ]]; then
               echo "::error::Uploaded size mismatch for ${name}."
+              exit 1
+            fi
+            local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+            remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest // empty' <<< "${release_json}")"
+            if [[ -z "${remote_digest}" ]]; then
+              asset_id="$(jq -er --arg name "${name}" '.assets[] | select(.name == $name) | .id' <<< "${release_json}")"
+              downloaded_asset="$(mktemp)"
+              trap 'rm -f "${downloaded_asset}"' EXIT
+              gh api \
+                -H 'Accept: application/octet-stream' \
+                "repos/${GH_REPO}/releases/assets/${asset_id}" \
+                > "${downloaded_asset}"
+              remote_digest="sha256:$(sha256sum "${downloaded_asset}" | awk '{print $1}')"
+              rm -f "${downloaded_asset}"
+              trap - EXIT
+            fi
+            if [[ "${remote_digest}" != "${local_digest}" ]]; then
+              echo "::error::Uploaded digest mismatch for ${name}."
               exit 1
             fi
           done

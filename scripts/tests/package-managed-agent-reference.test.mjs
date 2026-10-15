@@ -216,14 +216,21 @@ test('publishes verified draft assets behind an exact tag', async () => {
   const draft = workflow.indexOf('draft:true');
   const upload = workflow.indexOf('gh release upload');
   const assetVerification = workflow.indexOf('actual_names=');
+  const digestVerification = workflow.indexOf('remote_digest=');
+  const digestMismatch = workflow.indexOf('Uploaded digest mismatch');
   const tag = workflow.indexOf('git/refs');
   const publish = workflow.indexOf('-F draft=false');
 
   assert.ok(draft >= 0);
   assert.ok(draft < upload);
   assert.ok(upload < assetVerification);
+  assert.ok(assetVerification < digestVerification);
+  assert.ok(digestVerification < digestMismatch);
+  assert.ok(digestMismatch < tag);
   assert.ok(assetVerification < tag);
   assert.ok(tag < publish);
+  assert.match(workflow, /Accept: application\/octet-stream/);
+  assert.match(workflow, /remote_digest.*!=.*local_digest/);
   assert.match(workflow, /scripts\/contract-version-utils\.js/);
   assert.match(workflow, /scripts\/flyway-migration-utils\.js/);
 });
