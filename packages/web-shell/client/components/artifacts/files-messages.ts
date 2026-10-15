@@ -9,6 +9,7 @@ export const FILES_MESSAGES_EN = {
   'files.deleteWarning':
     'This will permanently delete the file. This cannot be undone.',
   'files.deleting': 'Deleting…',
+  'files.uploadTo': 'Drop files to upload into',
   'files.description': 'Browse workspace files',
   'files.filter': 'Filter files…',
   'files.noMatches': 'No matches in loaded paths',
@@ -34,6 +35,7 @@ export const FILES_MESSAGES_ZH = {
   'files.deleteTitle': '删除文件？',
   'files.deleteWarning': '此操作将永久删除该文件。删除后不可恢复。',
   'files.deleting': '删除中…',
+  'files.uploadTo': '拖放文件上传至',
   'files.description': '浏览工作区文件',
   'files.filter': '筛选文件…',
   'files.noMatches': '已加载路径内无匹配',
