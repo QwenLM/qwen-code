@@ -15,6 +15,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,15 +26,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
@@ -1356,12 +1355,7 @@ public class ManagedExtensionRecordStore {
     }
 
     private static String sha256(byte[] value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance(
-                    "SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
+        return DigestUtils.sha256Hex(value);
     }
 
     /**
@@ -1761,16 +1755,8 @@ public class ManagedExtensionRecordStore {
 
     /** Whether the event id sits in the domain's own reserved {@code <domain>:<n>} namespace. */
     private static boolean ownReservedId(String eventId, String domain) {
-        if (eventId == null || !eventId.startsWith(domain + ":")) {
-            return false;
-        }
-        for (int index = domain.length() + 1; index < eventId.length();
-                index++) {
-            if (!Character.isDigit(eventId.charAt(index))) {
-                return false;
-            }
-        }
-        return eventId.length() > domain.length() + 1;
+        return eventId != null && eventId.startsWith(domain + ":")
+                && StringUtils.isNumeric(eventId.substring(domain.length() + 1));
     }
 
     /**

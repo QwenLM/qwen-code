@@ -124,6 +124,15 @@ class ConsolidatedActionStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Long.class)).isZero();
     }
 
+    @Test
+    void preservesThePersistedDecisionDigestAndItsFieldOrder() {
+        JsonNode response = JSON.createObjectNode()
+                .put("policyRevision", "p1").put("inputRevision", 7).put("optionId", "allow");
+
+        assertThat(ManagedActionStore.decisionDigest(response)).isEqualTo(
+                "d61ff840d95b8aaa9b24999e2910fc687098d73b225c0837b6ec6718fb038ae5");
+    }
+
     private StoreModels.OperationAdmission admit(String key, String digest, JsonNode response) {
         return transactions.execute(status -> actions.admit("tenant", "session", null, "anonymous", key, digest, ACTION, response, 10));
     }
