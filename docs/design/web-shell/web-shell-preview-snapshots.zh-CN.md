@@ -76,7 +76,10 @@ daemon 就恢复。初次加载失败仍会重试内容路由。关闭后重新�
 快照描述符沿用会话产物的保留策略和默认 200 条记录上限。本次不实现无限存档，也不
 改变会话删除或保留策略。新发布不会覆盖旧快照；快照保留到最后一个保留记录被删除。
 过去的实时链接记录不能追溯重建。快照字节缺失时显示不可用，包括移动对话文件却没有
-携带运行时存储的情况。
+携带运行时存储的情况。不是快照描述符的本地 published `file://` 页只存在于 live
+store：即使调用方请求 restorable，Store 也会写成 ephemeral；恢复时安静丢弃匹配的
+Artifact 工具历史记录。详见
+[local-published-file-retention.zh-CN.md](../daemon-session-artifacts/local-published-file-retention.zh-CN.md)。
 
 ## 受影响组件与验证
 

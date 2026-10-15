@@ -2,16 +2,17 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
-import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
+import com.alibaba.qwen.code.managedagent.harness.HarnessDisabledException;
 import com.alibaba.qwen.code.managedagent.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -21,12 +22,19 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.annotation.PreDestroy;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -39,10 +47,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 
 @Component
 public class HarnessCoordinator {
@@ -61,6 +65,14 @@ public class HarnessCoordinator {
     // anyway, so an entry could never change an outcome.
     private static final Set<String> LEASE_BOUNDED_409_CODES =
             Set.of("managed_session_writer_conflict");
+    // `hosted_turn_recovery_in_progress` is the ONLY refusal the daemon
+    // provably clears under its own recovery channel: the wake pump
+    // settles the park the prompt route still sees. A user Turn arriving
+    // in that window must outlive the park, whatever the shared budget
+    // already bought on durable refusals — the durable meaning stays on
+    // `hosted_turn_recovery_required` and still meets the budget.
+    private static final Set<String> TRANSIENT_RECOVERY_WINDOW_409_CODES =
+            Set.of("hosted_turn_recovery_in_progress");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -125,6 +137,17 @@ public class HarnessCoordinator {
             throw new IllegalStateException(
                     "Managed dispatch retry limits are invalid");
         }
+        // The scheduler receives toMillis(): a renew interval that is
+        // positive but below a millisecond still dies on the worker thread,
+        // and one without margin against the lease loses the lease to the
+        // first late renewal, surfacing later as hosted_harness_unavailable.
+        if (renewInterval.toMillis() <= 0
+                || renewInterval.toMillis() > leaseDuration.toMillis() / 2) {
+            throw new IllegalStateException(
+                    "Managed dispatch lease limits are invalid: renew"
+                            + " interval must be at least one millisecond and"
+                            + " at most half the lease duration");
+        }
     }
 
     public void dispatch(String tenantId, String sessionId, String turnId) {
@@ -144,7 +167,7 @@ public class HarnessCoordinator {
     public void cancel(String tenantId, String sessionId, String turnId) {
         dispatch(tenantId, sessionId, turnId);
         executor.execute(() -> cancelAdmittedTurn(tenantId, sessionId,
-                turnId));
+                turnId, false));
     }
 
     @Scheduled(fixedDelayString =
@@ -180,7 +203,7 @@ public class HarnessCoordinator {
                             leaseLost.set(true);
                         } else if (!leaseLost.get()) {
                             executor.execute(() -> cancelAdmittedTurn(
-                                    tenantId, sessionId, turnId));
+                                    tenantId, sessionId, turnId, true));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -217,9 +240,8 @@ public class HarnessCoordinator {
                 // in managed_agent_turn.error_message VARCHAR(2048), so bound it
                 // instead of letting one oversized body throw the terminal
                 // write itself.
-                String declineReason = error.getReason().length() > 1024
-                        ? error.getReason().substring(0, 1024)
-                        : error.getReason();
+                String declineReason = StringUtils.truncate(
+                        Objects.requireNonNull(error.getReason()), 1024);
                 terminal = failTerminally(claimed,
                         "managed_runtime_recovery_blocked",
                         "The prior Harness generation parked a Turn this"
@@ -273,13 +295,18 @@ public class HarnessCoordinator {
                         submissionAttempted.get()
                                 && !"hosted_prompt_recovery_required"
                                         .equals(errorCode)
-                                && !("hosted_turn_recovery_required"
-                                                .equals(errorCode)
+                                && !(("hosted_turn_recovery_required"
+                                                        .equals(errorCode)
+                                                || "hosted_turn_recovery_in_progress"
+                                                        .equals(errorCode))
                                         && claimed.harnessEventEpoch()
                                                 == null),
                         error,
-                        recoveryPath.get() && errorCode != null
-                                && LEASE_BOUNDED_409_CODES.contains(errorCode));
+                        (recoveryPath.get() && errorCode != null
+                                && LEASE_BOUNDED_409_CODES.contains(
+                                        errorCode))
+                                || "hosted_turn_recovery_in_progress"
+                                        .equals(errorCode));
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
@@ -308,6 +335,14 @@ public class HarnessCoordinator {
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
+            if (!claimed.submissionAttempted()) {
+                // Before submission a Workspace-files outage holds the Turn
+                // like a Harness outage: a replay may already have answered
+                // 202 for it. Once submitted, the Turn stays terminal here.
+                return deferOutage(claimed, "workspace_unavailable",
+                        "Hosted Workspace execution remained unavailable"
+                                + " before Turn admission.");
+            }
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
@@ -689,10 +724,22 @@ public class HarnessCoordinator {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
                     flushAt = 0;
-                    store.retractHarnessTurnOutput(turn.tenantId(),
-                            turn.sessionId(), turn.turnId(), owner,
-                            stream.eventEpoch(), retractionFromSequence(source),
-                            source.id());
+                    Map<?, ?> retraction = source.data() instanceof Map<?, ?> data ? data : Map.of();
+                    if (retraction.containsKey("throughSequence")) {
+                        Object through = retraction.get("throughSequence");
+                        Object sourceBoot = retraction.get("sourceBootId");
+                        Object sourceEpoch = retraction.get("sourceEventEpoch");
+                        if (!(through instanceof Number) || !(sourceBoot instanceof String) || !(sourceEpoch instanceof String)) {
+                            throw new IllegalStateException("Invalid bounded Hosted retraction source");
+                        }
+                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
+                                stream.eventEpoch(), retractionFromSequence(source), source.id(),
+                                (String) sourceBoot, (String) sourceEpoch, ((Number) through).longValue());
+                    } else {
+                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
+                                stream.eventEpoch(), retractionFromSequence(source), source.id());
+                    }
+
                     // The replay's first chunk is the new first visible text:
                     // the transcript it replaces was just blanked.
                     flushFirstVisibleText = true;
@@ -857,7 +904,7 @@ public class HarnessCoordinator {
     }
 
     private void cancelAdmittedTurn(String tenantId, String sessionId,
-            String turnId) {
+            String turnId, boolean renewalDriven) {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
@@ -875,17 +922,22 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // Reuse the admitted attachment: attaching would recheck grants
-            // needed for new work and could replace the running attachment.
+            // Reuse the admitted owner; a cold connector cache re-attaches
+            // only for the persisted cancellation, without requiring the
+            // authority that admits new work.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
                 // Renewal requeues this poller while the Turn is still
-                // settling, so only one concurrent poller may send the
-                // cancel; a failed send releases the claim so the next
-                // renewal retries it.
+                // settling, so only one renewal-driven poller may send the
+                // cancel once per event epoch; a failed send releases the
+                // claim so the next renewal retries it. A public cancel()
+                // call always pays its own send: a takeover load re-armed
+                // after a transient failure must be settled by the send it
+                // re-requests, and the plain cancel is idempotent at the
+                // daemon under the same identities.
                 String cancelKey = key(tenantId, sessionId, turnId) + "\n"
                         + turn.harnessEventEpoch();
-                if (cancellations.add(cancelKey)) {
+                if (!renewalDriven || cancellations.add(cancelKey)) {
                     try {
                         harness.cancel(session.tenantId(),
                                 session.sessionId());
@@ -898,7 +950,9 @@ public class HarnessCoordinator {
                         // The coded refusal is a failed plain send: release
                         // the claim here and let the paced takeover below,
                         // not the claim, gate re-sends of this path.
-                        cancellations.remove(cancelKey);
+                        if (renewalDriven) {
+                            cancellations.remove(cancelKey);
+                        }
                         // The plain cancel route aborts only a live, in-memory
                         // Turn: a parked Turn its dead generation owned answers
                         // the coded refusal, and re-issuing that same cancel
@@ -939,7 +993,9 @@ public class HarnessCoordinator {
                                     recovery.getActivationId());
                         }
                     } catch (RuntimeException error) {
-                        cancellations.remove(cancelKey);
+                        if (renewalDriven) {
+                            cancellations.remove(cancelKey);
+                        }
                         throw error;
                     }
                 }
@@ -979,6 +1035,11 @@ public class HarnessCoordinator {
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error,
             boolean exemptFromPreAdmissionBudget) {
+        if (!submissionAttempted && isHarnessDisabled(error)) {
+            return deferOutage(turn, "hosted_harness_unavailable",
+                    "Hosted Harness remained unavailable before Turn"
+                            + " admission.", error);
+        }
         if (!submissionAttempted
                 && !exemptFromPreAdmissionBudget
                 && turn.retryCount() >= maxPreAdmissionRetries) {
@@ -1004,9 +1065,8 @@ public class HarnessCoordinator {
                 // refusal above. Without that mark the same code arrives
                 // from the open-LOAD path, whose reviewed exhaustion
                 // answer is the generic unavailable.
-                return fail(turn, http.getErrorCode().length() > 128
-                        ? http.getErrorCode().substring(0, 128)
-                        : http.getErrorCode(),
+                return fail(turn, StringUtils.truncate(
+                        Objects.requireNonNull(http.getErrorCode()), 128),
                         "Hosted Harness refused the Turn before Turn"
                                 + " admission.");
             }
@@ -1024,6 +1084,44 @@ public class HarnessCoordinator {
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
                 turn.retryCount() + 1, delay, failureLabel(error));
         return true;
+    }
+
+    // The two outage arms age differently. The Workspace-files arm spends
+    // the pre-admission budget: the recovery sweep gates on isAvailable()
+    // alone, which the production connector answers true even with files
+    // off, so the sweep keeps re-offering the Turn and a permanent files
+    // outage terminates with the actionable code instead of an eternal
+    // ACCEPTED. The Harness-disabled arm is not budget-bounded: the sweep
+    // and the replay dispatch both gate on isAvailable(), so the first
+    // defer parks the Turn — retry count frozen — until availability
+    // returns. Either way the backoff grows like any other retry.
+    private boolean deferOutage(TurnRecord turn, String exhaustionCode,
+            String exhaustionMessage) {
+        return deferOutage(turn, exhaustionCode, exhaustionMessage, null);
+    }
+
+    private boolean deferOutage(TurnRecord turn, String exhaustionCode,
+            String exhaustionMessage, RuntimeException cause) {
+        if (turn.retryCount() >= maxPreAdmissionRetries) {
+            LOG.error("Managed Turn coordination exhausted outage deferrals"
+                            + " tenant={} session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    cause == null ? "none" : failureLabel(cause), cause);
+            return fail(turn, exhaustionCode, exhaustionMessage);
+        }
+        long delay = retryDelay(retryInitialDelay, retryMaxDelay,
+                turn.retryCount());
+        store.deferTurnRetry(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, clock.millis() + delay);
+        LOG.warn("Managed Turn coordination deferred tenant={} session={}"
+                        + " turn={} retry={} delayMs={}",
+                turn.tenantId(), turn.sessionId(), turn.turnId(),
+                turn.retryCount() + 1, delay);
+        return true;
+    }
+
+    private static boolean isHarnessDisabled(RuntimeException error) {
+        return error instanceof HarnessDisabledException;
     }
 
     private static String failureLabel(RuntimeException error) {

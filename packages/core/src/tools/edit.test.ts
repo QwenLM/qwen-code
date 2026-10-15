@@ -150,6 +150,256 @@ describe('EditTool', () => {
       ApprovalMode.AUTO_EDIT,
     );
 
+  describe('fuzzy trailing-newline boundaries', () => {
+    it.each(
+      [
+        {
+          name: 'primary fuzzy match beside an indented line',
+          content: ' const x = 1 \nfoo\n\nconst x = 1 \n\nafter\n',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\n\nreplacement\n\nafter\n',
+        },
+        {
+          name: 'fallback fuzzy match beside an indented line',
+          content: ' const x = 1 \nfoo\nconst x = 1 \nbar\n',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\nreplacement\nbar\n',
+        },
+        {
+          name: 'fuzzy EOF match beside an indented line',
+          content: ' const x = 1 \nfoo\nconst x = 1 ',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\nreplacement',
+        },
+        {
+          name: 'fuzzy EOF deletion beside an indented newline suffix',
+          content: ' a \nx\na ',
+          oldString: 'a\n',
+          newString: '',
+          expected: ' a \nx\n',
+        },
+        {
+          name: 'fuzzy match beside a longer line prefix',
+          content: 'const x = 1 extra\nconst x = 1 \n',
+          oldString: 'const x = 1  ',
+          newString: 'replacement',
+          expected: 'const x = 1 extra\nreplacement\n',
+        },
+        {
+          name: 'multiline fuzzy match beside an indented block',
+          content:
+            ' const x = 1 \nnext \nother\nconst x = 1 \nnext \n\nafter\n',
+          oldString: 'const x = 1\nnext\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nnext \nother\nreplacement\n\nafter\n',
+        },
+        {
+          name: 'multiline fuzzy match beside a longer final line',
+          content: 'first \nsecond extra\nx\nfirst \nsecond \ny\n',
+          oldString: 'first\nsecond\n',
+          newString: 'replacement\n',
+          expected: 'first \nsecond extra\nx\nreplacement\ny\n',
+        },
+        {
+          name: 'overlapping blank-line fuzzy match',
+          content: 'x\n\n\n',
+          oldString: '\n \n',
+          newString: 'replacement\n',
+          expected: 'x\nreplacement\n',
+        },
+        {
+          name: 'fuzzy replacement with literal dollar sequences',
+          content: ' const x = 1 \nfoo\n\nconst x = 1 \n\nafter\n',
+          oldString: 'const x = 1\n',
+          newString: "$& $` $' $$\n",
+          expected: " const x = 1 \nfoo\n\n$& $` $' $$\n\nafter\n",
+        },
+      ].flatMap((testCase) =>
+        [false, true].map((replaceAll) => ({ ...testCase, replaceAll })),
+      ),
+    )(
+      'preserves unmatched lines during $name (all: $replaceAll)',
+      async (testCase) => {
+        const filePath = path.join(rootDir, 'scoped-fuzzy-match.txt');
+        seedFile(filePath, testCase.content);
+
+        const result = await run(
+          edit(filePath, testCase.oldString, testCase.newString, {
+            replace_all: testCase.replaceAll,
+          }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(testCase.expected);
+        expect(mockFileHistoryService.trackEdit).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([false, true])(
+      'counts only repeated whole fuzzy lines (all: %s)',
+      async (replaceAll) => {
+        const content = ' a \nfoo\na \n\na \nb\n';
+        const filePath = path.join(rootDir, 'scoped-repeated-lines.txt');
+        seedFile(filePath, content);
+        const write = vi.spyOn(fsService, 'writeTextFile');
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: replaceAll }),
+        );
+
+        if (replaceAll) {
+          expect(result.error).toBeUndefined();
+          expect(readText(filePath)).toBe(
+            ' a \nfoo\nreplacement\n\nreplacement\nb\n',
+          );
+          expect(write).toHaveBeenCalledTimes(1);
+        } else {
+          expect(result.error?.type).toBe(
+            ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+          );
+          expect(result.llmContent).toContain('Found 2 occurrences');
+          expect(readText(filePath)).toBe(content);
+          expect(write).not.toHaveBeenCalled();
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([
+      ['literal', 'prefix old\nold\n', 'old'],
+      ['character-normalized', 'prefix “old”\n“old”\n', '"old"'],
+    ])(
+      'retains %s mid-line replacements',
+      async (_mode, content, oldString) => {
+        const filePath = path.join(rootDir, 'mid-line.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, oldString, 'new', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('prefix new\nnew\n');
+      },
+    );
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])('rejects repeated %s lines without writing', async (_mode, content) => {
+      const filePath = path.join(rootDir, 'repeated-lines.txt');
+      seedFile(filePath, content);
+      const write = vi.spyOn(fsService, 'writeTextFile');
+
+      const result = await run(edit(filePath, 'a\n', 'replacement\n'));
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+      );
+      expect(result.llmContent).toContain('Found 2 occurrences');
+      expect(readText(filePath)).toBe(content);
+      expect(write).not.toHaveBeenCalled();
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])(
+      'replaces both repeated %s lines when explicitly enabled',
+      async (_mode, content) => {
+        const filePath = path.join(rootDir, 'repeated-lines.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('replacement\n\nreplacement\nb\n');
+      },
+    );
+
+    it.each([
+      {
+        name: 'deletion before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'replacement before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement\n\nafter\n',
+      },
+      {
+        name: 'multiline string replacement',
+        content: 'before\nconst value = `first \nsecond`;\n\nafter\n',
+        oldString: 'const value = `first\nsecond`;\n',
+        newString: 'const value = `replacement`;\n',
+        expected: 'before\nconst value = `replacement`;\n\nafter\n',
+      },
+      {
+        name: 'deletion with multiple requested newlines',
+        content: 'before\nremove-me \n\n\nafter\n',
+        oldString: 'remove-me\n\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'deletion before a whitespace-only line',
+        content: 'before\nremove-me \n \nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n \nafter\n',
+      },
+      {
+        name: 'deletion at EOF with a newline',
+        content: 'before\nremove-me \n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n',
+      },
+      {
+        name: 'replacement at EOF without a newline',
+        content: 'before\nremove-me ',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement',
+      },
+      {
+        name: 'literal deletion before a blank line',
+        content: 'before\nremove-me\n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'implicit whole-line deletion without a requested newline',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me  ',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+    ])('preserves surrounding content during $name', async (testCase) => {
+      const filePath = path.join(rootDir, 'newline-boundary.txt');
+      seedFile(filePath, testCase.content);
+
+      const result = await run(
+        edit(filePath, testCase.oldString, testCase.newString),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(testCase.expected);
+    });
+  });
+
   /** An invocation whose calculateEdit aborts `controller`, then throws `error`. */
   const abortingInvocation = (
     fileName: string,

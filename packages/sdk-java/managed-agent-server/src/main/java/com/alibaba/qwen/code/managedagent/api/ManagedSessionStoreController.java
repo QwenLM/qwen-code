@@ -7,13 +7,13 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockR
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.PublishToolResultRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import jakarta.validation.Valid;
@@ -41,7 +41,7 @@ public class ManagedSessionStoreController {
         this.store = store;
     }
 
-    private static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
+    static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
         String operation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER);
         String generation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER);
         if (operation == null && generation == null) {
@@ -114,7 +114,7 @@ public class ManagedSessionStoreController {
                 writerToken, request);
     }
 
-    @PostMapping("/transactions:commit")
+    @PostMapping({"/transactions:commit", "/transactions:commit-v2"})
     public CommitReceipt commit(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
@@ -139,8 +139,8 @@ public class ManagedSessionStoreController {
     public ToolResultResourceRef publishToolResult(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
-            @Valid @RequestBody PublishToolResultRequest request) {
-        return store.publishToolResult(tenant.tenantId(), sessionId, writerToken, request);
+            @Valid @RequestBody PublishToolResultRequest request, @RequestHeader HttpHeaders headers) {
+        return store.publishToolResult(tenant.tenantId(), sessionId, writerToken, request, lifecycleAuthority(headers));
     }
 
     @GetMapping("/transactions")
@@ -163,7 +163,7 @@ public class ManagedSessionStoreController {
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
             @RequestParam String workspaceId) {
-        StoredResource resource = store.readResource(tenant.tenantId(),
+        StoredResource resource = store.readOwnerResource(tenant.tenantId(),
                 workspaceId, sessionId, resourceId, writerToken);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_LENGTH,
