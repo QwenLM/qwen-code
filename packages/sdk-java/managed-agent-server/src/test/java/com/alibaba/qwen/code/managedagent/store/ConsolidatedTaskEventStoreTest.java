@@ -1,14 +1,14 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ConsolidatedTaskEventStoreTest {
     private ConsolidatedStoreFixture fixture;
@@ -28,7 +28,9 @@ class ConsolidatedTaskEventStoreTest {
 
     @AfterEach
     void closeFixture() {
-        if (fixture != null) fixture.close();
+        if (fixture != null) {
+            fixture.close();
+        }
     }
 
     @Test

@@ -1,5 +1,17 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.AttachedSession;
+import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
+import org.apache.rocketmq.client.apis.ClientException;
+import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -8,17 +20,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.AttachedSession;
-import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
-import org.apache.rocketmq.client.apis.ClientException;
-import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 
 class OwnerSubscriptionsTest {
     private static final String WRITER = "harness-boot-1";

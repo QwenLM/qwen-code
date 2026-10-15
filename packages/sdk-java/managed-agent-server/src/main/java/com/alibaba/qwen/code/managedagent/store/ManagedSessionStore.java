@@ -24,7 +24,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -42,7 +42,6 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -51,7 +50,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -399,6 +397,9 @@ public class ManagedSessionStore {
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
+        // A root that predates this writer still needs its scope keys and the
+        // SESSION event stream the session read path joins on.
+        materializeSessionRoot(tenantId, sessionId);
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
@@ -659,6 +660,9 @@ public class ManagedSessionStore {
                 || "READY".equals(request.recoveryStatus())) {
             throw invalid("recoveryStatus must be a blocked state.");
         }
+        // The 128-character column width is enforced one layer up by
+        // @Size(max = 128) on BlockRecoveryRequest — byte-counting here
+        // would reject non-ASCII codes that legitimately fit VARCHAR(128).
         validateText(request.recoveryDetailCode(), "recoveryDetailCode",
                 MAX_TEXT_BYTES);
         var continuation = lockCsiContinuation(tenantId, sessionId);
@@ -2724,6 +2728,10 @@ public class ManagedSessionStore {
 
     private void ensureSessionRoot(String tenantId, String sessionId) {
         insertSessionRoot(tenantId, sessionId);
+        materializeSessionRoot(tenantId, sessionId);
+    }
+
+    private void materializeSessionRoot(String tenantId, String sessionId) {
         long now = databaseEpochMillis(databaseNow());
         String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
         String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
@@ -2753,12 +2761,7 @@ public class ManagedSessionStore {
     }
 
     private static String sha256(byte[] value) {
-        try {
-            return HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
+        return DigestUtils.sha256Hex(value);
     }
 
     private static boolean secureEquals(String left, String right) {

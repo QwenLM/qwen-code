@@ -4,10 +4,12 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -32,8 +34,8 @@ final class WorkspaceRuntimeResolver {
             throw new IllegalStateException("Workspace execution profile is reserved");
         }
         if (!broker.getWorkspaceMounts().isEmpty()
-                && (!"local-process".equals(broker.getProvisioner())
-                        || !"session".equals(broker.getIsolationClass()))) {
+                && (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())
+                        || !WorkspaceExecutionProfile.admitsIsolationClass(broker.getIsolationClass()))) {
             throw new IllegalStateException("Workspace execution requires local Session isolation");
         }
         try {
