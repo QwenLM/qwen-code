@@ -7,6 +7,9 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, useEffect, useState } from 'react';
+import { I18nProvider } from '../i18n';
+import { cleanupReact, flushReact, mountReact } from '../test/reactHarness';
 import type {
   DaemonCapabilities,
   DaemonClient,
@@ -14,9 +17,15 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
+  LocalFilesControl,
   createLocalFilesRewarm,
   resolveLocalFilesWorkspaceRoute,
 } from './LocalFilesControl';
+
+const bridgeLifecycle = vi.hoisted(() => ({
+  mount: vi.fn(),
+  cleanup: vi.fn(),
+}));
 
 const capturedHookOptions = vi.hoisted(() => ({
   current: undefined as unknown,
@@ -76,6 +85,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
 
 vi.mock('../local-files/useLocalFilesBridge', () => ({
   useLocalFilesBridge: (options: unknown) => {
+    useEffect(() => {
+      bridgeLifecycle.mount();
+      return bridgeLifecycle.cleanup;
+    }, []);
     capturedHookOptions.current = options;
     return {
       status: { phase: 'idle', blocker: null },
@@ -457,4 +470,43 @@ describe('LocalFilesControl wiring', () => {
       value: 'locked-ws',
     });
   });
+});
+
+it('keeps the local-files bridge mounted while the More slot opens and closes', async () => {
+  bridgeLifecycle.mount.mockClear();
+  bridgeLifecycle.cleanup.mockClear();
+  let setSlot: (slot: HTMLElement | null) => void = () => {};
+  function Harness() {
+    const [slot, updateSlot] = useState<HTMLElement | null>(null);
+    setSlot = updateSlot;
+    return (
+      <I18nProvider language="en">
+        <LocalFilesControl triggerClassName="" portalContainer={slot} />
+      </I18nProvider>
+    );
+  }
+  const slot = document.createElement('div');
+  document.body.appendChild(slot);
+  try {
+    mountReact(<Harness />);
+    await flushReact();
+    expect(bridgeLifecycle.mount).toHaveBeenCalledTimes(1);
+    expect(slot.querySelector('button')).toBeNull();
+    act(() => setSlot(slot));
+    await flushReact();
+    expect(slot.querySelector('button')?.getAttribute('aria-label')).toBe(
+      'Local files',
+    );
+    act(() => setSlot(null));
+    await flushReact();
+    expect(slot.querySelector('button')).toBeNull();
+    expect(bridgeLifecycle.cleanup).not.toHaveBeenCalled();
+    act(() => setSlot(slot));
+    await flushReact();
+    expect(bridgeLifecycle.mount).toHaveBeenCalledTimes(1);
+  } finally {
+    cleanupReact();
+    slot.remove();
+  }
+  expect(bridgeLifecycle.cleanup).toHaveBeenCalledTimes(1);
 });

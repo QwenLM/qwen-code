@@ -1069,7 +1069,7 @@ test("typed discovery methods expose apps, windows, and exact-window lookup", as
     },
   });
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
-  assert.equal((await computer.listApps())[0].name, "Harness");
+  assert.equal((await computer.listApps())[0].displayName, "Harness");
   assert.equal((await computer.listWindows({ pid: 42 }))[0].window_id, 7);
   assert.equal((await computer.getWindow({ pid: 42, windowId: 7 })).title, "Harness");
 });
@@ -1458,7 +1458,7 @@ test("post-dispatch cancellation waits for the native terminal result", async ()
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(settled, false);
   finishNative(toolResult({ structured: { apps: [{ pid: 42 }] } }));
-  assert.deepEqual(await read, [{ pid: 42 }]);
+  assert.deepEqual(await read, [{ id: "unknown", displayName: "", isRunning: false }]);
   assert.equal(driver.asyncOptions[0].options, undefined);
 });
 
@@ -1818,7 +1818,7 @@ test("reconnect clears the old cursor so the next observation is full", async ()
   });
 
   await computer.observeWindow({ pid: 42, windowId: 7 });
-  assert.equal((await computer.listApps())[0].name, "Harness");
+  assert.equal((await computer.listApps())[0].displayName, "Harness");
   assert.equal(factoryCalls, 1);
   assert.equal(expired.closeCalls, 1);
   assert.equal(expired.destroyCalls, 1);
@@ -1992,7 +1992,7 @@ test("concurrent expired reads share one replacement session", async () => {
   const lateResult = await late;
 
   assert.deepEqual(
-    [...firstResults, lateResult].map((apps) => apps[0].name),
+    [...firstResults, lateResult].map((apps) => apps[0].displayName),
     ["Harness", "Harness", "Harness"],
   );
   assert.equal(factoryCalls, 1);
@@ -2038,7 +2038,7 @@ test("automatic reconnect drains async teardown and binding before redispatch", 
     },
   });
 
-  assert.deepEqual(await computer.listApps(), [{ pid: 42 }]);
+  assert.deepEqual(await computer.listApps(), [{ id: "unknown", displayName: "", isRunning: false }]);
   assert.equal(syncCloseCalls, 0);
   assert.equal(asyncCloseOptions, undefined);
   assert.equal(factoryCalls, 1);
@@ -2127,7 +2127,7 @@ test("a later call retries session creation after automatic reconnect fails", as
     computer.listApps(),
     (error) => error instanceof ComputerUseError && error.code === "reconnect_failed",
   );
-  assert.deepEqual(await computer.listApps(), [{ pid: 42, name: "Harness" }]);
+  assert.deepEqual(await computer.listApps(), [{ id: "Harness", displayName: "Harness", isRunning: false }]);
   assert.equal(factoryCalls, 2);
   assert.equal(computer.connectionGeneration, 2);
 });

@@ -304,8 +304,14 @@ not as a transport error.
 ### Compacted Replay
 
 `POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
-`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`, and
-`lastEventId?: number`. These fields are the daemon's bounded in-memory replay
+`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`,
+`lifecycleReplay?: BridgeEvent[]`, `lifecycleReplayIncomplete?: boolean`, and
+`lastEventId?: number`. The optional lifecycle supplement contains up to 1024
+metadata-only frames from the in-memory replay window when refreshing a
+persisted page, and may overlap that page. An incomplete flag reports
+unavailable, degraded, or truncated lifecycle coverage. Clients must apply
+replayed lifecycle records idempotently without treating starts as proof of
+currently running work; a false flag does not establish complete history. These fields are the daemon's bounded in-memory replay
 window for a live session, not a full transcript API. The default window cap is
 4 MiB per live session (`--compacted-replay-max-bytes`), and boot rejects
 invalid caps; the hard ceiling is 256 MiB. `compactedReplay` is produced by
@@ -345,7 +351,7 @@ resets that window, including when the channel was already live.
   timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
-- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

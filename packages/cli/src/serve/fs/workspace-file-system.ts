@@ -294,7 +294,10 @@ export interface WorkspaceFileSystem {
     opts?: ReadBytesOptions,
   ): Promise<ReadBytesOutcome>;
   list(p: ResolvedPath, opts?: ListOptions): Promise<FsEntry[]>;
-  glob(pattern: string, opts?: GlobOptions): Promise<ResolvedPath[]>;
+  glob(
+    pattern: string,
+    opts?: GlobOptions,
+  ): Promise<ResolvedPath[] & { truncated?: boolean }>;
   writeTextAtomic(
     p: ResolvedPath,
     content: string,
@@ -370,6 +373,7 @@ export interface WorkspaceFileSystem {
  * `forRequest` per HTTP route invocation.
  */
 export interface WorkspaceFileSystemFactory {
+  readonly sshWorkspace?: import('@qwen-code/qwen-code-core/services/ssh-workspace.js').SshWorkspace;
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
   assertCanWrite(): void;
   /** Optional so existing custom factories remain workspace-only by default. */

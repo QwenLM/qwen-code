@@ -34,13 +34,28 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
-    key: 'senderPolicy',
-    label: 'Sender Policy',
+    key: 'messageRoutes',
+    label: 'Message Routes',
+    kind: 'record',
+    description:
+      'Map message prefixes to instructions in separate route sessions',
+  },
+  {
+    key: 'defaultMessageRoute',
+    label: 'Default Message Route',
+    kind: 'string',
+    description:
+      'Route unmatched messages through this configured message route',
+  },
+  {
+    key: 'privatePolicy',
+    label: 'Private Policy',
     kind: 'enum',
     required: true,
     default: 'pairing',
     description: 'Controls who can start direct conversations',
     options: [
+      { value: 'disabled', label: 'Disabled' },
       { value: 'pairing', label: 'Pairing' },
       { value: 'allowlist', label: 'Allowlist' },
       { value: 'open', label: 'Open' },
@@ -65,6 +80,13 @@ const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
       { value: 'allowlist', label: 'Allowlist' },
       { value: 'open', label: 'Open' },
     ],
+  },
+  {
+    key: 'operators',
+    label: 'Session Operators',
+    kind: 'string-list',
+    description:
+      'User IDs who may approve tool use and run /cancel, /clear or /loop in shared sessions; empty grants no shared-session operator permissions',
   },
 ];
 
@@ -320,6 +342,7 @@ function ensureBuiltins(): Promise<void> {
         { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
         { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
         { name: 'dws', promise: import('@qwen-code/channel-dws') },
+        { name: 'email', promise: import('@qwen-code/channel-email') },
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },

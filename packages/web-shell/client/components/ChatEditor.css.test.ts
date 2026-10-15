@@ -98,7 +98,7 @@ describe('Plan chip close mark', () => {
           selectors: ['.planChipIcon > .planChipClose svg'],
           decls: ['width: 12px', 'height: 12px'],
         },
-        // Not limited to an enabled chip: the chip is disabled for the length
+        // Not limited to a chip that is not busy: it is inert for the length
         // of the request its own click starts.
         {
           at: '',
@@ -155,9 +155,26 @@ describe('Plan chip close mark', () => {
     expect(hiding).toEqual([]);
   });
 
-  it('keeps its hover tint whether or not the chip is enabled', () => {
-    // Each half ties the generic toolbar hover on specificity and wins only by
-    // coming later, so the shorter `.toolBtn.planChip:hover` would lose to it.
+  it('keys its busy cursor on aria-disabled, never on the native attribute', () => {
+    // A focused button that becomes natively disabled loses focus to the body,
+    // so the chip is only ever inert; a `:disabled` rule would never match.
+    // The markup side of that decision is pinned in ChatEditor.test.tsx.
+    // State selectors on the chip itself, not on something inside it.
+    const onChip = entries((selector) =>
+      /^\.planChip(\[|:)[^ ]*$/.test(selector),
+    );
+    expect(onChip).toEqual([
+      {
+        at: '',
+        selectors: [".planChip[aria-disabled='true']"],
+        decls: ['cursor: default'],
+      },
+    ]);
+  });
+
+  it('keeps its hover tint over the generic toolbar hover', () => {
+    // It ties the generic toolbar hover on specificity and wins only by coming
+    // later, so the shorter `.toolBtn.planChip:hover` would lose to it.
     const line = (rule: Rule) => rule.source?.start?.line ?? 0;
     let generic = 0;
     let tint = 0;
@@ -170,10 +187,7 @@ describe('Plan chip close mark', () => {
       }
       if (selectors.some((entry) => entry.startsWith('.toolBtn.planChip'))) {
         tint = line(rule);
-        expect(selectors).toEqual([
-          '.toolBtn.planChip:not(:disabled):hover',
-          '.toolBtn.planChip:disabled:hover',
-        ]);
+        expect(selectors).toEqual(['.toolBtn.planChip:not(:disabled):hover']);
       }
     });
     expect(generic).toBeGreaterThan(0);

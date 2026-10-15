@@ -81,7 +81,7 @@ describe('remote connection add navigation', () => {
     expect(navigateToDaemon).toHaveBeenCalledWith(
       'https://remote.example',
       'secret',
-      { continueRemoteConnectionAdd: true },
+      { continueFlow: 'connection' },
     );
     expect(window.sessionStorage.getItem('qwen-remote-connection-return')).toBe(
       `${testOrigin}/session/original?workspace=local`,

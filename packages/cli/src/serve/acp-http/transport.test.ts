@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
@@ -851,6 +852,16 @@ const fakeWorkspace = {
       accepted: true,
       ...(request as Record<string, unknown>),
       requiresOperatorAction: true,
+    };
+  },
+  async grantWorkspaceTrust() {
+    return {
+      v: 1,
+      workspaceCwd: TEST_WORKSPACE,
+      folderTrustEnabled: true,
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: 'TRUST_FOLDER',
+      requiresDaemonRestartForChanges: false,
     };
   },
   async getWorkspacePermissionsStatus() {
@@ -1789,6 +1800,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
   });
+
+  it.each(['agent-host', 'agent'])(
+    'session/new rejects the reserved %s source',
+    async (sourceType) => {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'session/new',
+        params: { cwd: '/ws', sourceType, sourceId: 'ag_x' },
+      });
+      expect(ack.status).toBe(202);
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frame).toMatchObject({
+        id: 91,
+        error: {
+          code: -32602,
+          data: { errorKind: 'reserved_session_source' },
+        },
+      });
+    },
+  );
 
   it('maps workspace session admission failures to retryable RPC error data', async () => {
     bridge.spawnOrAttach = async () => {
@@ -5206,15 +5245,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it.each(['session/load', 'session/resume'] as const)(
-    '%s restores reserved-source transcripts on the generic surface',
-    async (method) => {
+  it.each([
+    ['session/load', 'standalone', '550e8400-e29b-41d4-a716-446655440133'],
+    ['session/resume', 'standalone', '550e8400-e29b-41d4-a716-446655440134'],
+    ['session/load', 'agent', '550e8400-e29b-41d4-a716-446655440135'],
+    ['session/resume', 'agent', '550e8400-e29b-41d4-a716-446655440136'],
+  ] as const)(
+    '%s strips %s source metadata on the generic surface',
+    async (method, sourceType, sessionId) => {
       await withRuntimeDir(async () => {
-        const sessionId =
-          method === 'session/load'
-            ? '550e8400-e29b-41d4-a716-446655440133'
-            : '550e8400-e29b-41d4-a716-446655440134';
-        await writeStoredSession(sessionId, 'active', undefined, 'standalone');
+        await writeStoredSession(sessionId, 'active', undefined, sourceType);
         const loadCount = bridge.loadRequests.length;
         const resumeCount = bridge.resumeRequests.length;
 
@@ -6908,6 +6948,313 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 
+  it('session/new forwards startup selection and returns its actual confirmation', async () => {
+    const startupConfig = {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+    };
+    const startupConfigApplied = {
+      ...startupConfig,
+      effectiveReasoning: { state: 'enabled', effort: 'high' },
+    };
+    const session = {
+      sessionId: 'startup',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: false,
+      clientId: 'startup-client',
+      modelApplied: true,
+      startupConfigApplied,
+    };
+    const spawn = vi
+      .spyOn(bridge, 'spawnOrAttach')
+      .mockResolvedValueOnce(session);
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 430,
+      method: 'session/new',
+      params: { startupConfig },
+    });
+    const [frame] = (await got) as Array<{ result: Record<string, unknown> }>;
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ startupConfig, sessionScope: 'thread' }),
+    );
+    expect(frame.result).toMatchObject({
+      modelApplied: true,
+      startupConfigApplied,
+    });
+  });
+
+  it.each([
+    { startupConfig: {} },
+    {
+      startupConfig: { modelServiceId: 'x', reasoningEffort: 'high' },
+      sessionScope: 'single',
+    },
+    {
+      startupConfig: { modelServiceId: 'x', reasoningEffort: 'high' },
+      modelServiceId: 'legacy',
+    },
+  ])(
+    'session/new rejects invalid startup request without spawning %j',
+    async (params) => {
+      const spawn = vi.spyOn(bridge, 'spawnOrAttach');
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const got = takeFrames(stream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 431,
+        method: 'session/new',
+        params,
+      });
+      const [frame] = (await got) as Array<{
+        error: { data: Record<string, unknown> };
+      }>;
+      expect(frame.error.data).toMatchObject({
+        errorKind: 'invalid_startup_config',
+        httpStatus: 400,
+      });
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('session/new maps a definite startup rejection to an explicit 422 RPC error', async () => {
+    vi.spyOn(bridge, 'spawnOrAttach').mockRejectedValueOnce(
+      new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      ),
+    );
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 432,
+      method: 'session/new',
+      params: { startupConfig: { modelServiceId: 'm' } },
+    });
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      // A rejected selection is caller input, not a daemon fault; the
+      // REST-equivalent status travels in data.httpStatus.
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+  });
+
+  it('session/new rolls back the persisted recording after a definite startup rejection so the caller id stays retryable', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440005';
+    // The spawn persists its recording before the selection is rejected
+    // and the bridge closes the live session.
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(sessionId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      );
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 445,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(bridge.killed).toContain(sessionId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 446,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      result: { sessionId: string };
+    };
+    expect(retryFrame.result.sessionId).toBe(sessionId);
+    reader.close();
+  });
+
+  it('session/new rolls back the persisted recording after a definite startup rejection when the daemon generated the id', async () => {
+    // No `_meta['qwen-code/sessionId']`: only the rejection's own
+    // `sessionId` can name the recording the spawn persisted before the
+    // selection was rejected.
+    const spawnedId = '550e8400-e29b-41d4-a716-446655440098';
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(spawnedId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+        spawnedId,
+      );
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 449,
+      method: 'session/new',
+      params: { startupConfig: { modelServiceId: 'm' } },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(bridge.killed).toContain(spawnedId);
+    await expect(
+      new SessionService(TEST_WORKSPACE).findSessionIdIgnoringCase(spawnedId),
+    ).resolves.toBeUndefined();
+    reader.close();
+  });
+
+  it('session/new logs when the definite-rejection recording rollback is refused', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440097';
+    // The session reads as live only after the spawn attempt — reporting it
+    // earlier would trip the admission's live-conflict before the spawn.
+    let spawned = false;
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      spawned = true;
+      await writeStoredSession(sessionId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+        sessionId,
+      );
+    });
+    // The orphan kill is refused (the session stays live), so the rollback
+    // removes nothing — the refusal must still leave a diagnostic.
+    vi.spyOn(bridge, 'killSession').mockResolvedValue(false);
+    const realGetSummary = bridge.getSessionSummary.bind(bridge);
+    bridge.getSessionSummary = (id: string) => {
+      if (spawned && id === sessionId) {
+        return {
+          sessionId: id,
+          workspaceCwd: TEST_WORKSPACE,
+          createdAt: '2026-06-30T00:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        };
+      }
+      return realGetSummary(id);
+    };
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 450,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+      ),
+    );
+
+    // The rollback was refused, so the id stays occupied: a retry of the
+    // same id conflicts with the still-live session instead of attaching.
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 451,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(retryFrame.error).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'live',
+      },
+    });
+    reader.close();
+  });
+
+  it('session/new keeps the persisted recording when a startup failure outcome is uncertain', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440006';
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(sessionId);
+      throw new Error('transport closed');
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 447,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).not.toMatchObject({
+      errorKind: 'startup_config_rejected',
+    });
+    expect(bridge.killed).not.toContain(sessionId);
+
+    // The recording survives, so a corrected retry of the same id still
+    // answers the persisted-admission conflict instead of attaching.
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 448,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(retryFrame.error).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'persisted',
+      },
+    });
+    reader.close();
+  });
+
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
     // ACP standard: session/new MUST create a new isolated session.
     // sessionScope param is ignored; bridge always gets 'thread'.
@@ -7507,6 +7854,96 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(requestSpy).not.toHaveBeenCalled();
     trustSpy.mockRestore();
     requestSpy.mockRestore();
+  });
+
+  it('dispatches _qwen/workspace/trust/grant', async () => {
+    // The pre-write status must differ from the post-write grant result on
+    // the asserted fields, so the reply below can only be satisfied by the
+    // grant result — not by the dispatcher echoing the pre-write status.
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'untrusted', source: 'file' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    // A real grant notifies the trust monitor, whose reconcile closes this
+    // generation before the reply is built, so the spy closes it too.
+    const generationGuard = createWorkspaceGenerationGuard();
+    const grant = fakeWorkspace.grantWorkspaceTrust.bind(fakeWorkspace);
+    const grantSpy = vi
+      .spyOn(fakeWorkspace, 'grantWorkspaceTrust')
+      .mockImplementation(async (ctx) => {
+        generationGuard.close();
+        return grant(ctx);
+      });
+    await restartServer({ generationGuard });
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 216,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+    const frames = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frames[0]).toMatchObject({
+      id: 216,
+      result: {
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'trusted', source: 'file' },
+      },
+    });
+    expect(grantSpy).toHaveBeenCalledTimes(1);
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
+  });
+
+  it('rejects _qwen/workspace/trust/grant when folder trust is disabled', async () => {
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: false,
+        effective: { state: 'trusted', source: 'disabled' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    const grantSpy = vi.spyOn(fakeWorkspace, 'grantWorkspaceTrust');
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 217,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 217,
+      error: {
+        code: -32600,
+        message: 'Folder trust is disabled for this workspace',
+      },
+    });
+    expect(grantSpy).not.toHaveBeenCalled();
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
   });
 
   it('dispatches _qwen/workspace/permissions', async () => {
@@ -11548,6 +11985,8 @@ describe('ACP WebSocket transport security', () => {
   let lanPort: number;
   let bridge: FakeBridge;
   let previousCdpMcpCommand: string | undefined;
+  let credentialStore: CredentialStore | undefined;
+  let desktopRelayCredential: string | undefined;
 
   beforeEach(() => {
     previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
@@ -11565,8 +12004,10 @@ describe('ACP WebSocket transport security', () => {
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
+      webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      desktopRelaySessionId?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -11574,9 +12015,20 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
-      const credentials = opts.localControlToken
-        ? new CredentialStore(opts.token)
+      const credentials =
+        opts.localControlToken ||
+        opts.webShellToken ||
+        opts.desktopRelaySessionId
+          ? new CredentialStore(opts.token)
+          : undefined;
+      credentialStore = credentials;
+      desktopRelayCredential = opts.desktopRelaySessionId
+        ? credentials!.createDesktopRelayCredential({
+            acpPath: '/acp',
+            sessionId: opts.desktopRelaySessionId,
+          })
         : undefined;
+      if (opts.webShellToken) credentials!.addWebShellToken(opts.webShellToken);
       if (opts.localControlToken) {
         credentials!.addPairingToken('test-pairing', opts.localControlToken);
       }
@@ -11605,6 +12057,7 @@ describe('ACP WebSocket transport security', () => {
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        clientMcpOverWs: opts.desktopRelaySessionId !== undefined,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -11741,6 +12194,112 @@ describe('ACP WebSocket transport security', () => {
   }
 
   // ── Host allowlist ──────────────────────────────────────────────────
+  it('rejects a primary desktop relay credential on the local-control listener', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const result = await wsConnectLocalControl(desktopRelayCredential!);
+    result.socket?.close();
+    expect(result.code).toBe(401);
+    const primary = await wsConnect({
+      headers: { Authorization: `Bearer ${desktopRelayCredential!}` },
+    });
+    primary.close();
+  });
+
+  it('limits a desktop relay credential to one ACP connection, client, server, and session', async () => {
+    await startServer({
+      token: 'runtime-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const credential = desktopRelayCredential!;
+    const ws = await wsConnect({
+      headers: { Authorization: `Bearer ${credential}` },
+    });
+
+    await expect(
+      sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+        },
+      }),
+    ).resolves.toMatchObject({ result: expect.any(Object) });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'other-session',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'other-server',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'not_wired' });
+
+    const replay = await wsConnectRaw('127.0.0.1', undefined, {
+      Authorization: `Bearer ${credential}`,
+    });
+    expect(replay.code).toBe(401);
+
+    const wrongClientCredential = credentialStore!.createDesktopRelayCredential(
+      {
+        acpPath: '/acp',
+        sessionId: 'session-1',
+      },
+    )!;
+    const wrongClient = await wsConnect({
+      headers: { Authorization: `Bearer ${wrongClientCredential}` },
+    });
+    await expect(
+      sendRpc(wrongClient, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'initialize',
+        params: { clientInfo: { name: 'other-client', version: '1.0.0' } },
+      }),
+    ).resolves.toMatchObject({ error: { code: -32600 } });
+
+    const frameOnlyCredential = credentialStore!.createDesktopRelayCredential({
+      acpPath: '/acp',
+      sessionId: 'session-1',
+    })!;
+    const frameOnly = await wsConnect({
+      headers: { Authorization: `Bearer ${frameOnlyCredential}` },
+    });
+    await sendRpc(frameOnly, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+      },
+    });
+    const closed = new Promise<number>((resolve) =>
+      frameOnly.once('close', (code) => resolve(code)),
+    );
+    frameOnly.send(
+      JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'session/new' }),
+    );
+    await expect(closed).resolves.toBe(1008);
+    ws.close();
+    wrongClient.close();
+  });
+
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', undefined);
@@ -11802,6 +12361,96 @@ describe('ACP WebSocket transport security', () => {
   );
 
   // ── CSWSH origin check ─────────────────────────────────────────────
+  it.each([
+    ['http://qwen.test:4170', 'device-token', 101],
+    ['http://qwen.test:4170', 'wrong', 401],
+    ['http://evil.test', 'device-token', 403],
+    ['https://qwen.test:4170', 'device-token', 403],
+  ])(
+    'checks non-loopback primary device access from %s with %s',
+    async (origin, token, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: 'qwen.test:4170',
+        Authorization: `Bearer ${token}`,
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
+  it.each([
+    ['[fd00::1]:4170', 'http://[fd00::1]:4170', 101],
+    ['[fd00::1]:4170', 'http://fd00::1:4170', 403],
+    ['[fd00::1]:4170', 'http://[fd00::2]:4170', 403],
+    // RFC 7230 §5.4: a browser omits the scheme-default port from Origin;
+    // only the URL-parse normalization matches `Host: qwen.test:80` to it.
+    ['qwen.test:80', 'http://qwen.test', 101],
+    ['qwen.test:4170', 'http://qwen.test', 403],
+  ])(
+    'checks non-loopback primary device access with Host %s and origin %s',
+    async (host, origin, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: host,
+        Authorization: 'Bearer device-token',
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
+  it('applies the loopback Host allowlist on a short-spelled loopback bind', async () => {
+    // `127.1` is the inet_aton short form Node binds as 127.0.0.1: the
+    // listener is loopback, so a rebound Host/Origin pair must fail the
+    // loopback allowlist even with a valid device credential — the bind must
+    // not classify as an authenticated remote one.
+    await startServer({
+      hostname: '127.1',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+    });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+      Authorization: 'Bearer device-token',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`, {
+      Authorization: 'Bearer device-token',
+    });
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less non-loopback bind', async () => {
+    // A token-less daemon never classifies as an authenticated remote bind:
+    // the upgrade carries no credential at all, so the rebound Host/Origin
+    // pair must fail the loopback Host allowlist rather than pass an
+    // "Origin agrees with Host" check.
+    await startServer({ hostname: '0.0.0.0' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less specific non-loopback bind', async () => {
+    await startServer({ hostname: '192.168.1.100' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
   it('rejects WS upgrade with cross-origin Origin header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
@@ -12519,6 +13168,36 @@ describe('ACP WebSocket transport security', () => {
     expect(res).toMatchObject({
       id: 2,
       result: { accepted: true, desiredState: 'untrusted' },
+    });
+    expect(tiers).toEqual(['mutation']);
+    ws.close();
+  });
+
+  it('classifies _qwen/workspace/trust/grant as a WS mutation method', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    const res = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    expect(res).toMatchObject({
+      id: 2,
+      result: { effective: { state: 'trusted' } },
     });
     expect(tiers).toEqual(['mutation']);
     ws.close();

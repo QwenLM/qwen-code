@@ -1,0 +1,20 @@
+name: 'pnpm store cache'
+description: >-
+  Restore and save the pnpm content-addressable store on hosted runners,
+  keyed on pnpm-lock.yaml. Self-hosted runners keep their store on local disk
+  between jobs, so they do not need this.
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Locate the pnpm store'
+      id: 'store'
+      shell: 'bash'
+      run: 'echo "path=$(corepack pnpm store path --silent)" >> "${GITHUB_OUTPUT}"'
+
+    - name: 'Cache the pnpm store'
+      uses: 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+      with:
+        path: '${{ steps.store.outputs.path }}'
+        key: "pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}"
+        restore-keys: 'pnpm-store-${{ runner.os }}-'

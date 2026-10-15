@@ -17,12 +17,15 @@ import {
   completeRemoteConnectionAdd,
   isRemoteConnectionAddActive,
   leaveRemoteConnectionAdd,
-  rememberRemoteConnection,
 } from '../config/remote-connections';
 import {
-  getRemoteWorkspaceAddStep,
+  isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
+import {
+  openHostedWorkspace,
+  useWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -71,12 +74,15 @@ interface AuthCopy {
   local: string;
   remoteAddCancel: string;
   connectionAddCancel: string;
+  pairingFailed: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
 // it carries its own copy table instead of calling useI18n.
 const COPY: Record<WebShellLanguage, AuthCopy> = {
   en: {
+    pairingFailed:
+      'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
     heading: 'Connect to Qwen Code',
     connecting: 'Connecting…',
     starting: 'Daemon is starting…',
@@ -109,6 +115,8 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
   },
   'zh-CN': {
+    pairingFailed:
+      '配对失败或二维码已过期。请扫描新的二维码，或输入 daemon 令牌。',
     heading: '连接到 Qwen Code',
     connecting: '正在连接…',
     starting: '守护进程正在启动…',
@@ -158,6 +166,7 @@ export function StandaloneAuth({
   theme = WebShellThemeId.Dark,
   invalidTarget = false,
   unconfirmedTarget = false,
+  pairingFailed = false,
   onChangeTarget = navigateToDaemon,
   children,
 }: {
@@ -171,19 +180,20 @@ export function StandaloneAuth({
   invalidTarget?: boolean;
   /** The daemon came from a link to an origin this browser has not used. */
   unconfirmedTarget?: boolean;
+  pairingFailed?: boolean;
   onChangeTarget?: (
     daemonOrigin: string,
     token?: string,
     options?: {
-      continueRemoteWorkspaceAdd?: boolean;
-      continueRemoteConnectionAdd?: boolean;
+      continueFlow?: 'workspace' | 'connection';
     },
   ) => boolean | void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
-  const remoteWorkspaceAddActive = getRemoteWorkspaceAddStep() === 'browse';
+  const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
   const remoteConnectionAddActive = isRemoteConnectionAddActive();
+  const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -191,15 +201,30 @@ export function StandaloneAuth({
   const [confirming, setConfirming] = useState(
     unconfirmedTarget && !invalidTarget,
   );
+  // A failed pairing exchange parks the gate on the rescan copy only when
+  // there is no credential left to try; with one (a stored device token) the
+  // boot probe still runs, and the rescan copy surfaces if the daemon rejects
+  // it. Session storage outlives a daemon restart, so "a credential exists"
+  // is not "a credential worked".
+  const awaitingPairing = pairingFailed && !initialToken;
   const [status, setStatus] = useState(
     invalidTarget
       ? copy.invalidAddress
       : confirming
         ? copy.confirmTarget
-        : copy.connecting,
+        : awaitingPairing
+          ? copy.pairingFailed
+          : copy.connecting,
   );
-  const [busy, setBusy] = useState(!invalidTarget && !confirming);
-  const [needsToken, setNeedsToken] = useState(false);
+  const [busy, setBusy] = useState(
+    !awaitingPairing && !invalidTarget && !confirming,
+  );
+  // Focus the token field only when entering a token is the pending step: an
+  // invalid or unconfirmed target asks for the address (or a trust decision)
+  // first, and the token input's later autoFocus would otherwise win focus.
+  const [needsToken, setNeedsToken] = useState(
+    awaitingPairing && !invalidTarget && !confirming,
+  );
   // Every probe — the first one, a manual retry, and each auto-retry — is one
   // bump of this counter, so exactly one effect run owns the in-flight request
   // and aborts its predecessor on cleanup.
@@ -265,7 +290,6 @@ export function StandaloneAuth({
         if (response.ok) {
           persistDaemonToken(candidate, baseUrl);
           confirmDaemonTarget(baseUrl);
-          rememberRemoteConnection(baseUrl);
           if (
             remoteConnectionAddActive &&
             completeRemoteConnectionAdd(baseUrl)
@@ -283,10 +307,20 @@ export function StandaloneAuth({
           // is not what this 401 rejected and must survive it.
           if (candidate && candidate === initialCandidateRef.current)
             setToken((current) => (current === candidate ? '' : current));
+          // A boot credential rejected after a failed pairing exchange points
+          // at the rescan recovery, not the terminal-token copy a phone user
+          // cannot act on; a rejected hand-typed token keeps the token copy.
+          // An empty submit on the rescan screen keeps the rescan copy too:
+          // "enter the daemon token" would drop the one instruction the phone
+          // user can act on, and no later state change would restore it.
           setStatus(
             candidate
-              ? copyRef.current.invalidToken
-              : copyRef.current.enterToken,
+              ? pairingFailed && candidate === initialCandidateRef.current
+                ? copyRef.current.pairingFailed
+                : copyRef.current.invalidToken
+              : pairingFailed
+                ? copyRef.current.pairingFailed
+                : copyRef.current.enterToken,
           );
         } else if (response.status === 403) {
           setBusy(false);
@@ -336,14 +370,22 @@ export function StandaloneAuth({
         clearTimeout(timeout);
       }
     },
-    [baseUrl, remoteConnectionAddActive],
+    [baseUrl, pairingFailed, remoteConnectionAddActive],
   );
 
   useEffect(() => {
-    if (invalidTarget || confirming) return undefined;
+    if (invalidTarget || confirming || (awaitingPairing && attempt === 0))
+      return undefined;
     void connect(candidateRef.current);
     return retireProbe;
-  }, [connect, attempt, invalidTarget, confirming, retireProbe]);
+  }, [
+    connect,
+    attempt,
+    invalidTarget,
+    confirming,
+    awaitingPairing,
+    retireProbe,
+  ]);
 
   if (accepted) return children(accepted.token);
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
@@ -398,11 +440,11 @@ export function StandaloneAuth({
                   token.trim() || getDaemonToken(normalizedAddress);
                 const switched = remoteWorkspaceAddActive
                   ? onChangeTarget(normalizedAddress, candidate, {
-                      continueRemoteWorkspaceAdd: true,
+                      continueFlow: 'workspace',
                     })
                   : remoteConnectionAddActive
                     ? onChangeTarget(normalizedAddress, candidate, {
-                        continueRemoteConnectionAdd: true,
+                        continueFlow: 'connection',
                       })
                     : onChangeTarget(normalizedAddress, candidate);
                 if (switched === false) {
@@ -499,6 +541,26 @@ export function StandaloneAuth({
                   : copy.local}
             </Button>
           )}
+          {hosts
+            .filter(
+              (host) =>
+                host.origin !== baseUrl &&
+                host.origin !== window.location.origin,
+            )
+            .map((host) => (
+              <Button
+                key={host.origin}
+                variant="outline"
+                onClick={() => {
+                  // See the local-return button: leaving a target must retire
+                  // its probe loop before navigation is committed.
+                  retireProbe();
+                  openHostedWorkspace(host.origin);
+                }}
+              >
+                {host.origin}
+              </Button>
+            ))}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">

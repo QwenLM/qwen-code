@@ -6,14 +6,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import {
   getConversationDirectoryName,
-  hasVerifiableInode,
   isSameConversationPath,
-  normalizedInode,
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
 
@@ -86,9 +85,18 @@ export class StandaloneDeletionJournalError extends Error {
   }
 }
 
+// The journal's internal identity pair. These are IN-MEMORY only (cached in
+// `directoryIdentities` and carried by open durable-directory handles) —
+// never serialised into a record — so they keep the filesystem's ids as
+// bigints: exact end to end on volumes whose 64-bit file ids exceed the JS
+// safe-integer range (NTFS), where a number-backed `Stats` would round two
+// distinct directories into one identity and the swap checks below would
+// compare a private replacement tree EQUAL to the real one (#11848).
+// `inodeVerifiable` is `ino !== 0n` — with exact ids the only unverifiable
+// case left is a volume reporting no id at all (FAT/exFAT/SMB-style).
 interface DirectoryIdentity {
-  device: number;
-  inode: number;
+  device: bigint;
+  inode: bigint;
   inodeVerifiable: boolean;
 }
 
@@ -124,6 +132,33 @@ function sameDirectoryIdentity(
     left.inodeVerifiable === right.inodeVerifiable &&
     (!left.inodeVerifiable || left.inode === right.inode)
   );
+}
+
+// Verifiability is the bigint non-zero rule: with `{ bigint: true }` stats
+// the filesystem's id is exact, so only a volume reporting no id at all
+// (`ino === 0` — FAT/exFAT/SMB-style) is unverifiable. On such a volume the
+// comparator above degrades to device-only, so ANY two same-device journal
+// directories compare equal — an accepted fail-open, since refusing there
+// would make the journal unusable on those volumes altogether.
+//
+// The rule is restated here rather than called, and both alternatives are
+// deliberate (this restatement is listed in the ledger at the cli
+// predicate's declaration site, utils/conversation-directory-identity.ts):
+// - core's `hasVerifiableInode` (packages/core/src/utils/file-identity.ts)
+//   states the same non-zero rule and accepts `number | bigint`, but this
+//   module is loaded from the serve entry and keeps core out of its import
+//   graph — the bundle-closure trade-off serve/managed-scratch-workspace.ts
+//   records for that very predicate;
+// - the cli's number-typed predicate of the same name is a DIFFERENT rule
+//   (`Number.isSafeInteger(ino) && ino > 0`). Applying it to the exact
+//   bigint ids this module now stats would report every >2^53 NTFS id
+//   unverifiable and re-open #11848.
+function directoryIdentityOf(stat: BigIntStats): DirectoryIdentity {
+  return {
+    device: stat.dev,
+    inode: stat.ino,
+    inodeVerifiable: stat.ino !== 0n,
+  };
 }
 
 function exactKeys(
@@ -673,9 +708,14 @@ export class StandaloneDeletionJournal {
     directory: string,
     requirePrivate = true,
   ): Promise<DirectoryIdentity> {
-    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    // `{ bigint: true }`: the swap checks keyed off this identity must see
+    // a 64-bit NTFS file id exactly — a number-backed `Stats` rounds it,
+    // `hasVerifiableInode` then reports false on both sides of a comparison,
+    // and a complete private replacement of the journal tree compares EQUAL
+    // to the original (#11848).
+    let stat: BigIntStats;
     try {
-      stat = await fs.lstat(directory);
+      stat = await fs.lstat(directory, { bigint: true });
     } catch (error) {
       if (isMissing(error) && this.directoryIdentities.has(directory)) {
         throw new StandaloneDeletionJournalError('compromised');
@@ -686,17 +726,13 @@ export class StandaloneDeletionJournal {
       !stat.isDirectory() ||
       stat.isSymbolicLink() ||
       (process.platform !== 'win32' &&
-        ((requirePrivate && (stat.mode & 0o777) !== 0o700) ||
+        ((requirePrivate && (stat.mode & 0o777n) !== 0o700n) ||
           (typeof process.getuid === 'function' &&
-            stat.uid !== process.getuid())))
+            stat.uid !== BigInt(process.getuid()))))
     ) {
       throw new StandaloneDeletionJournalError('compromised');
     }
-    const identity = {
-      device: stat.dev,
-      inode: normalizedInode(stat.ino),
-      inodeVerifiable: hasVerifiableInode(stat.ino),
-    };
+    const identity = directoryIdentityOf(stat);
     if (
       directory === this.stableBaseDir ||
       directory === this.stateDirectory ||
@@ -777,12 +813,8 @@ export class StandaloneDeletionJournal {
         fsConstants.O_RDONLY |
           (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
       );
-      const opened = await handle.stat();
-      const openedIdentity = {
-        device: opened.dev,
-        inode: normalizedInode(opened.ino),
-        inodeVerifiable: hasVerifiableInode(opened.ino),
-      };
+      const opened = await handle.stat({ bigint: true });
+      const openedIdentity = directoryIdentityOf(opened);
       if (
         !opened.isDirectory() ||
         !sameDirectoryIdentity(openedIdentity, expected)
@@ -803,12 +835,8 @@ export class StandaloneDeletionJournal {
   private async syncDurableDirectory(
     directory: DurableDirectory,
   ): Promise<void> {
-    const opened = await directory.handle.stat();
-    const openedIdentity = {
-      device: opened.dev,
-      inode: normalizedInode(opened.ino),
-      inodeVerifiable: hasVerifiableInode(opened.ino),
-    };
+    const opened = await directory.handle.stat({ bigint: true });
+    const openedIdentity = directoryIdentityOf(opened);
     if (
       !opened.isDirectory() ||
       !sameDirectoryIdentity(openedIdentity, directory.identity)

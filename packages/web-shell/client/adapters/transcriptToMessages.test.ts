@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createDaemonToolPreview,
   createDaemonTranscriptState,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
@@ -14,7 +15,11 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { extractTodosFromToolCall } from '../utils/todos.js';
 import { groupParallelAgents } from './parallelAgentGrouping.js';
-import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
+import {
+  assistantBlockRendersAsSystemNotice,
+  transcriptBlocksToDaemonMessages,
+} from './transcriptToMessages.js';
+import { getToolDescription } from '../components/messages/toolFormatting';
 
 function textBlock(
   id: string,
@@ -76,6 +81,47 @@ it.each([true, false])(
     );
   },
 );
+
+it('preserves literal slash-command output and artifact references when a directory resembles insight JSON', () => {
+  const workspacePath = '{"insight_ready":{"path":"fixture"}}/export.md';
+  const descriptor = {
+    kind: 'file',
+    storage: 'workspace',
+    title: 'export.md',
+    workspacePath,
+  };
+  const text = `Session exported to Markdown: ${workspacePath}`;
+  const block = {
+    ...textBlock('export-result', 'assistant', text, 1),
+    meta: { source: 'slash_command', sessionArtifacts: [descriptor] },
+  };
+  const messages = transcriptBlocksToDaemonMessages([block]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({
+    role: 'assistant',
+    content: text,
+    reportedArtifacts: [descriptor],
+  });
+});
+
+it('retains slash-command insight cards when no export descriptor is reported', () => {
+  const messages = transcriptBlocksToDaemonMessages([
+    {
+      ...textBlock(
+        'insight-result',
+        'assistant',
+        '{"insight_ready":{"path":"/tmp/report.md"}}',
+        1,
+      ),
+      meta: { source: 'slash_command' },
+    },
+  ]);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({
+    role: 'insight_ready',
+    path: '/tmp/report.md',
+  });
+});
 
 describe('Assistant branch anchors', () => {
   it('preserves the checkpoint on the rendered Assistant message', () => {
@@ -240,6 +286,32 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps shell input previews out of output while preserving actual content', () => {
+    const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
+      toolName: 'run_shell_command',
+      serverTimestamp: 500,
+      rawInput: { command: 'sleep 10' },
+      details: '{"command":"sleep 10"}',
+    });
+    const getTool = (value: typeof block) =>
+      transcriptBlocksToDaemonMessages([value]).find(
+        (m) => m.role === 'tool_group',
+      )?.tools[0];
+    expect(getTool(block)?.rawOutput).toBeUndefined();
+    expect(getTool(block)?.startTime).toBe(500);
+    expect(getTool({ ...block, rawOutput: 'actual output' })?.rawOutput).toBe(
+      'actual output',
+    );
+    // `details` is a redacted dump of the input, so it must never surface as
+    // the result of a completed or failed call either.
+    expect(getTool({ ...block, status: 'completed' })?.rawOutput).toBe(
+      undefined,
+    );
+    expect(
+      getTool({ ...block, status: 'failed', details: 'Timed out' })?.rawOutput,
+    ).toBeUndefined();
+  });
+
   it('does not treat a historical background launch as agent completion', () => {
     const block = toolBlock('agent-history', 'agent-1', 'completed', 1000, {
       toolName: 'agent',
@@ -3047,6 +3119,39 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it.each([
+    { name: 'missing input', input: undefined },
+    { name: 'null input', input: null },
+    { name: 'name argument', input: { name: 'health' } },
+    { name: 'toolName argument', input: { toolName: 'health' } },
+  ])('does not infer empty MCP args from a preview: $name', ({ input }) => {
+    const toolName = 'mcp__sample__ping';
+    const title = 'ping (sample MCP Server): {}';
+    const preview = createDaemonToolPreview(input, { toolName, title });
+    expect(preview).toEqual({
+      kind: 'mcp_invocation',
+      serverId: 'sample',
+      toolName: 'ping',
+    });
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('mcp-safe', 'mcp-call', 'completed', 1, {
+          toolName,
+          title,
+          preview,
+          rawInput: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+    expect(tool).toBeDefined();
+    expect(tool?.args).toBeUndefined();
+    expect(getToolDescription(tool!)).toBe(title);
+  });
+
   it.each(['cancelled', 'canceled'])(
     'keeps %s edits unapplied in safe projection',
     (status) => {
@@ -4536,6 +4641,42 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
+  it.each([' ', '\n', '\r\n', '\t'])(
+    'omits a standalone whitespace assistant between tools and thinking: %j',
+    (whitespace) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('tool-1', 'call-1', 'completed', 1),
+        textBlock('blank', 'assistant', whitespace, 2, true),
+        textBlock('thought', 'thought', 'Check the next file.', 3, true),
+        toolBlock('tool-2', 'call-2', 'completed', 4),
+      ]);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'tool_group',
+        'thinking',
+        'tool_group',
+      ]);
+    },
+  );
+
+  it('preserves whitespace chunks within existing assistant prose and usage', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('first', 'assistant', 'First paragraph.', 1, true),
+      textBlock('spacing', 'assistant', '\n\n', 2, true, {
+        usage: { inputTokens: 10, outputTokens: 2 },
+      }),
+      textBlock('last', 'assistant', 'Second paragraph.\n', 3),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'First paragraph.\n\nSecond paragraph.\n',
+        usage: { inputTokens: 10, outputTokens: 2 },
+      },
+    ]);
+  });
+
   it('keeps status blocks in the main transcript while subagent is active', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -4737,7 +4878,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tools?.[2]?.kind).toBeUndefined();
   });
 
-  it('getToolRawOutput fallback returns rawOutput ?? details for non-cancelled', () => {
+  it('does not fall back to input details as a non-cancelled tool result', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, {
         toolName: 'Read',
@@ -4748,7 +4889,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(tool?.rawOutput).toBe('some detail info');
+    expect(tool?.rawOutput).toBeUndefined();
   });
 
   it('does not use content text as generic raw output', () => {
@@ -5834,5 +5975,311 @@ describe('transcript message prompt ids', () => {
     expect(promptIdOf('assistant-4')).toBe('prompt-2');
     // A block without a stamp must not have one invented for it.
     expect(promptIdOf('assistant-2')).toBeUndefined();
+  });
+});
+
+describe('assistantBlockRendersAsSystemNotice', () => {
+  // The predicate the settlement guard and the turn-notification scanner
+  // consult instead of each keeping a `meta.source` list, so a notice source
+  // added to the renderer reaches both without editing either. The compression
+  // rows are the case a list cannot express: their `meta.source` stays
+  // `slash_command` and the renderer decides from the payload keys (#12141).
+  const cases: Array<[string, Partial<DaemonTextTranscriptBlock>, boolean]> = [
+    [
+      'a background notification',
+      { meta: { source: 'background_notification' } },
+      true,
+    ],
+    [
+      'a vision bridge notice',
+      { meta: { source: 'vision_bridge_notice' } },
+      true,
+    ],
+    [
+      'a compression result',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 2123,
+            newTokenCount: 58,
+          },
+        },
+      },
+      true,
+    ],
+    [
+      'a compression invocation note',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompressionNotice: {
+            phase: 'notice',
+            instructionsLimit: 2000,
+          },
+        },
+      },
+      true,
+    ],
+    // An unreadable payload means this client and the daemon disagree on the
+    // schema, and the renderer lets the block's own text through as an answer.
+    [
+      'a compression payload this client cannot read',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'done' },
+        },
+      },
+      false,
+    ],
+    ['a plain answer', {}, false],
+    [
+      'another slash command answer',
+      { meta: { source: 'slash_command' } },
+      false,
+    ],
+  ];
+
+  for (const [label, overrides, expected] of cases) {
+    it(`reports ${label}`, () => {
+      expect(
+        assistantBlockRendersAsSystemNotice(
+          textBlock('b-1', 'assistant', 'text', 1, false, overrides),
+        ),
+      ).toBe(expected);
+    });
+  }
+
+  it('reports a block of another kind as no notice', () => {
+    expect(
+      assistantBlockRendersAsSystemNotice(textBlock('u-1', 'user', 'hi', 1)),
+    ).toBe(false);
+  });
+});
+
+it('projects generic tool wrappers into real names and arguments in chat messages', () => {
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'wrapped',
+        status: 'completed',
+        rawInput: {
+          name: 'mcp__server__lookup',
+          arguments: { query: 'value' },
+        },
+        _meta: { toolName: 'tool_call' },
+      },
+    }),
+  );
+  const message = transcriptBlocksToDaemonMessages(state.blocks).find(
+    (message) => message.role === 'tool_group',
+  );
+  expect(message?.role === 'tool_group' && message.tools[0]).toMatchObject({
+    toolName: 'mcp__server__lookup',
+    title: 'mcp__server__lookup',
+    args: { query: 'value' },
+  });
+});
+
+describe('session agent messages', () => {
+  const update = (update: Record<string, unknown>) =>
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: { update },
+    });
+  const author = {
+    agentId: 'agent-1',
+    name: 'reviewer',
+    color: '#ff8800',
+    program: 'claude',
+  };
+
+  it('renders an agent reply as its own authored message, apart from the main assistant text around it', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Main answer.' },
+        }),
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Looks good to me.' },
+          _meta: {
+            source: 'agent_message',
+            qwenDiscreteMessage: true,
+            qwenTranscript: { segmentId: 'agent:run-1' },
+            qwenAgentMessage: {
+              kind: 'agent_message',
+              author,
+              runId: 'run-1',
+              status: 'completed',
+              steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+              totalTokens: 1234,
+            },
+          },
+        }),
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Main follow-up.' },
+        }),
+      ].flat(),
+    );
+    const assistants = transcriptBlocksToDaemonMessages(state.blocks).filter(
+      (message) => message.role === 'assistant',
+    );
+    expect(assistants.map((message) => message.content)).toEqual([
+      'Main answer.',
+      'Looks good to me.',
+      'Main follow-up.',
+    ]);
+    expect(assistants[1]).toMatchObject({
+      author: { name: 'reviewer', color: '#ff8800' },
+      agentMessage: {
+        kind: 'agent_message',
+        runId: 'run-1',
+        status: 'completed',
+        totalTokens: 1234,
+        steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+      },
+    });
+    expect(assistants[0]).not.toHaveProperty('author');
+    expect(assistants[2]).not.toHaveProperty('author');
+    expect(assistants[2]).not.toHaveProperty('agentMessage');
+  });
+
+  it('keeps a failed agent reply with no text, so its status still shows', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('agent-block', 'assistant', '', 1, false, {
+        segmentId: 'agent:run-2',
+        meta: {
+          source: 'agent_message',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_message',
+            author,
+            runId: 'run-2',
+            status: 'offline',
+            error: 'runtime went away',
+          },
+        },
+      }),
+    ]);
+    expect(messages).toEqual([
+      expect.objectContaining({
+        id: 'agent-block',
+        role: 'assistant',
+        content: '',
+        author: { name: 'reviewer', color: '#ff8800' },
+        agentMessage: expect.objectContaining({
+          status: 'offline',
+          error: 'runtime went away',
+        }),
+      }),
+    ]);
+  });
+
+  it('renders an @-mention as an ordinary user message', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@reviewer please check' },
+          _meta: {
+            source: 'agent_mention',
+            qwenDiscreteMessage: true,
+            qwenAgentMessage: {
+              kind: 'agent_mention',
+              mentionedAgentIds: ['agent-1'],
+            },
+          },
+        }),
+      ].flat(),
+    );
+    const [message] = transcriptBlocksToDaemonMessages(state.blocks);
+    expect(message).toMatchObject({
+      role: 'user',
+      content: '@reviewer please check',
+      source: 'agent_mention',
+      agentMessage: { kind: 'agent_mention', mentionedAgentIds: ['agent-1'] },
+    });
+    expect(message).not.toHaveProperty('author');
+  });
+
+  it('names the agent on a post an agent made into the session', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@writer your turn' },
+          _meta: {
+            source: 'agent_mention',
+            qwenDiscreteMessage: true,
+            qwenAgentMessage: {
+              kind: 'agent_mention',
+              author,
+              mentionedAgentIds: ['agent-2'],
+            },
+          },
+        }),
+      ].flat(),
+    );
+    const [message] = transcriptBlocksToDaemonMessages(state.blocks);
+    expect(message).toMatchObject({
+      role: 'user',
+      author: { name: 'reviewer', color: '#ff8800' },
+    });
+  });
+
+  it("names the agent from an exported block's author, which carries no meta", () => {
+    // The export document strips `meta` and keeps the agent as `author`.
+    const exported = (
+      id: string,
+      kind: 'user' | 'assistant',
+      text: string,
+      author?: { name: string },
+    ) =>
+      ({
+        id,
+        kind,
+        text,
+        clientReceivedAt: 0,
+        createdAt: 0,
+        updatedAt: 0,
+        streaming: false,
+        ...(author ? { author } : {}),
+      }) as unknown as DaemonTranscriptBlock;
+    const messages = transcriptBlocksToDaemonMessages([
+      exported('u1', 'user', '@claude-B check', { name: 'lead' }),
+      exported('a1', 'assistant', 'Main answer.'),
+      exported('a2', 'assistant', 'Agent reply.', { name: 'claude-B' }),
+      exported('a3', 'assistant', 'Main follow-up.'),
+    ]);
+    expect(messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'assistant',
+      'assistant',
+    ]);
+    expect(messages[0]).toMatchObject({
+      author: { name: 'lead' },
+      agentMessage: { kind: 'agent_mention' },
+    });
+    expect(messages[2]).toMatchObject({
+      content: 'Agent reply.',
+      author: { name: 'claude-B' },
+      agentMessage: { kind: 'agent_message', author: { name: 'claude-B' } },
+    });
+    expect(messages[1]).not.toHaveProperty('author');
+    expect(messages[3]).not.toHaveProperty('agentMessage');
   });
 });

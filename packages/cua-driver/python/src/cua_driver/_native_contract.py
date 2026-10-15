@@ -3682,16 +3682,22 @@ class _UniffiFfiConverterTypeInvokeMenuInput(_UniffiConverterRustBuffer):
 
 @dataclass
 class LaunchAppInput:
-    def __init__(self, *, name:str):
+    def __init__(self, *, name:str, launch_path:typing.Optional[str] = _DEFAULT):
         self.name = name
+        if launch_path is _DEFAULT:
+            self.launch_path = None
+        else:
+            self.launch_path = launch_path
 
 
 
 
     def __str__(self):
-        return "LaunchAppInput(name={})".format(self.name)
+        return "LaunchAppInput(name={}, launch_path={})".format(self.name, self.launch_path)
     def __eq__(self, other):
         if self.name != other.name:
+            return False
+        if self.launch_path != other.launch_path:
             return False
         return True
 
@@ -3700,15 +3706,18 @@ class _UniffiFfiConverterTypeLaunchAppInput(_UniffiConverterRustBuffer):
     def read(buf):
         return LaunchAppInput(
             name=_UniffiFfiConverterString.read(buf),
+            launch_path=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
     def check_lower(value):
         _UniffiFfiConverterString.check_lower(value.name)
+        _UniffiFfiConverterOptionalString.check_lower(value.launch_path)
 
     @staticmethod
     def write(value, buf):
         _UniffiFfiConverterString.write(value.name, buf)
+        _UniffiFfiConverterOptionalString.write(value.launch_path, buf)
 
 @dataclass
 class ListAppsInput:
@@ -6337,8 +6346,12 @@ class _UniffiFfiConverterTypeWindowPressKeyInput(_UniffiConverterRustBuffer):
 
 @dataclass
 class WindowScrollInput:
-    def __init__(self, *, pid:int, window_id:typing.Optional[int], element_token:typing.Optional[str], delivery_mode:typing.Optional[DeliveryMode], x:typing.Optional[float], y:typing.Optional[float], direction:ScrollDirection, by:typing.Optional[ScrollBy], amount:typing.Optional[int]):
+    def __init__(self, *, pid:int, app_context:typing.Optional[bool] = _DEFAULT, window_id:typing.Optional[int], element_token:typing.Optional[str], delivery_mode:typing.Optional[DeliveryMode], x:typing.Optional[float], y:typing.Optional[float], direction:ScrollDirection, by:typing.Optional[ScrollBy], amount:typing.Optional[int]):
         self.pid = pid
+        if app_context is _DEFAULT:
+            self.app_context = None
+        else:
+            self.app_context = app_context
         self.window_id = window_id
         self.element_token = element_token
         self.delivery_mode = delivery_mode
@@ -6352,9 +6365,11 @@ class WindowScrollInput:
 
 
     def __str__(self):
-        return "WindowScrollInput(pid={}, window_id={}, element_token={}, delivery_mode={}, x={}, y={}, direction={}, by={}, amount={})".format(self.pid, self.window_id, self.element_token, self.delivery_mode, self.x, self.y, self.direction, self.by, self.amount)
+        return "WindowScrollInput(pid={}, app_context={}, window_id={}, element_token={}, delivery_mode={}, x={}, y={}, direction={}, by={}, amount={})".format(self.pid, self.app_context, self.window_id, self.element_token, self.delivery_mode, self.x, self.y, self.direction, self.by, self.amount)
     def __eq__(self, other):
         if self.pid != other.pid:
+            return False
+        if self.app_context != other.app_context:
             return False
         if self.window_id != other.window_id:
             return False
@@ -6379,6 +6394,7 @@ class _UniffiFfiConverterTypeWindowScrollInput(_UniffiConverterRustBuffer):
     def read(buf):
         return WindowScrollInput(
             pid=_UniffiFfiConverterUInt32.read(buf),
+            app_context=_UniffiFfiConverterOptionalBoolean.read(buf),
             window_id=_UniffiFfiConverterOptionalUInt64.read(buf),
             element_token=_UniffiFfiConverterOptionalString.read(buf),
             delivery_mode=_UniffiFfiConverterOptionalTypeDeliveryMode.read(buf),
@@ -6392,6 +6408,7 @@ class _UniffiFfiConverterTypeWindowScrollInput(_UniffiConverterRustBuffer):
     @staticmethod
     def check_lower(value):
         _UniffiFfiConverterUInt32.check_lower(value.pid)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.app_context)
         _UniffiFfiConverterOptionalUInt64.check_lower(value.window_id)
         _UniffiFfiConverterOptionalString.check_lower(value.element_token)
         _UniffiFfiConverterOptionalTypeDeliveryMode.check_lower(value.delivery_mode)
@@ -6404,6 +6421,7 @@ class _UniffiFfiConverterTypeWindowScrollInput(_UniffiConverterRustBuffer):
     @staticmethod
     def write(value, buf):
         _UniffiFfiConverterUInt32.write(value.pid, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.app_context, buf)
         _UniffiFfiConverterOptionalUInt64.write(value.window_id, buf)
         _UniffiFfiConverterOptionalString.write(value.element_token, buf)
         _UniffiFfiConverterOptionalTypeDeliveryMode.write(value.delivery_mode, buf)

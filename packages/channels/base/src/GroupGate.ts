@@ -89,9 +89,10 @@ export class GroupGate {
       };
     }
 
-    // Per-group config, falling back to "*" defaults, then built-in defaults
-    const groupConfig = this.groups[envelope.chatId] || this.groups['*'] || {};
-    const requireMention = groupConfig.requireMention ?? true;
+    const requireMention =
+      this.groups[envelope.chatId]?.requireMention ??
+      this.groups['*']?.requireMention ??
+      true;
 
     if (requireMention && !envelope.isMentioned && !envelope.isReplyToBot) {
       return { allowed: false, reason: 'mention_required' };
@@ -102,5 +103,19 @@ export class GroupGate {
 
   isGroupApproved(groupId: string): boolean {
     return this.pairingStore?.isGroupApproved(groupId) ?? false;
+  }
+}
+
+/**
+ * Lowercase every per-group `allowedUsers` list in place, for platforms whose
+ * user IDs are case-insensitive logins.
+ */
+export function lowercaseGroupAllowedUsers(
+  groups: Record<string, GroupConfig>,
+): void {
+  for (const group of Object.values(groups)) {
+    if (group.allowedUsers) {
+      group.allowedUsers = group.allowedUsers.map((u) => u.toLowerCase());
+    }
   }
 }

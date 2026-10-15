@@ -18,12 +18,15 @@ import { SyntaxStyle, type StyleDefinitionInput } from '@opentui/core';
 import type { Palette } from './theme.js';
 import type { Theme, ThemeType } from '../themes/theme.js';
 import { themeManager } from '../themes/theme-manager.js';
+import { getRenderableGradientColors } from '../utils/gradientUtils.js';
 
 export interface OpenTuiThemeDefinition {
   name: string;
   type: ThemeType;
   palette: Palette;
   syntaxStyles: Record<string, StyleDefinitionInput>;
+  /** Banner wordmark ramp; empty means ink renders the logo uncolored. */
+  gradient: string[];
 }
 
 /**
@@ -46,9 +49,10 @@ export const HLJS_TO_SYNTAX_TOKEN: ReadonlyArray<readonly [string, string]> = [
 
 /**
  * Derives the OpenTUI palette from an ink theme's semantic tokens. Empty
- * strings are preserved — they mean "no color" in ink and must stay unset in
- * opentui (e.g. the NoColor theme, or themes with an empty Foreground that
- * rely on the terminal default).
+ * strings mean "no color" in ink and are passed through unset (e.g. the
+ * NoColor theme), except for `text`: this port anchors both its plain-text
+ * colour and the markdown syntax `default` token on that key, so a theme whose
+ * primary is empty falls back to its own hljs foreground.
  */
 export function paletteFromInkTheme(theme: Theme): Palette {
   const semantic = theme.semanticColors;
@@ -59,9 +63,31 @@ export function paletteFromInkTheme(theme: Theme): Palette {
     green: semantic.status.success,
     red: semantic.status.error,
     yellow: semantic.status.warning,
+    warningDim: semantic.status.warningDim,
+    errorDim: semantic.status.errorDim,
     purple: semantic.text.link,
+    symbol: semantic.ui.symbol,
+    borderFocused: semantic.border.focused,
+    borderDefault: semantic.border.default,
     hover: semantic.background.primary,
   };
+}
+
+/**
+ * The banner wordmark ramp, resolved exactly as the ink `Header` does:
+ * `ui.gradient` when the theme declares one, otherwise the
+ * `[secondary, link, accent]` fallback, otherwise no gradient at all (ink
+ * then renders the logo uncolored rather than throwing).
+ */
+export function gradientFromInkTheme(theme: Theme): string[] {
+  const semantic = theme.semanticColors;
+  return (
+    getRenderableGradientColors(semantic.ui.gradient, [
+      semantic.text.secondary,
+      semantic.text.link,
+      semantic.text.accent,
+    ]) ?? []
+  );
 }
 
 /**
@@ -99,6 +125,7 @@ export function openTuiThemeFromInkTheme(theme: Theme): OpenTuiThemeDefinition {
     type: theme.type,
     palette: paletteFromInkTheme(theme),
     syntaxStyles: syntaxStylesFromInkTheme(theme),
+    gradient: gradientFromInkTheme(theme),
   };
 }
 

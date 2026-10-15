@@ -216,7 +216,13 @@ export const SystemMessage = memo(function SystemMessage({
           <MarkerIcon aria-hidden="true" />
         </span>
         <span className="shrink-0 text-muted-foreground">
-          {t(turn?.kind === 'agent' ? 'background.agent' : 'background.task')}
+          {t(
+            turn?.kind === 'agent'
+              ? 'background.agent'
+              : turn?.kind === 'peer'
+                ? 'background.peer'
+                : 'background.task',
+          )}
         </span>
         <span aria-hidden="true" className="text-muted-foreground">
           ·
@@ -240,7 +246,8 @@ export const SystemMessage = memo(function SystemMessage({
               {t('background.source')}
             </Button>
           )}
-          {backgroundDetails && turn && (
+          {/* A peer turn has no task behind it to show the details of. */}
+          {backgroundDetails && turn && turn.kind !== 'peer' && (
             <Button
               type="button"
               variant="ghost"
@@ -287,7 +294,7 @@ export const SystemMessage = memo(function SystemMessage({
     );
   }
   const contextUsage =
-    variant === 'info' ? parseContextUsageMessage(content) : null;
+    variant === 'info' ? parseContextUsageMessage(content, data) : null;
   if (contextUsage) {
     return (
       <div className={styles.flushMessage}>
@@ -299,7 +306,8 @@ export const SystemMessage = memo(function SystemMessage({
     );
   }
 
-  const statsData = variant === 'info' ? parseStatsMessage(content) : null;
+  const statsData =
+    variant === 'info' ? parseStatsMessage(content, data) : null;
   if (statsData) {
     return (
       <div className={styles.flushMessage}>

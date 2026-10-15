@@ -374,22 +374,24 @@ test('reopens a live webpage from its historical message after closing the tab a
   }
 });
 
-test('recorded links open metadata without automatically loading a live frame', async ({
+test('opens recorded links in a new page instead of a panel tab', async ({
   page,
 }) => {
-  await page
-    .getByRole('button', { name: 'Close Web preview', exact: true })
-    .click();
-  await page
-    .locator('[data-web-shell-message-list] [title="Recorded link"] > button')
-    .click();
+  const tabs = page.getByRole('tab');
+  const tabsBefore = await tabs.count();
+  expect(tabsBefore).toBeGreaterThan(0);
+  const card = page.locator(
+    '[data-web-shell-message-list] [title="Recorded link"]',
+  );
+  await expect(card.locator('a')).toHaveAttribute('href', fixtureUrl);
+  const popupPromise = page.waitForEvent('popup');
+  await card.locator('a').click();
+  const popup = await popupPromise;
+  await popup.waitForLoadState('domcontentloaded');
+  expect(new URL(popup.url()).origin).toBe(fixtureUrl);
+  await expect(tabs).toHaveCount(tabsBefore);
   await expect(
     page.getByRole('tab', { name: 'Recorded link', exact: true }),
-  ).toBeVisible();
-  await expect(page.locator('iframe[title="Web preview frame"]')).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByRole('link', { name: 'Open link', exact: true }),
-  ).toHaveAttribute('href', fixtureUrl);
+  ).toHaveCount(0);
+  await popup.close();
 });

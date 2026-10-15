@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { copyFileSync, existsSync, mkdirSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -19,7 +19,7 @@ const sourceRoot = path.resolve(
   "bundled",
   "computer-use",
 )
-const resources = ["SKILL.md", "references/macos.md", "references/windows-linux.md"]
+const resources = ["SKILL.md"]
 
 for (const resource of resources) {
   const source = path.join(sourceRoot, resource)
@@ -31,4 +31,8 @@ for (const resource of resources) {
   const destination = path.join(packageRoot, "computer-use", resource)
   mkdirSync(path.dirname(destination), { recursive: true })
   copyFileSync(path.join(sourceRoot, resource), destination)
+}
+
+for (const legacy of ["macos.md", "windows-linux.md"]) {
+  rmSync(path.join(packageRoot, "computer-use", "references", legacy), { force: true })
 }

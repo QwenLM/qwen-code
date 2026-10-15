@@ -8,6 +8,10 @@ import { useState } from 'react';
 import { render, Box, useApp } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { getGitBranch } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
@@ -108,7 +112,12 @@ export async function showResumeSessionPicker(
   initialSessions?: SessionListItem[],
 ): Promise<string | undefined> {
   const sessionService = new SessionService(cwd);
-  const hasSession = await sessionService.loadLastSession();
+  const hasSession = await sessionService.loadLastSession({
+    excludeSourceTypes: [
+      AGENT_HOST_SESSION_SOURCE_TYPE,
+      AGENT_SESSION_SOURCE_TYPE,
+    ],
+  });
   if (!hasSession) {
     writeStdoutLine('No sessions found. Start a new session with `qwen`.');
     return undefined;

@@ -257,8 +257,17 @@ export function createContextUsageSnapshot(
   const tools = estimateToolCategories(request, config);
   if (!tools) return undefined;
   const contents = toContents(request.contents);
+  const catalog = config.getAutoMemoryContext?.() ?? '';
+  const last = contents.at(-1);
+  const hasCatalog =
+    catalog.length > 0 &&
+    last?.role === 'user' &&
+    last.parts?.at(-1)?.text === catalog;
+  const conversation = hasCatalog
+    ? [...contents.slice(0, -1), { ...last, parts: last.parts!.slice(0, -1) }]
+    : contents;
   const attributedSkills = attributeLoadedSkillBodies(
-    contents,
+    conversation,
     loadedSkillBodies(config),
   );
   const thresholds = computeThresholds(
@@ -272,7 +281,9 @@ export function createContextUsageSnapshot(
       system_prompt_tokens: estimateContextTextTokens(memory.systemInstruction),
       builtin_tools_tokens: tools.builtinTools,
       mcp_tools_tokens: tools.mcpTools,
-      memory_files_tokens: memory.memoryTokens,
+      memory_files_tokens:
+        memory.memoryTokens +
+        (hasCatalog ? estimateContextTextTokens(catalog) : 0),
       skills_tokens: tools.skillTool + attributedSkills.skillBodyTokens,
       messages_tokens: estimateContentTokens(attributedSkills.contents),
     },

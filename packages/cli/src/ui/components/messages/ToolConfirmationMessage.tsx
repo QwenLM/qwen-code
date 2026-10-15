@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -24,10 +24,12 @@ import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { IdeClient } from '@qwen-code/qwen-code-core/ide/ide-client.js';
 import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { isEditorAvailable } from '@qwen-code/qwen-code-core/utils/editor.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { useLaunchEditor } from '../../hooks/useLaunchEditor.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
@@ -67,10 +69,38 @@ export const ToolConfirmationMessage: React.FC<
     'hideAlwaysAllow' in confirmationDetails &&
     confirmationDetails.hideAlwaysAllow === true;
 
+  // An open right-click context menu owns the keyboard while it is up. The
+  // dispatch in KeypressContext is a broadcast that discards return values,
+  // so an overlay cannot consume a key for the dialog — the dialog has to go
+  // quiet itself, or one Enter aimed at "Open Link" also approves the
+  // pending tool call. Mirrors the main view's InputPrompt gate; the
+  // teammate tab renders this same dialog (via HistoryItemDisplay).
+  const { menu: contextMenu } = useContextMenu();
+  const inputActive = isFocused && contextMenu === null;
+
   const settings = useSettings();
   const preferredEditor = settings.merged.general?.preferredEditor as
     | EditorType
     | undefined;
+  const hideModify =
+    confirmationDetails.type === 'edit'
+      ? confirmationDetails.hideModify
+      : false;
+  // Offering "Modify with external editor" for an editor that is not installed
+  // only leads to a failed launch (#10745), so probe availability first.
+  // `isEditorAvailable` shells out to look the binary up on PATH, hence the
+  // memo and the guards that skip the probe when the option can't be offered
+  // anyway (compact mode renders a fixed option list, non-edit confirmations
+  // and `hideModify` never offer it).
+  const editorAvailable = useMemo(
+    () =>
+      !compactMode &&
+      confirmationDetails.type === 'edit' &&
+      !hideModify &&
+      preferredEditor !== undefined &&
+      isEditorAvailable(preferredEditor),
+    [compactMode, confirmationDetails.type, hideModify, preferredEditor],
+  );
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
@@ -97,7 +127,12 @@ export const ToolConfirmationMessage: React.FC<
     // (e.g. ProceedAlways) is processed first.  resolveDiffFromCli would
     // otherwise trigger the scheduler's ideConfirmation .then() handler
     // with ProceedOnce, racing with the intended CLI outcome.
-    onConfirm(outcome);
+    //
+    // Hold the rejection here: the scheduler re-throws after terminalizing a
+    // call the trust gate refused, and an unhandled rejection trips the
+    // process-level handler (llm.tsx), which shows a "file a bug report"
+    // banner and opens the debug console over a correctly-refused action.
+    void Promise.resolve(onConfirm(outcome)).catch(() => {});
 
     if (
       confirmationDetails.type === 'edit' &&
@@ -140,7 +175,7 @@ export const ToolConfirmationMessage: React.FC<
 
   useKeypress(
     (key) => {
-      if (!isFocused) return;
+      if (!inputActive) return;
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         handleConfirm(ToolConfirmationOutcome.Cancel);
         return;
@@ -154,7 +189,7 @@ export const ToolConfirmationMessage: React.FC<
         openFullPlanInEditor();
       }
     },
-    { isActive: isFocused },
+    { isActive: inputActive },
   );
 
   const handleSelect = (item: ToolConfirmationOutcome) => handleConfirm(item);
@@ -263,7 +298,7 @@ export const ToolConfirmationMessage: React.FC<
     if (
       !confirmationDetails.hideModify &&
       (!config.getIdeMode() || !isDiffingEnabled) &&
-      preferredEditor
+      editorAvailable
     ) {
       options.push({
         label: t('Modify with external editor'),
@@ -477,11 +512,17 @@ export const ToolConfirmationMessage: React.FC<
       }),
       value: ToolConfirmationOutcome.RestorePrevious,
     });
-    options.push({
-      key: 'proceed-always',
-      label: t('Yes, and auto-accept edits'),
-      value: ToolConfirmationOutcome.ProceedAlways,
-    });
+    // "Auto-accept edits" is a privileged escalation (AUTO_EDIT): in an
+    // untrusted folder the trust gate refuses it, so exit_plan_mode would only
+    // ever answer "Failed to exit plan mode". The two remaining exits
+    // (proceed once / restore previous) both stay available untrusted.
+    if (isTrustedFolder) {
+      options.push({
+        key: 'proceed-always',
+        label: t('Yes, and auto-accept edits'),
+        value: ToolConfirmationOutcome.ProceedAlways,
+      });
+    }
     options.push({
       key: 'proceed-once',
       label: t('Yes, and manually approve edits'),
@@ -612,7 +653,7 @@ export const ToolConfirmationMessage: React.FC<
     return (
       <AskUserQuestionDialog
         confirmationDetails={confirmationDetails}
-        isFocused={isFocused}
+        isFocused={inputActive}
         availableWidth={contentWidth}
         onConfirm={onConfirm}
       />
@@ -736,7 +777,7 @@ export const ToolConfirmationMessage: React.FC<
                 },
               ]
             : []),
-          ...(!confirmationDetails.hideAlwaysAllow
+          ...(isTrustedFolder && !confirmationDetails.hideAlwaysAllow
             ? [
                 {
                   key: 'proceed-always',
@@ -780,7 +821,7 @@ export const ToolConfirmationMessage: React.FC<
         <RadioButtonSelect
           items={renderedOptions}
           onSelect={handleSelect}
-          isFocused={isFocused}
+          isFocused={inputActive}
         />
       </Box>
     </Box>

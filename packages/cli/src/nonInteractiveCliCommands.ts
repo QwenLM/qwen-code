@@ -15,10 +15,12 @@ import {
   type Config,
   type GoalStateCause,
   type GoalStateResponse,
+  type ToolArtifact,
   createDebugLogger,
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
+import type { ICommandLoader } from './services/types.js';
 import { commandRestrictionNames } from './services/commandUtils.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
@@ -48,6 +50,10 @@ import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
 import {
+  isSshSessionCommandAllowed,
+  SSH_SLASH_COMMAND_POLICY,
+} from './acp-integration/ssh-workspace-guards.js';
+import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
   serializeUserPromptExpansionPrompt,
@@ -65,6 +71,11 @@ export function isCommandAllowedByPolicy(
   command: Pick<SlashCommand, 'kind' | 'name'>,
   policy?: NonInteractiveSlashCommandPolicy,
 ): boolean {
+  if (
+    policy === SSH_SLASH_COMMAND_POLICY &&
+    !isSshSessionCommandAllowed(command)
+  )
+    return false;
   if (!policy || command.kind !== CommandKind.BUILT_IN) return true;
   if (command.name === 'clear' && !policy.allowSessionReset) return false;
   return !policy.blockedBuiltinCommandNames.includes(command.name);
@@ -94,6 +105,7 @@ export type NonInteractiveSlashCommandResult = (
       type: 'message';
       messageType: 'info' | 'warning' | 'error';
       content: string;
+      artifacts?: ToolArtifact[];
       outputHistoryItems?: HistoryItemWithoutId[];
     }
   | {
@@ -178,6 +190,7 @@ function handleCommandResult(
         type: 'message',
         messageType: result.messageType,
         content: result.content,
+        ...(result.artifacts?.length ? { artifacts: result.artifacts } : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
@@ -416,11 +429,15 @@ export const handleSlashCommand = async (
   settings: LoadedSettings,
   sessionHooks?: NonInteractiveSlashCommandSessionHooks,
   executionPolicy?: NonInteractiveSlashCommandPolicy,
+  modCommands?: ICommandLoader,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
     return { type: 'no_command' };
   }
+
+  const sshWorkspace = Boolean(config.getExecutionEnvironment?.());
+  if (sshWorkspace) executionPolicy = SSH_SLASH_COMMAND_POLICY;
 
   const isAcpMode = config.getExperimentalZedIntegration();
   const isInteractive = config.isInteractive();
@@ -432,14 +449,17 @@ export const handleSlashCommand = async (
       : 'non_interactive';
 
   // Load all commands to check if the command exists but is not allowed
-  const allLoaders = [
-    new McpPromptLoader(config),
-    new BuiltinCommandLoader(config),
-    new BundledSkillLoader(config),
-    new SkillCommandLoader(config),
-    new SavedWorkflowLoader(config),
-    new FileCommandLoader(config),
-  ];
+  const allLoaders = sshWorkspace
+    ? [new BuiltinCommandLoader(config)]
+    : [
+        new McpPromptLoader(config),
+        new BuiltinCommandLoader(config),
+        new BundledSkillLoader(config),
+        new SkillCommandLoader(config),
+        new SavedWorkflowLoader(config),
+        new FileCommandLoader(config),
+        ...(modCommands ? [modCommands] : []),
+      ];
 
   // Build the disabled-command set (case-insensitive).
   const disabledSlashCommandsRaw = config.getDisabledSlashCommands();
@@ -755,16 +775,22 @@ export const getAvailableCommands = async (
   mode: ExecutionMode = 'acp',
   settings?: LoadedSettings,
   executionPolicy?: NonInteractiveSlashCommandPolicy,
+  modCommands?: ICommandLoader,
 ): Promise<SlashCommand[]> => {
   try {
-    const loaders = [
-      new McpPromptLoader(config),
-      new BuiltinCommandLoader(config),
-      new BundledSkillLoader(config),
-      new SkillCommandLoader(config),
-      new SavedWorkflowLoader(config),
-      new FileCommandLoader(config),
-    ];
+    const sshWorkspace = Boolean(config.getExecutionEnvironment?.());
+    if (sshWorkspace) executionPolicy = SSH_SLASH_COMMAND_POLICY;
+    const loaders = sshWorkspace
+      ? [new BuiltinCommandLoader(config)]
+      : [
+          new McpPromptLoader(config),
+          new BuiltinCommandLoader(config),
+          new BundledSkillLoader(config),
+          new SkillCommandLoader(config),
+          new SavedWorkflowLoader(config),
+          new FileCommandLoader(config),
+          ...(modCommands ? [modCommands] : []),
+        ];
 
     const disabledSlashCommands = config.getDisabledSlashCommands();
     const commandService = await CommandService.create(

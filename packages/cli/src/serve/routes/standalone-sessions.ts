@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseSessionStartupConfig } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   APPROVAL_MODES,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
@@ -296,6 +297,7 @@ export function registerStandaloneSessionRoutes(
       const body = requireExactBody(req, res, [
         'sessionId',
         'modelServiceId',
+        'startupConfig',
         'approvalMode',
       ]);
       if (!body) return;
@@ -315,6 +317,10 @@ export function registerStandaloneSessionRoutes(
         );
         return;
       }
+      const startupConfig = parseSessionStartupConfig(
+        body['startupConfig'],
+        body,
+      );
       const approvalMode = parseApprovalMode(body['approvalMode']);
       if (approvalMode === null) {
         sendInvalidRequest(
@@ -325,6 +331,7 @@ export function registerStandaloneSessionRoutes(
       }
       const request: CreateStandaloneSessionRequest = {
         sessionId: body['sessionId'],
+        ...(startupConfig ? { startupConfig } : {}),
         ...(body['modelServiceId'] !== undefined
           ? { modelServiceId: body['modelServiceId'] as string }
           : {}),

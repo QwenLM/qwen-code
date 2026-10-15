@@ -632,7 +632,7 @@ The following events are logged:
 #### Tool Events
 
 - `qwen-code.tool_call`: Each function/tool call. Terminal events are normalized so `status` is authoritative: success and cancelled events omit error fields, while error events always have a non-empty `error_type` (`unknown` when the producer did not classify the error). Blank tool names are emitted as `unknown_tool`. A missing `execution_status` is normalized to `unknown` and is never inferred from the terminal `status`.
-  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
+  - **Attributes**: `function_name` (string), `function_args` (object), `call_id` (string, optional), `duration_ms` (int), `started_at_ms` (int, optional — epoch ms at which `duration_ms` started counting, including any approval wait; absent when the call never ran), `status` (string: "success", "error", or "cancelled"), `execution_status` (string: "not_started", "success", "error", "cancelled", or "unknown"), `success` (boolean), `decision` (string: "accept", "reject", "auto_accept", or "modify", optional), `error` (string, optional), `error_type` (string, present for error events), `prompt_id` (string), `response_id` (string, optional), `content_length` (int, optional), `tool_type` (string: "native" or "mcp"), `mcp_server_name` (string, optional), `metadata` (object, optional — for file-writing tools contains `model_added_lines`, `model_removed_lines`, `user_added_lines`, `user_removed_lines`, `model_added_chars`, `model_removed_chars`, `user_added_chars`, `user_removed_chars`)
 
 - `qwen-code.file_operation`: Each file operation.
   - **Attributes**: `tool_name` (string), `operation` (string: "create", "read", "update"), `lines` (int, optional), `mimetype` (string, optional), `extension` (string, optional), `programming_language` (string, optional)
@@ -752,7 +752,7 @@ The following events are logged:
   - **Attributes**: `trigger` ("auto"/"manual"), `status` ("updated"/"noop"/"failed"/"cancelled"), `deduped_entries` (int), `touched_topics_count` (int), `touched_topics` (string), `duration_ms` (int)
 
 - `qwen-code.memory.recall`: Memory recall operation completed.
-  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int)
+  - **Attributes**: `query_length` (int), `docs_scanned` (int), `docs_selected` (int), `strategy` ("none"/"heuristic"/"model"), `duration_ms` (int), `selector_skipped` (bool, optional — set for structured-mode recalls that made a skip decision, so not on the empty-query/empty-corpus short circuit; false when the selector runs, including when the #13003 knob is off)
 
 #### Prompt Suggestion & Speculation Events
 
@@ -873,10 +873,10 @@ A resumed Goal can contribute multiple stop observations, each containing its li
   - **Attributes**: `trigger`, `status`
 
 - `qwen-code.memory.recall.count` (Counter, Int): Auto-memory recall operations.
-  - **Attributes**: `strategy` ("none"/"heuristic"/"model")
+  - **Attributes**: `strategy` ("none"/"heuristic"/"model"), `selector_skipped` (bool, optional — attached only for structured-mode recalls while the #13003 skip-selector knob is on)
 
 - `qwen-code.memory.recall.duration` (Histogram, ms): Recall duration.
-  - **Attributes**: `strategy`
+  - **Attributes**: `strategy`, `selector_skipped` (bool, optional — same conditions as the counter)
 
 #### API Request Breakdown
 

@@ -223,7 +223,6 @@ describe('streamingModel', () => {
       const task = selectItemById(reduceAll(events), 's1');
       expect(task).toMatchObject({
         kind: 'task',
-        done: false,
         progress: ['three', 'four', 'five'],
       });
     });
@@ -239,7 +238,7 @@ describe('streamingModel', () => {
       const after = reduceAll([
         start,
         { type: 'task-progress', id: 'ghost', line: 'nope' },
-        { type: 'task-end', id: 'ghost', tools: 1, seconds: 1, tokens: '1' },
+        { type: 'task-end', id: 'ghost' },
       ]);
       expect(after.items).toEqual(before.items);
     });
@@ -250,7 +249,6 @@ describe('streamingModel', () => {
         { type: 'task-progress', id: 's1', line: 'stale' },
         { type: 'task-start', id: 's1', name: 'n2', description: 'd2' },
         { type: 'task-progress', id: 's1', line: 'fresh' },
-        { type: 'task-end', id: 's1', tools: 1, seconds: 1, tokens: '1' },
       ]);
       expect(
         selectItems(state).filter((item) => item.kind === 'task'),
@@ -258,11 +256,10 @@ describe('streamingModel', () => {
       expect(selectItemById(state, 's1')).toMatchObject({
         name: 'n2',
         progress: ['fresh'],
-        done: true,
       });
     });
 
-    it('closes the task with formatted stats', () => {
+    it('drops the task card once the subagent settles', () => {
       const state = reduceAll([
         {
           type: 'task-start',
@@ -271,23 +268,10 @@ describe('streamingModel', () => {
           description: 'bench ink frames',
         },
         { type: 'task-progress', id: 's1', line: '↳ done' },
-        {
-          type: 'task-end',
-          id: 's1',
-          tools: 3,
-          seconds: 12.4,
-          tokens: '2.1k',
-        },
+        { type: 'task-end', id: 's1' },
       ]);
-      expect(selectItemById(state, 's1')).toEqual({
-        kind: 'task',
-        id: 's1',
-        name: 'researcher',
-        description: 'bench ink frames',
-        progress: ['↳ done'],
-        done: true,
-        stats: '3 tools · 12.4s · 2.1k tokens',
-      });
+      expect(selectItems(state)).toHaveLength(0);
+      expect(selectItemById(state, 's1')).toBeUndefined();
     });
   });
 
@@ -334,13 +318,7 @@ describe('streamingModel', () => {
           description: 'verify',
         },
         { type: 'task-progress', id: 's1', line: 'step' },
-        {
-          type: 'task-end',
-          id: 's1',
-          tools: 1,
-          seconds: 2,
-          tokens: '0.1k',
-        },
+        { type: 'task-end', id: 's1' },
         { type: 'text', delta: 'summary' },
         { type: 'done' },
       ]);
@@ -349,11 +327,9 @@ describe('streamingModel', () => {
         'assistant',
         'tool',
         'assistant',
-        'task',
         'assistant',
       ]);
       expect(selectItemById(state, 't1')).toMatchObject({ done: true });
-      expect(selectItemById(state, 's1')).toMatchObject({ done: true });
       expect(selectIsDone(state)).toBe(true);
     });
   });
@@ -386,7 +362,7 @@ describe('streamingModel', () => {
       ],
       [
         { type: 'task-start', id: 's1', name: 'n', description: 'd' },
-        { type: 'task-end', id: 's1', tools: 1, seconds: 1, tokens: '1' },
+        { type: 'task-end', id: 's1' },
       ],
       // closeTrailingAssistant rewrites the streaming assistant when a
       // start/user/done event lands — pin the rewrite through a captured

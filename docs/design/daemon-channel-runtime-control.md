@@ -8,8 +8,8 @@ Add runtime desired-state control for daemon-managed channel workers. A daemon
 may start without `--channel`, then enable, replace, inspect, reload, and stop
 its channel selection without restarting the daemon. Runtime changes are not
 persisted. The next daemon boot follows an explicit `--channel`, otherwise it
-restores the trusted primary workspace's `serve.channels`; without either it
-remains disabled.
+restores each trusted registered workspace's own `serve.channels`; without
+either it remains disabled.
 
 The control layer sits above the workspace-grouped worker implementation. It
 owns the committed selection, serializes lifecycle mutations, preserves the
@@ -67,12 +67,39 @@ daemon status continues to emit `channel_worker_partial_connect`.
 
 Boot-time `--channel` uses the same manager while retaining pre-listen lease
 reservation and ready-before-success behavior. On a flagless boot, the daemon
-restores `serve.channels` from the trusted primary workspace. The startup
+restores `serve.channels` from every trusted registered workspace, each
+contributing the list in its own workspace-scope settings. The startup
 selection uses persisted folder-trust settings; workspace ownership and trust
-are checked again before workers start. Secondary workspaces do not
-independently restore their own setting. Without an explicit or persisted
-selection, the daemon does not reserve the channel service or load the heavy
-channel runtime until the first runtime mutation.
+are checked again before workers start. The workspace that listed a name breaks
+an otherwise ambiguous ownership tie, and keeps breaking it for as long as the
+daemon runs, so re-enabling a name the daemon stopped resolves as boot did. A
+name contributed only by non-primary workspaces is dropped with a log rather
+than failing the whole restore; a name the primary workspace listed keeps
+failing it. `all` stays primary-only and is reported when configured
+elsewhere. A trusted non-primary workspace registered after boot restores
+its own names too, without holding the registration open, and only the first
+time this daemon sees it — recorded as soon as it asks for anything — because a
+later removal and re-registration, or a trust re-materialization, must not undo
+an operator who stopped one of those channels in between. Late restores run one
+at a time, each adding its names to the committed selection in one change, so
+one name it cannot attribute costs that workspace its whole list, unlike boot;
+each name left down is reported as described below.
+After `DELETE /workspace/channel` has stopped hosting, a registration restores
+nothing, because registering a workspace is not an instruction to turn hosting
+back on; that waits for a `PUT /workspace/channel` that commits, or the next
+boot. The daemon records that stop where it happens: a manager that has never
+hosted anything reports the same state as a stopped one, so the state cannot
+tell them apart. An explicit `--channel` selection is never extended by a
+workspace registered later, and a committed `all` selection is left as it is.
+Registration does not wait on the channel-control lane: the restore and the
+reconcile of already-hosted channels are queued there and the hook returns, so
+a worker that never becomes ready delays only channel work, never another
+registration or a trust reconcile, which share a daemon-wide gate. The lane
+orders that work on its own, and the late restore computes its additions
+inside it, so each builds on what the previous one committed. Without an explicit selection, a persisted
+selection, or a registration like the one above, the daemon does not reserve
+the channel service or load the heavy channel runtime until the first runtime
+mutation.
 
 Stored startup names must be non-empty, have no leading or trailing whitespace,
 and contain no unsafe control or invisible characters. Invalid entries are
@@ -88,9 +115,27 @@ unconfirmed worker stops retain the existing startup-failure behavior. The
 service lease remains held while worker termination is unconfirmed.
 
 Channel management reports persisted startup settings and actual runtime state.
-Skipped or failed automatic restores are diagnosed through the daemon log;
-they do not replace the configured instances or startup toggles with a retained
-boot-failure snapshot.
+Three ways a `serve.channels` name can stay unhosted are reported rather than
+only logged: a configured selection whose worker failed to start on the boot
+path that keeps the daemon serving, a name the boot ownership resolver dropped
+(reported against every workspace that listed it), and every name still
+unhosted after a late restore failed. Such a name never reaches the committed
+selection, so no worker snapshot carries it and the channel list would
+otherwise call it `stopped`. The daemon keeps an in-memory record per workspace
+and channel; daemon status raises one `channel_restore_failed` warning per
+workspace and is the complete surface, while the channel list reports the
+channel as `error` with the recorded `lastError` for the names that
+workspace's own settings scope defines. The record changes only the runtime
+state: the configured instances and startup toggles are still read from
+settings.
+
+A record retires from current state rather than from an event: it is dropped
+once the channel is hosted — by this workspace or by a later restore from
+another — or once its workspace is no longer registered. Reads apply that rule
+and prune, so a runtime replaced by a trust reconcile cannot erase a failure
+that is still true, and a restore that settles after its workspace was removed
+cannot strand one. On top of that, an operator acting on the channel, or on the
+whole selection with a change that stops something, clears it.
 
 Legacy `runtime.channelWorker`, grouped `runtime.channelWorkers`, pidfile
 fields, standalone `qwen channel start`, and `qwen channel reload` remain

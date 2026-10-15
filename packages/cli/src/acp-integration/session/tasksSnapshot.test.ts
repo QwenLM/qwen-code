@@ -15,6 +15,7 @@ import type {
   WorkflowSnapshot,
   WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import { snapshotArgsUnavailable } from '@qwen-code/qwen-code-core';
 import {
   buildSessionAgentsStatus,
   buildSessionTasksStatus,
@@ -807,6 +808,73 @@ describe('buildSessionTasksStatus workflow graph', () => {
         ],
       }),
     ]);
+  });
+
+  // A host decides before asking whether a history entry can be restarted;
+  // the args themselves stay on disk, since they can be large.
+  it('says when a history entry could not keep its args, and never carries the args', () => {
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [
+        workflowSnapshot({
+          runId: 'wf_kept',
+          args: { prompt: 'secret' },
+          argsRecorded: true,
+        }),
+        workflowSnapshot({ runId: 'wf_none', argsRecorded: true }),
+        workflowSnapshot({ runId: 'wf_omitted', argsOmitted: true }),
+        // Written before args were kept: it cannot say whether there were any.
+        workflowSnapshot({ runId: 'wf_legacy' }),
+      ],
+      { includeWorkflows: true },
+    );
+    const at = (id: string) => tasks.find((task) => task.id === id);
+
+    expect(at('wf_kept')).not.toHaveProperty('args');
+    expect(at('wf_kept')).not.toHaveProperty('argsOmitted');
+    expect(at('wf_kept')).not.toHaveProperty('argsUnavailable');
+    expect(at('wf_none')).not.toHaveProperty('argsUnavailable');
+    // `argsOmitted` stays as the reason; `argsUnavailable` is the answer.
+    expect(at('wf_omitted')).toMatchObject({
+      id: 'wf_omitted',
+      argsOmitted: true,
+      argsUnavailable: true,
+    });
+    expect(at('wf_omitted')).not.toHaveProperty('args');
+    expect(at('wf_legacy')).toMatchObject({ argsUnavailable: true });
+    expect(at('wf_legacy')).not.toHaveProperty('argsOmitted');
+  });
+
+  // The other end of the contract `acpAgent.test.ts` pins: the daemon
+  // refuses on `snapshotArgsUnavailable`, and what a client sees has to be
+  // that same answer rather than a second spelling of the question.
+  it('puts the daemon-side predicate on the wire, computed rather than restated', () => {
+    const snapshots = [
+      workflowSnapshot({ runId: 'wf_a', args: { q: 1 }, argsRecorded: true }),
+      workflowSnapshot({ runId: 'wf_b', argsRecorded: true }),
+      workflowSnapshot({ runId: 'wf_c', argsOmitted: true }),
+      workflowSnapshot({ runId: 'wf_d' }),
+    ];
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      snapshots,
+      { includeWorkflows: true },
+    );
+
+    for (const snapshot of snapshots) {
+      const task = tasks.find((entry) => entry.id === snapshot.runId);
+      expect({
+        runId: snapshot.runId,
+        marked: (task as { argsUnavailable?: true }).argsUnavailable === true,
+      }).toEqual({
+        runId: snapshot.runId,
+        marked: snapshotArgsUnavailable(snapshot) !== undefined,
+      });
+    }
   });
 
   it('prefers the in-memory workflow task over a persisted duplicate', () => {

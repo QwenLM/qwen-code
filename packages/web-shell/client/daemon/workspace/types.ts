@@ -56,6 +56,8 @@ import type {
   DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
+  DaemonWorkspaceExtensionSummaries,
+  DaemonExtensionEntry,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
@@ -539,6 +541,8 @@ export interface DaemonWorkspaceActions {
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
+  loadExtensionSummaries(): Promise<DaemonWorkspaceExtensionSummaries>;
+  loadExtensionDetails(name: string): Promise<DaemonExtensionEntry>;
 
   // Tools
   preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
@@ -557,8 +561,18 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
-  loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
-  readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
+  loadMemoryStatus(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus>;
+  /**
+   * `opts.maxBytes` is how a caller accepts partial content: without a window
+   * argument the daemon refuses any file above its own read cap instead of
+   * silently handing back a truncated file.
+   */
+  readWorkspaceFile(
+    filePath: string,
+    opts?: { maxBytes?: number },
+  ): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
   generateContent(
