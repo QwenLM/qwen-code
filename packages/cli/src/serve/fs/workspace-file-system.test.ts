@@ -2629,6 +2629,26 @@ describe('WorkspaceFileSystem - deleteDirectory', () => {
     await teardown(h);
   });
 
+  it('classifies changing directory contents as retryable without deleting siblings', async () => {
+    const target = path.join(h.workspace, 'folder');
+    await fsp.mkdir(target);
+    await fsp.writeFile(path.join(target, 'keep.txt'), 'keep');
+    await fsp.writeFile(path.join(h.workspace, 'sibling.txt'), 'sibling');
+    vi.spyOn(fsp, 'rm').mockRejectedValueOnce(
+      Object.assign(new Error('directory is not empty'), { code: 'ENOTEMPTY' }),
+    );
+    await expect(h.fs.deleteDirectory!('folder')).rejects.toMatchObject({
+      kind: 'io_error',
+      status: 503,
+    });
+    expect(await fsp.readFile(path.join(target, 'keep.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'sibling.txt'), 'utf8'),
+    ).toBe('sibling');
+  });
+
   it.each([false, true])(
     'deletes a directory with contents=%s and audits it',
     async (nonempty) => {
@@ -2798,6 +2818,43 @@ describe('WorkspaceFileSystem - createDirectory', () => {
     await teardown(h);
   });
 
+  it.each(['create', 'delete'] as const)(
+    'records ignored-directory audit metadata on %s',
+    async (operation) => {
+      await teardown(h);
+      h = await makeHarness({ ignore: new Ignore().add(['dist/']) });
+      if (operation === 'delete')
+        await fsp.mkdir(path.join(h.workspace, 'dist'));
+      await (operation === 'create'
+        ? h.fs.createDirectory!('dist')
+        : h.fs.deleteDirectory!('dist'));
+      const event = h.events.find(
+        (entry) => entry.type === FS_ACCESS_EVENT_TYPE,
+      );
+      expect(event?.data).toMatchObject({
+        matchedIgnore: 'directory',
+        ...(operation === 'create' ? { sizeBytes: 0 } : {}),
+      });
+    },
+  );
+
+  it.each(['reports.', 'NUL'])(
+    'rejects suspicious leaf %j and preserves reports',
+    async (input) => {
+      await fsp.mkdir(path.join(h.workspace, 'reports'));
+      await fsp.writeFile(path.join(h.workspace, 'reports/keep.txt'), 'keep');
+      for (const operation of [h.fs.createDirectory!, h.fs.deleteDirectory!]) {
+        await expect(operation.call(h.fs, input)).rejects.toMatchObject({
+          kind: 'path_outside_workspace',
+          status: 400,
+        });
+      }
+      expect(
+        await fsp.readFile(path.join(h.workspace, 'reports/keep.txt'), 'utf8'),
+      ).toBe('keep');
+    },
+  );
+
   it('creates exactly one directory under an existing parent and audits it', async () => {
     await fsp.mkdir(path.join(h.workspace, 'src'));
     await expect(h.fs.createDirectory!('src/新 folder')).resolves.toBe(
@@ -2833,7 +2890,7 @@ describe('WorkspaceFileSystem - createDirectory', () => {
     );
   });
 
-  it('allows only one concurrent create at the same path', async () => {
+  it('only one same-path create succeeds', async () => {
     const results = await Promise.allSettled([
       h.fs.createDirectory!('same'),
       h.fs.createDirectory!('same'),

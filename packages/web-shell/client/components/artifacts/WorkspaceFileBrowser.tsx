@@ -147,6 +147,9 @@ export function WorkspaceFileBrowser({
     const createdEntries = new Map<string, DaemonDirectoryEntry>();
     const entries = new Map<string, DaemonDirectoryEntry>();
     const cache = new Map<string, DirectoryState>();
+    const hasDirectoryActions = Boolean(
+      actions.createFile || actions.createDirectory || actions.deleteDirectory,
+    );
     const tree = new FileTree({
       paths: [],
       initialExpansion: 'closed',
@@ -171,7 +174,7 @@ export function WorkspaceFileBrowser({
       fileTreeSearchMode: 'hide-non-matches',
       composition: {
         contextMenu: {
-          triggerMode: 'both',
+          triggerMode: hasDirectoryActions ? 'both' : 'right-click',
           buttonVisibility: 'when-needed',
           onOpen(item, context) {
             const entry = entries.get(item.path);
@@ -179,10 +182,7 @@ export function WorkspaceFileBrowser({
               entry &&
               (entry.kind === 'file' ||
                 entry.kind === 'symlink' ||
-                (entry.kind === 'directory' &&
-                  (actions.createFile ||
-                    actions.createDirectory ||
-                    actions.deleteDirectory)))
+                (entry.kind === 'directory' && hasDirectoryActions))
             ) {
               closingMenuRef.current = false;
               transferMenuFocusRef.current = false;
@@ -291,6 +291,12 @@ export function WorkspaceFileBrowser({
     };
     createdRef.current = (path, kind) => {
       const child = `${path}${kind === 'directory' ? '/' : ''}`;
+      if (kind === 'directory' && tree.getItem(child)) {
+        deletedRef.current?.(path);
+        setSelectedPath((selected) =>
+          selected?.startsWith(child) ? undefined : selected,
+        );
+      }
       const entry: DaemonDirectoryEntry = {
         name: path.split('/').at(-1)!,
         kind,
@@ -302,7 +308,6 @@ export function WorkspaceFileBrowser({
       const parent = path.split('/').slice(0, -1).join('/');
       const directory = cache.get(parent);
       if (directory) cache.set(parent, { ...directory, empty: false });
-      if (kind === 'directory') cache.set(path, { path, empty: true });
       if (!tree.getItem(child)) tree.add(child);
       const parentItem = parent ? tree.getItem(`${parent}/`) : undefined;
       if (parentItem && 'expand' in parentItem) parentItem.expand();
@@ -395,8 +400,9 @@ export function WorkspaceFileBrowser({
         (
           row ??
           shadow?.querySelector<HTMLElement>(
-            '[role="treeitem"][tabindex="0"], [role="tree"]',
-          )
+            '[role="treeitem"][tabindex="0"]',
+          ) ??
+          shadow?.querySelector<HTMLElement>('[role="tree"]')
         )?.focus();
       } else if (focused instanceof HTMLElement && focused.isConnected) {
         focused.focus();

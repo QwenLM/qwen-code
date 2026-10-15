@@ -35,7 +35,7 @@ the refresh icon with `rotate-cw`. Creation supports trusted local workspaces.
 - Insert successful entries into the current tree and parent listing state,
   preserving other expansion, filtering and previews. Merge locally created
   entries into late directory responses so stale results cannot hide them or
-  mark their parent empty. Newly created folders are initially empty.
+  mark their parent empty. Newly created folders are empty when created and load on first expansion.
 
 ## Affected areas and decisions
 
@@ -85,3 +85,17 @@ the `sticky-note-plus` icon.
 Verify non-empty/empty deletion, nested symlink preservation outside the target,
 root/boundary/auth/owner refusal, cancel/focus/busy/retry, late descendant listings,
 preview cleanup, unrelated expansion and initial loading alignment.
+
+## Review follow-up boundaries
+
+Workspace mutations are excluded at build time from the read-only transcript
+entry; the interactive entry retains them. Keep the existing transcript size
+ceiling and test both mutation absence and read-only directory access.
+Directory rows expose a trailing Options trigger only when directory actions
+are available. After deletion, restore focus to a surviving roving row before
+falling back to the tree root. Newly created folders load on first expansion,
+so external writes made before expansion are visible without Refresh. Successful
+exclusive recreation at a loaded directory path discards its stale subtree,
+cached listings and descendant preview before adding the new empty directory.
+Test late ancestor listings, failed creates without phantom entries, capability
+menus with positive controls, and preservation of unrelated previews.

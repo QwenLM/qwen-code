@@ -1635,10 +1635,15 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         input.endsWith('/') ||
         input.endsWith(path.sep) ||
         basename === '.' ||
-        basename === '..' ||
-        hasSuspiciousPathPattern(input)
+        basename === '..'
       ) {
         throw new FsError('parse_error', 'Deletion requires a directory path');
+      }
+      if (hasSuspiciousPathPattern(input)) {
+        throw new FsError(
+          'path_outside_workspace',
+          'path contains a suspicious pattern',
+        );
       }
       const parent = await resolveWithinWorkspace(
         path.dirname(input),
@@ -1673,12 +1678,28 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         }
         this.deps.generationGuard?.assertOpen();
         assertTrustedForIntent(this.deps.trusted, 'delete');
-        await fsp.rm(target, { recursive: true, force: false });
+        try {
+          await fsp.rm(target, { recursive: true, force: false });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
+            throw new FsError(
+              'io_error',
+              'Directory contents changed during removal',
+              {
+                cause: error,
+                hint: 'Retry deleting the directory.',
+              },
+            );
+          }
+          throw error;
+        }
+        const verdict = this.ignoreVerdict(target, 'directory');
         this.deps.audit.recordAccess(this.deps.ctx, {
           intent: 'delete',
           operation: 'rm',
           absolute: target,
           durationMs: performance.now() - start,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
         });
         return target;
       });
@@ -1699,10 +1720,15 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         input.endsWith('/') ||
         input.endsWith(path.sep) ||
         basename === '.' ||
-        basename === '..' ||
-        hasSuspiciousPathPattern(input)
+        basename === '..'
       ) {
         throw new FsError('parse_error', 'path must name a new directory');
+      }
+      if (hasSuspiciousPathPattern(input)) {
+        throw new FsError(
+          'path_outside_workspace',
+          'path contains a suspicious pattern',
+        );
       }
       const parent = await resolveWithinWorkspace(
         path.dirname(input),
@@ -1741,11 +1767,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         if (!(await fsp.lstat(target)).isDirectory()) {
           throw new FsError('symlink_escape', 'created directory changed');
         }
+        const verdict = this.ignoreVerdict(target, 'directory');
         this.deps.audit.recordAccess(this.deps.ctx, {
           intent: 'write',
           operation: 'mkdir',
           absolute: target,
           durationMs: performance.now() - start,
+          sizeBytes: 0,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
         });
         return target;
       });

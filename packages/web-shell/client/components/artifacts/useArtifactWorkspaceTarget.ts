@@ -99,15 +99,17 @@ export function useArtifactWorkspaceTarget(
     () => resolveArtifactWorkspaceOwner(workspace.capabilities, workspaceCwd),
     [workspace.capabilities, workspaceCwd],
   );
-  const localOwner = Boolean(
-    owner?.id &&
-      workspace.capabilities?.features?.includes(
-        'workspace_qualified_rest_core',
-      ) &&
-      !workspace.capabilities?.workspaces?.find(
-        (entry) => entry.id === owner.id,
-      )?.ssh,
-  );
+  const localOwner =
+    import.meta.env.MODE !== 'transcript' &&
+    Boolean(
+      owner?.id &&
+        workspace.capabilities?.features?.includes(
+          'workspace_qualified_rest_core',
+        ) &&
+        !workspace.capabilities?.workspaces?.find(
+          (entry) => entry.id === owner.id,
+        )?.ssh,
+    );
   const canCreateFile =
     localOwner &&
     Boolean(workspace.capabilities?.features?.includes('workspace_file_write'));
