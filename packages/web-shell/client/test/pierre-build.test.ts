@@ -29,12 +29,79 @@ it('redirects only Pierre imports, including development query strings', () => {
     ),
   ).toMatch(/pierre-highlighter\.ts$/);
   expect(resolve('shiki', '/repo/client/code-highlighter.ts')).toBeUndefined();
+  for (const subpath of ['wasm', 'core', 'engine/javascript', 'textmate']) {
+    expect(
+      resolve(
+        `shiki/${subpath}`,
+        '/repo/node_modules/@pierre/diffs/dist/highlighter/shared_highlighter.js',
+      ),
+    ).toContain('shiki-files');
+    expect(
+      resolve(`shiki/${subpath}`, '/repo/client/code-highlighter.ts'),
+    ).toBeUndefined();
+  }
   expect(
     resolve(
       '@pierre/theming/themes',
       '/repo/node_modules/@pierre/diffs/dist/highlighter/registerCustomTheme.js',
     ),
   ).toBeUndefined();
+});
+
+it('counts static and lazy descendants and requires an adapter for Pierre', () => {
+  const entry = '/repo/client/components/artifacts/pierre-highlighter.ts';
+  const resources = '/repo/client/components/artifacts/pierre-resources.ts';
+  const grammar = '/repo/node_modules/shiki-files/langs/typescript.mjs';
+  const theme = '/repo/node_modules/shiki-files/themes/github-light.mjs';
+  const pierre = '/repo/node_modules/@pierre/diffs/dist/index.js';
+  const graph: Record<
+    string,
+    { importedIds: string[]; dynamicallyImportedIds: string[] }
+  > = {
+    [entry]: { importedIds: [resources], dynamicallyImportedIds: [] },
+    [resources]: { importedIds: [theme], dynamicallyImportedIds: [grammar] },
+    [grammar]: { importedIds: [entry], dynamicallyImportedIds: [] },
+    [theme]: { importedIds: [], dynamicallyImportedIds: [] },
+  };
+  const check = (ids: string[], grammarBytes = 100, themeBytes = 100) => {
+    const { generateBundle } = pierreResources();
+    if (typeof generateBundle !== 'function') throw new Error('Missing gate');
+    Reflect.apply(
+      generateBundle,
+      {
+        getModuleIds: () => ids,
+        getModuleInfo: (id: string) => graph[id],
+        error: (message: string) => {
+          throw new Error(message);
+        },
+        info: () => {},
+      },
+      [
+        {},
+        {
+          entry: {
+            type: 'chunk',
+            modules: { [entry]: { renderedLength: 100 } },
+          },
+          lazy: {
+            type: 'chunk',
+            modules: {
+              [grammar]: { renderedLength: grammarBytes },
+              [theme]: { renderedLength: themeBytes },
+            },
+          },
+        },
+        false,
+      ],
+    );
+  };
+  expect(() => check([entry, pierre])).not.toThrow();
+  expect(() => check([entry, pierre], 4 * 1024 * 1024)).toThrow('4 MiB budget');
+  expect(() => check([entry, pierre], 100, 4 * 1024 * 1024)).toThrow(
+    '4 MiB budget',
+  );
+  expect(() => check([pierre])).toThrow('no Pierre highlighter resource');
+  expect(() => check(['/repo/client/transcript.ts'])).not.toThrow();
 });
 
 it('budgets resource modules without counting unrelated shared chunk code', () => {

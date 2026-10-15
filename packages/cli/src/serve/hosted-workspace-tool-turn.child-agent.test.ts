@@ -1542,6 +1542,7 @@ it.each([false, true])(
       original.getCatalog()!,
     );
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
+    const childSession = children;
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1570,10 +1571,10 @@ it.each([false, true])(
         (async () => {
           if (background) return;
           await vi.waitFor(
-            () => expect(children.record('prompt:call-1')).toBeDefined(),
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
             { timeout: 10_000 },
           );
-          await children.settleFailed('prompt:call-1', {
+          await childSession.settleFailed('prompt:call-1', {
             stopReason: 'creation_failed',
             reason: null,
             started: false,
@@ -1581,7 +1582,7 @@ it.each([false, true])(
         })(),
       ]);
       expect(JSON.stringify(result)).not.toContain(mountRefusal);
-      expect(children.record('prompt:call-1')).toBeDefined();
+      expect(childSession.record('prompt:call-1')).toBeDefined();
       expect(
         broker.hookControl.mock.calls.filter(
           ([operation]) => operation.kind === 'hook-execute',
@@ -1671,6 +1672,7 @@ it.each(
       duration: 1,
       output: {},
     }));
+    const childSession = children;
     try {
       const [result] = await Promise.all([
         executeAgent(
@@ -1684,10 +1686,10 @@ it.each(
         (async () => {
           if (background) return;
           await vi.waitFor(
-            () => expect(children.record('prompt:call-1')).toBeDefined(),
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
             { timeout: 10_000 },
           );
-          await children.settleFailed('prompt:call-1', {
+          await childSession.settleFailed('prompt:call-1', {
             stopReason: 'creation_failed',
             reason: null,
             started: false,
@@ -1695,7 +1697,7 @@ it.each(
         })(),
       ]);
       expect(JSON.stringify(result)).not.toContain(mountRefusal);
-      expect(children.record('prompt:call-1')).toBeDefined();
+      expect(childSession.record('prompt:call-1')).toBeDefined();
     } finally {
       await turn.finish();
       await hooks.close();

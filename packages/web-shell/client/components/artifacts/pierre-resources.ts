@@ -1,4 +1,5 @@
 // Explicit imports keep unused Shiki grammars and themes out of both builds.
+/** @internal */
 export const bundledLanguages = {
   c: () => import('shiki-files/langs/c.mjs'),
   cpp: () => import('shiki-files/langs/cpp.mjs'),
@@ -35,6 +36,7 @@ export const bundledLanguages = {
   zsh: () => import('shiki-files/langs/shellscript.mjs'),
 };
 
+/** @internal */
 export const bundledThemes = {
   'github-light': () => import('shiki-files/themes/github-light.mjs'),
   'github-dark': () => import('shiki-files/themes/github-dark.mjs'),

@@ -31,7 +31,8 @@
   "files": [
     "NOTICES.txt",
     "dist/*.js",
-    "dist/types"
+    "dist/types",
+    "!dist/types/components/artifacts/pierre-*.d.ts"
   ],
   "scripts": {
     "dev": "vite",
@@ -66,6 +67,7 @@
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.26",
+    "@types/hast": "^3.0.5",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
@@ -107,7 +109,6 @@
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
-    "@types/hast": "^3.0.5",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",

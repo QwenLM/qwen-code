@@ -4,6 +4,8 @@
 
 ## Problem
 
+This refines the [Files browser design](web-shell-file-browser.md).
+
 The merged Files browser still displays control characters in Pierre-owned rows,
 ships the full highlighter grammar/theme graph, omits an inlined layout dependency
 from its license seeds, and has no action to close only the inline preview.
@@ -11,11 +13,18 @@ from its license seeds, and has no action to close only the inline preview.
 ## Decisions
 
 - Add a pinned `patch-package` patch exposing a render-only `formatItemName` hook
-  in Pierre Trees. Pass the existing `safeDisplayText` helper. Apply it to ordinary,
+  in Pierre Trees. Use a filename-specific formatter removing ANSI, control and
+  Unicode format characters and the combining grapheme joiner, while
+  preserving legal spaces, including repeated, leading/trailing and nonbreaking
+  spaces. Search matches both this per-segment display projection and raw paths.
+  Apply the formatter to ordinary,
   flattened and sticky rows and their accessible names; never mutate model paths.
   Raw paths continue to identify reads, downloads, references and clipboard copies.
   Two names with the same cleaned display remain distinct files. Remove the patch
-  when the upstream package supplies an equivalent supported hook.
+  when the upstream package supplies an equivalent supported hook. Modified files
+  carry banners and the patched package NOTICE feeds generated distribution notices.
+  After changing the patch, reapply it and restart development with
+  `npm run dev -- --force` from `packages/web-shell` to invalidate Vite prebundles.
 - Give Pierre a dedicated Shiki 4 build entry with explicit lazy loaders for common
   languages and only `github-light` / `github-dark`. Scope resolution to Pierre so
   existing Shiki 1 consumers keep their behavior. Unsupported languages fall back
@@ -25,7 +34,12 @@ from its license seeds, and has no action to close only the inline preview.
   the same adapter. `pierre-resources.ts` defines 33 allowed language keys;
   normalize `yml` to `yaml` and `kts` to `kotlin`. Guard rendered module code
   in this resource graph with a 4 MiB budget, excluding unrelated code in shared
-  chunks. Verify cold loading, common grammars, theme changes and fallback behavior.
+  chunks, including redirected Shiki subpaths. Fail the budget check if Pierre is
+  bundled without the curated adapters; transcript builds legitimately omit Pierre.
+  Vitest applies the same adapter with Pierre dependencies inlined. Internal adapter
+  declarations are not a public package surface; published declarations may depend
+  only on declared runtime/peer packages or their declared type packages.
+  Verify cold loading, common grammars, theme changes and fallback behavior.
 - Keep `react-resizable-panels` external in the published library, matching the
   existing UI dependencies. The npm dependency then supplies its own license;
   it is no longer an unattributed copy inside the library bundle.

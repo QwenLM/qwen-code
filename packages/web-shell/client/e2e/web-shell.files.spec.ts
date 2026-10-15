@@ -9,7 +9,8 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
-const controlledName = 'control-\u202e\u0001\u001b[31mfile.ts';
+const controlledName =
+  'control-\u202e\u0001\u001b[31m\u00ad\u2060\u{e0041}file.ts';
 const controlledDirectory = 'folder-\u202e\u0001';
 
 // UI integration uses a simulated daemon; it does not verify filesystem or Git operations.
@@ -44,6 +45,7 @@ async function openFiles(
   const contents: Record<string, string> = {
     [controlledName]: 'export const originalPath = true;',
     'control-file.ts': 'export const ordinaryPath = true;',
+    'notes  draft.md': '# Two spaces',
     [`${controlledDirectory}/child.ts`]: 'export const nestedOriginal = true;',
     'unsupported.lean': 'def unsupported := 42',
     'README.md':
@@ -125,6 +127,7 @@ async function openFiles(
               { name: 'report.xlsx', kind: 'file', ignored: false },
               { name: 'legacy.xls', kind: 'file', ignored: false },
               { name: 'notes draft.md', kind: 'file', ignored: false },
+              { name: 'notes  draft.md', kind: 'file', ignored: false },
               { name: controlledName, kind: 'file', ignored: false },
               { name: 'control-file.ts', kind: 'file', ignored: false },
               { name: 'unsupported.lean', kind: 'file', ignored: false },
@@ -874,6 +877,7 @@ test('offers file context actions, previews images and HTML, and references a fi
   const rightClick = async (name: string) => {
     await browser
       .getByRole('treeitem', { name, exact: true })
+      .and(browser.locator(`[data-item-path="${name}"]`))
       .click({ button: 'right' });
     await expect(
       page.getByRole('menuitem', { name: 'Copy relative path', exact: true }),
@@ -959,7 +963,7 @@ test('offers file context actions, previews images and HTML, and references a fi
   ).toBeFocused();
   await page.keyboard.press('ArrowUp');
   await expect(
-    browser.getByRole('treeitem', { name: 'notes draft.md', exact: true }),
+    browser.locator('[role="treeitem"][data-item-path="notes draft.md"]'),
   ).toBeFocused();
   await rightClick('notes draft.md');
   await page.getByRole('menuitem', { name: 'Reference', exact: true }).click();
@@ -1108,7 +1112,14 @@ test('@smoke cleans tree labels while keeping distinct raw file and directory pa
     const row = rows.nth(index);
     const path = identities[index]!;
     await expect(row).toHaveAttribute('aria-label', 'control-file.ts');
-    for (const character of ['\u0001', '\u001b', '\u202e'])
+    for (const character of [
+      '\u0001',
+      '\u001b',
+      '\u202e',
+      '\u00ad',
+      '\u2060',
+      '\u{e0041}',
+    ])
       expect(await row.textContent()).not.toContain(character);
     await row.click();
     await expect(browser.getByTestId('pierre-file-preview')).toContainText(
@@ -1133,6 +1144,30 @@ test('@smoke cleans tree labels while keeping distinct raw file and directory pa
       ),
     ).toBe(`/tmp/qwen-web-shell-e2e/${path}`);
   }
+  const filter = browser.getByRole('textbox', {
+    name: 'Filter files…',
+    exact: true,
+  });
+  await filter.fill('control-file.ts');
+  await expect(rows).toHaveCount(2);
+  await expect(browser.getByText('No matches in loaded paths')).toBeHidden();
+  await filter.fill('notes  draft.md');
+  const spaced = browser.locator(
+    '[role="treeitem"][data-item-path="notes  draft.md"]',
+  );
+  await expect(spaced).toHaveAttribute('aria-label', 'notes  draft.md');
+  expect(
+    await spaced
+      .locator('[data-truncate-content="visible"]')
+      .evaluateAll((nodes) => nodes.map((node) => node.textContent).join('')),
+  ).toBe('notes  draft.md');
+  expect(
+    await spaced
+      .locator('[data-truncate-content="visible"]')
+      .first()
+      .evaluate((node) => getComputedStyle(node).whiteSpace),
+  ).toBe('pre');
+  await filter.fill('');
   await browser.getByRole('treeitem', { name: 'folder-', exact: true }).click();
   await browser
     .getByRole('treeitem', { name: 'child.ts', exact: true })
@@ -1187,7 +1222,7 @@ test('@smoke closes inline content to a full-width tree and reopens the same fil
   );
 });
 
-test('renders unsupported source as plain text on a cold load', async ({
+test('@smoke renders unsupported source as plain text on a cold load', async ({
   page,
 }, testInfo) => {
   const errors: string[] = [];
@@ -1202,5 +1237,6 @@ test('renders unsupported source as plain text on a cold load', async ({
   const source = browser.getByTestId('pierre-file-preview');
   await expect(source).toContainText('def unsupported := 42');
   await expect(source.locator('[data-line] span[style]')).toHaveCount(0);
+  expect(await source.locator('[data-line]').count()).toBeGreaterThan(0);
   expect(errors).toEqual([]);
 });

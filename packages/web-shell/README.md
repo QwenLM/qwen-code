@@ -59,6 +59,12 @@ Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。M
 嵌入式宿主通过 `rightPanel={{ items: ['files', 'review', 'sideTask'] }}` 启用。
 此入口需要有效、可信且无歧义的 daemon 工作区归属。
 
+源码高亮支持 33 个常用语言键及 GitHub 浅色/深色主题，其他语言显示原文。
+语言清单维护于 [`pierre-resources.ts`](client/components/artifacts/pierre-resources.ts)，
+选择策略与补丁移除条件见[后续设计](../../docs/design/web-shell-files-followups.zh-CN.md)。
+文件树移除名称中的控制字符，保留普通空格；筛选同时支持显示名称和真实路径。
+修改 Pierre 补丁并重新应用后，开发时执行 `npm run dev -- --force` 清除预构建缓存。
+
 Excel（`.xlsx`）支持内联预览，也可通过右键「预览」在独立页签打开；重复打开同一文件复用页签，其他 Excel 格式仍仅支持下载。
 文件树源码预览在读取前限制为 4 MiB，更大的文件请通过右键菜单下载。
 导入失败仅在凭据可恢复的独立页面中提供重载；嵌入宿主或仅内存凭据时提供关闭文件，保留对话和宿主页面。

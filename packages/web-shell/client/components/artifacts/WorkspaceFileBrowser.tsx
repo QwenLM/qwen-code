@@ -1,4 +1,4 @@
-import { safeDisplayText } from '../../hooks/useAtMentionSources';
+import { formatFileName } from './file-name-display';
 import { usePanelRef } from 'react-resizable-panels';
 import { FileTree, type ContextMenuOpenContext } from '@pierre/trees';
 import {
@@ -117,7 +117,7 @@ export function WorkspaceFileBrowser({
       initialExpansion: 'closed',
       flattenEmptyDirectories: false,
       icons: 'complete',
-      formatItemName: safeDisplayText,
+      formatItemName: formatFileName,
       unsafeCSS: `
         [data-file-tree-virtualized-scroll] { overflow: auto; }
         [data-file-tree-virtualized-list] {
@@ -129,6 +129,7 @@ export function WorkspaceFileBrowser({
           flex-shrink: 0;
         }
         [data-item-section="spacing"] { flex-shrink: 0; }
+        [data-truncate-content] { white-space: pre; }
       `,
       // The host supplies the visible filter instead of Pierre's search input.
       search: false,
@@ -313,7 +314,7 @@ export function WorkspaceFileBrowser({
           </DropdownMenuTrigger>
           <DropdownMenuContent
             className="w-48"
-            aria-label={`${t('files.title')}: ${safeDisplayText(menu.path)}`}
+            aria-label={`${t('files.title')}: ${formatFileName(menu.path)}`}
             aria-labelledby={undefined}
             data-file-tree-context-menu-root="true"
             onCloseAutoFocus={(event) => {
@@ -375,10 +376,12 @@ export function WorkspaceFileBrowser({
       <header className={styles.toolbar}>
         <span
           className={styles.path}
-          title={safeDisplayText(absolutePath(selectedPath ?? ''))}
+          title={formatFileName(absolutePath(selectedPath ?? ''))}
         >
-          {safeDisplayText(workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1))}
-          {selectedPath && <> / {safeDisplayText(selectedPath)}</>}
+          {formatFileName(
+            workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1) ?? workspaceCwd,
+          )}
+          {selectedPath && <> / {formatFileName(selectedPath)}</>}
         </span>
         {canPreview && (
           <Button
@@ -553,7 +556,7 @@ export function WorkspaceFileBrowser({
                   <div key={directory.path}>
                     <span>
                       {directory.path
-                        ? safeDisplayText(directory.path)
+                        ? formatFileName(directory.path)
                         : t('files.title')}
                       :{' '}
                     </span>

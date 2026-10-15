@@ -8,11 +8,16 @@ import {
 import { useEffect, useRef } from 'react';
 import { useTheme } from '../../themeContext';
 
-export function getPreviewLanguage(path: string) {
+/** @internal */
+export function getPreviewLanguage(
+  path: string,
+): keyof typeof bundledLanguages | 'text' {
   const detected = getFiletypeFromFileName(path);
   const language =
     detected === 'yml' ? 'yaml' : detected === 'kts' ? 'kotlin' : detected;
-  return Object.hasOwn(bundledLanguages, language) ? language : 'text';
+  return Object.hasOwn(bundledLanguages, language)
+    ? (language as keyof typeof bundledLanguages)
+    : 'text';
 }
 
 export default function PierreFilePreview({
