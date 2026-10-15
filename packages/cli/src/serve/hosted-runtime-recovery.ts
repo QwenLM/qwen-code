@@ -1374,6 +1374,7 @@ const JOURNAL_ONLY_ANSWERABLE_TOOLS: ReadonlySet<string> = new Set([
   'agent',
   'workflow',
   'send_message',
+  'team_plan_approval',
   ...HOSTED_TEAM_TOOL_NAMES,
 ]);
 
@@ -1468,6 +1469,12 @@ async function settleJournalOnlyInterruptedTurn(input: {
         HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
         (input.teams === undefined || input.commands === undefined)
       )
+        return undefined;
+      // A plan approval's committed evidence is the plan decision the
+      // teams funnel alone records (teams.planDecisionEvidence) — the
+      // standalone HOSTED_TEAM_PLAN_TOOL never lands in the team-tools
+      // name list, so it keeps its own one-funnel guard.
+      if (call.name === 'team_plan_approval' && input.teams === undefined)
         return undefined;
     }
   }
