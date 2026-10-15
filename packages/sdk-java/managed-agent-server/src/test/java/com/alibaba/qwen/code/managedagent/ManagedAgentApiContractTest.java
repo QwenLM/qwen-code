@@ -1,16 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static java.util.Map.entry;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
-import static org.awaitility.Awaitility.await;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels;
@@ -20,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
@@ -29,7 +19,6 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
@@ -46,8 +35,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
@@ -77,20 +66,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.ValidationMessage;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.Arrays;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-import java.util.UUID;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -98,8 +73,8 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
-import org.springframework.http.MediaType;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -107,6 +82,32 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static java.util.Map.entry;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-agent-contract;MODE=MySQL;"
@@ -1719,6 +1720,67 @@ class ManagedAgentApiContractTest {
                 ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
                         + "\"idempotencyKey\":\"contract-web-scope\"}")
                         .formatted(sessionId, childTask));
+
+        // H4f-b: a workflow task serves the same cancel on both surfaces,
+        // and its view advertises the action.
+        String workflowKey = "e".repeat(64);
+        jdbc.update("INSERT INTO ma_session_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, runtime_state,"
+                        + " delivery_target, delivery_state, created_at,"
+                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
+                        + " ?, 'child_run', 'run-contract-wf', ?, 1,"
+                        + " 'resource-run-contract-wf', 'workflow',"
+                        + " 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                workflowKey, tenant, sessionId, "f".repeat(64));
+        String workflowTask = "task_" + workflowKey;
+        JsonNode workflowView = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        workflowTask).header(TENANT, tenant), null));
+        assertThat(workflowView.get("action_capabilities").toString())
+                .isEqualTo("[\"cancel\"]");
+        // The child_agent cancel above stays open in this fixture, and the
+        // one open operation per Session rule spans task kinds.
+        assertThat(json(exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, workflowTask).header(TENANT,
+                        tenant).header(IDEMPOTENCY_KEY,
+                        "contract-workflow-blocked"), null))
+                .at("/error/code").asText())
+                .isEqualTo("session_operation_active");
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        JsonNode workflowAdmitted = json(exchange(drift, "cancelSessionTask",
+                202, post(cancelPath, sessionId, workflowTask)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-workflow-cancel"),
+                null));
+        assertThat(workflowAdmitted.get("type").asText())
+                .isEqualTo("task_cancel");
+        assertThat(workflowAdmitted.get("task_id").asText())
+                .isEqualTo(workflowTask);
+        assertThat(workflowAdmitted.get("replayed").asBoolean()).isFalse();
+        JsonNode workflowReplayed = json(exchange(drift, "cancelSessionTask",
+                202, post(cancelPath, sessionId, workflowTask)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-workflow-cancel"),
+                null));
+        assertThat(workflowReplayed.get("id").asText())
+                .isEqualTo(workflowAdmitted.get("id").asText());
+        assertThat(workflowReplayed.get("replayed").asBoolean()).isTrue();
+        JsonNode workflowWebShell = json(exchange(drift, "cancelWebShellTask",
+                202, post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-workflow-cancel\"}")
+                        .formatted(sessionId, workflowTask)));
+        assertThat(workflowWebShell.get("operationId").asText())
+                .isEqualTo(workflowAdmitted.get("id").asText());
+        assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**

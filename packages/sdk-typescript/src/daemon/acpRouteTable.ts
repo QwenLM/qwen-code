@@ -162,7 +162,10 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/cancel$/,
     mapping: {
       method: 'session/cancel',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+      }),
       notification: true,
     },
   },

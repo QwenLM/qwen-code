@@ -10,6 +10,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -25,8 +30,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import javax.sql.DataSource;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** A private component snapshot; it cannot authorize settlement or release. */
 public final class WorkspaceCsiCheckpointSnapshotStore {
@@ -631,7 +634,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
     }
 
     private static boolean id(String value, int limit) {
-        return value != null && !value.isBlank() && value.length() <= limit && value.indexOf('\0') < 0;
+        return StringUtils.isNotBlank(value) && value.length() <= limit && value.indexOf('\0') < 0;
     }
 
     private static boolean uuid(String value) {

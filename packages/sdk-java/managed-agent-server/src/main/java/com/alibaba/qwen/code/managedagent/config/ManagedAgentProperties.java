@@ -1,6 +1,16 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import jakarta.annotation.PostConstruct;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.core.env.Environment;
+
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -9,15 +19,9 @@ import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.convert.DurationUnit;
-import org.springframework.context.EnvironmentAware;
-import org.springframework.core.env.Environment;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties implements EnvironmentAware {
@@ -154,8 +158,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !"local-process".equals(runtimeBroker.getProvisioner())
-                        || !"session".equals(runtimeBroker.getIsolationClass())
+                        || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || runtimeBroker.getWorkspaceMounts().isEmpty()
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
@@ -200,7 +204,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
             // A merge runs once the child Session is closed (#13753 I2), and
             // only a durable local-process Broker can close one.
             if (!runtimeBroker.isEnabled()
-                    || !"local-process".equals(runtimeBroker.getProvisioner())
+                    || !LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                     || !"session".equals(runtimeBroker.getIsolationClass())
                     || !runtimeBroker.isDurableLocalProcess()
                     || runtimeBroker.getWorkspaceMounts().isEmpty()) {
@@ -612,7 +616,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // A blank value comes from an unset template variable; both the
         // startup guard and the connector must read it as the default.
         public String getAddress() {
-            return address == null || address.isBlank() ? "127.0.0.1"
+            return StringUtils.isBlank(address) ? "127.0.0.1"
                     : address;
         }
 
@@ -881,7 +885,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private int port = 4182;
         private boolean allowNonLoopback;
         private String token = "";
-        private String provisioner = "local-process";
+        private String provisioner = LocalProcessRuntimeProvisioner.KIND;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
@@ -1303,6 +1307,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // The parent topic the per-Session LiteTopics (journal and public
         // envelopes alike) and the wake bootstrap LiteTopic live under.
         private String topic = "";
+        // The group the startup capability probe subscribes in; pre-created
+        // as a LITE group bound to the topic like the lane groups.
+        private String capabilityProbeGroup =
+                "qwen-managed-journal-capability-probe";
         // The one LiteTopic every wake.requested envelope is also sent to, so
         // a node can learn of a wake nobody owns yet. Session ids are UUIDs,
         // so this name cannot collide with a Session's LiteTopic.
@@ -1315,6 +1323,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // Unit-less operator overrides must bind in the annotated unit.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration ownerReconcileInterval = Duration.ofSeconds(1);
+
+        public String getCapabilityProbeGroup() {
+            return capabilityProbeGroup;
+        }
+
+        public void setCapabilityProbeGroup(String capabilityProbeGroup) {
+            this.capabilityProbeGroup = capabilityProbeGroup;
+        }
 
         public String getWakeBootstrapLiteTopic() {
             return wakeBootstrapLiteTopic;

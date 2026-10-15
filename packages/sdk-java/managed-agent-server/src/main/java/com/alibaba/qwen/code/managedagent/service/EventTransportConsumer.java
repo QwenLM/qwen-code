@@ -4,6 +4,11 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.store.TransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
+import org.apache.rocketmq.client.apis.message.MessageView;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.OptionalLong;
@@ -15,10 +20,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
-import org.apache.rocketmq.client.apis.message.MessageView;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The message listener of both EventTransport consumer lanes (design
@@ -31,9 +32,10 @@ import org.slf4j.LoggerFactory;
  * is consumed in order, so a FAILURE would hold every later notice of the
  * Session (or, on the bootstrap lane, of every Session) behind a retry; and
  * no outcome here is recovery-relevant, because SQL — never the broker — is
- * the truth each role re-reads, and the SQL-side scans recover whatever a
- * notice missed. A message that is not a contract envelope is dropped with
- * its message id logged, never its body.
+ * the truth each role re-reads: a missed public notice is covered by the
+ * scheduled materialization pass, a missed wake by the ledger of the source
+ * that committed its input. A message that is not a contract envelope is
+ * dropped with its message id logged, never its body.
  *
  * <p>Materialization notices are coalesced per Session onto one thread: at
  * most one batch per Session is queued and one runs, so a streaming Turn's

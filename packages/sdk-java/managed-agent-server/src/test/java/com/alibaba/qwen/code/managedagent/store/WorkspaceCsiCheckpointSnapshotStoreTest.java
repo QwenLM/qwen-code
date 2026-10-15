@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -15,9 +12,22 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.AbstractDataSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
@@ -30,17 +40,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import javax.sql.DataSource;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.AbstractDataSource;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.support.TransactionTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiCheckpointSnapshotStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -231,7 +233,11 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         var match = java.util.regex.Pattern.compile("\"" + field + "\"\\s*:\\s*([0-9]+)(?=\\s*[,}])").matcher(original);
         assertThat(match.find()).isTrue();
         String fractional = original.substring(0, match.start(1)) + match.group(1) + ".5" + original.substring(match.end(1));
-        if (registration) { jdbc.update("UPDATE ma_storage SET registration_json = ?", fractional); } else { saveRetirementIdentity(fractional); }
+        if (registration) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", fractional);
+        } else {
+            saveRetirementIdentity(fractional);
+        }
         assertThatThrownBy(this::export).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Original CSI checkpoint snapshot is unavailable.").hasNoCause();
         assertThat(source.starts).isEqualTo(1);

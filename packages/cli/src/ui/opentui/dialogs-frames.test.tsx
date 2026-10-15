@@ -54,7 +54,8 @@ const buildJsxRuntime = vi.hoisted(() => async () => {
               k !== 'children' &&
               (typeof v === 'string' ||
                 typeof v === 'number' ||
-                typeof v === 'boolean'),
+                typeof v === 'boolean' ||
+                Array.isArray(v)),
           ),
         ),
       );
@@ -78,7 +79,8 @@ const buildJsxRuntime = vi.hoisted(() => async () => {
               k !== 'children' &&
               (typeof v === 'string' ||
                 typeof v === 'number' ||
-                typeof v === 'boolean'),
+                typeof v === 'boolean' ||
+                Array.isArray(v)),
           ),
         ),
       );
@@ -348,16 +350,50 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
     frameState.width = 100;
   });
 
-  it('windows the skills scrollbox to zero rows when the region cannot pay the chrome', () => {
-    const { container } = render(
+  it.each([1, 2, 3, 4, 5, 6])(
+    'keeps skills readable in a %i-row region by shedding chrome',
+    (height) => {
+      const { container } = render(
+        <OpenTuiSkillsDialog
+          config={null}
+          onClose={() => {}}
+          availableTerminalHeight={height}
+        />,
+      );
+      expect(container.textContent).not.toContain('Skills');
+      expect(container.textContent).toContain('no skills available');
+      const frame = layoutOf(container.firstElementChild);
+      expect(frame).toMatchObject({
+        border: height >= 3 ? true : [],
+        paddingTop: 0,
+        paddingBottom: 0,
+      });
+      expect(
+        layoutOf(container.querySelector('[data-kind="scrollbox"]')),
+      ).toMatchObject({ height: height - (height >= 3 ? 2 : 0), marginTop: 0 });
+    },
+  );
+
+  it('restores skills chrome and remounts its sized body after resize', () => {
+    const dialog = (height: number) => (
       <OpenTuiSkillsDialog
         config={null}
         onClose={() => {}}
-        availableTerminalHeight={5}
-      />,
+        availableTerminalHeight={height}
+      />
     );
+    const { container, rerender } = render(dialog(5));
+    const before = container.querySelector('[data-kind="scrollbox"]');
+    rerender(dialog(15));
+    expect(container.textContent).toContain('Skills');
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      border: true,
+      paddingTop: 1,
+      paddingBottom: 1,
+    });
+    expect(container.querySelector('[data-kind="scrollbox"]')).not.toBe(before);
     expect(
       layoutOf(container.querySelector('[data-kind="scrollbox"]')),
-    ).toMatchObject({ height: 0 });
+    ).toMatchObject({ height: 9, marginTop: 1, flexShrink: 1 });
   });
 });

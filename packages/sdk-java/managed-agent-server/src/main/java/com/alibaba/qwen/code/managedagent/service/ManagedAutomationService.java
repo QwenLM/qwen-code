@@ -24,6 +24,10 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -38,9 +42,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 
 /**
  * H6b: the control plane's automation service. Public mutations are
@@ -153,7 +154,7 @@ public class ManagedAutomationService {
         // from here on, so a lost answer or a concurrent request under
         // the same key meets this binding instead of committing twice. A
         // claim already held by the identical request is its own redrive.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(session.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, scheduleId, ""),
                 clock.get());
         if (!claimed) {
@@ -203,7 +204,7 @@ public class ManagedAutomationService {
         requireEnabled();
         // Claim before the relay, as create does: the row binds this
         // request before its side effect, and only this digest settles it.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(session.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, automationId, ""),
                 clock.get());
         if (!claimed) {
@@ -255,7 +256,7 @@ public class ManagedAutomationService {
         requireEnabled();
         // The same pre-relay claim create uses: a late or re-driven
         // request meets the binding, and only the owner settles it.
-        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+        boolean claimed = ledger.claimCommand(row.sessionId(), new CommandRow(tenantId,
                 idempotencyKey, actorId, requestDigest, automationId, ""),
                 clock.get());
         if (!claimed) {
