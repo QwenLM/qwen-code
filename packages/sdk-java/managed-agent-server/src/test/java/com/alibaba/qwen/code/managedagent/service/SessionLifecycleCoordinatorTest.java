@@ -74,7 +74,7 @@ class SessionLifecycleCoordinatorTest {
         Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness, warmer,
-                    relay, new ObjectMapper(), admissions(store, warmer), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
+                    relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
             coordinator.setWorkspaceLifecycleStore(lifecycle);
             var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class);
             settle.setAccessible(true);
@@ -103,6 +103,12 @@ class SessionLifecycleCoordinatorTest {
             RuntimeWarmer warmer) {
         return new ChildLifecycleAdmissions(store, new RequestDigests(),
                 warmer);
+    }
+
+    /** The cascade's child-Turn cancel hook (#13875): these tests never
+     * give a child a live Turn, so the hook is never expected to fire. */
+    private static ManagedAgentService noTurnCancels() {
+        return Mockito.mock(ManagedAgentService.class);
     }
 
     @Test
@@ -134,7 +140,7 @@ class SessionLifecycleCoordinatorTest {
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(store, new ManagedSessionStore(jdbc),
                     new UnavailableHarnessConnector(), unsupported, new ChildResultRelayStore(jdbc),
-                    new ObjectMapper(), admissions(store, unsupported), brokerProvider(null), executor,
+                    new ObjectMapper(), admissions(store, unsupported), noTurnCancels(), brokerProvider(null), executor,
                     Clock.systemUTC(), properties);
             try {
                 coordinator.dispatch("tenant", session, operation);
@@ -305,6 +311,11 @@ class SessionLifecycleCoordinatorTest {
         /** What a committed child operation does to the parent's records. */
         volatile java.util.function.Consumer<Map<String, Object>> applied =
                 ignored -> {};
+        /** Every message operation (H4d-b) on arrival, and a failure to
+         * throw after it, for the cascade's message-stop ordering tests. */
+        volatile java.util.function.Consumer<Map<String, Object>> messageApplied =
+                ignored -> {};
+        volatile RuntimeException messageFailure;
         private final boolean available;
 
         CascadingHarness(boolean available, boolean flap) {
@@ -358,6 +369,16 @@ class SessionLifecycleCoordinatorTest {
                 throw new RuntimeException("journal write flap");
             }
             applied.accept(body);
+        }
+
+        @Override
+        public Map<String, Object> runMessageOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            messageApplied.accept(body);
+            if (messageFailure != null) {
+                throw messageFailure;
+            }
+            return Map.of();
         }
     }
 
@@ -439,6 +460,7 @@ class SessionLifecycleCoordinatorTest {
                     warmer(false, false), world.relayStore,
                     new ObjectMapper(), admissions(world.store,
                             warmer(false, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor, Clock.systemUTC(),
                     world.properties);
             try {
@@ -475,6 +497,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -534,6 +557,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -604,6 +628,7 @@ class SessionLifecycleCoordinatorTest {
                         new ManagedSessionStore(world.jdbc), harness,
                         warmer(true, false), world.relayStore, new ObjectMapper(),
                         admissions(world.store, warmer(true, false)),
+                        noTurnCancels(),
                         brokerProvider(null), executor,
                         Clock.systemUTC(), world.properties, cascadeWorkspaces);
                 try {
@@ -668,6 +693,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, true), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, true)),
+                    noTurnCancels(),
                     brokerProvider(null), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -716,6 +742,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -754,6 +781,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -821,6 +849,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     provider, executor, Clock.systemUTC(),
                     world.properties);
             try {
@@ -863,6 +892,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor, Clock.systemUTC(),
                     world.properties);
             try {
@@ -906,6 +936,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -947,6 +978,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -999,6 +1031,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -1044,6 +1077,7 @@ class SessionLifecycleCoordinatorTest {
                     warmer(true, false), lifecycleWorld.relayStore,
                     new ObjectMapper(), admissions(lifecycleWorld.store,
                             warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor,
                     Clock.systemUTC(), lifecycleWorld.properties);
             try {
@@ -1091,6 +1125,7 @@ class SessionLifecycleCoordinatorTest {
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
+                    noTurnCancels(),
                     brokerProvider(null), executor, Clock.systemUTC(),
                     world.properties);
             try {
@@ -1112,5 +1147,452 @@ class SessionLifecycleCoordinatorTest {
                 coordinator.stopRenewals();
             }
         }
+    }
+
+    // #13875: the close cascade records each child's stop request but
+    // never cancels the child's active Turn, so the child close refuses
+    // ("The Session has an active Turn.") and the parent close re-arms
+    // until the Turn ends on its own — up to the 30-minute Harness Turn
+    // deadline. The cascade must key the child Turn's cancel itself, the
+    // same keyed cancel the relay's stop arm uses, so the child close can
+    // be admitted and the parent close completes without the wait.
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"ACCEPTED",
+            "RUNNING"})
+    void theCascadeCancelsTheChildsActiveTurnInsteadOfWaitingForIt(
+            String initialTurnStatus) {
+        World world = closingWorld("active-turn-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        // The child's live Turn never ends on its own in this world:
+        // nothing but a keyed cancel can move it.
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', '" + initialTurnStatus + "', TRUE, 1, 2, 1)",
+                world.child);
+        var harness = new CascadingHarness(true, false);
+        // The keyed cancel's command effect, stood in by the mock: the
+        // Turn leaves its live state (ManagedAgentService's own tests
+        // cover the real command path).
+        ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
+        Mockito.doAnswer(invocation -> {
+            world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
+                            + " version = version + 1"
+                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " AND session_id = ? AND turn_id = ?",
+                    world.child, "turn-1");
+            return null;
+        }).when(sessions).cancelChildTurn("tenant", world.session,
+                world.child, "run-1", "turn-1");
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    sessions,
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                coordinator.dispatch("tenant", world.session,
+                        world.operation);
+                // The bug: the Turn stays in its live state — the cascade
+                // only records the stop request and re-arms the close,
+                // waiting for the Turn's natural end. The keyed cancel
+                // must move the Turn out of it within the retry cadence.
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return !initialTurnStatus.equals(world.jdbc.queryForObject(
+                            "SELECT status FROM ma_turn WHERE tenant_id ="
+                                    + " X'74656e616e74' AND session_id = ?"
+                                    + " AND turn_id = ?",
+                            String.class, world.child, "turn-1"));
+                });
+                // One more pass with the Turn CANCELLING: the stop request
+                // is re-recorded, but the keyed cancel is never re-driven.
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return harness.operations.stream()
+                            .filter(op -> "cancel".equals(op.get("kind")))
+                            .count() >= 2;
+                });
+                Mockito.verify(sessions, Mockito.times(1))
+                        .cancelChildTurn("tenant", world.session,
+                                world.child, "run-1", "turn-1");
+                // The Harness settles a cancelled Turn CANCELLED; with the
+                // Turn terminal the child close is admitted and the parent
+                // close completes without ever waiting the Turn out.
+                world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
+                                + " completed_at = 3, version = version + 1"
+                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " AND session_id = ? AND turn_id = ?",
+                        world.child, "turn-1");
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                // One keyed cancel, replayed never: later passes see the
+                // Turn CANCELLING/CANCELLED and do not re-drive it.
+                Mockito.verify(sessions, Mockito.times(1))
+                        .cancelChildTurn("tenant", world.session,
+                                world.child, "run-1", "turn-1");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // #13875: a faltered Turn cancel is close debt like any other
+    // faltered child verb — the close stays owed and the next pass
+    // re-drives the keyed cancel, never settling on suspicion.
+    @Test
+    void theCascadeRetriesAFalteredChildTurnCancel() {
+        World world = closingWorld("cancel-flap-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
+                world.child);
+        var harness = new CascadingHarness(true, false);
+        java.util.concurrent.atomic.AtomicInteger cancels =
+                new java.util.concurrent.atomic.AtomicInteger();
+        ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
+        Mockito.doAnswer(invocation -> {
+            if (cancels.getAndIncrement() == 0) {
+                throw new RuntimeException("cancel flap");
+            }
+            world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
+                            + " version = version + 1"
+                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " AND session_id = ? AND turn_id = ?",
+                    world.child, "turn-1");
+            return null;
+        }).when(sessions).cancelChildTurn("tenant", world.session,
+                world.child, "run-1", "turn-1");
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    sessions,
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                // The first cancel falters: nothing settles on suspicion —
+                // no child close, no parent completion — and the next pass
+                // re-drives the keyed cancel.
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return cancels.get() >= 1;
+                });
+                assertThat(world.store.findOperation("tenant", world.session,
+                        world.operation).orElseThrow().state())
+                        .isNotEqualTo("COMPLETED");
+                assertThat(harness.closed).isEmpty();
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return cancels.get() >= 2;
+                });
+                world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
+                                + " completed_at = 3, version = version + 1"
+                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " AND session_id = ? AND turn_id = ?",
+                        world.child, "turn-1");
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Mockito.verify(sessions, Mockito.times(2))
+                        .cancelChildTurn("tenant", world.session,
+                                world.child, "run-1", "turn-1");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // #13875: the Turn cancel's own load can start the child's wake pump
+    // on a queued session message, so the message route stops first —
+    // the same ordering the relay's stop arm keeps.
+    @Test
+    void theCascadeStopsTheMessageRouteBeforeCancellingTheTurn() {
+        World world = closingWorld("msg-stop-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
+                world.child);
+        pendingSessionMessage(world);
+        var harness = new CascadingHarness(true, false);
+        List<String> calls = new CopyOnWriteArrayList<>();
+        harness.messageApplied = body -> calls.add("message-stop");
+        ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
+        Mockito.doAnswer(invocation -> {
+            calls.add("turn-cancel");
+            world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
+                            + " version = version + 1"
+                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " AND session_id = ? AND turn_id = ?",
+                    world.child, "turn-1");
+            return null;
+        }).when(sessions).cancelChildTurn("tenant", world.session,
+                world.child, "run-1", "turn-1");
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    sessions,
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return calls.contains("turn-cancel");
+                });
+                assertThat(calls).contains("message-stop");
+                assertThat(calls.indexOf("turn-cancel"))
+                        .isGreaterThan(calls.indexOf("message-stop"));
+                world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
+                                + " completed_at = 3, version = version + 1"
+                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " AND session_id = ? AND turn_id = ?",
+                        world.child, "turn-1");
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Mockito.verify(sessions, Mockito.times(1))
+                        .cancelChildTurn("tenant", world.session,
+                                world.child, "run-1", "turn-1");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // A message stop that falters drives no Turn cancel: the cancel's
+    // load must never start the pump with the queued inputs unstopped.
+    @Test
+    void aFalteredMessageStopDefersTheTurnCancel() {
+        World world = closingWorld("msg-flap-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
+                world.child);
+        pendingSessionMessage(world);
+        var harness = new CascadingHarness(true, false);
+        harness.messageFailure = new RuntimeException("stop flap");
+        List<String> calls = new CopyOnWriteArrayList<>();
+        harness.messageApplied = body -> calls.add("message-stop");
+        ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    sessions,
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return calls.contains("message-stop");
+                });
+                Mockito.verify(sessions, Mockito.never())
+                        .cancelChildTurn(Mockito.anyString(),
+                                Mockito.anyString(), Mockito.anyString(),
+                                Mockito.anyString(), Mockito.anyString());
+                assertThat(world.store.findOperation("tenant", world.session,
+                        world.operation).orElseThrow().state())
+                        .isNotEqualTo("COMPLETED");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // The relay's stop arm tolerates a child that waits on its recovery or
+    // is already closing; the cascade mirrors exactly those two refusal
+    // codes — any other failure defers the Turn cancel, these two do not.
+    @Test
+    void aToleratedMessageStopRefusalStillCancelsTheTurn() {
+        World world = closingWorld("msg-tolerated-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
+                world.child);
+        pendingSessionMessage(world);
+        var harness = new CascadingHarness(true, false);
+        var refusal = Mockito.mock(
+                com.alibaba.qwen.code.daemon.DaemonHttpException.class);
+        Mockito.when(refusal.getErrorCode())
+                .thenReturn("hosted_session_closing");
+        harness.messageFailure = refusal;
+        List<String> calls = new CopyOnWriteArrayList<>();
+        harness.messageApplied = body -> calls.add("message-stop");
+        ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
+        Mockito.doAnswer(invocation -> {
+            calls.add("turn-cancel");
+            world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
+                            + " version = version + 1"
+                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " AND session_id = ? AND turn_id = ?",
+                    world.child, "turn-1");
+            return null;
+        }).when(sessions).cancelChildTurn("tenant", world.session,
+                world.child, "run-1", "turn-1");
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    sessions,
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                // The tolerated refusal is not a stop failure: the stop is
+                // re-asked each pass, and the Turn cancel drives on.
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return calls.contains("turn-cancel");
+                });
+                assertThat(calls).contains("message-stop");
+                world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
+                                + " completed_at = 3, version = version + 1"
+                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " AND session_id = ? AND turn_id = ?",
+                        world.child, "turn-1");
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Mockito.verify(sessions, Mockito.times(1))
+                        .cancelChildTurn("tenant", world.session,
+                                world.child, "run-1", "turn-1");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // #13875: no durable stop request, no physical cancel — a relay that
+    // captured the parent ACTIVE could otherwise read the cancelled Turn
+    // as child_failed. The child close attempt itself is never deferred.
+    @Test
+    void aFalteredStopRequestDefersTheTurnCancelUntilItIsDurable() {
+        World world = closingWorld("stop-flap-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
+                world.child);
+        var harness = new CascadingHarness(true, true);
+        List<String> calls = new CopyOnWriteArrayList<>();
+        harness.applied = body -> {
+            if ("cancel".equals(body.get("kind"))) {
+                calls.add("stop-ok");
+            }
+        };
+        ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
+        Mockito.doAnswer(invocation -> {
+            calls.add("turn-cancel");
+            world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
+                            + " version = version + 1"
+                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " AND session_id = ? AND turn_id = ?",
+                    world.child, "turn-1");
+            return null;
+        }).when(sessions).cancelChildTurn("tenant", world.session,
+                world.child, "run-1", "turn-1");
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    sessions,
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    coordinator.dispatch("tenant", world.session,
+                            world.operation);
+                    return calls.contains("turn-cancel");
+                });
+                // The harness flap faltered the first stop request: the
+                // Turn cancel only followed the first durable one.
+                assertThat(calls).contains("stop-ok");
+                assertThat(calls.indexOf("turn-cancel"))
+                        .isGreaterThan(calls.indexOf("stop-ok"));
+                world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
+                                + " completed_at = 3, version = version + 1"
+                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " AND session_id = ? AND turn_id = ?",
+                        world.child, "turn-1");
+                redispatchUntil(coordinator, world, "COMPLETED");
+                Mockito.verify(sessions, Mockito.times(1))
+                        .cancelChildTurn("tenant", world.session,
+                                world.child, "run-1", "turn-1");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    /** One session_message record (hasSessionMessages) and one accepted,
+     * never-settled message input on the child's own journal
+     * (journalTurns), for the cascade's message-stop tests (#13875). */
+    private static void pendingSessionMessage(World world) {
+        world.jdbc.update("INSERT INTO ma_session_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " created_at)"
+                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " 'session_message', 'msg_1:message', 'h', 1,"
+                        + " 'res-msg-1', 1)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore.sessionScopeKey("tenant", world.child),
+                com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(world.child, "session_message", "msg_1:message"),
+                world.child);
+        byte[] journal = ("{\"subtype\":\"managed_session_event_v1\","
+                + "\"managedSession\":{\"kind\":\"input.accepted\","
+                + "\"occurredAt\":1,\"payload\":{"
+                + "\"turnId\":\"msg_1:message\","
+                + "\"source\":\"session_message\"}}}\n")
+                .getBytes(StandardCharsets.UTF_8);
+        world.jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,"
+                        + " workspace_id, session_id, journal_revision,"
+                        + " command_key_hash, transaction_id, operation,"
+                        + " command_id, content_digest, first_sequence,"
+                        + " last_sequence, event_count, writer_generation,"
+                        + " writer_id, writer_token_hash, activation_epoch,"
+                        + " record_encoding, record_bytes, byte_length,"
+                        + " record_digest, created_at) VALUES ('tenant',"
+                        + " 'workspace', ?, 1, ?, 'tx', 'op', 'command', ?,"
+                        + " 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?,"
+                        + " CURRENT_TIMESTAMP)",
+                world.child, "e".repeat(64), "c".repeat(64), "t".repeat(64),
+                journal, journal.length, "d".repeat(64));
     }
 }
