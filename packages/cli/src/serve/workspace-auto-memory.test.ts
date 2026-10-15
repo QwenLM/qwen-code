@@ -243,8 +243,11 @@ describe('readWorkspaceAutoMemoryFile', () => {
     // Simulate the file growing between the pre-read lstat and the read.
     const torn = Object.assign(realStat, { size: realStat.size + 100 });
     const originalLstat = fs.lstat.bind(fs);
+    const canonicalFile = await fs.realpath(file);
     vi.spyOn(fs, 'lstat').mockImplementation((target) =>
-      String(target) === file ? Promise.resolve(torn) : originalLstat(target),
+      String(target) === canonicalFile
+        ? Promise.resolve(torn)
+        : originalLstat(target),
     );
 
     const result = await readWorkspaceAutoMemoryFile(workspace, file);
@@ -318,5 +321,20 @@ describe('mountWorkspaceAutoMemoryRoutes', () => {
       .query({ path: path.join(projectDir, 'missing.md') });
     expect(notFound.status).toBe(404);
     expect(notFound.body.code).toBe('not_found');
+  });
+
+  it('refuses a relative path input instead of resolving it against a managed root', async () => {
+    // The entry exists in the project root, so a relative `?path=` that were
+    // resolved against either root would be served; with the process cwd
+    // outside both roots it must be refused as outside.
+    await writeFile(projectDir, 'note.md', 'served\n');
+    const app = mountApp({ boundWorkspace: workspace, trusted: true });
+
+    const res = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: 'note.md' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('outside');
   });
 });
