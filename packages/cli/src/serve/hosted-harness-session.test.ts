@@ -19671,18 +19671,30 @@ describe('Hosted Harness Runtime turn takeover', () => {
   /**
    * Drives a Workspace turn to its parked await_runtime checkpoint: the Broker
    * execute hangs until the owner is "crashed" via cancel, leaving the turn
-   * unsettled in the journal.
+   * unsettled in the journal. With `runtimeBinding`, warm() returns the
+   * Runtime binding production supplies, so the parked owner commits a real
+   * hosted.cleanup obligation.
    */
   async function parkToolTurn(
     retainOwnerOrCalls: boolean | Array<typeof CALL> = false,
     toolProfile = FILE_PROFILE,
+    runtimeBinding = false,
   ) {
     // Callers pass either a retainOwner flag or the parked call list.
     const retainOwner = retainOwnerOrCalls === true;
     const calls = Array.isArray(retainOwnerOrCalls)
       ? retainOwnerOrCalls
       : [CALL];
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        if (runtimeBinding)
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+      },
+    );
     acquireSpy = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
       .mockImplementation(async function (this: HostedWorkspaceBroker) {
@@ -28238,6 +28250,148 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
   });
+
+  it.each([
+    { exit: 'DELETE', drain: true },
+    // The control plane closes a bound Session through the lifecycle: its
+    // effects phase retries the owed cleanup before the detach.
+    { exit: 'lifecycle', drain: false },
+  ])(
+    'retires the owed marker before $exit hands back a cleanup-owed recovered lease',
+    async ({ exit, drain }) => {
+      const cleanupStates: unknown[] = [];
+      const appendEvent =
+        LocalManagedSessionAuthority.prototype.appendExecutionEvent;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'appendExecutionEvent',
+      ).mockImplementation(async function (
+        this: LocalManagedSessionAuthority,
+        ...args
+      ) {
+        const appended = await Reflect.apply(appendEvent, this, args);
+        if (args[0].operation === 'hostedCleanup')
+          cleanupStates.push(
+            (
+              args[1] as (sequence: number) => {
+                payload: Record<string, unknown>;
+              }
+            )(0).payload['state'],
+          );
+        return appended;
+      });
+      await parkToolTurn(false, FILE_PROFILE, true);
+      // The parked owner's Runtime binding committed a real cleanup
+      // obligation: its release waits on the Turn's file-history marker.
+      expect(cleanupStates).toEqual(['owed']);
+      let stopConfirmed = false;
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+        async () => ({ state: stopConfirmed ? 'settled' : 'prepared' }),
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockImplementation(
+        async () => {
+          stopConfirmed = true;
+        },
+      );
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const { server, loaded } = await loadReplacement(true);
+      expect(loaded.status).toBe(200);
+      const clientId = loaded.body.clientId as string;
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      // Only the cancellation's first retirement write fails: the
+      // compensating path lands turn.settled and owes the marker.
+      let failHistoryCommit = true;
+      const originalCommit =
+        LocalManagedSessionAuthority.prototype.commitDomainRecord;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'commitDomainRecord',
+      ).mockImplementation(async function (
+        this: LocalManagedSessionAuthority,
+        record,
+        ...rest
+      ) {
+        if (failHistoryCommit && record.operation === 'commitFileHistory') {
+          failHistoryCommit = false;
+          throw new Error('history write rejected');
+        }
+        return originalCommit.call(this, record, ...rest);
+      });
+      const send = () =>
+        replacementHeaders(
+          supertest(server).post(
+            `/session/${SESSION_ID}/managed-runtime/cancel`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            promptId: PROMPT_ID,
+            checkpointId: recovery.checkpointId,
+            activationId: recovery.activationId,
+          });
+      expect((await send()).status).toBe(503);
+      expect((await send()).status).toBe(200);
+      // The replay's handback is refused while the marker still names the
+      // Turn, so the lease stays owed into the close.
+      await vi.waitFor(
+        () =>
+          expect(log).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Original file history marker is still owed',
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      expect(release).not.toHaveBeenCalled();
+      if (exit === 'DELETE') {
+        await replacementHeaders(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        ).expect(204);
+      } else {
+        const authority = { operationId: 'close-op', claimGeneration: 1 };
+        await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            kind: 'close',
+            sessionKey: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+            authority,
+          })
+          .expect(200);
+        await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/detach`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ authority })
+          .expect(204);
+      }
+      // The marker is retired first, so the obligation releases the original
+      // Runtime and is confirmed: no 204 with the lease never handed back,
+      // and no lifecycle refused on every retry.
+      expect(release).toHaveBeenCalledOnce();
+      expect(release.mock.contexts[0]).toMatchObject({
+        runtimeSessionId: hostedRuntimeSessionId(PROMPT_ID),
+      });
+      expect(release.mock.calls[0][0]).toEqual({
+        bindingId: 'binding',
+        generation: '1',
+        ...(drain ? { drain: true } : {}),
+      });
+      expect(cleanupStates).toEqual(['owed', 'confirmed']);
+    },
+  );
 
   it("retires a settled Turn's pending marker on a fresh-incarnation load", async () => {
     const dropSpy = vi.spyOn(hostedHistory, 'dropPendingHostedFileHistoryTurn');

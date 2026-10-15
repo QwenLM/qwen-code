@@ -1525,6 +1525,32 @@ function answerRecoveredTurnCommittedCalls(
   });
 }
 
+/**
+ * Retires a settled Turn's owed file-history marker ahead of the exits that
+ * clean up its recovered lease. The lease's cleanup obligation refuses to
+ * release while the marker still names its Turn (#13188), so a close that
+ * released first returned 204 with the lease never handed back, and a
+ * lifecycle answered recovery-required on every retry with nothing left to
+ * retire the marker. Callers hold the closing gate, so the drop cannot race
+ * a fresh Turn's own marker. A failure stays owed, in memory and durably:
+ * the caller's retry, or the next load, retires it.
+ */
+async function retireOwedFileHistory(
+  session: HostedSession,
+  where: string,
+): Promise<void> {
+  const owed = session.fileHistoryOwed;
+  if (owed === undefined) return;
+  try {
+    await dropPendingHostedFileHistoryTurn(session.managed, owed);
+    if (session.fileHistoryOwed === owed) session.fileHistoryOwed = undefined;
+  } catch (cause) {
+    writeStderrLineSafe(
+      `qwen serve: Hosted Harness file-history retirement of settled Turn ${owed} failed ${where}: ${String(cause)}`,
+    );
+  }
+}
+
 // The cancellation-side settle of a provably ownerless parked Turn: the
 // LoadHarnessSession.cancellationTakeover signal names the user's CANCEL
 // intent, and the load's own writer fence proves the producing generation
@@ -5732,6 +5758,7 @@ export function registerHostedHarnessSessionRoutes(
       session.lifecycleKind = kind;
       session.lifecycleProtocolVersion = protocolVersion as 1 | 2;
       session.mcpClosing = true;
+      await retireOwedFileHistory(session, 'at lifecycle');
       if (phase === 'effects') {
         if (brokerOptions)
           await retryHostedCleanup(session, {
@@ -6847,8 +6874,10 @@ export function registerHostedHarnessSessionRoutes(
   // (session close/detach). Retry-inviting refusals must not call it: see
   // the owed-lease comment at the blocked cancel refusal. The close drains:
   // a recovered Runtime can hold live background runs (#13856), and only
-  // the drain arm may stop them.
+  // the drain arm may stop them. This exit swallows a refused release, so
+  // the owed file-history retirement must go first.
   const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
+    await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
     if (lease === undefined || !brokerOptions) return;
     if (
@@ -9423,24 +9452,11 @@ export function registerHostedHarnessSessionRoutes(
         // wake turn can start meanwhile; pending notifications settle below.
         session.monitorWake?.close();
         // A lease a recovery load acquired must go back with the Session, or
-        // the Workspace stays pinned after every later route is gone.
+        // the Workspace stays pinned after every later route is gone. The
+        // release retires a settled Turn's owed file-history marker first,
+        // ahead of the unguarded loop stop below so that a throw there
+        // cannot strand the retirement.
         await releaseLeaseNow(session);
-        // A settled Turn may still owe its file-history retirement; close it
-        // out best-effort here or the durable marker outlives the Session.
-        // It runs ahead of the unguarded loop stop below so that a throw
-        // there cannot strand the retirement.
-        if (session.fileHistoryOwed !== undefined) {
-          const owed = session.fileHistoryOwed;
-          try {
-            await dropPendingHostedFileHistoryTurn(session.managed, owed);
-            if (session.fileHistoryOwed === owed)
-              session.fileHistoryOwed = undefined;
-          } catch (cause) {
-            writeStderrLineSafe(
-              `qwen serve: Hosted Harness file-history retirement of settled Turn ${owed} failed at close: ${String(cause)}`,
-            );
-          }
-        }
         // #13856: drain every Runtime a turn left held, ahead of the loop
         // stops and the publisher close. The drain's stops land their
         // finalize through the still-open publisher — the maintenance
