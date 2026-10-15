@@ -9,6 +9,8 @@
  * Provides secure interpolation with whitelist-based access control.
  */
 
+import { isInternalSecretEnvVar } from '../utils/sanitize-child-env.js';
+
 /**
  * Strip CR, LF, and NUL bytes from a header value to prevent HTTP header
  * injection (CRLF injection) via env var values or hook-configured header
@@ -63,6 +65,12 @@ export function interpolateEnvVars(
     (match, varName: string) => {
       // Block dangerous variable names to prevent prototype pollution
       if (!isSafeVarName(varName)) {
+        return '';
+      }
+      // Qwen-internal secrets are never interpolated, even when the hook
+      // config lists them in allowedEnvVars: that whitelist is
+      // repo-controlled and the value leaves the process over the network.
+      if (isInternalSecretEnvVar(varName)) {
         return '';
       }
       if (allowedVars.includes(varName)) {

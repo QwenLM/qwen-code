@@ -15,6 +15,7 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -41,6 +42,7 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
+  seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -91,6 +93,7 @@ export function useResumeCommand(
     historyManager,
     loadHistory: loadHistoryOverride,
     startNewSession,
+    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -132,7 +135,7 @@ export function useResumeCommand(
       // not open.
       let swapOpened = false;
       const telemetrySwapOpened =
-        config.getGeminiClient()?.beginTelemetrySwap?.() ?? true;
+        config.getLlmClient()?.beginTelemetrySwap?.() ?? true;
       if (!telemetrySwapOpened) {
         addItem(
           {
@@ -157,13 +160,14 @@ export function useResumeCommand(
       try {
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
+        sessionService.assertLegacySessionExecution(sessionId);
         const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {
           // Close the transaction this attempt opened; nothing was replayed.
           // Forgetting this would leave the single slot occupied and every
           // later swap rejected (#9844).
-          config.getGeminiClient()?.commitTelemetrySwap?.();
+          config.getLlmClient()?.commitTelemetrySwap?.();
           return;
         }
 
@@ -214,7 +218,7 @@ export function useResumeCommand(
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
-        await config.getGeminiClient()?.initialize?.();
+        await config.getLlmClient()?.initialize?.();
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
@@ -233,8 +237,15 @@ export function useResumeCommand(
         //    The remaining steps (name, history items, notice) are display
         //    state for a swap that has already committed.
         startNewSession(sessionId);
+        // startNewSession resets the counter, so seed afterward.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            sessionData.conversation.messages,
+            sessionId,
+          ),
+        );
         uiSwapped = true;
-        config.getGeminiClient()?.commitTelemetrySwap?.();
+        config.getLlmClient()?.commitTelemetrySwap?.();
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
@@ -289,7 +300,7 @@ export function useResumeCommand(
             // already contains it (#9844 review). Best-effort: if this
             // throws too, sessionId + recorder are still back on the old
             // session, which is the load-bearing invariant.
-            await config.getGeminiClient()?.initialize?.();
+            await config.getLlmClient()?.initialize?.();
             // The forward path cleared the old session's in-memory
             // background agents (resetBackgroundStateForSessionSwitch above,
             // ~L158) before swapping core. After rolling core back to the old
@@ -316,7 +327,7 @@ export function useResumeCommand(
           // replays the old session's history on top of the abandoned
           // session's replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
-          config.getGeminiClient()?.abortTelemetrySwap?.();
+          config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
           // transaction is unarmed) or the UI already committed (the replay
@@ -325,7 +336,7 @@ export function useResumeCommand(
           // attempt did not open — the shared slot may hold a different
           // in-flight swap (#9844). See beginTelemetrySwap's JSDoc in core
           // client.ts.
-          config.getGeminiClient()?.commitTelemetrySwap?.();
+          config.getLlmClient()?.commitTelemetrySwap?.();
         }
         addItem(
           {
@@ -345,6 +356,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

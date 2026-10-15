@@ -365,7 +365,7 @@ export const copyCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: async (context, args): Promise<SlashCommandActionReturn | void> => {
-    const chat = await context.services.config?.getGeminiClient()?.getChat();
+    const chat = await context.services.config?.getLlmClient()?.getChat();
     const history = chat?.getHistoryShallow();
     const aiMessages = history?.filter((item) => item.role === 'model') ?? [];
 

@@ -1,5 +1,6 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
+import { parseUnifiedDiff } from '../../utils/unifiedDiff';
 import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
@@ -38,6 +39,14 @@ export function getArtifactsByTurn(
       continue;
     }
     if (!currentTurnId) currentTurnId = message.id;
+    if (message.role === 'assistant') {
+      for (const artifact of message.reportedArtifacts ?? []) {
+        recordArtifactReferences.push({
+          turnId: currentTurnId,
+          workspacePath: artifact.workspacePath,
+        });
+      }
+    }
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
       for (const id of getToolCallIds(tool)) {
@@ -70,6 +79,30 @@ export function getArtifactsByTurn(
         byTurn.set(turnId, [artifact]);
       }
     }
+  }
+  for (const [turnId, list] of byTurn) {
+    const savedUrls = new Set(
+      list
+        .filter(
+          (artifact) =>
+            artifact.metadata?.['artifactType'] === 'web_preview_snapshot',
+        )
+        .map((artifact) => artifact.metadata?.['publishedUrl']),
+    );
+    byTurn.set(
+      turnId,
+      list.filter(
+        (artifact) =>
+          artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+          artifact.storage !== 'published' ||
+          !artifact.url ||
+          // Only a file:// publication is indistinguishable from its saved
+          // twin: the preview cannot frame it either way. A browser-openable
+          // live card opens the hosted page, so it is not a duplicate.
+          /^https?:/i.test(artifact.url) ||
+          !savedUrls.has(artifact.url),
+      ),
+    );
   }
   return byTurn;
 }
@@ -281,7 +314,7 @@ function getFileChange(
   };
 }
 
-function getToolFilePath(tool: ACPToolCall): string | undefined {
+export function getToolFilePath(tool: ACPToolCall): string | undefined {
   const fromArgs = getStringContentField(
     tool.args,
     'file_path',
@@ -342,9 +375,20 @@ function getFileChangeLineStats(diffs: TurnOutputFileChange['diffs']):
     }
   | undefined {
   const fullDiff = getFinalFullContentDiff(diffs);
-  return fullDiff
-    ? countChangedLines(fullDiff.oldText, fullDiff.newText)
-    : undefined;
+  if (fullDiff) return countChangedLines(fullDiff.oldText, fullDiff.newText);
+  if (diffs.length === 0) return undefined;
+  const total = { additions: 0, deletions: 0 };
+  for (const diff of diffs) {
+    const stats = diff.fullContent
+      ? countChangedLines(diff.oldText, diff.newText)
+      : diff.fileDiff
+        ? parseUnifiedDiff(diff.fileDiff)
+        : undefined;
+    if (!stats) return undefined;
+    total.additions += stats.additions;
+    total.deletions += stats.deletions;
+  }
+  return total;
 }
 
 function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
@@ -361,6 +405,8 @@ function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
       },
     ];
   }
+  const fileDiff = getStringField(raw, 'fileDiff');
+  if (fileDiff) return [{ oldText: '', newText: '', fileDiff }];
 
   const diffs = [];
   for (const content of tool.content ?? []) {
@@ -372,7 +418,7 @@ function getFileChangeDiffs(tool: ACPToolCall): TurnOutputFileChange['diffs'] {
   }
   if (diffs.length > 0) return diffs;
   if (tool.toolName.toLowerCase() === 'write_file') {
-    const newText = getStringContentField(tool.args, 'content');
+    const newText = getStringContentField(tool.args, 'content', 'newText');
     return newText !== undefined
       ? [{ oldText: '', newText, fullContent: true }]
       : [];
@@ -434,10 +480,7 @@ function upsertFileChange(
     ...existingWithoutLineStats
   } = existing;
   const diffs = mergeFileDiffs(existing.diffs, change.diffs);
-  const finalFullDiff = getFinalFullContentDiff(diffs);
-  const lineStats = finalFullDiff
-    ? countChangedLines(finalFullDiff.oldText, finalFullDiff.newText)
-    : undefined;
+  const lineStats = getFileChangeLineStats(diffs);
   list[index] = {
     ...existingWithoutLineStats,
     status:

@@ -17,6 +17,7 @@ import {
   type ExecFileOptions,
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
+import { resolveWorkspacePath } from './workspaceContext.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -525,8 +526,51 @@ export function getCommandRoots(command: string): string[] {
     .filter((c): c is string => !!c);
 }
 
+/**
+ * Trim the characters bash's lexer discards at a command edge — space, tab and
+ * newline — plus a CR that is the first half of a CRLF pair. A lone CR is an
+ * ordinary bash word character, as are VT, FF and NBSP, which
+ * `String.prototype.trim` also strips; that deleted a redirection target before
+ * op extraction (#11865).
+ *
+ * Two pointers rather than a `$`-anchored `g` regex: with the `g` flag the
+ * engine retries the end-anchored alternative at every index, and inside an
+ * interior whitespace run the greedy `+` unwinds one character at a time, so
+ * the regex is quadratic there (~1.4 s at a 40 k run, ~3.2 s at 64 k) —
+ * synchronously, on model-controlled input, inside the permission gate.
+ */
+function trimBashEdgeSeparators(command: string): string {
+  let start = 0;
+  let end = command.length;
+  while (start < end) {
+    const ch = command[start]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      start++;
+      continue;
+    }
+    if (ch === '\r' && command[start + 1] === '\n') {
+      start++;
+      continue;
+    }
+    break;
+  }
+  while (end > start) {
+    const ch = command[end - 1]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      end--;
+      continue;
+    }
+    if (ch === '\r' && command[end] === '\n') {
+      end--;
+      continue;
+    }
+    break;
+  }
+  return command.slice(start, end);
+}
+
 export function stripShellWrapper(command: string): string {
-  const trimmed = command.trim();
+  const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
   // Skip leading env assignments (e.g. `FOO=bar bash -c '...'`)
@@ -2038,6 +2082,25 @@ export function buildShellExecWarnings(
     return [COMMAND_SUBSTITUTION_WARNING];
   }
   return undefined;
+}
+
+/**
+ * The confirmation warning for a shell-like tool whose `directory` is outside
+ * the workspace. The workspace check follows symlinks, so name the directory
+ * it resolved to: a link inside the workspace that points out would otherwise
+ * be shown by a path that looks internal.
+ */
+export function buildOutsideWorkspaceWarning(directory: string): string {
+  let resolved: string;
+  try {
+    resolved = resolveWorkspacePath(directory);
+  } catch {
+    // Unresolvable: show the directory as given.
+    resolved = path.resolve(directory);
+  }
+  return resolved === path.resolve(directory)
+    ? `Runs outside the workspace in ${directory}`
+    : `Runs outside the workspace in ${resolved} (via ${directory})`;
 }
 
 /**

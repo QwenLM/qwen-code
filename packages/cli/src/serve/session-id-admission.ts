@@ -69,7 +69,7 @@ interface PendingRestore {
 
 type PendingAdmission = PendingCreate | PendingRestore;
 
-async function persistedSessionExists(
+export async function requestedSessionIdPersistenceExists(
   sessionService: SessionService,
   sessionId: string,
 ): Promise<boolean> {
@@ -260,7 +260,7 @@ export function createRequestedSessionIdAdmission({
                   );
                   return {
                     entry,
-                    exists: await persistedSessionExists(
+                    exists: await requestedSessionIdPersistenceExists(
                       sessionService,
                       sessionId,
                     ),

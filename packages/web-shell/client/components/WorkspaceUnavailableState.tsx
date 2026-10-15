@@ -13,8 +13,8 @@ import {
 interface WorkspaceUnavailableStateProps {
   title: string;
   description: string;
-  actionLabel: string;
-  onAction: () => void;
+  actionLabel?: string;
+  onAction?: () => void;
   theme?: 'dark' | 'light';
   icon?: ReactNode;
 }
@@ -39,9 +39,11 @@ export function WorkspaceUnavailableState({
           <EmptyTitle>{title}</EmptyTitle>
           <EmptyDescription>{description}</EmptyDescription>
         </EmptyHeader>
-        <EmptyContent>
-          <Button onClick={onAction}>{actionLabel}</Button>
-        </EmptyContent>
+        {actionLabel && onAction ? (
+          <EmptyContent>
+            <Button onClick={onAction}>{actionLabel}</Button>
+          </EmptyContent>
+        ) : null}
       </Empty>
     </div>
   );

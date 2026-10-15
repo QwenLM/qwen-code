@@ -253,6 +253,7 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_runtime_owner_mismatch', 409],
   ['channel_worker_not_enabled', 409],
   ['channel_service_conflict', 409],
+  ['channel_control_workspace_limit_reached', 409],
   ['channel_worker_start_failed', 502],
   ['channel_worker_stop_failed', 500],
   ['daemon_draining', 503],

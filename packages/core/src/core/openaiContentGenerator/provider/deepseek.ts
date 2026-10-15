@@ -95,7 +95,8 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   protected override supportedReasoningEffortsFor(
     model: string | undefined,
   ): readonly ReasoningEffort[] {
-    return isDeepSeekHostname(this.contentGeneratorConfig)
+    return !this.getReasoningCapabilities(model)?.profile &&
+      isDeepSeekHostname(this.contentGeneratorConfig)
       ? REASONING_EFFORT_TIERS
       : super.supportedReasoningEffortsFor(model);
   }
@@ -119,20 +120,29 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const reshaped = isDeepSeekHostname(this.contentGeneratorConfig)
-      ? translateReasoningEffort(baseRequest)
-      : baseRequest;
+    const profile = this.getReasoningCapabilities(request.model)?.profile;
+    const reshaped =
+      (!profile ||
+        this.contentGeneratorConfig.samplingParams?.['reasoning'] !==
+          undefined ||
+        this.contentGeneratorConfig.extra_body?.['reasoning'] !== undefined) &&
+      isDeepSeekHostname(this.contentGeneratorConfig)
+        ? translateReasoningEffort(baseRequest)
+        : baseRequest;
     if (!reshaped.messages?.length) {
       return reshaped;
     }
 
-    const messages = reshaped.messages.map((message) =>
-      ensureReasoningContentOnAssistantMessage(
-        this.contentGeneratorConfig.modalities?.image
-          ? message
-          : flattenContentParts(message),
-      ),
-    );
+    const messages = reshaped.messages.map((message) => {
+      const content = this.contentGeneratorConfig.modalities?.image
+        ? message
+        : flattenContentParts(message);
+      return isDeepSeekHostname(this.contentGeneratorConfig) ||
+        !profile ||
+        profile === 'deepseek-openai'
+        ? ensureReasoningContentOnAssistantMessage(content)
+        : content;
+    });
 
     return {
       ...reshaped,
@@ -141,9 +151,7 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      temperature: 0,
-    };
+    return {};
   }
 }
 

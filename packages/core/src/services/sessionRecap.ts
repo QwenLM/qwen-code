@@ -48,13 +48,13 @@ export async function generateSessionRecap(
   abortSignal: AbortSignal,
 ): Promise<string | null> {
   try {
-    const geminiClient = config.getGeminiClient();
-    if (!geminiClient) {
-      debugLogger.debug('recap skipped: no geminiClient available');
+    const llmClient = config.getLlmClient();
+    if (!llmClient) {
+      debugLogger.debug('recap skipped: no llmClient available');
       return null;
     }
 
-    const fullHistory = geminiClient.getHistoryShallow();
+    const fullHistory = llmClient.getHistoryShallow();
     if (fullHistory.length < 2) {
       debugLogger.debug(
         `recap skipped: history too short (${fullHistory.length} messages)`,

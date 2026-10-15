@@ -14,13 +14,20 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'node:util';
-import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  SandboxConfig,
+} from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
+import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { MODEL_CATALOG_ENV } from '@qwen-code/qwen-code-core/models/model-catalog.js';
 import {
-  FatalSandboxError,
-  Storage,
-  isSubpath,
-  resolveBundleDir,
-} from '@qwen-code/qwen-code-core';
+  MODEL_CATALOG_REFRESH_ENV,
+  MODEL_CATALOG_URL_ENV,
+} from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
+import { BWRAP_MIGRATION_MESSAGE } from '../config/execution-sandbox-settings.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { parseSandboxImageName } from '../utils/sandboxImageName.js';
@@ -81,6 +88,9 @@ export function getSandboxPassthroughEnvArgs(
   return [
     'QWEN_DEBUG_LOG_FILE',
     'QWEN_CODE_LEGACY_MCP_BLOCKING',
+    MODEL_CATALOG_ENV,
+    MODEL_CATALOG_REFRESH_ENV,
+    MODEL_CATALOG_URL_ENV,
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,
@@ -225,6 +235,8 @@ export async function start_sandbox(
   cliArgs: string[] = [],
   childEnv?: Readonly<Record<string, string>>,
 ): Promise<number> {
+  if (config.command === 'bwrap')
+    throw new FatalSandboxError(BWRAP_MIGRATION_MESSAGE);
   if (config.command === 'sandbox-exec') {
     // disallow BUILD_SANDBOX
     if (process.env['BUILD_SANDBOX']) {
@@ -399,6 +411,15 @@ export async function start_sandbox(
   const isCustomProjectSandbox = fs.existsSync(projectSandboxDockerfile);
 
   const image = config.image;
+  // `image` is optional on SandboxConfig because the in-place backends never
+  // pull one; `loadSandboxConfig` only emits a container command together with
+  // an image. Fail loudly rather than handing `undefined` to the runtime, where
+  // it would stringify into an "undefined" image reference.
+  if (!image) {
+    throw new FatalSandboxError(
+      `Sandbox command '${config.command}' requires an image`,
+    );
+  }
   const workdir = path.resolve(process.cwd());
   const containerWorkdir = getContainerPath(workdir);
 
@@ -654,7 +675,10 @@ export async function start_sandbox(
     containerName = `${imageName}-${randomBytes(4).toString('hex')}`;
     writeStderrLine(`ContainerName (regular): ${containerName}`);
   }
-  args.push('--name', containerName, '--hostname', containerName);
+  args.push('--name', containerName);
+  if (containerName.length <= 64) {
+    args.push('--hostname', containerName);
+  }
 
   // copy QWEN_CODE_TEST_VAR for integration tests
   if (process.env['QWEN_CODE_TEST_VAR']) {
@@ -669,6 +693,14 @@ export async function start_sandbox(
       '--env',
       `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
         process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
+    );
+  }
+  if (process.env['QWEN_CODE_WARNINGS_FILE']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_WARNINGS_FILE=${getContainerPath(
+        process.env['QWEN_CODE_WARNINGS_FILE'],
       )}`,
     );
   }

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as os from 'node:os';
 import type { SimpleGit, SimpleGitFactory, SimpleGitOptions } from 'simple-git';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import type { GitCredential } from './extension-git-credentials.js';
@@ -126,7 +125,19 @@ export function createExtensionGitClient(
 
   const environment: Record<string, string> = {
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
+    // The literal '/dev/null' on every platform, NOT os.devNull: Git for
+    // Windows special-cases the POSIX spelling in its compat layer, while
+    // os.devNull's win32 value ('\\\\.\\nul') is rejected as
+    // "fatal: unable to access '\\.\nul': Invalid argument".
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    // Never let Git ask for credentials interactively. It reads that prompt
+    // from /dev/tty, which the Ink TUI already holds in raw mode, so keystrokes
+    // reach Ink and never Git: the prompt can be neither answered nor
+    // dismissed, and nothing upstream cancels it. The /dev/null global config
+    // above also drops the user's credential helper, so there is no
+    // non-interactive fallback left. Without this, an extension whose Git
+    // source needs authentication hangs every startup (#13447).
+    GIT_TERMINAL_PROMPT: '0',
   };
   for (const key of [
     'PATH',

@@ -259,6 +259,8 @@ pub fn managed_policy_sha256() -> Result<Option<String>, String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorizationError {
+    #[error("Authorization context expired: {0}")]
+    Expired(String),
     #[error("Permission denied: {0}")]
     Denied(String),
     #[error("Policy evaluation error: {0}")]

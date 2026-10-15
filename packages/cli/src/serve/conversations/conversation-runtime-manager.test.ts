@@ -14,7 +14,6 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import type { ConversationWorkspace } from './conversation-workspace.js';
-import type { ConversationRuntimeOwnership } from './conversation-runtime-ownership.js';
 import {
   ConversationRuntimeManager,
   type ConversationRuntimeManagerOptions,
@@ -28,8 +27,9 @@ const root = {
   inodeVerifiable: true,
 };
 
-function createBridge() {
+function createBridge(mandatoryLeaseAttested = true) {
   return {
+    mandatoryLeaseAttested,
     preheat: vi.fn(async () => undefined),
     setLiveScreenContextCaptureHandler: vi.fn(),
     setLiveTaskToolRequestHandler: vi.fn(),
@@ -104,9 +104,9 @@ function createOwnedRuntime(bridge = createBridge()): WorkspaceRuntime {
 function createManager(
   options: Omit<
     ConversationRuntimeManagerOptions,
-    'ownership' | 'quarantineRuntime'
+    'checkLegacyOwner' | 'quarantineRuntime'
   > & {
-    ownership?: ConversationRuntimeOwnership;
+    checkLegacyOwner?: () => Promise<void>;
     quarantineRuntime?: ConversationRuntimeManagerOptions['quarantineRuntime'];
   },
 ): ConversationRuntimeManager {
@@ -114,28 +114,40 @@ function createManager(
     ...options,
     quarantineRuntime:
       options.quarantineRuntime ?? vi.fn(async () => undefined),
-    ownership: options.ownership ?? {
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release: vi.fn(async () => false),
-    },
+    checkLegacyOwner: options.checkLegacyOwner ?? vi.fn(async () => undefined),
   });
 }
 
 describe('ConversationRuntimeManager', () => {
-  it('acquires ownership before touching the root or registry', async () => {
+  it('retries legacy admission after failure but never polls a published runtime', async () => {
+    const candidate = createOwnedRuntime();
+    const checkLegacyOwner = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('legacy active'))
+      .mockResolvedValue(undefined);
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry: createRegistry(candidate),
+      publishRuntime: vi.fn(),
+      checkLegacyOwner,
+    });
+    await expect(manager.ensure()).rejects.toThrow('legacy active');
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    expect(checkLegacyOwner).toHaveBeenCalledTimes(2);
+  });
+
+  it('checks the legacy owner before touching the root or registry', async () => {
     const workspace = createWorkspace();
     const registry = createRegistry();
     const publishRuntime = vi.fn();
     const ownershipError = new Error('owner unavailable');
-    const ownership = {
-      acquire: vi.fn(async () => Promise.reject(ownershipError)),
-      release: vi.fn(async () => false),
-    };
+    const checkLegacyOwner = vi.fn(async () => Promise.reject(ownershipError));
     const manager = createManager({
       workspace,
       registry,
       publishRuntime,
-      ownership,
+      checkLegacyOwner,
     });
 
     await expect(manager.ensure()).rejects.toBe(ownershipError);
@@ -452,6 +464,66 @@ describe('ConversationRuntimeManager', () => {
       retryable: false,
     });
     expect(publishRuntime).not.toHaveBeenCalled();
+  });
+
+  it('rejects and does not publish a candidate missing the mandatory-lease attestation', async () => {
+    const candidate = createOwnedRuntime(createBridge(false));
+    const registry = createRegistry();
+    const publishRuntime = vi.fn(
+      async (_cwd: string, validate: (runtime: WorkspaceRuntime) => void) => {
+        await validate(candidate);
+        throw new Error('unreachable: validation must reject the candidate');
+      },
+    );
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(publishRuntime).toHaveBeenCalledOnce();
+    expect(
+      registry.getManagedEntryByWorkspaceCwd(root.canonicalRoot),
+    ).toBeUndefined();
+  });
+
+  it('terminally quarantines a registered runtime missing the mandatory-lease attestation', async () => {
+    const candidate = createOwnedRuntime(createBridge(false));
+    const registry = createRegistry(candidate);
+    const quarantineRuntime = vi.fn(async () => undefined);
+    const onTerminalQuarantine = vi.fn();
+    const publishRuntime = vi.fn();
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+      quarantineRuntime,
+      onTerminalQuarantine,
+    });
+
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(quarantineRuntime).toHaveBeenCalledWith(
+      candidate,
+      'missing_mandatory_lease_attestation',
+    );
+    expect(publishRuntime).not.toHaveBeenCalled();
+    // The static contract violation keeps its non-retryable classification on
+    // every later access instead of degrading to retryable
+    // `conversation_runtime_unavailable`.
+    await expect(manager.ensure()).rejects.toMatchObject({
+      code: 'conversation_root_compromised',
+      retryable: false,
+    });
+    expect(() => manager.assertCurrent(candidate)).toThrowError(
+      expect.objectContaining({ code: 'conversation_root_compromised' }),
+    );
   });
 
   it.each(['draining', 'blocked'] as const)(

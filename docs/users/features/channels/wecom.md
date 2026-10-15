@@ -34,7 +34,7 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "wecom",
       "botId": "$WECOM_BOT_ID",
       "secret": "$WECOM_SECRET",
-      "senderPolicy": "allowlist",
+      "privatePolicy": "allowlist",
       "allowedUsers": ["zhangsan"],
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
@@ -73,13 +73,14 @@ Open WeCom and send a message to the intelligent robot.
 
 ## Access Control
 
-`senderPolicy` works the same way as other IM channels:
+`privatePolicy` works the same way as other IM channels:
 
-- `allowlist`: only users in `allowedUsers` can use the bot. This is the recommended enterprise default.
+- `disabled`: ignore all private messages without creating pairing requests.
+- `allowlist`: only users in the top-level `allowedUsers` can send private messages. This is the recommended enterprise default.
 - `pairing`: users must pair before using the bot.
 - `open`: anyone who can message the robot can use it.
 
-For groups, set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"`. Under `"pairing"`, the group's first mention creates a pairing request that must be approved once before responses start. Note that under `groupPolicy: "pairing"`, access is granted per group: once a group is approved, **any member of that group** can use the bot; `senderPolicy` and `allowedUsers` do not gate members of an approved group. WeCom only delivers group messages that mention the intelligent robot, so every delivered group callback is treated as mentioned. The `requireMention` setting cannot enable responses to unmentioned group messages because those messages are not delivered to the bot.
+For groups, set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"`. Under `"pairing"`, the group's first mention creates a pairing request that must be approved once before responses start. Note that under `groupPolicy: "pairing"`, access is granted per group: once a group is approved, **any member of that group** can use the bot by default (restrict with the group's `senders: "allowlist"` and `allowedUsers`); `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved group. WeCom only delivers group messages that mention the intelligent robot, so every delivered group callback is treated as mentioned. The `requireMention` setting cannot enable responses to unmentioned group messages because those messages are not delivered to the bot.
 
 ### Group Mention Compatibility
 

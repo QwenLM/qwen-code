@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mem0 External Context bounded delete dialect v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["deleteDialectVersion", "id", "auth", "record"],
+  "properties": {
+    "deleteDialectVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$"
+    },
+    "auth": {
+      "enum": ["authorization-token", "authorization-bearer", "x-api-key"]
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pathPrefix",
+        "pathSuffix",
+        "idField",
+        "contentField",
+        "notFound"
+      ],
+      "properties": {
+        "pathPrefix": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^/",
+          "allOf": [
+            {
+              "pattern": "/$"
+            }
+          ]
+        },
+        "pathSuffix": {
+          "enum": ["", "/"]
+        },
+        "idField": {
+          "enum": ["id", "memory_id"]
+        },
+        "contentField": {
+          "enum": ["memory", "content", "text"]
+        },
+        "notFound": {
+          "enum": ["http-404", "null-200"]
+        }
+      }
+    }
+  }
+}

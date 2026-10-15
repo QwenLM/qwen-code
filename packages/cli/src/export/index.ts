@@ -6,6 +6,7 @@
 
 export {
   collectSessionData,
+  collectSessionMetadata,
   generateExportFilename,
   normalizeSessionData,
   toHtml,

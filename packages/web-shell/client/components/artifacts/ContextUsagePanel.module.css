@@ -1,0 +1,39 @@
+.panel {
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-weight: 600;
+  flex-wrap: wrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.feedback {
+  margin-bottom: 12px;
+  color: var(--chat-editor-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.feedback[role='alert'] {
+  color: var(--error-color);
+}
+
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}

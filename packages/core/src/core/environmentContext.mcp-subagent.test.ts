@@ -59,7 +59,7 @@ describe('MCP server instructions and subagent registries', () => {
   it('leaves a skipDiscovery registry with no server instructions', async () => {
     const config = makeConfig({ 'server-a': { command: 'a' } });
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipFileCheckpointing: true,
@@ -89,7 +89,7 @@ describe('MCP server instructions and subagent registries', () => {
     // instead of the provisioned worktree.
     const config = makeConfig({ 'server-a': { command: 'a' } });
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipFileCheckpointing: true,
@@ -117,7 +117,7 @@ describe('MCP server instructions and subagent registries', () => {
     // propagated instructions inside the rebuild would survive.
     const config = makeConfig({ 'server-a': { command: 'a' } });
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       skipHooks: true,
       skipMcpDiscovery: true,
       skipFileCheckpointing: true,

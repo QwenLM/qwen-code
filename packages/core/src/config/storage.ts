@@ -697,6 +697,19 @@ export class Storage {
   }
 
   /**
+   * Where an inline `Workflow({script})` run persists its script:
+   * `<generated>/inline/<runId>.js`. Inside the generated root because that
+   * root is already a trusted `{scriptPath}` source and is never resolvable
+   * by name, so the persisted copy is re-runnable (and editable before a
+   * resume) without entering the user's command namespace. The `inline/`
+   * subdirectory keeps model-authored scripts apart from the one-run scripts
+   * other tooling emits into the same root.
+   */
+  getInlineWorkflowScriptPath(runId: string): string {
+    return path.join(this.getGeneratedWorkflowsDir(), 'inline', `${runId}.js`);
+  }
+
+  /**
    * Path to the persisted snapshot of a completed workflow run.
    */
   getWorkflowRunSnapshotPath(runId: string): string {

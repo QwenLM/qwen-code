@@ -16,7 +16,7 @@ Dream scheduled once after a complete, successful logical user turn.
 
 This design deliberately does **not** add a new coordinator class. Every ACP
 `Session` already has a per-session `Config`, and that `Config` already owns one
-`GeminiClient`. The `GeminiClient` is therefore the existing correct owner for
+`LlmClient`. The `LlmClient` is therefore the existing correct owner for
 the pending Recall handle, surfaced-document deduplication, recent-tool context,
 cancellation, and Recall delivery telemetry. The ACP `Session` calls a small
 public lifecycle API on that existing object.
@@ -37,7 +37,7 @@ older tree and then mechanically applied to the target.
 
 At the target baseline:
 
-- `GeminiClient.sendMessageStream()` owns the complete managed Recall state
+- `LlmClient.sendMessageStream()` owns the complete managed Recall state
   machine.
 - A fresh interactive `UserQuery` starts Recall after `UserPromptSubmit` has
   allowed the request, but queries with the original pre-hook prompt text.
@@ -48,13 +48,13 @@ At the target baseline:
   delivered by the fast phase are removed before refined delivery.
 - Pending Recall is cancelled on a new query, parent abort, reset, shutdown, or
   a turn with no later safe delivery point.
-- `GeminiClient` tracks surfaced memory paths for session-level deduplication and
+- `LlmClient` tracks surfaced memory paths for session-level deduplication and
   recent completed tool names for Recall relevance filtering.
 - Extract and Dream are implemented and guarded by `MemoryManager`; their
   cursor, trailing-request merge, locks, pressure gates, and Dream thresholds do
   not depend on the UI.
 
-ACP bypasses the orchestration above by calling `GeminiChat.sendMessageStream()`
+ACP bypasses the orchestration above by calling `LlmChat.sendMessageStream()`
 from `Session.#sendMessageStreamWithAutoCompression()`. The comment above
 `Session.#buildInitialSystemReminders()` explicitly records that managed Recall
 is absent. ACP also never schedules Extract or Dream after its complete tool and
@@ -79,7 +79,7 @@ algorithm.
 
 - Reimplementing Recall, Extract, or Dream in ACP, a hook, a sidecar, or a proxy.
 - Adding an ACP method or notification for memory task progress.
-- Refactoring all `GeminiClient` background work, including auto-skill, into a
+- Refactoring all `LlmClient` background work, including auto-skill, into a
   new shared scheduler.
 - Changing memory paths, workspace scoping, file formats, settings defaults, or
   Dream thresholds.
@@ -94,14 +94,14 @@ algorithm.
 
 ## Ownership
 
-| Concern                                                  | Owner                      | Reason                                                                                      |
-| -------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------- |
-| Pending Recall promise and abort controller              | Per-session `GeminiClient` | It already owns this state for interactive turns and is shared by the ACP `Session`.        |
-| Fast/refined arbitration, surfaced-path dedup, telemetry | Per-session `GeminiClient` | These invariants must not be copied into ACP.                                               |
-| Fresh/retry/continue/runtime turn classification         | ACP `Session`              | Only `Session` knows ACP admission metadata and Goal origin.                                |
-| ToolResult provider-send ordering                        | ACP `Session`              | It owns the autonomous tool loop and final outgoing `Part[]`.                               |
-| Successful logical-turn completion                       | ACP `Session`              | It alone spans model calls, tools, mid-turn input, Stop hooks, and todo-stop continuations. |
-| Extract/Dream jobs and durable state                     | Existing `MemoryManager`   | It already owns cursors, merging, locks, gates, and task records.                           |
+| Concern                                                  | Owner                    | Reason                                                                                      |
+| -------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
+| Pending Recall promise and abort controller              | Per-session `LlmClient`  | It already owns this state for interactive turns and is shared by the ACP `Session`.        |
+| Fast/refined arbitration, surfaced-path dedup, telemetry | Per-session `LlmClient`  | These invariants must not be copied into ACP.                                               |
+| Fresh/retry/continue/runtime turn classification         | ACP `Session`            | Only `Session` knows ACP admission metadata and Goal origin.                                |
+| ToolResult provider-send ordering                        | ACP `Session`            | It owns the autonomous tool loop and final outgoing `Part[]`.                               |
+| Successful logical-turn completion                       | ACP `Session`            | It alone spans model calls, tools, mid-turn input, Stop hooks, and todo-stop continuations. |
+| Extract/Dream jobs and durable state                     | Existing `MemoryManager` | It already owns cursors, merging, locks, gates, and task records.                           |
 
 This ownership split avoids both bad extremes: copying the Recall state machine
 into `Session.ts`, and introducing a general coordinator that would merely wrap
@@ -157,10 +157,10 @@ they need no extra flags.
 
 ## Design
 
-### 1. Expose the existing Recall lifecycle on `GeminiClient`
+### 1. Expose the existing Recall lifecycle on `LlmClient`
 
 Extract the current inline/private orchestration into three public methods on
-the already-exported `GeminiClient`:
+the already-exported `LlmClient`:
 
 ```ts
 beginManagedAutoMemoryRecall(query: string, signal: AbortSignal): void;
@@ -192,7 +192,7 @@ The current lower-level helper may remain private so the interactive Cron path
 can retain its existing zero-wait initial poll. No wait constant or new Recall
 type is exported.
 
-`GeminiClient.sendMessageStream()` is migrated to these methods in the same
+`LlmClient.sendMessageStream()` is migrated to these methods in the same
 change, so the interactive path continues to exercise the shared API. Existing
 Recall tests then protect both callers instead of leaving the new public path
 ACP-only and weakly tested.
@@ -200,7 +200,7 @@ ACP-only and weakly tested.
 The complete downstream consumer list for the new methods is intentionally
 small. It consists of three owning methods:
 
-1. `GeminiClient.sendMessageStream()` for interactive/headless UserQuery and
+1. `LlmClient.sendMessageStream()` for interactive/headless UserQuery and
    ToolResult sends.
 2. `Session.#executePromptInner()` for ACP begin, initial consume, and final
    cleanup.
@@ -223,7 +223,7 @@ In `Session.#executePromptInner()`:
 
 ```ts
 this.config
-  .getGeminiClient()
+  .getLlmClient()
   .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
 ```
 
@@ -242,7 +242,7 @@ consume the initial result:
 
 ```ts
 const memory = await this.config
-  .getGeminiClient()
+  .getLlmClient()
   .consumeManagedAutoMemoryRecall('initial');
 
 if (memory?.prompt) {
@@ -275,7 +275,7 @@ Instead, extend `Session.#sendMessageStreamWithAutoCompression()` after all of
 its explicit send-drop gates have passed: `prepareBeforeCompression`, automatic
 compression, the session-token limit, the compression diagnostic,
 `beforeSend`, and the final abort check. Immediately before constructing the
-request and calling `GeminiChat.sendMessageStream()`:
+request and calling `LlmChat.sendMessageStream()`:
 
 1. Detect that the outgoing message starts with one or more
    `functionResponse` parts.
@@ -369,7 +369,7 @@ void memoryManager
 ```
 
 Do not await either task and do not store their promises in
-`GeminiClient.pendingMemoryTaskPromises`; ACP has no TUI `memory_saved` item to
+`LlmClient.pendingMemoryTaskPromises`; ACP has no TUI `memory_saved` item to
 consume that queue. `MemoryManager` already tracks the work. The two rejection
 handlers are required to prevent unhandled background rejections, not to add a
 fallback path.
@@ -381,13 +381,13 @@ turn. Tool and Stop-hook continuations never pass that callsite independently.
 ### 7. Feed existing recent-tool state from ACP
 
 ACP currently executes tools without calling the already-public
-`GeminiClient.recordCompletedToolCall()`. Use `Session.runTool()`'s existing
+`LlmClient.recordCompletedToolCall()`. Use `Session.runTool()`'s existing
 outer `finally`, where `terminalStatus` and the effective `args` are already
 known, to call it once when a registered tool reaches a non-cancelled terminal
 state:
 
 ```ts
-this.config.getGeminiClient().recordCompletedToolCall(toolName, args);
+this.config.getLlmClient().recordCompletedToolCall(toolName, args);
 ```
 
 This keeps Recall's recent-tool noise filter aligned with interactive sessions.
@@ -406,7 +406,7 @@ auto-skill behavior.
 sequenceDiagram
     participant C as ACP client
     participant S as ACP Session
-    participant G as GeminiClient Recall owner
+    participant G as LlmClient Recall owner
     participant M as MemoryManager
     participant L as Main model
 
@@ -551,23 +551,23 @@ The implementation is complete only if all of these hold:
 
 ### New `ManagedMemoryTurnCoordinator` class
 
-Rejected for this PR. It would move the same fields out of `GeminiClient`, add a
+Rejected for this PR. It would move the same fields out of `LlmClient`, add a
 new exported entity, and force constructor/lifecycle plumbing even though ACP
-already shares the exact `GeminiClient` instance. Public lifecycle methods on the
+already shares the exact `LlmClient` instance. Public lifecycle methods on the
 existing state owner provide reuse with a smaller proof surface.
 
 A standalone coordinator becomes justified only if a future runtime does not
-own a `GeminiClient` but still needs the same Recall state machine.
+own a `LlmClient` but still needs the same Recall state machine.
 
 ### Copy Recall state into `Session.ts`
 
 Rejected. It duplicates fast/refined arbitration, path deduplication,
 cancellation listeners, terminal telemetry, and every future Recall change.
 
-### Put all post-turn scheduling in `GeminiClient`
+### Put all post-turn scheduling in `LlmClient`
 
 Rejected. ACP has the authoritative complete-turn boundary, while
-`GeminiClient.sendMessageStream()` is a physical model-send boundary in
+`LlmClient.sendMessageStream()` is a physical model-send boundary in
 interactive flows. Forcing ACP to call the interactive background-task method
 would also enqueue TUI-only notification promises and couple this change to
 auto-skill scheduling.
@@ -606,7 +606,7 @@ The ACP/WebSocket proxy remains transport-only and requires no memory logic.
 
 1. Rebase the fork branch onto target baseline `43d46be` or a newer upstream
    commit and re-check the named symbols.
-2. Refactor `GeminiClient` Recall into the public lifecycle methods with no
+2. Refactor `LlmClient` Recall into the public lifecycle methods with no
    behavior change; run the core tests.
 3. Add ACP begin/initial/refined/finalize wiring and focused Session tests.
 4. Add exactly-once Extract/Dream scheduling and recent-tool recording tests.

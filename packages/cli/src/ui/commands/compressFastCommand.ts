@@ -59,8 +59,8 @@ export const compressFastCommand: SlashCommand = {
     };
 
     const config = context.services.config;
-    const geminiClient = config?.getGeminiClient();
-    if (!config || !geminiClient) {
+    const llmClient = config?.getLlmClient();
+    if (!config || !llmClient) {
       return {
         type: 'message',
         messageType: 'error',
@@ -68,7 +68,7 @@ export const compressFastCommand: SlashCommand = {
       };
     }
 
-    const doCompress = async () => await geminiClient.tryCompressChatFast();
+    const doCompress = async () => await llmClient.tryCompressChatFast();
 
     if (executionMode === 'acp') {
       const messages = async function* () {
@@ -76,6 +76,7 @@ export const compressFastCommand: SlashCommand = {
           yield {
             messageType: 'info' as const,
             content: 'Compressing context (fast)...',
+            contextCompression: { phase: 'progress' as const },
           };
           const compressed = await doCompress();
           if (
@@ -85,12 +86,27 @@ export const compressFastCommand: SlashCommand = {
             yield {
               messageType: 'info' as const,
               content: t('No compression needed.'),
+              // Terminal phase, so the client replaces its "compressing" row
+              // instead of leaving it to be merged into this frame's text.
+              contextCompression: { phase: 'noop' as const },
             };
             return;
           }
           yield {
             messageType: 'info' as const,
             content: `Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).`,
+            contextCompression: {
+              phase: 'done' as const,
+              originalTokenCount: compressed.originalTokenCount,
+              newTokenCount: compressed.newTokenCount,
+              // An omitted flag travels as `false`, which is how the daemon's
+              // own banner reads it (`isEstimated ? '~' : ''`). Core is more
+              // conservative about an omitted flag (`?? true`, #9309).
+              originalTokenCountIsEstimated:
+                compressed.originalTokenCountIsEstimated ?? false,
+              newTokenCountIsEstimated:
+                compressed.newTokenCountIsEstimated ?? false,
+            },
           };
         } catch (e) {
           yield {

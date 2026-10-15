@@ -149,6 +149,43 @@ describe('assign-issue-owner: owner map', () => {
     broken.areas[0].owners = [42];
     assert.throws(() => loadPolicy(JSON.stringify(broken)), /invalid login/);
   });
+
+  it('rejects paths entries that could never route the area', () => {
+    // startsWith matching can never honour these spellings; accepting them
+    // would silently unroute the area from PR assignment forever.
+    for (const paths of [
+      ['./packages/core/'],
+      ['packages//core/'],
+      ['.github/../packages/core/'],
+      ['/packages/core/'],
+      ['packages/core'],
+      ['packages\\core/'],
+      [''],
+      [42],
+    ]) {
+      const broken = JSON.parse(ownersRaw);
+      broken.areas[0].paths = paths;
+      assert.throws(
+        () => loadPolicy(JSON.stringify(broken)),
+        /invalid paths entry/,
+      );
+    }
+
+    const notArray = JSON.parse(ownersRaw);
+    notArray.areas[0].paths = 'packages/core/';
+    assert.throws(
+      () => loadPolicy(JSON.stringify(notArray)),
+      /paths must be an array/,
+    );
+
+    // An explicitly empty list can never route the area either.
+    const emptyPaths = JSON.parse(ownersRaw);
+    emptyPaths.areas[0].paths = [];
+    assert.throws(
+      () => loadPolicy(JSON.stringify(emptyPaths)),
+      /paths must not be empty/,
+    );
+  });
 });
 
 describe('assign-issue-owner: skip policy', () => {
@@ -364,6 +401,15 @@ describe('assign-issue-owner: workflow invariants', () => {
       '${{ github.event.issue.number || inputs.number }}',
     );
     assert.equal(checkoutStep.with['persist-credentials'], false);
+  });
+
+  it('sparse-checks out a cone directory, not individual files', () => {
+    // The directory carries the script, and cone mode adds issue-owners.json
+    // as a direct child of .github/. File entries fail cone mode on a reused
+    // self-hosted workspace, and non-cone mode leaves the workspace sparse
+    // for the next job; see the matching pin in assign-pr-owner.test.mjs.
+    assert.equal(checkoutStep.with['sparse-checkout'], '.github/scripts');
+    assert.equal(checkoutStep.with['sparse-checkout-cone-mode'], undefined);
   });
 
   it('never runs a model or reads issue text', () => {

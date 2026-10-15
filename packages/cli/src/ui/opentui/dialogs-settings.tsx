@@ -1,0 +1,1076 @@
+/* eslint-disable react/no-unknown-property */
+/** @jsxImportSource @opentui/react */
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * OpenTUI parity of the ink `/settings` dialog
+ * (ui/components/SettingsDialog.tsx): the Settings/Status/Stats top tab
+ * bar, the search box, the windowed settings list (toggle booleans, cycle
+ * enums, inline-edit numbers/strings, sub-dialog rows like ui.theme), the
+ * Tab scope-mode selector, description line, restart prompt, and every
+ * original key binding and footer string. Settings data and side effects
+ * reuse the framework-neutral utils/settingsUtils helpers, so the rows are
+ * sourced from the same schema as the ink dialog.
+ */
+
+import { useEffect, useState } from 'react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import { C } from './theme.js';
+import { t } from '../../i18n/index.js';
+import type { Config } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings, Settings } from '../../config/settings.js';
+import { SettingScope } from '../../config/settings.js';
+import {
+  getScopeItems,
+  getScopeMessageForSetting,
+} from '../../config/dialogScopeUtils.js';
+import {
+  getDialogSettingKeys,
+  getSettingDefinition,
+  getEffectiveValue,
+  nextBooleanSettingValue,
+  setPendingSettingValueAny,
+  saveModifiedSettings,
+  getDisplayValue,
+  isDefaultValue,
+  requiresRestart,
+  getRestartRequiredFromModified,
+  getDefaultValue,
+  getNestedValue,
+  validateSettingValue,
+} from '../../config/settingsUtils.js';
+import {
+  isNumericSettingType,
+  TOGGLE_TYPES,
+  type SettingsType,
+  type SettingsValue,
+} from '../../config/settingsSchema.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
+import { isAutoLanguage } from '../../i18n/languageUtils.js';
+import {
+  getExtendedSystemInfo,
+  type ExtendedSystemInfo,
+} from '../systemInfo.js';
+import { getSystemInfoFields } from '../systemInfoFields.js';
+import { ICON } from '../constants.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
+import { toOriginalKey } from './key-map.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
+import {
+  DialogFrame,
+  DialogSelect,
+  dialogContentWidth,
+  FooterHint,
+  useDialogSelect,
+} from './dialogs-shared.js';
+
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
+import { followScrollOffset, wrappedRows } from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
+
+export type SettingsTab = 'settings' | 'status' | 'stats';
+
+export const SETTINGS_TAB_ORDER: readonly SettingsTab[] = [
+  'settings',
+  'status',
+  'stats',
+];
+
+export const SETTINGS_LIST_MAX_ITEMS = 8;
+
+// Rows the dialog spends outside the settings list: the frame's border and
+// padding (4), the tab bar and its spacer (2), the bordered search box and
+// its spacer (4), the description row and its margin (2), and the footer
+// hint's (2) — ink's SettingsDialog charges the same items (its footer is
+// one row; this port's FooterHint carries a margin row) before windowing
+// its list to what is left. The scroll arrows are not in the flat charge:
+// they paint only when the window is a strict subset with rows to spare, so
+// the budget pays them out of the list rows at exactly those sizes (the rule
+// the mode list's budget ports) — charging them flat showed one row fewer
+// than ink at every size the arrows never paint. The description and the
+// footer hint are clipped to the frame's content width at paint time, the
+// way ink's wrap="truncate" keeps them to the charged row; the restart
+// prompt stays wrapped, so its rows are measured and charged on top.
+const SETTINGS_LIST_CHROME_ROWS = 14;
+// The scope step beside it has no search box, arrows, description or restart
+// prompt: its chrome is the frame (4), the tab bar and its spacer (2), the
+// `> Apply To` title and its spacer (2), and the footer hint (2), which this
+// step paints unconditionally. Leaving the hint out granted the list two
+// rows the region could not pay — measured at region ten, where one down
+// moved the highlight onto a row nothing painted and onHighlight retargeted
+// every later write.
+const SETTINGS_SCOPE_CHROME_ROWS = 10;
+
+/** Parity of configTabLabel in SettingsDialog.tsx. */
+export function settingsTabLabel(tab: SettingsTab): string {
+  switch (tab) {
+    case 'settings':
+      return t('Settings');
+    case 'status':
+      return t('Status');
+    case 'stats':
+      return t('Stats');
+    default:
+      return tab;
+  }
+}
+
+export const SUB_DIALOG_SETTING_KEYS = [
+  'ui.theme',
+  'general.preferredEditor',
+  'fastModel',
+  'visionModel',
+] as const;
+
+export function isSubDialogSetting(key: string): boolean {
+  return (SUB_DIALOG_SETTING_KEYS as readonly string[]).includes(key);
+}
+
+// The rule itself lives in `utils/aux-model-selector.ts` next to the rest of
+// the selector-scrub surface, so the ink and OpenTUI `/settings` rows cannot
+// drift apart. Re-exported here for this dialog's existing unit test.
+export { formatSettingRowValue };
+
+export interface SettingsListItem {
+  key: string;
+  label: string;
+  description?: string;
+  type?: SettingsType;
+}
+
+/** The settings rows, sourced from the same schema as the ink dialog. */
+export function buildSettingsListItems(options?: {
+  excludeWorkspaceRestricted?: boolean;
+}): SettingsListItem[] {
+  return getDialogSettingKeys(options).map((key) => {
+    const definition = getSettingDefinition(key);
+    return {
+      key,
+      label: definition?.label ? t(definition.label) || definition.label : key,
+      description: definition?.description
+        ? t(definition.description) || definition.description
+        : undefined,
+      type: definition?.type,
+    };
+  });
+}
+
+/** Parity of the settings-list search filter (label, key, desc, scope msg). */
+export function filterSettingsItems(
+  items: readonly SettingsListItem[],
+  query: string,
+  scopeMessageOf: (key: string) => string | undefined,
+): SettingsListItem[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [...items];
+  return items.filter((item) => {
+    const scopeMsg = scopeMessageOf(item.key);
+    return (
+      item.label.toLowerCase().includes(normalized) ||
+      item.key.toLowerCase().includes(normalized) ||
+      (item.description?.toLowerCase().includes(normalized) ?? false) ||
+      (scopeMsg?.toLowerCase().includes(normalized) ?? false)
+    );
+  });
+}
+
+/**
+ * Parity of the toggle action's value computation: booleans flip, enums
+ * advance to the next option and loop back to the first.
+ */
+export function nextToggleValue(
+  definition:
+    | {
+        type?: SettingsType;
+        options?: ReadonlyArray<{ value: SettingsValue }>;
+        default?: SettingsValue;
+      }
+    | undefined,
+  currentValue: SettingsValue,
+): SettingsValue | undefined {
+  if (!definition || !TOGGLE_TYPES.has(definition.type)) return undefined;
+  if (definition.type === 'boolean') {
+    return nextBooleanSettingValue(currentValue, definition.default);
+  }
+  if (definition.type === 'enum' && definition.options) {
+    const options = definition.options;
+    const currentIndex = options.findIndex((opt) => opt.value === currentValue);
+    if (currentIndex !== -1 && currentIndex < options.length - 1) {
+      return options[currentIndex + 1].value;
+    }
+    return options[0].value;
+  }
+  return undefined;
+}
+
+/**
+ * Parity of commitEdit's value parsing. Numbers must parse (empty or NaN
+ * cancels the edit, returned as null); outputLanguage commits the trimmed
+ * value with empty meaning 'auto'; other string keys keep the raw buffer.
+ */
+export function parseEditCommit(
+  key: string,
+  type: SettingsType | undefined,
+  buffer: string,
+): string | number | null | undefined {
+  const trimmed = buffer.trim();
+  if (isNumericSettingType(type)) {
+    if (trimmed === '') return null;
+    const numParsed = Number(trimmed);
+    return Number.isNaN(numParsed) ? null : numParsed;
+  }
+  if (key === 'general.outputLanguage') {
+    return trimmed === '' ? 'auto' : trimmed;
+  }
+  return buffer;
+}
+
+export interface EditBufferState {
+  buffer: string;
+  cursor: number;
+}
+
+/** Inline-edit buffer operations (grapheme-counted like the ink editor). */
+export function editInsert(
+  state: EditBufferState,
+  ch: string,
+): EditBufferState {
+  const chars = [...state.buffer];
+  chars.splice(state.cursor, 0, ch);
+  return { buffer: chars.join(''), cursor: state.cursor + 1 };
+}
+
+export function editBackspace(state: EditBufferState): EditBufferState {
+  if (state.cursor <= 0) return state;
+  const chars = [...state.buffer];
+  chars.splice(state.cursor - 1, 1);
+  return { buffer: chars.join(''), cursor: state.cursor - 1 };
+}
+
+export function editDelete(state: EditBufferState): EditBufferState {
+  const chars = [...state.buffer];
+  if (state.cursor >= chars.length) return state;
+  chars.splice(state.cursor, 1);
+  return { buffer: chars.join(''), cursor: state.cursor };
+}
+
+export function editMoveCursor(
+  state: EditBufferState,
+  movement: 'left' | 'right' | 'home' | 'end',
+): EditBufferState {
+  const len = [...state.buffer].length;
+  switch (movement) {
+    case 'left':
+      return { ...state, cursor: Math.max(0, state.cursor - 1) };
+    case 'right':
+      return { ...state, cursor: Math.min(len, state.cursor + 1) };
+    case 'home':
+      return { ...state, cursor: 0 };
+    case 'end':
+      return { ...state, cursor: len };
+    default:
+      return state;
+  }
+}
+
+export interface OpenTuiSettingsDialogProps {
+  settings: LoadedSettings;
+  onSelect: (settingName: string | undefined, scope: SettingScope) => void;
+  onRestartRequest?: () => void;
+  /** Backend seam for runtime side effects (vim sync, approval mode). */
+  onSettingApplied?: (key: string, value: SettingsValue) => void;
+  config?: Config;
+  availableTerminalHeight?: number;
+}
+
+export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
+  const {
+    settings,
+    onSelect,
+    onRestartRequest,
+    onSettingApplied,
+    config,
+    availableTerminalHeight,
+  } = props;
+
+  const [mode, setMode] = useState<'settings' | 'scope'>('settings');
+  const [selectedScope, setSelectedScope] = useState<SettingScope>(
+    SettingScope.User,
+  );
+  const {
+    cursor: activeSettingIndex,
+    cursorRef: activeSettingIndexRef,
+    setCursor: setActiveSettingIndex,
+  } = useBatchSafeCursor();
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [activeTab, setActiveTab] = useState<SettingsTab>('settings');
+  const [focusZone, setFocusZone] = useState<'tabs' | 'search' | 'list'>(
+    'list',
+  );
+  const [searchQuery, setSearchQuery] = useState('');
+  const [pendingSettings, setPendingSettings] = useState<Settings>(() =>
+    structuredClone(settings.forScope(SettingScope.User).settings),
+  );
+  const [modifiedSettings, setModifiedSettings] = useState<Set<string>>(
+    new Set(),
+  );
+  const [restartRequiredSettings, setRestartRequiredSettings] = useState<
+    Set<string>
+  >(new Set());
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [edit, setEdit] = useState<EditBufferState>({ buffer: '', cursor: 0 });
+  const [systemInfo, setSystemInfo] = useState<ExtendedSystemInfo | null>(null);
+  const [statusError, setStatusError] = useState(false);
+  const [statusReloadNonce, setStatusReloadNonce] = useState(0);
+
+  const showRestartPrompt = restartRequiredSettings.size > 0;
+  const restartText = t(
+    'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+  );
+
+  // Rebase the pending snapshot on scope switches, mirroring the ink effect.
+  useEffect(() => {
+    setPendingSettings(
+      structuredClone(settings.forScope(selectedScope).settings),
+    );
+    setModifiedSettings(new Set());
+  }, [selectedScope, settings]);
+
+  // Status tab data (same source as `/status`).
+  useEffect(() => {
+    if (activeTab !== 'status') {
+      setSystemInfo(null);
+      setStatusError(false);
+      return;
+    }
+    let cancelled = false;
+    setStatusError(false);
+    const ctx = { services: { config, settings } };
+    getExtendedSystemInfo(ctx)
+      .then((info) => {
+        if (!cancelled) setSystemInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setStatusError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, config, settings, statusReloadNonce]);
+
+  // Keep the selection valid as the search query narrows the list (ink has
+  // the same [searchQuery] reset effect).
+  useEffect(() => {
+    setActiveSettingIndex(0);
+    setScrollOffset(0);
+  }, [searchQuery, setActiveSettingIndex]);
+
+  const allItems = buildSettingsListItems({
+    excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
+  });
+  const items = filterSettingsItems(allItems, searchQuery, (key) =>
+    getScopeMessageForSetting(key, selectedScope, settings),
+  );
+
+  // Window the list to the region the mount hands over, like ink's
+  // SettingsDialog does with the same charge-out: an unsized frame inside the
+  // fixed-height region is squeezed, and a list that still asks for eight
+  // rows there overpaints its neighbours into illegibility while Enter keeps
+  // committing the row under the cursor.
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  // The prompt renders as wrapping text, so the flat one-row charge ink pays
+  // is short a row at any content width under 83 columns — and the list is
+  // granted a row the region cannot pay for. Charge the rows the text
+  // actually takes, measured at the frame's content width.
+  const restartRows = showRestartPrompt
+    ? wrappedRows(restartText, contentWidth)
+    : 0;
+  const listRows =
+    regionHeight === undefined
+      ? undefined
+      : regionHeight - SETTINGS_LIST_CHROME_ROWS - restartRows;
+  // The arrows cost two rows and exist only when the window can scroll, so a
+  // window of one or two rows spends them on items instead.
+  const arrowsPaint =
+    listRows === undefined
+      ? true
+      : listRows > 2 &&
+        Math.min(SETTINGS_LIST_MAX_ITEMS, listRows) < items.length;
+  const maxItemsToShow =
+    listRows === undefined
+      ? SETTINGS_LIST_MAX_ITEMS
+      : Math.max(
+          0,
+          Math.min(SETTINGS_LIST_MAX_ITEMS, listRows - (arrowsPaint ? 2 : 0)),
+        );
+  // Re-follow the highlight when the window's own size changes — a resize,
+  // or the restart prompt taking a row — the way useDialogSelect's
+  // scroll-follow effect does. A window left stale strands the highlight on
+  // a row nothing paints while Enter still commits it. A zero-row window has
+  // no anchor to follow to — the rule would walk the offset off the top row
+  // and back on every list change — so it is left alone until the budget
+  // paints rows again, the rule the shared hook keeps.
+  useEffect(() => {
+    if (maxItemsToShow < 1) return;
+    setScrollOffset((prev) =>
+      followScrollOffset(
+        activeSettingIndexRef.current,
+        // The follow rule leaves the offset alone while the highlight stays
+        // inside the window, so a grown window would inherit the smaller
+        // window's offset and paint fewer rows than the budget grants; clamp
+        // to the last full start first, the same bound selectionWindow
+        // derives at paint time.
+        Math.min(prev, Math.max(0, items.length - maxItemsToShow)),
+        items.length,
+        maxItemsToShow,
+      ),
+    );
+  }, [activeSettingIndexRef, items.length, maxItemsToShow]);
+
+  // A collapse to a zero-row window unpaints the row an in-flight edit is
+  // open on, and the edit's commit path sits above the zero-row guard — left
+  // open it would still write on Escape, a value the frame no longer shows.
+  useEffect(() => {
+    if (maxItemsToShow < 1) setEditingKey(null);
+  }, [maxItemsToShow]);
+
+  const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
+  const showScrollUp = arrowsPaint && maxItemsToShow > 0 && scrollOffset > 0;
+  const showScrollDown =
+    arrowsPaint &&
+    maxItemsToShow > 0 &&
+    scrollOffset + maxItemsToShow < items.length;
+
+  const applySettingValue = (key: string, value: SettingsValue) => {
+    setPendingSettings((prev) => setPendingSettingValueAny(key, value, prev));
+    if (!requiresRestart(key)) {
+      saveModifiedSettings(
+        new Set([key]),
+        setPendingSettingValueAny(key, value, {} as Settings),
+        settings,
+        selectedScope,
+      );
+      onSettingApplied?.(key, value);
+      setModifiedSettings((prev) => {
+        const updated = new Set(prev);
+        updated.delete(key);
+        return updated;
+      });
+      setRestartRequiredSettings((prev) => {
+        const updated = new Set(prev);
+        updated.delete(key);
+        return updated;
+      });
+    } else {
+      saveModifiedSettings(
+        new Set([key]),
+        setPendingSettingValueAny(key, value, {} as Settings),
+        settings,
+        selectedScope,
+      );
+      setRestartRequiredSettings((prev) => new Set(prev).add(key));
+    }
+  };
+
+  const toggleCurrent = (key: string) => {
+    const definition = getSettingDefinition(key);
+    const currentValue = getEffectiveValue(key, pendingSettings, {});
+    const newValue = nextToggleValue(definition, currentValue);
+    if (newValue === undefined) return;
+    applySettingValue(key, newValue);
+  };
+
+  const startEditing = (key: string, initial?: string) => {
+    setEditingKey(key);
+    const initialValue = initial ?? '';
+    setEdit({ buffer: initialValue, cursor: [...initialValue].length });
+  };
+
+  const commitEdit = (key: string) => {
+    const definition = getSettingDefinition(key);
+    const parsed = parseEditCommit(key, definition?.type, edit.buffer);
+    if (parsed === null) {
+      setEditingKey(null);
+      setEdit({ buffer: '', cursor: 0 });
+      return;
+    }
+    if (definition && validateSettingValue(definition, parsed)) {
+      setEditingKey(null);
+      setEdit({ buffer: '', cursor: 0 });
+      return;
+    }
+    if (parsed !== undefined) applySettingValue(key, parsed);
+    setEditingKey(null);
+    setEdit({ buffer: '', cursor: 0 });
+  };
+
+  const resetCurrentToDefault = (key: string) => {
+    const currentSetting = items[activeSettingIndexRef.current];
+    if (!currentSetting || currentSetting.key !== key) return;
+    const defaultValue = getDefaultValue(key);
+    applySettingValue(key, defaultValue);
+    setModifiedSettings((prev) => {
+      const updated = new Set(prev);
+      updated.delete(key);
+      return updated;
+    });
+  };
+
+  const applyRestart = () => {
+    const restartRequiredSet = new Set(
+      getRestartRequiredFromModified(modifiedSettings),
+    );
+    if (restartRequiredSet.size > 0) {
+      saveModifiedSettings(
+        restartRequiredSet,
+        pendingSettings,
+        settings,
+        selectedScope,
+      );
+    }
+    setRestartRequiredSettings(new Set());
+    if (onRestartRequest) onRestartRequest();
+  };
+
+  const scopeItems = getScopeItems().map((item) => ({
+    label: t(item.label),
+    key: item.value,
+    value: item.value,
+  }));
+  const initialScopeIndex = scopeItems.findIndex(
+    (item) => item.value === selectedScope,
+  );
+  // Decision 70's rule for the mode dialog's Tab step, applied here: a
+  // region too short for even one scope row must not leave the keys a row
+  // nothing painted — onHighlight alone retargets every later write.
+  const scopeMaxItemsToShow =
+    regionHeight === undefined
+      ? scopeItems.length
+      : Math.max(
+          0,
+          Math.min(
+            scopeItems.length,
+            regionHeight - SETTINGS_SCOPE_CHROME_ROWS,
+          ),
+        );
+  const scopeList = useDialogSelect({
+    items: scopeItems,
+    initialIndex: initialScopeIndex >= 0 ? initialScopeIndex : 0,
+    focused: activeTab === 'settings' && mode === 'scope',
+    maxItemsToShow: scopeMaxItemsToShow,
+    onSelect: (scope) => {
+      setSelectedScope(scope);
+      setMode('settings');
+    },
+    onHighlight: (scope) => setSelectedScope(scope),
+  });
+
+  useKeyboard((key) => {
+    const original = toOriginalKey(key);
+    const { name, ctrl } = original;
+
+    const cycleTab = (direction: 1 | -1) => {
+      setActiveTab((current) => {
+        const index = SETTINGS_TAB_ORDER.indexOf(current);
+        const next =
+          (index + direction + SETTINGS_TAB_ORDER.length) %
+          SETTINGS_TAB_ORDER.length;
+        return SETTINGS_TAB_ORDER[next];
+      });
+    };
+
+    // Status-tab retry affordance works from any focus zone.
+    if (activeTab === 'status' && statusError && name === 'r') {
+      setStatusError(false);
+      setStatusReloadNonce((n) => n + 1);
+      return;
+    }
+
+    if (focusZone === 'tabs') {
+      if (name === 'left' || (name === 'tab' && original.shift)) cycleTab(-1);
+      else if (name === 'right' || (name === 'tab' && !original.shift))
+        cycleTab(1);
+      else if (name === 'down' || name === 'return') {
+        setFocusZone(activeTab === 'settings' ? 'search' : 'list');
+      } else if (name === 'escape') {
+        onSelect(undefined, selectedScope);
+      }
+      return;
+    }
+
+    if (activeTab !== 'settings') {
+      if (name === 'up') {
+        setFocusZone('tabs');
+        return;
+      }
+      // The Stats tab embeds OpenTuiStatsDialog whose own handlers drive
+      // Tab and Esc (Esc defocuses to the tab bar via onClose) — don't
+      // double-handle them here.
+      if (activeTab === 'stats') return;
+      if (name === 'escape') onSelect(undefined, selectedScope);
+      return;
+    }
+
+    if (activeTab === 'settings' && mode === 'scope') {
+      if (name === 'escape') {
+        setMode('settings');
+        return;
+      }
+      if (name === 'tab') {
+        setMode('settings');
+        return;
+      }
+      // List keys (↑/↓/Enter/digits) handled by the scope useDialogSelect.
+      return;
+    }
+
+    if (focusZone === 'search') {
+      if (name === 'up') {
+        setFocusZone('tabs');
+      } else if (name === 'down' || name === 'return') {
+        setFocusZone('list');
+      } else if (name === 'tab') {
+        setMode('scope');
+        setFocusZone('list');
+      } else if (name === 'escape') {
+        if (searchQuery) setSearchQuery('');
+        else onSelect(undefined, selectedScope);
+      } else if (name === 'backspace' || name === 'delete') {
+        setSearchQuery((q) => [...q].slice(0, -1).join(''));
+      } else if (
+        !ctrl &&
+        original.sequence.length === 1 &&
+        original.sequence >= ' '
+      ) {
+        setSearchQuery((q) => q + original.sequence);
+      }
+      return;
+    }
+
+    // Settings tab, list focused. Tab toggles the scope selector (ink
+    // parity: setMode from the previous value — a fixed 'settings' would be
+    // a no-op, since mode is always 'settings' in this branch).
+    if (name === 'tab') {
+      setMode((prev) => (prev === 'settings' ? 'scope' : 'settings'));
+      return;
+    }
+    if (editingKey) {
+      if (name === 'backspace') {
+        setEdit((s) => editBackspace(s));
+        return;
+      }
+      if (name === 'delete') {
+        setEdit((s) => editDelete(s));
+        return;
+      }
+      if (name === 'escape' || name === 'return') {
+        commitEdit(editingKey);
+        return;
+      }
+      if (name === 'left') {
+        setEdit((s) => editMoveCursor(s, 'left'));
+        return;
+      }
+      if (name === 'right') {
+        setEdit((s) => editMoveCursor(s, 'right'));
+        return;
+      }
+      if (name === 'home') {
+        setEdit((s) => editMoveCursor(s, 'home'));
+        return;
+      }
+      if (name === 'end') {
+        setEdit((s) => editMoveCursor(s, 'end'));
+        return;
+      }
+      const definition = getSettingDefinition(editingKey);
+      const ch = original.sequence;
+      let isValidChar = false;
+      if (isNumericSettingType(definition?.type)) {
+        isValidChar = /^[0-9\-+.]$/.test(ch);
+      } else {
+        isValidChar = ch.length === 1 && ch >= ' ' && !ctrl;
+      }
+      if (isValidChar) {
+        setEdit((s) => editInsert(s, ch));
+      }
+      return;
+    }
+    // A zero-row budget paints no list row; the row under the cursor is one
+    // nothing paints, so the keys that move or commit it stay refused. The
+    // keys that address no row keep working: Tab (handled above), Escape,
+    // the restart prompt's `r`, up from the top row into the search box
+    // (thence the tab bar), and type-to-search. Three printable shapes stay
+    // refused because the chain reads them as row keys first: the space bar
+    // (its sequence is a printable blank, but the commit branch reads its
+    // name — hence the strict `> ' '` below), the k/j highlight aliases, and
+    // a digit on a numeric row, which opens an edit on a row nothing paints.
+    const typeToSearchKey =
+      !ctrl &&
+      original.sequence.length === 1 &&
+      original.sequence > ' ' &&
+      !keyMatchers[Command.SELECTION_UP](original) &&
+      !keyMatchers[Command.SELECTION_DOWN](original) &&
+      !(
+        /^[0-9]$/.test(original.sequence) &&
+        isNumericSettingType(items[activeSettingIndexRef.current]?.type)
+      );
+    if (
+      maxItemsToShow < 1 &&
+      name !== 'escape' &&
+      !(showRestartPrompt && name === 'r') &&
+      !(
+        keyMatchers[Command.SELECTION_UP](original) &&
+        activeSettingIndexRef.current === 0
+      ) &&
+      !typeToSearchKey
+    )
+      return;
+    if (keyMatchers[Command.SELECTION_UP](original)) {
+      if (activeSettingIndexRef.current === 0) {
+        setFocusZone('search');
+        setScrollOffset(0);
+      } else {
+        const newIndex = activeSettingIndexRef.current - 1;
+        setActiveSettingIndex(newIndex);
+        if (newIndex < scrollOffset) setScrollOffset(newIndex);
+      }
+    } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
+      const newIndex =
+        activeSettingIndexRef.current < items.length - 1
+          ? activeSettingIndexRef.current + 1
+          : 0;
+      setActiveSettingIndex(newIndex);
+      if (newIndex === 0) setScrollOffset(0);
+      else if (newIndex >= scrollOffset + maxItemsToShow)
+        setScrollOffset(newIndex - maxItemsToShow + 1);
+    } else if (name === 'return' || name === 'space') {
+      const currentItem = items[activeSettingIndexRef.current];
+      if (!currentItem) return;
+      if (isSubDialogSetting(currentItem.key)) {
+        if (name === 'return') onSelect(currentItem.key, selectedScope);
+        return;
+      }
+      if (
+        isNumericSettingType(currentItem.type) ||
+        currentItem.type === 'string'
+      ) {
+        startEditing(currentItem.key);
+      } else {
+        toggleCurrent(currentItem.key);
+      }
+    } else if (name === 'right') {
+      const currentItem = items[activeSettingIndexRef.current];
+      if (currentItem && isSubDialogSetting(currentItem.key)) {
+        onSelect(currentItem.key, selectedScope);
+      }
+    } else if (/^[0-9]$/.test(original.sequence)) {
+      const currentItem = items[activeSettingIndexRef.current];
+      if (isNumericSettingType(currentItem?.type)) {
+        startEditing(currentItem.key, original.sequence);
+      } else {
+        setFocusZone('search');
+        setSearchQuery((q) => q + original.sequence);
+      }
+    } else if (ctrl && (name === 'c' || name === 'l')) {
+      const currentItem = items[activeSettingIndexRef.current];
+      if (currentItem) resetCurrentToDefault(currentItem.key);
+    } else if (showRestartPrompt && name === 'r') {
+      applyRestart();
+      return;
+    } else if (
+      !ctrl &&
+      original.sequence.length === 1 &&
+      original.sequence >= ' '
+    ) {
+      setFocusZone('search');
+      setSearchQuery((q) => q + original.sequence);
+    }
+
+    if (name === 'escape') {
+      if (searchQuery) setSearchQuery('');
+      else onSelect(undefined, selectedScope);
+    }
+  });
+
+  const activeDescription =
+    activeTab === 'settings' &&
+    mode === 'settings' &&
+    focusZone === 'list' &&
+    items[activeSettingIndex]?.description;
+
+  // The bar is charged as one row; the hint gets the columns the tabs leave
+  // rather than wrapping onto a second.
+  const settingsTabsWidth = SETTINGS_TAB_ORDER.reduce(
+    (total, tab) =>
+      total + getCachedStringWidth(` ${settingsTabLabel(tab)} `) + 2,
+    0,
+  );
+
+  return (
+    <DialogFrame>
+      <box flexDirection="row">
+        {SETTINGS_TAB_ORDER.map((tab) => {
+          const isActive = tab === activeTab;
+          return (
+            <box key={tab} marginRight={2}>
+              <text
+                fg={isActive ? '#000000' : C.dim}
+                bg={isActive ? C.accent : undefined}
+                attributes={isActive ? 1 : undefined}
+              >
+                {` ${settingsTabLabel(tab)} `}
+              </text>
+            </box>
+          );
+        })}
+        <text fg={C.dim}>
+          {' '}
+          {truncateToWidth(
+            focusZone === 'tabs'
+              ? t('(←/→ to switch, ↓ to return)')
+              : t('(↑ to switch tabs)'),
+            Math.max(0, contentWidth - settingsTabsWidth - 1),
+          )}
+        </text>
+      </box>
+      <box height={1} />
+
+      {activeTab === 'status' ? (
+        systemInfo ? (
+          <box flexDirection="column">
+            <text fg={C.accent} attributes={1}>
+              {t('Status')}
+            </text>
+            {getSystemInfoFields(systemInfo).map((field) => (
+              <box key={field.label} flexDirection="row">
+                <box width="35%" flexShrink={0}>
+                  <text fg={C.accent} attributes={1}>
+                    {field.label}
+                  </text>
+                </box>
+                <text fg={C.text}>{field.value}</text>
+              </box>
+            ))}
+          </box>
+        ) : statusError ? (
+          <text fg={C.red}>
+            {t('Failed to load status. Press r to retry.')}
+          </text>
+        ) : (
+          <text fg={C.dim}>{t('Loading status…')}</text>
+        )
+      ) : activeTab === 'stats' ? (
+        <OpenTuiStatsDialog
+          config={config}
+          isFocused={focusZone === 'list'}
+          onClose={() => setFocusZone('tabs')}
+        />
+      ) : mode === 'scope' ? (
+        <box flexDirection="column">
+          <text fg={C.text} attributes={1}>
+            {'> '}
+            {t('Apply To')}
+          </text>
+          <box height={1} />
+          <DialogSelect
+            items={scopeItems}
+            activeIndex={scopeList.activeIndex}
+            scrollOffset={scopeList.scrollOffset}
+            maxItemsToShow={scopeMaxItemsToShow}
+            showNumbers={true}
+            focused={true}
+            onHover={scopeList.setActiveIndex}
+            onSelectIndex={scopeList.selectIndex}
+            onWheel={(direction) =>
+              scopeList.setActiveIndex(
+                scopeList.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
+              )
+            }
+            renderLabel={(item, { titleColor }) => (
+              <text fg={titleColor}>{item.label}</text>
+            )}
+          />
+        </box>
+      ) : (
+        <box flexDirection="column">
+          <box
+            borderStyle="rounded"
+            borderColor={focusZone === 'search' ? C.accent : C.dim}
+            paddingX={1}
+            flexDirection="row"
+          >
+            <text fg={C.dim}>⌕ </text>
+            {searchQuery ? (
+              <text fg={C.text}>
+                {truncateToWidth(searchQuery, contentWidth - 6)}
+              </text>
+            ) : (
+              <text fg={C.dim}>{t('Search settings…')}</text>
+            )}
+          </box>
+          <box height={1} />
+          {showScrollUp && <text fg={C.dim}>▲</text>}
+          {items.length === 0 && (
+            <text fg={C.dim}>{t('No settings match your search.')}</text>
+          )}
+          {visibleItems.map((item, idx) => {
+            const itemIndex = scrollOffset + idx;
+            const isActive =
+              focusZone === 'list' && activeSettingIndex === itemIndex;
+            const isEditing = editingKey === item.key;
+
+            let displayValue: string;
+            if (isEditing) {
+              displayValue = edit.buffer;
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
+              const path = item.key.split('.');
+              const currentValue = getNestedValue(pendingSettings, path);
+              const defaultValue = getDefaultValue(item.key);
+              const effectiveCurrentValue =
+                currentValue !== undefined && currentValue !== null
+                  ? currentValue
+                  : defaultValue;
+              if (
+                item.key === 'general.outputLanguage' &&
+                isAutoLanguage(
+                  effectiveCurrentValue as string | null | undefined,
+                )
+              ) {
+                displayValue = t('Auto (follow user input)');
+              } else if (
+                effectiveCurrentValue !== undefined &&
+                effectiveCurrentValue !== null
+              ) {
+                displayValue = formatSettingRowValue(
+                  item.key,
+                  effectiveCurrentValue,
+                );
+              } else {
+                displayValue = '';
+              }
+              const isModified = modifiedSettings.has(item.key);
+              if (isModified || effectiveCurrentValue !== defaultValue) {
+                displayValue += '*';
+              }
+              if (isSubDialogSetting(item.key)) {
+                displayValue = displayValue ? `${displayValue} ▸` : '▸';
+              }
+            } else {
+              displayValue = getDisplayValue(
+                item.key,
+                settings.forScope(selectedScope).settings,
+                settings.merged,
+                modifiedSettings,
+                pendingSettings,
+              );
+            }
+            const greyedOut = isDefaultValue(
+              item.key,
+              settings.forScope(selectedScope).settings,
+            );
+            const scopeMessage = getScopeMessageForSetting(
+              item.key,
+              selectedScope,
+              settings,
+            );
+
+            // ink truncates the label and the value (wrap="truncate"); an
+            // unclipped label would wrap the row into a second physical row
+            // the window charged as one. The value box keeps its natural
+            // width (flexShrink 0); the label box gets what the indicator,
+            // the margin and the value leave.
+            const labelBudget = Math.max(
+              0,
+              contentWidth - 3 - getCachedStringWidth(displayValue),
+            );
+            const labelFitsWhole =
+              getCachedStringWidth(item.label) <= labelBudget;
+            const scopeMessageFits =
+              scopeMessage !== undefined &&
+              labelFitsWhole &&
+              getCachedStringWidth(item.label) +
+                1 +
+                getCachedStringWidth(scopeMessage) <=
+                labelBudget;
+
+            return (
+              <box
+                key={item.key}
+                flexDirection="row"
+                onMouseUp={() => {
+                  setActiveSettingIndex(itemIndex);
+                  setFocusZone('list');
+                }}
+              >
+                <box width={2} flexShrink={0}>
+                  <text fg={isActive ? C.green : C.dim}>
+                    {isActive ? ICON.CIRCLE_FILLED : ''}
+                  </text>
+                </box>
+                <box flexGrow={1} flexShrink={1}>
+                  <box flexDirection="row">
+                    <text fg={isActive ? C.green : C.text}>
+                      {truncateToWidth(item.label, labelBudget)}
+                    </text>
+                    {scopeMessageFits ? (
+                      <text fg={C.dim}>{` ${scopeMessage}`}</text>
+                    ) : null}
+                  </box>
+                </box>
+                <box marginLeft={1} flexShrink={0}>
+                  <text
+                    fg={
+                      isActive
+                        ? C.green
+                        : greyedOut && !isEditing
+                          ? C.dim
+                          : C.text
+                    }
+                  >
+                    {displayValue}
+                  </text>
+                </box>
+              </box>
+            );
+          })}
+          {showScrollDown && <text fg={C.dim}>▼</text>}
+        </box>
+      )}
+
+      {activeDescription && mode === 'settings' && activeTab === 'settings' ? (
+        <box marginTop={1}>
+          <text fg={C.dim}>
+            {truncateToWidth(activeDescription, contentWidth)}
+          </text>
+        </box>
+      ) : null}
+
+      {activeTab === 'settings' && (
+        <FooterHint
+          text={truncateToWidth(
+            mode === 'settings'
+              ? t('(Use Enter to select, Tab to configure scope)')
+              : t('(Use Enter to apply scope, Tab to go back)'),
+            contentWidth,
+          )}
+        />
+      )}
+      {showRestartPrompt &&
+        activeTab === 'settings' &&
+        mode === 'settings' &&
+        focusZone === 'list' && <text fg={C.yellow}>{restartText}</text>}
+    </DialogFrame>
+  );
+}

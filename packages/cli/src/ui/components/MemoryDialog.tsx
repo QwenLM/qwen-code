@@ -10,14 +10,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
-  getAllGeminiMdFilenames,
-  Storage,
   getAutoMemoryRoot,
   getAutoMemoryProjectStateDir,
   getUserAutoMemoryRoot,
   AUTO_MEMORY_INDEX_FILENAME,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/memory/paths.js';
+import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { SettingScope } from '../../config/settings.js';
@@ -47,7 +47,7 @@ async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
 ): Promise<string> {
-  for (const filename of getAllGeminiMdFilenames()) {
+  for (const filename of getAllMemoryFilenames()) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -150,7 +150,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     () =>
       path.join(
         Storage.getGlobalQwenDir(),
-        getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
+        getAllMemoryFilenames()[0] ?? 'QWEN.md',
       ),
     [],
   );
@@ -158,7 +158,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     () =>
       path.join(
         config.getWorkingDir(),
-        getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
+        getAllMemoryFilenames()[0] ?? 'QWEN.md',
       ),
     [config],
   );
@@ -273,12 +273,12 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         case 'project':
           return resolvePreferredMemoryFile(
             config.getWorkingDir(),
-            getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
+            getAllMemoryFilenames()[0] ?? 'QWEN.md',
           );
         case 'global':
           return resolvePreferredMemoryFile(
             Storage.getGlobalQwenDir(),
-            getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
+            getAllMemoryFilenames()[0] ?? 'QWEN.md',
           );
         default: {
           const _exhaustive: never = item.value;

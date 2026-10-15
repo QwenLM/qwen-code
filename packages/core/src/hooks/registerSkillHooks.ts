@@ -91,12 +91,15 @@ export function registerSkillHooks(
           continue;
         }
 
+        // A project skill's hooks are repo-supplied: they register only
+        // while the folder is trusted (the caller's gate) and fire only
+        // while it still is (the event handler re-checks at fire time).
         sessionHooksManager.addSessionHook(
           sessionId,
           eventName,
           matcherPattern,
           hookConfig,
-          { skillRoot: skill.skillRoot },
+          { skillRoot: skill.skillRoot, trustGated: skill.level === 'project' },
         );
 
         registeredCount++;
@@ -154,11 +157,14 @@ function prepareHookConfig(
 }
 
 /**
- * Unregisters all hooks from a skill.
+ * Unregisters the session hooks a skill registered, identified by the skill's
+ * root directory, and returns how many were removed.
  *
- * Note: This is typically not needed as session hooks are cleared
- * when the session ends. However, it can be useful for cleanup
- * in certain scenarios.
+ * Removal keys on the root alone, so it still works when the config passed in
+ * no longer lists the hooks it registered earlier. A skill without a root
+ * directory returns 0, because its hooks cannot be told apart from another
+ * skill's. Folder-trust revocation does not go through this: a project
+ * skill's hooks are registered trust-gated and re-checked at fire time.
  *
  * @param sessionHooksManager - The session hooks manager instance
  * @param sessionId - The current session ID
@@ -170,15 +176,26 @@ export function unregisterSkillHooks(
   sessionId: string,
   skill: SkillConfig,
 ): number {
-  if (!skill.hooks) {
+  if (!skill.skillRoot) {
     return 0;
   }
 
-  // Note: Current implementation doesn't track hook IDs per skill
-  // Session hooks are cleared when session ends
-  debugLogger.debug(
-    `Skill hooks for '${skill.name}' will be cleared with session`,
-  );
+  // Collect the ids first: removeHook splices the stored per-event arrays.
+  const hookIds = sessionHooksManager
+    .getAllSessionHooks(sessionId)
+    .filter((entry) => entry.skillRoot === skill.skillRoot)
+    .map((entry) => entry.hookId);
+  let removed = 0;
+  for (const hookId of hookIds) {
+    if (sessionHooksManager.removeHook(sessionId, hookId)) {
+      removed++;
+    }
+  }
 
-  return 0;
+  if (removed > 0) {
+    debugLogger.debug(
+      `Unregistered ${removed} hooks from skill '${skill.name}'`,
+    );
+  }
+  return removed;
 }

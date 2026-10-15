@@ -7,7 +7,7 @@
 | Unit Tests             | Vitest + ink-testing-library              | Ink components, Core logic, utilities   | Mature, extensive `.test.ts` / `.test.tsx`                |
 | Integration Tests      | Vitest + TestRig / SDKTestHelper          | CLI E2E, SDK multi-turn, MCP, auth      | Mature, supports none/docker/podman sandboxes             |
 | Terminal UI Snapshots  | `toMatchSnapshot()` + ink-testing-library | Ink component render output (ANSI)      | Exists, covers Footer, InputPrompt, MarkdownDisplay, etc. |
-| Web UI Regression      | Chromatic + Storybook                     | `packages/webui` components             | Exists, but only covers Web UI                            |
+| Web Shell Regression   | Playwright visual tests                   | `packages/web-shell` components         | Exists for browser UI scenarios                           |
 | **Terminal UI Visual** | **terminal-capture**                      | CLI terminal real rendering screenshots | ✅ Implemented                                            |
 
 ## 2. Problems Solved by terminal-capture
@@ -113,7 +113,7 @@ scenarios/screenshots/
 │  Unit Tests (Vitest)                 │  ← Function/Component level
 │  Text Snapshots (ink-testing-lib)    │  ← ANSI string comparison
 │  Integration Tests (TestRig/SDK)     │  ← E2E functionality
-│  Web UI Regression (Chromatic)       │  ← Only covers webui
+│  Web Shell Regression (Playwright)   │  ← Covers browser UI scenarios
 ├─────────────────────────────────────┤
 │  terminal-capture                    │  ← Terminal UI visual layer
 │  (xterm.js + Playwright)             │     Fills the gap
@@ -124,4 +124,4 @@ scenarios/screenshots/
 
 1. **Visual Regression** — Integrate Playwright `toHaveScreenshot()` for pixel-level baseline comparison, CI auto-detects terminal UI changes
 2. **PR Workflow Integration** — Drive Agent via Cursor Skill to auto-checkout branch → build → screenshot → attach to review comment
-3. **Complement to Chromatic** — Chromatic covers Web UI, terminal-capture covers CLI terminal UI
+3. **Complement to Web Shell visual tests** — Playwright visual tests cover the Web Shell browser UI, terminal-capture covers CLI terminal UI

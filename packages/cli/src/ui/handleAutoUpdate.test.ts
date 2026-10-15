@@ -116,7 +116,7 @@ describe('handleAutoUpdate', () => {
   });
 
   it('should show manual update message when enableAutoUpdate is false', () => {
-    // When enableAutoUpdate is false, gemini.tsx won't call checkForUpdates(),
+    // When enableAutoUpdate is false, llm.tsx won't call checkForUpdates(),
     // but if handleAutoUpdate is still called, it should show a manual update message.
     mockSettings.merged.general!.enableAutoUpdate = false;
     mockGetInstallationInfo.mockReturnValue({

@@ -3,6 +3,7 @@ import {
   DingtalkInteractiveCardClient,
   QUESTION_CARD_TEMPLATE_ID,
   STATUS_CARD_TEMPLATE_ID,
+  DingtalkCardRequestError,
 } from './interactive-card-client.js';
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -14,10 +15,18 @@ function response(body: unknown = {}, status = 200): Response {
   });
 }
 
-function createClient(): DingtalkInteractiveCardClient {
+function createClient(
+  options: {
+    getAccessToken?: () => Promise<string>;
+    invalidateAccessToken?: (token: string) => void;
+  } = {},
+): DingtalkInteractiveCardClient {
   return new DingtalkInteractiveCardClient({
     robotCode: 'robot-code',
-    getAccessToken: vi.fn().mockResolvedValue('access-token'),
+    getAccessToken:
+      options.getAccessToken ?? vi.fn().mockResolvedValue('access-token'),
+    invalidateAccessToken:
+      options.invalidateAccessToken ?? vi.fn<(token: string) => void>(),
     fetch: fetchMock,
   });
 }
@@ -152,4 +161,101 @@ describe('DingtalkInteractiveCardClient', () => {
       }),
     ).rejects.toThrow(`${QUESTION_CARD_TEMPLATE_ID}: template denied`);
   });
+
+  it('classifies a per-recipient delivery failure as non-retryable', async () => {
+    fetchMock.mockResolvedValueOnce(
+      response({
+        result: {
+          deliverResults: [{ success: false, errorMsg: 'template denied' }],
+        },
+      }),
+    );
+
+    const request = createClient().createAndDeliver({
+      templateId: STATUS_CARD_TEMPLATE_ID,
+      outTrackId: 'status-1',
+      target: { chatId: 'cid-1', isGroup: true },
+      cardParamMap: {},
+    });
+
+    await expect(request).rejects.toBeInstanceOf(DingtalkCardRequestError);
+    await expect(request).rejects.toMatchObject({ retryable: false });
+  });
+
+  it.each([408, 425, 429, 500, 503])(
+    'classifies HTTP %s as retryable',
+    async (status) => {
+      fetchMock.mockResolvedValueOnce(response({}, status));
+
+      await expect(
+        createClient().updateInstance({
+          outTrackId: 'status-1',
+          cardParamMap: {},
+        }),
+      ).rejects.toMatchObject<DingtalkCardRequestError>({
+        retryable: true,
+      });
+    },
+  );
+
+  it('refreshes the access token and retries once on HTTP 401', async () => {
+    const getAccessToken = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce('stale-token')
+      .mockResolvedValueOnce('fresh-token');
+    const invalidateAccessToken = vi.fn<(token: string) => void>();
+    fetchMock
+      .mockResolvedValueOnce(response({}, 401))
+      .mockResolvedValueOnce(response());
+
+    await createClient({
+      getAccessToken,
+      invalidateAccessToken,
+    }).updateInstance({
+      outTrackId: 'status-1',
+      cardParamMap: {},
+    });
+
+    expect(invalidateAccessToken).toHaveBeenCalledOnce();
+    expect(invalidateAccessToken).toHaveBeenCalledWith('stale-token');
+    expect(
+      fetchMock.mock.calls.map(
+        ([, init]) =>
+          (init?.headers as Record<string, string>)[
+            'x-acs-dingtalk-access-token'
+          ],
+      ),
+    ).toEqual(['stale-token', 'fresh-token']);
+  });
+
+  it('stops after one token refresh when HTTP 401 persists', async () => {
+    const invalidateAccessToken = vi.fn<(token: string) => void>();
+    fetchMock.mockResolvedValue(response({}, 401));
+
+    await expect(
+      createClient({ invalidateAccessToken }).updateInstance({
+        outTrackId: 'status-1',
+        cardParamMap: {},
+      }),
+    ).rejects.toMatchObject<DingtalkCardRequestError>({ retryable: false });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(invalidateAccessToken).toHaveBeenCalledOnce();
+  });
+
+  it.each([400, 403, 404])(
+    'classifies HTTP %s as non-retryable',
+    async (status) => {
+      fetchMock.mockResolvedValueOnce(response({}, status));
+
+      await expect(
+        createClient().updateInstance({
+          outTrackId: 'status-1',
+          cardParamMap: {},
+        }),
+      ).rejects.toMatchObject<DingtalkCardRequestError>({
+        retryable: false,
+      });
+    },
+  );
 });

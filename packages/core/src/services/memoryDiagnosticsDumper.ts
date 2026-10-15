@@ -175,9 +175,9 @@ export class MemoryDiagnosticsDumper {
 
   private collectSessionStats(): Record<string, unknown> {
     try {
-      const geminiClient = this.config.getGeminiClient?.();
-      if (!geminiClient) return { available: false };
-      const historyLength = geminiClient.getChat?.()?.getHistoryLength?.() ?? 0;
+      const llmClient = this.config.getLlmClient?.();
+      if (!llmClient) return { available: false };
+      const historyLength = llmClient.getChat?.()?.getHistoryLength?.() ?? 0;
       return {
         historyEntries: historyLength,
       };

@@ -30,7 +30,7 @@ static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "perform_secondary_action".into(),
-        description: "Perform one exact action name advertised by a cached AX element. Unavailable actions fail closed and never fall back to AXPress or pixels.".into(),
+        description: "Perform an advertised AX action using its raw name or the alias shown in the accessibility tree. Unavailable actions fail closed and never fall back to AXPress or pixels.".into(),
         input_schema: json!({
             "type": "object",
             "required": ["pid", "element_token", "action"],
@@ -53,7 +53,15 @@ fn resolve_advertised_action(actions: &[String], requested: &str) -> Result<Stri
     if requested.is_empty() {
         return Err("empty");
     }
-    let mut matches = actions.iter().filter(|action| action.as_str() == requested);
+    let mut matches = actions.iter().filter(|action| {
+        let alias = action
+            .strip_prefix("AX")
+            .unwrap_or(action)
+            .to_ascii_lowercase();
+        action.as_str() == requested
+            || alias == requested
+            || (action.as_str() == "AXShowMenu" && requested == "show_menu")
+    });
     let Some(action) = matches.next() else {
         return Err("missing");
     };
@@ -174,6 +182,25 @@ impl Tool for PerformSecondaryActionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_aliases_resolve_only_to_unambiguous_advertised_actions() {
+        let actions = vec!["AXRaise".into(), "AXShowMenu".into(), "AXConfirm".into()];
+        for (alias, raw) in [
+            ("raise", "AXRaise"),
+            ("showmenu", "AXShowMenu"),
+            ("show_menu", "AXShowMenu"),
+            ("confirm", "AXConfirm"),
+        ] {
+            assert_eq!(resolve_advertised_action(&actions, alias), Ok(raw.into()));
+            assert_eq!(resolve_advertised_action(&actions, raw), Ok(raw.into()));
+        }
+        assert_eq!(resolve_advertised_action(&actions, "press"), Err("missing"));
+        assert_eq!(
+            resolve_advertised_action(&["AXRaise".into(), "raise".into()], "raise"),
+            Err("ambiguous")
+        );
+    }
 
     #[test]
     fn action_matching_is_exact_without_fallback() {

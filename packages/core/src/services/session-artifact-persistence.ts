@@ -11,6 +11,9 @@ export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
 export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
+export const WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY =
+  'qwen.workspace.sizeBytes';
+export const PUBLISHED_CONTENT_SHA256_METADATA_KEY = 'qwen.published.sha256';
 const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
@@ -98,6 +101,44 @@ export interface PersistedSessionArtifact {
   toolName?: string;
   hookEventName?: string;
   clientId?: string;
+}
+
+export function getWebPreviewSnapshotId(
+  artifact: Partial<PersistedSessionArtifact>,
+): string | undefined {
+  const id =
+    /^preview-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(
+      artifact.managedId ?? '',
+    )?.[1];
+  const sha256 = artifact.metadata?.[PUBLISHED_CONTENT_SHA256_METADATA_KEY];
+  if (
+    !id ||
+    artifact.kind !== 'html' ||
+    artifact.storage !== 'published' ||
+    artifact.metadata?.['artifactType'] !== 'web_preview_snapshot' ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    (artifact.source !== undefined &&
+      (artifact.source !== 'tool' ||
+        artifact.toolName?.toLowerCase() !== 'artifact')) ||
+    (artifact.toolName !== undefined &&
+      artifact.toolName.toLowerCase() !== 'artifact')
+  )
+    return undefined;
+  try {
+    const url = new URL(artifact.url ?? '');
+    if (
+      url.protocol === 'file:' &&
+      !url.host &&
+      !url.search &&
+      !url.hash &&
+      url.pathname.endsWith(`/artifacts/snapshots/${id}/index.html`)
+    )
+      return id;
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 export type SessionArtifactPersistedChangeAction =
@@ -192,7 +233,11 @@ export function selectActiveSideArtifactRecordUuids(
       nextBlockingUuid = undefined;
     } else if (
       !isSessionArtifactRecord(record) &&
-      !(record.type === 'system' && record.subtype === 'custom_title')
+      !(
+        record.type === 'system' &&
+        (record.subtype === 'custom_title' ||
+          record.subtype === 'session_sources_snapshot')
+      )
     ) {
       nextBlockingUuid = record.uuid;
     }
@@ -599,7 +644,11 @@ function isForkSafeArtifact(artifact: PersistedSessionArtifact): boolean {
   if (artifact.metadata && hasRestoreUnsafeMetadata(artifact.metadata)) {
     return false;
   }
-  if (artifact.url && hasRestoreUnsafeUrl(artifact.url)) {
+  if (
+    artifact.url &&
+    hasRestoreUnsafeUrl(artifact.url) &&
+    !getWebPreviewSnapshotId(artifact)
+  ) {
     return false;
   }
   return true;
@@ -994,8 +1043,8 @@ function normalizeMetadata(
       typeof item === 'boolean'
     ) {
       if (
-        isReservedWorkspaceMetadataKey(key) &&
-        !isWorkspaceContentMetadataEntry(key, item)
+        isAdoptableContentFingerprintKey(key) &&
+        !isContentFingerprintMetadataEntry(key, item)
       ) {
         continue;
       }
@@ -1023,7 +1072,15 @@ export function isPrototypeMetadataKey(key: string): boolean {
 export function isReservedWorkspaceMetadataKey(key: string): boolean {
   return (
     key === WORKSPACE_CONTENT_SHA256_METADATA_KEY ||
-    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY
+    key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY ||
+    key === WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY
+  );
+}
+
+export function isAdoptableContentFingerprintKey(key: string): boolean {
+  return (
+    isReservedWorkspaceMetadataKey(key) ||
+    key === PUBLISHED_CONTENT_SHA256_METADATA_KEY
   );
 }
 
@@ -1063,7 +1120,7 @@ export function metadataBudgetBytes(
   }
   const userMetadata = Object.fromEntries(
     Object.entries(metadata).filter(
-      ([key, value]) => !isWorkspaceContentMetadataEntry(key, value),
+      ([key, value]) => !isContentFingerprintMetadataEntry(key, value),
     ),
   );
   return Buffer.byteLength(JSON.stringify(userMetadata), 'utf8');
@@ -1079,7 +1136,24 @@ export function isWorkspaceContentMetadataEntry(
   if (key === WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY) {
     return typeof value === 'number' && Number.isFinite(value);
   }
+  if (key === WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  }
   return false;
+}
+
+export function isContentFingerprintMetadataEntry(
+  key: string,
+  value: string | number | boolean | null,
+): boolean {
+  if (isWorkspaceContentMetadataEntry(key, value)) {
+    return true;
+  }
+  return (
+    key === PUBLISHED_CONTENT_SHA256_METADATA_KEY &&
+    typeof value === 'string' &&
+    /^[0-9a-f]{64}$/.test(value)
+  );
 }
 
 function normalizeLiteral<T extends string>(

@@ -1,0 +1,32 @@
+{
+  "id": "opentui-noflicker",
+  "description": "OpenTUI renderer must stream with ZERO full-screen clears (no flicker) and balanced DEC 2026, vs the Ink baseline.",
+  "proves": "fixed (OpenTUI, bun) has 0 full-screen clears and 0 unbalanced DEC 2026; base (Ink, node) is the reference.",
+  "doesNotProve": "visual identity; model correctness.",
+  "terminal": { "rows": 30, "columns": 100 },
+  "timeoutMs": 60000,
+  "input": [
+    { "data": "用一句话介绍你自己", "delayMs": 2000 },
+    { "data": "\r", "delayMs": 2000 },
+    { "data": "/quit\r", "delayMs": 20000 }
+  ],
+  "env": { "TERM": "xterm-256color" },
+  "compareParams": [],
+  "commands": {
+    "base": { "argv": ["node", "packages/cli/dist/index.js"] },
+    "fixed": {
+      "argv": [
+        "env",
+        "QWEN_TUI_RENDERER=opentui",
+        "QWEN_TUI_RENDERER_STRICT=1",
+        "bun",
+        "packages/cli/dist/index.js"
+      ]
+    }
+  },
+  "thresholds": {
+    "maxFullScreenClears": 0,
+    "maxDuplicateEvents": 3,
+    "maxDec2026Unbalanced": 0
+  }
+}

@@ -7,7 +7,7 @@
 import { vi } from 'vitest';
 
 /**
- * Stateful fake of the real GeminiClient's single swap-slot contract (see
+ * Stateful fake of the real LlmClient's single swap-slot contract (see
  * beginTelemetrySwap's JSDoc in core client.ts): one open transaction at a
  * time; commit/abort release the slot. Shared by the /resume and /branch
  * hook tests so the contract has exactly one home — when it evolves,

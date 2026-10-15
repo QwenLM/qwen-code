@@ -774,6 +774,36 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('runs an action item instead of inserting it, dropping the typed query', async () => {
+    vi.useFakeTimers();
+    const onSelect = vi.fn();
+    const view = makeView('ask @custom:ne');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi
+            .fn()
+            .mockResolvedValue([{ id: 'new', label: 'New agent…', onSelect }]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 4, to: 14, insert: '' },
+      selection: { anchor: 4 },
+    });
+    expect(latest!.state).toBeNull();
+  });
+
   it('strips the mcp prefix while refreshing MCP server searches', async () => {
     vi.useFakeTimers();
     const loadMcpStatus = vi.fn().mockResolvedValue({
@@ -968,6 +998,69 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items.map((item) => item.label)).toEqual([
       'package.json',
     ]);
+  });
+
+  it('lets a custom provider claim a typed query before the file fallback', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [],
+      truncated: false,
+    });
+    const search = vi
+      .fn()
+      .mockResolvedValue([
+        { id: 'ag_1', label: 'reviewer', insertText: '@reviewer ' },
+      ]);
+    mount({
+      actions: { listDirectory },
+      providers: [
+        {
+          id: 'people',
+          label: 'People',
+          search,
+          claimsTypedQuery: (query) => 'reviewer'.startsWith(query),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@rev')));
+    await runDebounce();
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'rev' }),
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'people',
+      query: 'rev',
+    });
+  });
+
+  it('falls back to files when no custom provider claims the typed query', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [],
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      providers: [
+        {
+          id: 'people',
+          label: 'People',
+          search: vi.fn().mockResolvedValue([]),
+          claimsTypedQuery: (query) => 'reviewer'.startsWith(query),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+    expect(latest!.state).toMatchObject({ selectedProviderId: 'files' });
   });
 
   it('searches matching files across the workspace', async () => {
@@ -1274,6 +1367,27 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items[0]?.id).toBe('upload-file');
     expect(latest!.state?.items[1]?.id).toBe('current:src');
     expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
+  });
+
+  it('keeps slash queries on workspace glob search when available', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn();
+    const globWorkspace = vi.fn().mockResolvedValue({
+      matches: ['src/index.ts'],
+    });
+    mount({ actions: { listDirectory, globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[sS][rR][cC]/*',
+      expect.objectContaining({ maxResults: 50 }),
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'src/index.ts',
+    ]);
   });
 
   it('keeps built-in providers when custom provider ids collide', () => {

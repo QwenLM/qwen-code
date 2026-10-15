@@ -8,6 +8,7 @@ import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useExternalLinkOpener } from '../hooks/useExternalLinkOpener';
 import { isExternalOpenUrl } from '../utils/externalOpen';
+import { SessionPrStateIcon, sessionPrStateLabel } from './SessionPrStateIcon';
 import styles from './SessionPrBadge.module.css';
 
 interface SessionPrBadgeProps {
@@ -40,13 +41,14 @@ export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
         count: openable.length,
       })
     : t('sidebar.sessionPr', { number: latest.number });
+  const stateSuffix = sessionPrStateLabel(t, latest.state);
   return (
     <a
       className={styles.sessionPrBadge}
       href={latest.url}
       target="_blank"
       rel="noreferrer"
-      aria-label={label}
+      aria-label={stateSuffix ? `${label} · ${stateSuffix}` : label}
       title={multiple ? label : latest.url}
       {...(tabIndex !== undefined ? { tabIndex } : {})}
       onClick={(event) => {
@@ -62,7 +64,7 @@ export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
         if (event.key === 'Enter') event.stopPropagation();
       }}
     >
-      #{latest.number}
+      <SessionPrStateIcon state={latest.state} />#{latest.number}
       {multiple ? ` +${openable.length - 1}` : ''}
     </a>
   );

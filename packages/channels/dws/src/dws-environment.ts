@@ -7,6 +7,7 @@
 import process from 'node:process';
 
 const SAFE_KEYS = new Set([
+  'AONE_SANDBOX_ID',
   'APPDATA',
   'COMSPEC',
   'HOME',

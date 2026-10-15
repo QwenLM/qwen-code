@@ -5,16 +5,17 @@
   height: 20px;
   display: inline-flex;
   align-items: center;
+  gap: 3px;
   padding: 0 7px;
   border-radius: 999px;
   background: color-mix(
     in srgb,
-    var(--color-accent-fg, #8b5cf6) 10%,
+    var(--muted-foreground, #6b7280) 10%,
     transparent
   );
   color: color-mix(
     in srgb,
-    var(--color-accent-fg, #8b5cf6) 95%,
+    var(--muted-foreground, #6b7280) 75%,
     var(--foreground)
   );
   font-size: 11px;
@@ -27,7 +28,14 @@
 .sessionPrBadge:hover {
   background: color-mix(
     in srgb,
-    var(--color-accent-fg, #8b5cf6) 18%,
+    var(--muted-foreground, #6b7280) 16%,
     transparent
   );
+}
+
+/* State is carried by the GitHub-style icon, not the pill background. */
+.sessionPrBadge svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
 }

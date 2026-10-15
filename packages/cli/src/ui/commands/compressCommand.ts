@@ -5,10 +5,15 @@
  */
 
 import type { HistoryItemCompression } from '../types.js';
+import { isCompressionFailureStatus } from '@qwen-code/qwen-code-core';
 import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatCompressionTokenCount,
+  getCompressionFailureStatusText,
+} from '../utils/compression-text.js';
 
 // Cap user-supplied compression instructions. The compression side-query has
 // no input-truncation retry today, so an unbounded instruction string would
@@ -16,11 +21,6 @@ import { t } from '../../i18n/index.js';
 // recover from. 2000 chars is generous for human-typed focus directives
 // without exposing that failure mode.
 const MAX_COMPRESS_INSTRUCTIONS_CHARS = 2000;
-
-// Estimated counts (#9309) get a '~' prefix so structured/headless consumers
-// don't treat locally estimated numbers as API-reported token counts.
-const formatTokenCount = (count: number, isEstimated?: boolean) =>
-  isEstimated ? `~${count}` : String(count);
 
 export const compressCommand: SlashCommand = {
   name: 'compress',
@@ -57,8 +57,8 @@ export const compressCommand: SlashCommand = {
     };
 
     const config = context.services.config;
-    const geminiClient = config?.getGeminiClient();
-    if (!config || !geminiClient) {
+    const llmClient = config?.getLlmClient();
+    if (!config || !llmClient) {
       return {
         type: 'message',
         messageType: 'error',
@@ -82,7 +82,7 @@ export const compressCommand: SlashCommand = {
 
     const doCompress = async () => {
       const promptId = `compress-${Date.now()}`;
-      return await geminiClient.tryCompressChat(
+      return await llmClient.tryCompressChat(
         promptId,
         true,
         abortSignal,
@@ -97,25 +97,55 @@ export const compressCommand: SlashCommand = {
             yield {
               messageType: 'info' as const,
               content: truncationNotice,
+              // The daemon locale files have no translation for this sentence,
+              // so hosts that render their own language take it from here. Its
+              // own key, not `contextCompression`: the result frame that follows
+              // merges into the same block and would overwrite a shared key.
+              contextCompressionNotice: {
+                phase: 'notice' as const,
+                instructionsLimit: MAX_COMPRESS_INSTRUCTIONS_CHARS,
+              },
             };
           }
           yield {
             messageType: 'info' as const,
             content: 'Compressing context...',
+            contextCompression: { phase: 'progress' as const },
           };
           const compressed = await doCompress();
-          if (!compressed) {
+          if (
+            !compressed ||
+            isCompressionFailureStatus(compressed.compressionStatus)
+          ) {
             yield {
               messageType: 'error' as const,
-              content: t('Failed to compress chat history.'),
+              content: compressed
+                ? getCompressionFailureStatusText({
+                    compressionStatus: compressed.compressionStatus,
+                    originalTokenCount: compressed.originalTokenCount,
+                  })
+                : t('Failed to compress chat history.'),
             };
             return;
           }
           yield {
             messageType: 'info' as const,
             content:
-              `Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+              `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
               (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
+            contextCompression: {
+              phase: 'done' as const,
+              originalTokenCount: compressed.originalTokenCount,
+              newTokenCount: compressed.newTokenCount,
+              // An omitted flag travels as `false`, which is how the daemon's
+              // own banner reads it (`isEstimated ? '~' : ''`). Core is more
+              // conservative about an omitted flag (`?? true`, #9309).
+              originalTokenCountIsEstimated:
+                compressed.originalTokenCountIsEstimated ?? false,
+              newTokenCountIsEstimated:
+                compressed.newTokenCountIsEstimated ?? false,
+              ...(compressed.warning ? { warning: compressed.warning } : {}),
+            },
           };
         } catch (e) {
           yield {
@@ -147,7 +177,11 @@ export const compressCommand: SlashCommand = {
         return;
       }
 
-      if (!compressed) {
+      if (
+        !compressed ||
+        (executionMode !== 'interactive' &&
+          isCompressionFailureStatus(compressed.compressionStatus))
+      ) {
         if (executionMode === 'interactive') {
           ui.addItem(
             {
@@ -162,7 +196,12 @@ export const compressCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('Failed to compress chat history.'),
+          content: compressed
+            ? getCompressionFailureStatusText({
+                compressionStatus: compressed.compressionStatus,
+                originalTokenCount: compressed.originalTokenCount,
+              })
+            : t('Failed to compress chat history.'),
         };
       }
 
@@ -196,7 +235,7 @@ export const compressCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content:
-          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
           (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
       };
     } catch (e) {

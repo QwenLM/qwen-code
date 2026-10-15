@@ -1,5 +1,5 @@
 {
-  "$comment": "Label-driven issue assignment map; areas are keyed on the existing issue label taxonomy. Assignment is a pure function of an issue's labels — no model output is involved. Owners need push access but do NOT need a CODEOWNERS entry; every candidate is re-checked against the collaborator API at write time, so adding a login here cannot grant access to someone who lacks it. Areas match in file order, first match wins. See docs/design/2026-08-07-issue-auto-assignment.md.",
+  "$comment": "Label-driven issue assignment map; areas are keyed on the existing issue label taxonomy. Assignment is a pure function of an issue's labels — no model output is involved. Owners need push access but do NOT need a CODEOWNERS entry; every candidate is re-checked against the collaborator API at write time, so adding a login here cannot grant access to someone who lacks it. Areas match in file order, first match wins. An area's optional paths list routes PR assignment (assign-pr-owner.mjs) by changed-file prefix, longest prefix wins; the core area's packages/core/ entry is the fallback for paths no module claims. Issue assignment ignores paths; module areas sit after core so label-based issue matching still resolves core first. See docs/design/2026-08-07-issue-auto-assignment.md.",
   "requireLabels": ["need-discussion"],
   "skipLabels": [
     "welcome-pr",
@@ -13,6 +13,7 @@
     {
       "name": "core",
       "labels": ["category/core", "scope/core"],
+      "paths": ["packages/core/"],
       "owners": [
         "wenshao",
         "yiliang114",
@@ -30,6 +31,59 @@
         "zjunothing",
         "ZijianZhang989"
       ]
+    },
+    {
+      "name": "core-skills",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/skills/"],
+      "owners": ["wenshao"]
+    },
+    {
+      "name": "core-memory",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/memory/"],
+      "owners": ["wenshao"]
+    },
+    {
+      "name": "core-goals",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/goals/"],
+      "owners": ["qqqys"]
+    },
+    {
+      "name": "core-telemetry",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/telemetry/"],
+      "owners": ["zjunothing"]
+    },
+    {
+      "name": "core-extension",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/extension/"],
+      "owners": ["callmeYe"]
+    },
+    {
+      "name": "core-agents",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/agents/"],
+      "owners": ["qqqys"]
+    },
+    {
+      "name": "core-config",
+      "labels": ["scope/core"],
+      "paths": ["packages/core/src/config/"],
+      "owners": ["qqqys"]
+    },
+    {
+      "name": "core-runtime",
+      "labels": ["scope/core"],
+      "paths": [
+        "packages/core/src/core/",
+        "packages/core/src/services/",
+        "packages/core/src/tools/",
+        "packages/core/src/utils/"
+      ],
+      "owners": ["yiliang114"]
     }
   ]
 }

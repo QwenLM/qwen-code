@@ -12,10 +12,13 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SessionService,
+  SessionOrganizationService,
   Storage,
   getCronFilePath,
   readCronTasks,
+  removeCronTasks,
   updateCronTasks,
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -29,8 +32,16 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { removeTasksForSessions } from '../scheduled-task-session-lifecycle.js';
 import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
+
+const stderrLines = vi.hoisted(() => [] as string[]);
+
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/stdioHelpers.js')>()),
+  writeStderrLine: (line: string) => stderrLines.push(line),
+}));
 
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
@@ -49,15 +60,26 @@ const SECONDARY_SESSION_ID = '10000000-0000-4000-8000-000000000005';
 interface StubBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
+    modelServiceId?: string;
     sessionScope?: 'single' | 'thread';
+    parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
-  }): Promise<{ sessionId: string }>;
+  }): Promise<{ sessionId: string; modelApplied?: boolean }>;
+  sendPrompt(
+    sessionId: string,
+    req: { sessionId: string; prompt: Array<{ type: 'text'; text: string }> },
+    signal?: AbortSignal,
+    context?: { onPromptAdmitted?: () => void },
+  ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
   ensureDefaultSessionPersisted(sessionId: string): Promise<void>;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    },
   ): unknown;
   getSessionSummary(sessionId: string): {
     sessionId: string;
@@ -84,10 +106,18 @@ interface StubBridge {
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
+  spawnParents: Array<string | undefined>;
+  spawnModels: Array<string | undefined>;
+  prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
   persisted: string[];
-  named: Array<{ sessionId: string; displayName?: string }>;
+  named: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }>;
   failNext: boolean;
+  modelApplied?: boolean;
   persistenceError?: Error;
 }
 
@@ -97,6 +127,9 @@ function makeStubBridge(): StubBridge {
     spawned: [],
     spawnScopes: [],
     spawnSources: [],
+    spawnParents: [],
+    spawnModels: [],
+    prompts: [],
     closed: [],
     persisted: [],
     named: [],
@@ -111,6 +144,8 @@ function makeStubBridge(): StubBridge {
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
       bridge.spawnScopes.push(req.sessionScope);
+      bridge.spawnParents.push(req.parentSessionId);
+      bridge.spawnModels.push(req.modelServiceId);
       bridge.spawnSources.push({
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
         ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
@@ -121,7 +156,18 @@ function makeStubBridge(): StubBridge {
         hasActivePrompt: false,
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
       });
-      return { sessionId };
+      return {
+        sessionId,
+        ...(req.modelServiceId !== undefined &&
+        bridge.modelApplied !== undefined
+          ? { modelApplied: bridge.modelApplied }
+          : {}),
+      };
+    },
+    async sendPrompt(sessionId, req, _signal, context) {
+      bridge.prompts.push({ sessionId, text: req.prompt[0]?.text ?? '' });
+      context?.onPromptAdmitted?.();
+      return { stopReason: 'end_turn' };
     },
     async closeSession(sessionId: string) {
       bridge.closed.push(sessionId);
@@ -270,6 +316,7 @@ describe('scheduled-tasks routes', () => {
   let h: Harness;
 
   beforeEach(async () => {
+    stderrLines.length = 0;
     h = await makeHarness();
   });
 
@@ -414,12 +461,602 @@ describe('scheduled-tasks routes', () => {
       prompt: 'summarize the day',
       recurring: true,
       enabled: true,
+      sessionMode: 'persistent',
     });
     expect(typeof res.body.id).toBe('string');
 
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toHaveLength(1);
     expect(list.body.tasks[0].id).toBe(res.body.id);
+  });
+
+  it('dispatches each manual per-run fire into a fresh child session', async () => {
+    const created = await create({
+      name: 'Review PRs',
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.sessionMode).toBe('per_run');
+    const controllerSessionId = created.body.sessionId as string;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(childSessionId).not.toBe(controllerSessionId);
+    expect(h.bridge.spawnParents[1]).toBe(controllerSessionId);
+    expect(h.bridge.spawnSources[1]).toEqual({
+      sourceType: 'default',
+      sourceId: `scheduled_task_run:${created.body.id}`,
+    });
+    expect(h.bridge.named[1]).toEqual({
+      sessionId: childSessionId,
+      // Task label + local trigger time, so runs are told apart in the list.
+      displayName: expect.stringMatching(
+        /^Review PRs · \d{2}-\d{2} \d{2}:\d{2}$/,
+      ),
+      titleSource: 'auto',
+    });
+    expect(h.bridge.prompts).toHaveLength(1);
+    expect(h.bridge.prompts[0]).toMatchObject({ sessionId: childSessionId });
+    expect(h.bridge.prompts[0]?.text).toContain('Scheduled task: Review PRs');
+    expect(h.bridge.prompts[0]?.text).toContain(`Task ID: ${created.body.id}`);
+    expect(h.bridge.prompts[0]?.text).toContain('Schedule: 0 * * * *');
+    expect(h.bridge.prompts[0]?.text).toContain('Trigger: manual');
+    expect(h.bridge.prompts[0]?.text).toContain(
+      'This is a scheduled task run. Execute the instructions below now.',
+    );
+    expect(h.bridge.prompts[0]?.text).toMatch(/\n\nreview the next PR$/);
+    expect(run.body.runs.at(-1)).toMatchObject({
+      kind: 'manual',
+      sessionId: childSessionId,
+    });
+    const stored = await readCronTasks(h.workspace);
+    expect(stored[0]?.sessionMode).toBe('per_run');
+    expect(stored[0]?.runs?.at(-1)?.sessionId).toBe(childSessionId);
+  });
+
+  it('applies the saved model and group to each manual per-run session', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(h.bridge.spawnModels[1]).toBe('qwen-max(openai)');
+    expect(
+      (await organization.readSnapshot()).sessions.get(childSessionId),
+    ).toMatchObject({ groupId: group.id });
+    expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalled();
+  });
+
+  it('runs without a group when the saved group was deleted', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: group.id,
+    });
+    await organization.deleteGroup(group.id);
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(h.bridge.prompts).toContainEqual(
+      expect.objectContaining({ sessionId: childSessionId }),
+    );
+    expect(
+      (await organization.readSnapshot()).sessions.has(childSessionId),
+    ).toBe(false);
+    expect(stderrLines).toContainEqual(
+      expect.stringMatching(/could not be assigned.*group not found/i),
+    );
+  });
+
+  it('edits a task when the dialog re-sends its deleted group', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'original prompt',
+      sessionMode: 'per_run',
+      groupId: group.id,
+    });
+    await organization.deleteGroup(group.id);
+
+    const updated = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        prompt: 'updated prompt',
+        sessionMode: 'per_run',
+        groupId: group.id,
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      prompt: 'updated prompt',
+      groupId: group.id,
+    });
+
+    const rejected = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ groupId: 'another-missing-group' });
+
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.code).toBe('group_not_found');
+  });
+
+  it('answers 404, not group_not_found, when the task id does not exist', async () => {
+    // The missing-group probe runs before the mutation, so without an
+    // explicit ordering the handler's own 404 was masked by the 400.
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/no-such-task')
+      .send({ groupId: 'missing-group' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
+  });
+
+  it('rejects a missing group before creating the task session', async () => {
+    const res = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: 'missing-group',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('group_not_found');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('validates per-run routing fields before creating the task session', async () => {
+    const persistent = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'persistent',
+      modelServiceId: 'qwen-max(openai)',
+    });
+    const emptyModel = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: '',
+    });
+    const longGroup = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: 'g'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
+    });
+    const unsafeModel = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: 'model\nqwen serve: forged',
+    });
+
+    expect(persistent.status).toBe(400);
+    expect(persistent.body.code).toBe('session_routing_requires_per_run');
+    expect(emptyModel.status).toBe(400);
+    expect(emptyModel.body.code).toBe('invalid_model_service_id');
+    expect(longGroup.status).toBe(400);
+    expect(longGroup.body.code).toBe('invalid_group_id');
+    expect(unsafeModel.status).toBe(400);
+    expect(unsafeModel.body.code).toBe('invalid_model_service_id');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('updates and clears per-run model and group routing', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+
+    const updated = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({
+        modelServiceId: 'qwen-max(openai)',
+        groupId: group.id,
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      modelServiceId: 'qwen-max(openai)',
+      groupId: group.id,
+    });
+
+    const unsafeGroup = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ groupId: 'group\nqwen serve: forged' });
+    expect(unsafeGroup.status).toBe(400);
+    expect(unsafeGroup.body.code).toBe('invalid_group_id');
+
+    const persistent = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ sessionMode: 'persistent' });
+    expect(persistent.status).toBe(200);
+    expect(persistent.body).toMatchObject({
+      sessionMode: 'persistent',
+      modelServiceId: null,
+      groupId: null,
+    });
+  });
+
+  it('restores a per-run one-shot when fresh-session admission fails', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    h.bridge.failNext = true;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      id: created.body.id,
+      recurring: false,
+      sessionMode: 'per_run',
+      enabled: false,
+    });
+    expect(stored[0]?.runs).toHaveLength(1);
+    expect(stored[0]?.runs?.[0]).toMatchObject({
+      kind: 'manual',
+      sessionDispatchFailed: true,
+    });
+  });
+
+  it('keeps a failed per-run one-shot paused until explicitly re-enabled', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const id = created.body.id as string;
+    h.bridge.failNext = true;
+    expect(
+      (await request(h.app).post(`/scheduled-tasks/${id}/run`)).status,
+    ).toBe(500);
+    const spawnsAfterFailure = h.bridge.spawned.length;
+
+    const retry = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(retry.status).toBe(409);
+    expect(retry.body.code).toBe('task_disabled');
+    expect(h.bridge.spawned).toHaveLength(spawnsAfterFailure);
+    expect((await readCronTasks(h.workspace))[0]?.runs).toHaveLength(1);
+    const enabled = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ enabled: true });
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.enabled).toBe(true);
+
+    const rerun = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(rerun.status).toBe(200);
+    expect(h.bridge.prompts).toHaveLength(1);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('re-enabling a dispatch-failed one-shot keeps its consumed anchors', async () => {
+    // Re-seating the anchor would point a date-pinned cron at its next
+    // occurrence (up to a year out) and strand the retry — the tick's
+    // candidate window only spans the jitter around now. Keeping the
+    // consumed slot lets the scheduler's missed-one-shot pass deliver the
+    // retry (confirm-first) on the next reload.
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const id = created.body.id as string;
+    h.bridge.failNext = true;
+    expect(
+      (await request(h.app).post(`/scheduled-tasks/${id}/run`)).status,
+    ).toBe(500);
+    const stored = (await readCronTasks(h.workspace))[0];
+    expect(stored?.enabled).toBe(false);
+    expect(stored?.runs?.[0]?.sessionDispatchFailed).toBe(true);
+
+    const enabled = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ enabled: true });
+
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.enabled).toBe(true);
+    expect(enabled.body.createdAt).toBe(stored?.createdAt);
+    expect(enabled.body.lastFiredAt).toBe(stored?.lastFiredAt);
+  });
+
+  it('a schedule edit alongside the re-enable still re-seats a dispatch-failed one-shot', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const id = created.body.id as string;
+    h.bridge.failNext = true;
+    expect(
+      (await request(h.app).post(`/scheduled-tasks/${id}/run`)).status,
+    ).toBe(500);
+    const stored = (await readCronTasks(h.workspace))[0];
+
+    const now = Date.now();
+    const enabled = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ enabled: true, cron: '0 9 * * *' });
+
+    // A new schedule is a fresh intent: the task fires at its next
+    // occurrence, not as a missed retry of the consumed slot.
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.createdAt).toBeGreaterThanOrEqual(now - 5_000);
+    expect(enabled.body.createdAt).not.toBe(stored?.createdAt);
+  });
+
+  it('does not restore a per-run one-shot deleted during failed model selection', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    const id = created.body.id as string;
+    const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
+      const child = await spawnOrAttach(req);
+      expect(await readCronTasks(h.workspace)).toEqual([]);
+      expect(await removeCronTasks(h.workspace, [id])).toBe(0);
+      return { ...child, modelApplied: false };
+    });
+
+    const run = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.prompts).toEqual([]);
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('does not restore a per-run one-shot whose parent is deleted during dispatch', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    const id = created.body.id as string;
+    const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
+      const child = await spawnOrAttach(req);
+      expect(await readCronTasks(h.workspace)).toEqual([]);
+      expect(req.parentSessionId).toBe(created.body.sessionId);
+      await removeTasksForSessions(h.workspace, [req.parentSessionId!]);
+      return { ...child, modelApplied: false };
+    });
+
+    const run = await request(h.app).post(`/scheduled-tasks/${id}/run`);
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.prompts).toEqual([]);
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('restores a per-run one-shot when prompt admission rejects asynchronously', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+      groupId: group.id,
+    });
+    h.bridge.sendPrompt = vi.fn(() =>
+      Promise.reject(new SessionNotFoundError('sess-2')),
+    );
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.closed).toContain('sess-2');
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      id: created.body.id,
+      recurring: false,
+      sessionMode: 'per_run',
+      enabled: false,
+    });
+    expect(stored[0]?.runs).toHaveLength(1);
+    expect(stored[0]?.runs?.[0]).toMatchObject({
+      kind: 'manual',
+      sessionDispatchFailed: true,
+    });
+    expect((await organization.readSnapshot()).sessions.has('sess-2')).toBe(
+      false,
+    );
+  });
+
+  it('fails a per-run dispatch when the selected model is not applied', async () => {
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'run with the selected model',
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+    });
+    h.bridge.modelApplied = false;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    expect(h.bridge.closed).toContain('sess-2');
+    expect(h.bridge.prompts).toEqual([]);
+    expect((await readCronTasks(h.workspace))[0]?.runs?.at(-1)).toMatchObject({
+      sessionDispatchFailed: true,
+    });
+  });
+
+  it('restores a consumed one-shot even when an unrelated write lands during dispatch', async () => {
+    // The one-shot is removed from the store before dispatch so it cannot race
+    // its scheduled slot. The undo must not be gated on the file still being
+    // byte-identical: a recurring task's tick persist, a keepalive binding, or
+    // another client's PATCH can land inside the dispatch window, and an
+    // equality-gated undo would destroy a schedule that never executed.
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    h.bridge.spawnOrAttach = async (req) => {
+      // An unrelated task appears on the same workspace file mid-dispatch.
+      await updateCronTasks(h.workspace, (tasks) => [
+        ...tasks,
+        {
+          id: 'concurrent-task',
+          cron: '0 9 * * *',
+          prompt: 'unrelated',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: 1_700_000_000_000,
+          sessionId: CALLER_SESSION_ID,
+        },
+      ]);
+      await spawnOrAttach(req);
+      throw new Error('spawn failed');
+    };
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    const stored = await readCronTasks(h.workspace);
+    // The failed task remains visible alongside the unrelated write.
+    expect(stored.map((t) => t.id).sort()).toEqual(
+      ['concurrent-task', created.body.id].sort(),
+    );
+    expect(stored.find((t) => t.id === created.body.id)).toMatchObject({
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+  });
+
+  it('rejects a per-run conversion on a task with no bound session', async () => {
+    // Tool-created durable tasks start unbound (`cron_create` omits sessionId)
+    // and the dialog offers Edit unconditionally. Accepting the conversion
+    // would leave a task whose every manual run 500s with a phantom failed-run
+    // record until the keepalive heartbeat binds it.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'unbound-task',
+        cron: '0 9 * * *',
+        prompt: 'unbound',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+      },
+    ]);
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/unbound-task')
+      .send({ sessionMode: 'per_run' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('session_mode_requires_bound_session');
+    const stored = await readCronTasks(h.workspace);
+    expect(stored.find((t) => t.id === 'unbound-task')?.sessionMode).toBe(
+      undefined,
+    );
+  });
+
+  it('rejects invalid or channel-delivery per-run session modes', async () => {
+    const invalid = await create({
+      cron: '0 * * * *',
+      prompt: 'p',
+      sessionMode: 'new',
+    });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('invalid_session_mode');
+
+    const delivery = await create({
+      cron: '0 * * * *',
+      prompt: 'p',
+      sessionMode: 'per_run',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'u1' },
+      },
+    });
+    expect(delivery.status).toBe(400);
+    expect(delivery.body.code).toBe('session_mode_delivery_unsupported');
+    expect(h.bridge.spawned).toEqual([]);
   });
 
   it('creates and persists a task with channel delivery', async () => {
@@ -661,6 +1298,64 @@ describe('scheduled-tasks routes', () => {
     expect(liveBridge.spawned).toEqual([]);
   });
 
+  it('allows a prompt-only edit of a per_run task where dispatch is unavailable', async () => {
+    // The edit dialog prefills and re-sends the task's own sessionMode on every
+    // PATCH. Gating on the raw value would make a per_run task already on disk
+    // unsavable wherever task-session management is off — the user could only
+    // save by switching to persistent, silently changing its run semantics.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'seeded-per-run',
+        cron: '0 9 * * *',
+        prompt: 'before',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        sessionId: CALLER_SESSION_ID,
+        sessionMode: 'per_run',
+      },
+    ]);
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      // no bridge — fresh-session dispatch is unavailable here
+    });
+
+    const res = await request(app)
+      .patch('/scheduled-tasks/seeded-per-run')
+      .send({ prompt: 'after', sessionMode: 'per_run' });
+
+    expect(res.status).toBe(200);
+    const stored = await readCronTasks(h.workspace);
+    expect(stored.find((t) => t.id === 'seeded-per-run')).toMatchObject({
+      prompt: 'after',
+      sessionMode: 'per_run',
+    });
+
+    // An actual conversion is still refused where dispatch is unavailable.
+    await updateCronTasks(h.workspace, (tasks) => [
+      ...tasks,
+      {
+        id: 'seeded-persistent',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: 1_700_000_000_000,
+        sessionId: CALLER_SESSION_ID,
+      },
+    ]);
+    const converted = await request(app)
+      .patch('/scheduled-tasks/seeded-persistent')
+      .send({ sessionMode: 'per_run' });
+    expect(converted.status).toBe(409);
+    expect(converted.body.code).toBe('session_mode_unavailable');
+  });
+
   it('creates an unbound task without a bridge but rejects requested binding', async () => {
     // Mirrors createServeApp passing no bridge when resident task-session
     // management is off: binding a task to a session nothing keeps resident /
@@ -687,6 +1382,14 @@ describe('scheduled-tasks routes', () => {
     });
     expect(rejected.status).toBe(409);
     expect(rejected.body.code).toBe('session_binding_unavailable');
+
+    const perRun = await request(app).post('/scheduled-tasks').send({
+      cron: '0 11 * * *',
+      prompt: 'p',
+      sessionMode: 'per_run',
+    });
+    expect(perRun.status).toBe(409);
+    expect(perRun.body.code).toBe('session_mode_unavailable');
   });
 
   it('rejects requested binding when management is off even with an active runtime bridge', async () => {
@@ -1130,13 +1833,18 @@ describe('scheduled-tasks routes', () => {
       prompt: 'summarize the day',
     });
     expect(h.bridge.named).toEqual([
-      { sessionId: named.body.sessionId, displayName: '⏰ Digest' },
+      {
+        sessionId: named.body.sessionId,
+        displayName: 'Digest',
+        titleSource: 'auto',
+      },
     ]);
 
     const unnamed = await create({ cron: '0 9 * * *', prompt: 'do the thing' });
     expect(h.bridge.named[1]).toEqual({
       sessionId: unnamed.body.sessionId,
-      displayName: '⏰ do the thing',
+      displayName: 'do the thing',
+      titleSource: 'auto',
     });
   });
 
@@ -1291,18 +1999,57 @@ describe('scheduled-tasks routes', () => {
     expect(checks).toBe(1);
   });
 
+  it('does not create task storage when deleting from a workspace without a task file', async () => {
+    const directory = path.dirname(getCronFilePath(h.workspace));
+    await expect(fsp.access(directory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    const deleted = await request(h.app).delete(
+      '/scheduled-tasks/missing-task',
+    );
+
+    expect(deleted.status).toBe(404);
+    expect(deleted.body.code).toBe('task_not_found');
+    await expect(fsp.access(directory)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('deletes a task, then 404s on repeat', async () => {
     const created = await create({ cron: '0 9 * * *', prompt: 'x' });
     const id = created.body.id as string;
+    let deletionGeneration: number | undefined;
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [id],
+      onDeletionGenerations: (generations) => {
+        deletionGeneration = generations.get(id);
+      },
+    });
+    expect(deletionGeneration).toBe(0);
 
     const del = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(del.status).toBe(200);
     expect(del.body).toEqual({ deleted: true, id });
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [id],
+      onDeletionGenerations: (generations) => {
+        deletionGeneration = generations.get(id);
+      },
+    });
+    expect(deletionGeneration).toBe(1);
     // The task's dedicated session is torn down with it (no resident leak).
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
 
     const again = await request(h.app).delete(`/scheduled-tasks/${id}`);
     expect(again.status).toBe(404);
+    await updateCronTasks(h.workspace, (tasks) => tasks, {
+      observeDeletionIds: [id],
+      onDeletionGenerations: (generations) => {
+        deletionGeneration = generations.get(id);
+      },
+    });
+    expect(deletionGeneration).toBe(2);
     // A no-op delete (already gone) closes nothing further.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
   });
@@ -1750,7 +2497,9 @@ describe('scheduled-tasks routes', () => {
     });
     const id = created.body.id as string;
     const sid = created.body.sessionId as string;
-    expect(h.bridge.named).toEqual([{ sessionId: sid, displayName: '⏰ Old' }]);
+    expect(h.bridge.named).toEqual([
+      { sessionId: sid, displayName: 'Old', titleSource: 'auto' },
+    ]);
 
     // Renaming the task re-labels its session.
     const rename = await request(h.app)
@@ -1759,7 +2508,8 @@ describe('scheduled-tasks routes', () => {
     expect(rename.status).toBe(200);
     expect(h.bridge.named).toContainEqual({
       sessionId: sid,
-      displayName: '⏰ New',
+      displayName: 'New',
+      titleSource: 'auto',
     });
 
     // A bare cron edit does NOT re-touch the session name.
@@ -1773,7 +2523,8 @@ describe('scheduled-tasks routes', () => {
     await request(h.app).patch(`/scheduled-tasks/${id}`).send({ name: '' });
     expect(h.bridge.named).toContainEqual({
       sessionId: sid,
-      displayName: '⏰ p',
+      displayName: 'p',
+      titleSource: 'auto',
     });
   });
 
@@ -2325,17 +3076,15 @@ describe('scheduled-tasks routes', () => {
 });
 
 describe('scheduledTaskSessionName', () => {
-  it('prefixes the clock and collapses whitespace', () => {
-    expect(scheduledTaskSessionName('  Daily   digest ')).toBe(
-      '⏰ Daily digest',
-    );
+  it('keeps the title flat and collapses whitespace', () => {
+    expect(scheduledTaskSessionName('  Daily   digest ')).toBe('Daily digest');
   });
 
   it('strips terminal control sequences (else the bridge guard drops the rename)', () => {
     // The CSI sequence is flattened to a space (and collapsed), leaving no
     // control char to trip the bridge's title guard.
     const name = scheduledTaskSessionName('ab\x1b[31mc');
-    expect(name).toBe('⏰ ab c');
+    expect(name).toBe('ab c');
     // eslint-disable-next-line no-control-regex
     expect(/[\x00-\x1f\x7f-\x9f]/.test(name)).toBe(false);
   });
@@ -2360,23 +3109,23 @@ describe('scheduledTaskSessionName', () => {
     // that honor bidi. Inputs are built from code points so this test file
     // itself carries no reordering controls.
     const RLO = String.fromCodePoint(0x202e); // right-to-left override
-    expect(scheduledTaskSessionName(`inv${RLO}fdp.exe`)).toBe('⏰ invfdp.exe');
+    expect(scheduledTaskSessionName(`inv${RLO}fdp.exe`)).toBe('invfdp.exe');
     // Every isolate (U+2066 LRI, U+2067 RLI, U+2068 FSI, U+2069 PDI) too.
     const isolates = [0x2066, 0x2067, 0x2068, 0x2069]
       .map((c) => String.fromCodePoint(c))
       .join('');
-    expect(scheduledTaskSessionName(`a${isolates}b`)).toBe('⏰ ab');
+    expect(scheduledTaskSessionName(`a${isolates}b`)).toBe('ab');
     // And the remaining embedding/override chars (U+202A-U+202D).
     const embeds = [0x202a, 0x202b, 0x202c, 0x202d]
       .map((c) => String.fromCodePoint(c))
       .join('');
-    expect(scheduledTaskSessionName(`x${embeds}y`)).toBe('⏰ xy');
+    expect(scheduledTaskSessionName(`x${embeds}y`)).toBe('xy');
     // And the standalone directional marks (U+061C ALM, U+200E LRM, U+200F RLM),
     // which are also Bidi_Control but invisible rather than reordering.
     const marks = [0x061c, 0x200e, 0x200f]
       .map((c) => String.fromCodePoint(c))
       .join('');
-    expect(scheduledTaskSessionName(`m${marks}n`)).toBe('⏰ mn');
+    expect(scheduledTaskSessionName(`m${marks}n`)).toBe('mn');
   });
 });
 

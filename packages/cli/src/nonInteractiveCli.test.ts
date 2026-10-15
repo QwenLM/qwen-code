@@ -10,12 +10,13 @@ import type {
   CronJob,
   GoalJournal,
   GoalRuntime,
+  GoalSnapshotV2,
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   ToolRegistry,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   SessionMetrics,
   WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
@@ -25,7 +26,7 @@ import {
   isTelemetrySdkInitialized,
   ToolErrorType,
   shutdownTelemetry,
-  GeminiEventType,
+  LlmEventType,
   Kind,
   OutputFormat,
   uiTelemetryService,
@@ -45,12 +46,19 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForHeadlessFailure,
+  goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
+  formatGoalState,
   skipHeadlessLoopSentinel,
   TurnInterruptedError,
 } from './nonInteractiveCli.js';
@@ -60,15 +68,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import { ModSession } from './nonInteractive/mod-session.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
-import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import {
+  _resetCleanupFunctionsForTest,
+  runExitCleanup,
+} from './utils/cleanup.js';
+import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 import {
   AlreadyReportedError,
   _resetExitLatchForTest,
 } from './utils/errors.js';
+import { expectWithinLatencyBudget } from './test-utils/latency-budget.js';
 
 // Mock core modules
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
@@ -77,6 +91,9 @@ const getActiveInteractionSpanSpy = vi.hoisted(() => vi.fn());
 const addAgentOutputMessageAttributesSpy = vi.hoisted(() => vi.fn());
 const interactionSpan = vi.hoisted(() => ({}));
 vi.mock('./ui/hooks/atCommandProcessor.js');
+vi.mock('./services/review-worktree-lease.js', () => ({
+  cleanupReviewWorktreeLeases: vi.fn(),
+}));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -247,7 +264,7 @@ describe('runNonInteractive', () => {
   let mockShutdownTelemetry: Mock;
   let processStdoutSpy: MockInstance;
   let processStderrSpy: MockInstance;
-  let mockGeminiClient: {
+  let mockLlmClient: {
     sendMessageStream: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
@@ -299,6 +316,7 @@ describe('runNonInteractive', () => {
       getTool: vi.fn(),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getAllToolNames: vi.fn().mockReturnValue([]),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
     } as unknown as ToolRegistry;
 
     mockBackgroundTaskRegistry = {
@@ -317,7 +335,7 @@ describe('runNonInteractive', () => {
       abortAll: vi.fn(),
     };
 
-    mockGeminiClient = {
+    mockLlmClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
@@ -338,8 +356,9 @@ describe('runNonInteractive', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
-      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn().mockResolvedValue(undefined),
       }),
@@ -392,7 +411,7 @@ describe('runNonInteractive', () => {
       // return undefined to short-circuit the helper.
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       // Phase D-1: nonInteractiveCli calls this on every prompt to pick
-      // up the one-shot startup-worktree notice (set by gemini.tsx
+      // up the one-shot startup-worktree notice (set by llm.tsx
       // when --worktree was passed). These tests don't exercise the
       // --worktree flag, so return null to short-circuit injection
       // and let the resume-restore branch run.
@@ -483,12 +502,54 @@ describe('runNonInteractive', () => {
   }
 
   async function* createStreamFromEvents(
-    events: ServerGeminiStreamEvent[],
-  ): AsyncGenerator<ServerGeminiStreamEvent> {
+    events: ServerLlmStreamEvent[],
+  ): AsyncGenerator<ServerLlmStreamEvent> {
     for (const event of events) {
       yield event;
     }
   }
+
+  it.each([false, true])(
+    'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',
+    async (sandbox) => {
+      setupMetricsMock();
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue(
+        sandbox
+          ? {
+              workspace: '/test/project',
+              installation: '/test/installation',
+              state: '/test/state',
+              filesystem: 'workspace-write',
+              network: 'closed',
+            }
+          : undefined,
+      );
+      vi.mocked(cleanupReviewWorktreeLeases).mockClear();
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        await runExitCleanup();
+        yield { type: LlmEventType.Content, value: 'Done' };
+      });
+
+      await runNonInteractive(mockConfig, mockSettings, 'Hello', 'test-prompt');
+
+      if (sandbox) {
+        expect(cleanupReviewWorktreeLeases).not.toHaveBeenCalled();
+      } else {
+        expect(cleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt',
+          repositoryRoot: '/test/project',
+          gitTimeout: 1_000,
+        });
+        expect(cleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-prompt',
+          repositoryRoot: '/test/project',
+          gitTimeout: undefined,
+        });
+      }
+    },
+  );
 
   type GoalControlCase = {
     name: string;
@@ -544,7 +605,10 @@ describe('runNonInteractive', () => {
       expectedStatus: 'paused',
       expectedObjective: 'existing goal',
       expectedWorkers: 0,
-      expectedText: 'Goal paused: existing goal',
+      // TEXT prints the reason for every non-active status, so a headless
+      // `/goal pause` says why it stopped rather than only that it did.
+      expectedText:
+        'Goal paused: existing goal\nReason: Paused with /goal pause.',
     },
     {
       name: 'resume',
@@ -582,12 +646,539 @@ describe('runNonInteractive', () => {
     }
   }
 
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'repairs discarded Retry tools and executes only the accepted attempt in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          if (cb)
+            cb(
+              'Monitor ready',
+              '<task-notification>ready</task-notification>',
+              {
+                monitorId: 'mon_retry',
+                toolUseId: 'tool_monitor',
+                status: 'running',
+                eventCount: 1,
+              },
+            );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'abandoned attempt' },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'discarded-tool',
+                name: 'test-tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'retry-tools',
+              },
+            },
+            {
+              type: LlmEventType.Retry,
+              retryInfo: {
+                attempt: 1,
+                maxRetries: 10,
+                delayMs: 60_000,
+                skipDelay: vi.fn(),
+                ...(drain ? { message: 'Too many requests' } : {}),
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'kept-tool',
+                name: 'test-tool',
+                args: { accepted: true },
+                isClientInitiated: false,
+                prompt_id: 'retry-tools',
+              },
+            },
+            { type: LlmEventType.Content, value: 'accepted attempt' },
+            finished,
+          ]),
+        )
+        .mockImplementation(() => createStreamFromEvents([finished]));
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: 'kept-tool',
+        responseParts: [{ text: 'accepted tool execution' }],
+        resultDisplay: 'accepted',
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
+      });
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'retry-tools',
+      );
+      expect(exitCode).toBe(0);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+        callId: 'kept-tool',
+        args: { accepted: true },
+      });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+        drain ? 3 : 2,
+      );
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        `Retrying in 60s (attempt 1/10)${drain ? ': Too many requests' : ''}\n`,
+      );
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const blocks = messages.flatMap(
+        (message: { message?: { content?: unknown[] } }) =>
+          message.message?.content ?? [],
+      ) as Array<{ type?: string; id?: string; tool_use_id?: string }>;
+      const discardedUses = blocks.filter(
+        (block) => block.type === 'tool_use' && block.id === 'discarded-tool',
+      );
+      const discardedResults = blocks.filter(
+        (block) =>
+          block.type === 'tool_result' &&
+          block.tool_use_id === 'discarded-tool',
+      );
+      if (format === OutputFormat.JSON) {
+        expect(discardedUses).toEqual([]);
+        expect(discardedResults).toEqual([]);
+        expect(stdout).not.toContain('abandoned attempt');
+      } else {
+        expect(discardedUses).toHaveLength(1);
+        expect(discardedResults).toHaveLength(1);
+        const discardedUseFrame = messages.findIndex(
+          (message: {
+            type?: string;
+            message?: { content?: Array<{ type?: string; id?: string }> };
+          }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_use' && block.id === 'discarded-tool',
+            ),
+        );
+        const discardedResultFrame = messages.findIndex(
+          (message: {
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string }>;
+            };
+          }) =>
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === 'discarded-tool',
+            ),
+        );
+        expect(discardedUseFrame).toBeGreaterThanOrEqual(0);
+        expect(discardedResultFrame).toBeGreaterThan(discardedUseFrame);
+      }
+      expect(stdout).toContain('accepted attempt');
+      expect(blocks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_use', id: 'kept-tool' }),
+          expect.objectContaining({
+            type: 'tool_result',
+            tool_use_id: 'kept-tool',
+          }),
+        ]),
+      );
+    },
+  );
+
+  it.each([
+    [OutputFormat.JSON, false],
+    [OutputFormat.JSON, true],
+    [OutputFormat.STREAM_JSON, false],
+    [OutputFormat.STREAM_JSON, true],
+  ] as const)(
+    'preserves delivered text across a continuation Retry in %s (drain=%s)',
+    async (format, drain) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      if (format === OutputFormat.STREAM_JSON) {
+        vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      }
+      setupMetricsMock();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+      };
+      if (drain) {
+        mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+          cb?.(
+            'Monitor ready',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_continuation',
+              toolUseId: 'tool_monitor',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([finished]),
+        );
+      }
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'prefix ' },
+          { type: LlmEventType.Retry, isContinuation: true },
+          { type: LlmEventType.Content, value: 'suffix' },
+          finished,
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'continuation'),
+      ).resolves.toBe(0);
+
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(JSON.stringify(messages)).toContain('prefix suffix');
+      if (format === OutputFormat.STREAM_JSON) {
+        const assistantMessages = messages.filter(
+          (message: { type?: string; message?: { content?: unknown[] } }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block: { type?: string }) => block.type === 'text',
+            ),
+        );
+        expect(assistantMessages).toHaveLength(1);
+        expect(
+          messages.find(
+            (message: { type?: string }) => message.type === 'result',
+          )?.result,
+        ).toContain('prefix suffix');
+      }
+    },
+  );
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'preserves continuation text while discarding a pending recovery tool in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'prefix-answer ' },
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'recovery-tool',
+              name: 'test-tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'continuation-tool',
+            },
+          },
+          { type: LlmEventType.Retry, isContinuation: true },
+          { type: LlmEventType.Content, value: 'suffix' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'continuation-tool',
+        ),
+      ).resolves.toBe(0);
+
+      expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      const assistantText = messages
+        .filter((message: { type?: string }) => message.type === 'assistant')
+        .flatMap(
+          (message: { message?: { content?: Array<{ text?: string }> } }) =>
+            message.message?.content ?? [],
+        )
+        .map((block: { text?: string }) => block.text ?? '')
+        .join('');
+      expect(assistantText).toContain('prefix-answer suffix');
+      if (format === OutputFormat.JSON) {
+        expect(JSON.stringify(messages)).not.toContain('recovery-tool');
+      } else {
+        const useFrame = messages.findIndex(
+          (message: {
+            type?: string;
+            message?: { content?: Array<{ type?: string; id?: string }> };
+          }) =>
+            message.type === 'assistant' &&
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_use' && block.id === 'recovery-tool',
+            ),
+        );
+        const resultFrame = messages.findIndex(
+          (message: {
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string }>;
+            };
+          }) =>
+            message.message?.content?.some(
+              (block) =>
+                block.type === 'tool_result' &&
+                block.tool_use_id === 'recovery-tool',
+            ),
+        );
+        expect(useFrame).toBeGreaterThanOrEqual(0);
+        expect(resultFrame).toBeGreaterThan(useFrame);
+      }
+    },
+  );
+
+  it('repairs a discarded tool when a drain attempt falls back models', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    const finished: ServerLlmStreamEvent = {
+      type: LlmEventType.Finished,
+      value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+    };
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+        monitorId: 'mon_fallback',
+        toolUseId: 'tool_monitor',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+    const request = (callId: string): ServerLlmStreamEvent => ({
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        callId,
+        name: 'test-tool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'fallback-tools',
+      },
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([finished]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          request('discarded-tool'),
+          {
+            type: LlmEventType.ModelFallback,
+            fromModel: 'primary',
+            toModel: 'fallback',
+            fallbackIndex: 0,
+          },
+          request('kept-tool'),
+          finished,
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents([finished]));
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'kept-tool',
+      responseParts: [{ text: 'accepted' }],
+      resultDisplay: 'accepted',
+      error: undefined,
+      errorType: undefined,
+      executionStatus: 'success',
+    });
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'fallback-tools'),
+    ).resolves.toBe(0);
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+    expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+      callId: 'kept-tool',
+    });
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+    );
+    expect(JSON.stringify(messages)).not.toContain('discarded-tool');
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'model_fallback',
+        }),
+      ]),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Falling back from primary to fallback (1 buffered tool call(s) discarded).\n',
+    );
+  });
+
+  it('retains every model fallback marker across repeated JSON attempt resets', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'abandoned primary' },
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'primary',
+          toModel: 'fallback-a',
+          fallbackIndex: 0,
+        },
+        { type: LlmEventType.Content, value: 'abandoned fallback-a' },
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'fallback-a',
+          toModel: 'fallback-b',
+          fallbackIndex: 1,
+        },
+        { type: LlmEventType.Content, value: 'final answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(mockConfig, mockSettings, 'test', 'two-fallbacks'),
+    ).resolves.toBe(0);
+
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+    );
+    const fallbacks = messages.filter(
+      (message: { type?: string; subtype?: string }) =>
+        message.type === 'system' && message.subtype === 'model_fallback',
+    );
+    expect(fallbacks).toHaveLength(2);
+    expect(
+      messages.filter(
+        (message: { type?: string; subtype?: string }) =>
+          message.type === 'system' && message.subtype === 'retry',
+      ),
+    ).toHaveLength(2);
+    expect(fallbacks).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          fromModel: 'primary',
+          toModel: 'fallback-a',
+        }),
+      }),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          fromModel: 'fallback-a',
+          toModel: 'fallback-b',
+        }),
+      }),
+    ]);
+    const output = JSON.stringify(messages);
+    expect(output).not.toContain('abandoned primary');
+    expect(output).not.toContain('abandoned fallback-a');
+    expect(output).toContain('final answer');
+  });
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits a structured marker for a bare Retry in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned answer' },
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'final answer' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'test', 'bare-retry'),
+      ).resolves.toBe(0);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'retry',
+            data: expect.objectContaining({
+              discardedToolCalls: 0,
+              preserveText: false,
+            }),
+          }),
+        ]),
+      );
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(
+        'Retrying provider attempt (0 buffered tool call(s) discarded).',
+      );
+      expect(stderr).not.toContain('undefined');
+    },
+  );
+
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
-    mockGeminiClient.sendMessageStream.mockImplementation(() =>
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
       createStreamFromEvents([
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -613,7 +1204,7 @@ describe('runNonInteractive', () => {
       );
 
       expect(exitCode).toBe(0);
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
         testCase.expectedWorkers,
       );
       expect(processStdoutSpy).toHaveBeenCalledWith(
@@ -656,7 +1247,7 @@ describe('runNonInteractive', () => {
       );
 
       expect(exitCode).toBe(0);
-      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
       expect(processStdoutSpy).toHaveBeenCalledWith(`${expectedText}\n`);
     },
   );
@@ -676,26 +1267,33 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
+    mockToolRegistry.getAllToolNames.mockReturnValue([
+      'tool_search',
+      'tool_call',
+    ]);
     await prepareGoalState('paused');
     mockFinishedGoalWorker();
+    const abortController = new AbortController();
 
     await runNonInteractive(
       mockConfig,
       mockSettings,
       '/goal resume',
       'goal-resume-exact',
+      { abortController },
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
-    const [parts, , , options] =
-      mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts, , , options] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain('In Direct mode:');
+    expect(parts[0]?.text).not.toContain('In Code Mode, discover');
     expect(parts[0]?.text).toContain(
       `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
     );
@@ -715,6 +1313,16 @@ describe('runNonInteractive', () => {
       `goal-runtime:${options.goalPermit.turnId}`,
     );
     expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+    expect(options.getInterruptedGoalPauseReason()).toBe(
+      GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    );
+    expect(
+      options.getInterruptedGoalPauseReason({ failure: '503 upstream down' }),
+    ).toBe(goalPauseReasonForHeadlessFailure('503 upstream down'));
+    abortController.abort();
+    expect(options.getInterruptedGoalPauseReason()).toBe(
+      GOAL_PAUSE_REASON_USER_INTERRUPT,
+    );
   });
 
   it('includes verifier feedback in a scheduled Goal continuation', async () => {
@@ -740,10 +1348,196 @@ describe('runNonInteractive', () => {
       'goal-runtime-feedback',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
-    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
       'Verifier feedback: Need independent evidence',
+    );
+  });
+
+  it('carries the spend figures into a scheduled Goal continuation', async () => {
+    // The host copies `usage` onto its own turn record. The field is optional
+    // on both sides, so a dropped copy typechecks and costs the prompt its
+    // budget line on this host alone.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-usage',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'Budget: 1,234 of 30,000,000 tokens used, 29,998,766 remaining; 4 Goal turns finished.',
+    );
+  });
+
+  it('carries the objective-updated notice into a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            objectiveUpdated: true,
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-notice',
+    );
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts, , , options] = mockLlmClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The Goal objective changed since your last turn',
+    );
+    expect(deliveredSpy).toHaveBeenCalledWith(options.goalTurnKey);
+  });
+
+  it('marks a follow-up continuation delivered when the finished turn schedules it', async () => {
+    // The first segment finishes through the real runtime, which schedules
+    // the next continuation into the headless queue; the promotion site has
+    // to mark that turn delivered before its prompt goes out, or a later
+    // fail-closed settle would roll its announcement back and re-fire the
+    // notice.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockImplementationOnce(realFinishTurn)
+      .mockResolvedValue(undefined);
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-promoted',
+    );
+
+    expect(finishTurn).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const sentKeys = mockLlmClient.sendMessageStream.mock.calls.map(
+      (call) => call[3].goalTurnKey,
+    );
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(deliveredSpy.mock.calls.map((call) => call[0])).toEqual(sentKeys);
+    // The promoted turn was marked before its prompt was sent.
+    expect(deliveredSpy.mock.invocationCallOrder[1]!).toBeLessThan(
+      mockLlmClient.sendMessageStream.mock.invocationCallOrder[1]!,
+    );
+  });
+
+  it('marks a follow-up continuation delivered after a tool-terminated segment', async () => {
+    // Same promotion, other branch: the first segment ends because a tool
+    // result terminated the turn (an update_goal proposal), and the real
+    // runtime schedules the next continuation from there.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockImplementationOnce(realFinishTurn)
+      .mockResolvedValue(undefined);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'update-goal-promoted',
+      responseParts: [{ text: 'proposal recorded' }],
+      resultDisplay: 'proposal recorded',
+      error: undefined,
+      errorType: undefined,
+      terminateTurn: true,
+    });
+    const finished = () =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]);
+    mockLlmClient.sendMessageStream
+      .mockImplementationOnce(
+        (
+          _parts: Part[],
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: { goalPermit?: GoalTurnPermit },
+        ) =>
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'update-goal-promoted',
+                name: 'update_goal',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-runtime-promoted-tool',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]),
+      )
+      .mockImplementation(finished);
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-promoted-tool',
+    );
+
+    expect(finishTurn).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const sentKeys = mockLlmClient.sendMessageStream.mock.calls.map(
+      (call) => call[3].goalTurnKey,
+    );
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(deliveredSpy.mock.calls.map((call) => call[0])).toEqual(sentKeys);
+    expect(deliveredSpy.mock.invocationCallOrder[1]!).toBeLessThan(
+      mockLlmClient.sendMessageStream.mock.invocationCallOrder[1]!,
     );
   });
 
@@ -767,10 +1561,10 @@ describe('runNonInteractive', () => {
       'goal-runtime-wind-down',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
-    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
-      'The autonomous token budget for this Goal window is spent.',
+      'An autonomous budget for this Goal window is spent',
     );
   });
 
@@ -783,7 +1577,7 @@ describe('runNonInteractive', () => {
       responseParts: [{ text: 'tool response' }],
     });
     let requestCount = 0;
-    mockGeminiClient.sendMessageStream.mockImplementation(
+    mockLlmClient.sendMessageStream.mockImplementation(
       (
         _parts: Part[],
         _signal: AbortSignal,
@@ -794,7 +1588,7 @@ describe('runNonInteractive', () => {
         if (requestCount === 1) {
           return createStreamFromEvents([
             {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: 'goal-tool-1',
                 name: 'testTool',
@@ -808,7 +1602,7 @@ describe('runNonInteractive', () => {
         }
         return createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 0 },
@@ -825,9 +1619,9 @@ describe('runNonInteractive', () => {
       'goal-resume-tool-result',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    const firstOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
-    const secondOptions = mockGeminiClient.sendMessageStream.mock.calls[1]![3];
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const firstOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
+    const secondOptions = mockLlmClient.sendMessageStream.mock.calls[1]![3];
     expect(secondOptions).toMatchObject({
       type: SendMessageType.ToolResult,
       goalPermit: firstOptions.goalPermit,
@@ -864,7 +1658,7 @@ describe('runNonInteractive', () => {
       };
     });
     let requestCount = 0;
-    mockGeminiClient.sendMessageStream.mockImplementation(
+    mockLlmClient.sendMessageStream.mockImplementation(
       (
         _parts: Part[],
         _signal: AbortSignal,
@@ -875,7 +1669,7 @@ describe('runNonInteractive', () => {
         if (requestCount === 1) {
           return createStreamFromEvents([
             {
-              type: GeminiEventType.ToolCallRequest,
+              type: LlmEventType.ToolCallRequest,
               value: {
                 callId: 'goal-tool-with-teammate',
                 name: 'testTool',
@@ -889,7 +1683,7 @@ describe('runNonInteractive', () => {
         }
         return createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 0 },
@@ -906,10 +1700,10 @@ describe('runNonInteractive', () => {
       'goal-teammate-handoff',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    const firstOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const firstOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
     const [, , secondPromptId, secondOptions] =
-      mockGeminiClient.sendMessageStream.mock.calls[1]!;
+      mockLlmClient.sendMessageStream.mock.calls[1]!;
     expect(secondPromptId).toBe('goal-teammate-handoff/teammate/2');
     expect(secondOptions).toMatchObject({
       type: SendMessageType.Teammate,
@@ -921,7 +1715,7 @@ describe('runNonInteractive', () => {
       promptId: 'goal-teammate-handoff',
     });
     expect(endInteractionSpanSpy.mock.invocationCallOrder[0]).toBeLessThan(
-      mockGeminiClient.sendMessageStream.mock.invocationCallOrder[1]!,
+      mockLlmClient.sendMessageStream.mock.invocationCallOrder[1]!,
     );
   });
 
@@ -940,7 +1734,7 @@ describe('runNonInteractive', () => {
       errorType: undefined,
       terminateTurn: true,
     });
-    mockGeminiClient.sendMessageStream.mockImplementation(
+    mockLlmClient.sendMessageStream.mockImplementation(
       (
         _parts: Part[],
         _signal: AbortSignal,
@@ -949,7 +1743,7 @@ describe('runNonInteractive', () => {
       ) =>
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'update-goal-terminal',
               name: 'update_goal',
@@ -970,8 +1764,8 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(0);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
-    expect(mockGeminiClient.addHistory).toHaveBeenCalledWith({
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    expect(mockLlmClient.addHistory).toHaveBeenCalledWith({
       role: 'user',
       parts: [{ text: 'proposal recorded' }],
     });
@@ -999,7 +1793,7 @@ describe('runNonInteractive', () => {
       responseParts: [{ text: 'proposal recorded' }],
       terminateTurn: true,
     });
-    mockGeminiClient.sendMessageStream.mockImplementation(
+    mockLlmClient.sendMessageStream.mockImplementation(
       (
         _parts: Part[],
         _signal: AbortSignal,
@@ -1008,7 +1802,7 @@ describe('runNonInteractive', () => {
       ) =>
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'update-goal-state-stream',
               name: 'update_goal',
@@ -1059,11 +1853,11 @@ describe('runNonInteractive', () => {
         finalize: vi.fn().mockResolvedValue(undefined),
       })),
     });
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'still working' },
+        { type: LlmEventType.Content, value: 'still working' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -1095,11 +1889,11 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockResolvedValue({
       responseParts: [{ text: 'tool response' }],
     });
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'goal-unlimited-turns-tool',
               name: 'testTool',
@@ -1113,7 +1907,7 @@ describe('runNonInteractive', () => {
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 0 },
@@ -1130,7 +1924,7 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(0);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
   });
 
@@ -1153,8 +1947,13 @@ describe('runNonInteractive', () => {
       ),
     ).rejects.toThrow('process.exit(53) called');
 
-    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     expect(goalStatusAtExit).toBe('paused');
+    expect(goalRuntime.getSnapshot().goal?.lastReason).toBe(
+      goalPauseReasonForHeadlessFailure(
+        'Headless Goal stopped after the session turn limit',
+      ),
+    );
   });
 
   it('keeps explicit tool-call budgets on runtime Goal work', async () => {
@@ -1163,10 +1962,10 @@ describe('runNonInteractive', () => {
     await prepareGoalState('paused');
     vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
     vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(0);
-    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
       createStreamFromEvents([
         {
-          type: GeminiEventType.ToolCallRequest,
+          type: LlmEventType.ToolCallRequest,
           value: {
             callId: 'goal-explicit-budget-tool',
             name: 'testTool',
@@ -1206,8 +2005,17 @@ describe('runNonInteractive', () => {
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
     expect(goalRuntime.getSnapshot()).toMatchObject({
       activity: 'idle',
-      goal: { status: 'paused' },
+      // The budget is what stopped this Goal. The generic failure prose
+      // would tell a headless user their turn broke and point them at a
+      // slash command in a process that has already exited.
+      goal: {
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('tool-calls'),
+      },
     });
+    expect(
+      mockLlmClient.sendMessageStream.mock.calls[0]![3].getInterruptedGoalPauseReason(),
+    ).toBe(goalPauseReasonForRunBudget('tool-calls'));
 
     void run;
   });
@@ -1225,9 +2033,9 @@ describe('runNonInteractive', () => {
         interactionOpen = false;
       }
     });
-    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
       (async function* () {
-        yield { type: GeminiEventType.Content, value: 'partial response' };
+        yield { type: LlmEventType.Content, value: 'partial response' };
         if (!runAbortController.signal.aborted) {
           await new Promise<void>((_, reject) => {
             runAbortController.signal.addEventListener(
@@ -1291,10 +2099,10 @@ describe('runNonInteractive', () => {
       responseParts: [{ text: 'proposal recorded' }],
       terminateTurn: true,
     });
-    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
       createStreamFromEvents([
         {
-          type: GeminiEventType.ToolCallRequest,
+          type: LlmEventType.ToolCallRequest,
           value: {
             callId: 'goal-wall-budget',
             name: 'update_goal',
@@ -1323,10 +2131,270 @@ describe('runNonInteractive', () => {
     );
     expect(goalRuntime.getSnapshot()).toMatchObject({
       activity: 'idle',
-      goal: { status: 'paused' },
+      // Same discrimination in the settlement window, where the abort
+      // listener inside `finishGoalTurn` is the writer that settles first.
+      goal: {
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('wall-time'),
+      },
     });
 
     void run;
+  });
+
+  it('names the wall-time budget when the model stream settles the interrupted Goal turn', async () => {
+    // The pause that reaches the record on a mid-stream stop is the one
+    // `LlmClient.sendMessageStream` dispatches from inside its own generator,
+    // before headless ever sees the error -- so the stub below settles the
+    // turn the way that generator does, reading the reason off the host
+    // resolver. Without the resolver a budget stop reads as a user interrupt.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
+    const runAbortController = new AbortController();
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+    mockLlmClient.sendMessageStream.mockImplementationOnce(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: {
+          goalPermit: GoalTurnPermit;
+          getInterruptedGoalPauseReason: () => string;
+        },
+      ) =>
+        (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+          await new Promise<void>((resolve) => {
+            if (runAbortController.signal.aborted) {
+              resolve();
+              return;
+            }
+            runAbortController.signal.addEventListener(
+              'abort',
+              () => resolve(),
+              { once: true },
+            );
+          });
+          await goalRuntime.dispatch({
+            action: 'pause',
+            expectedGoalId: sendOptions.goalPermit.goalId,
+            expectedRevision: sendOptions.goalPermit.revision,
+            reason: sendOptions.getInterruptedGoalPauseReason(),
+          });
+          await goalRuntime.finishTurn(sendOptions.goalPermit);
+          yield { type: LlmEventType.UserCancelled };
+        })(),
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-wall-budget-in-generator',
+      { abortController: runAbortController },
+    ).catch(() => undefined);
+
+    await vi.waitFor(() =>
+      expect(goalRuntime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: goalPauseReasonForRunBudget('wall-time'),
+      }),
+    );
+
+    void run;
+  });
+
+  it('names the failure in the headless register when an interrupted Goal turn dies', async () => {
+    // A model stream that fails without aborting the run is the dominant
+    // headless Goal failure, and it settles in the same generator. The
+    // interactive failure wording would tell a process that has already
+    // exited to run a slash command; the clean run-ended wording would claim
+    // a run that died finished.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+    mockLlmClient.sendMessageStream.mockImplementationOnce(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: {
+          goalPermit: GoalTurnPermit;
+          getInterruptedGoalPauseReason: () => string;
+        },
+      ) =>
+        (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+          await goalRuntime.dispatch({
+            action: 'pause',
+            expectedGoalId: sendOptions.goalPermit.goalId,
+            expectedRevision: sendOptions.goalPermit.revision,
+            reason: sendOptions.getInterruptedGoalPauseReason({
+              failure: 'the model stream broke',
+            }),
+          });
+          await goalRuntime.finishTurn(sendOptions.goalPermit);
+          yield {
+            type: LlmEventType.Error,
+            value: {
+              error: { message: 'the model stream broke', status: 500 },
+            },
+          };
+        })(),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-headless-stream-error',
+    ).catch(() => undefined);
+
+    const { goal } = goalRuntime.getSnapshot();
+    expect(goal).toMatchObject({
+      status: 'paused',
+      lastReason: goalPauseReasonForHeadlessFailure('the model stream broke'),
+    });
+    // A run that died did not end cleanly, and a process that has already
+    // exited cannot run a slash command.
+    expect(goal?.lastReason).not.toBe(GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED);
+    expect(goal?.lastReason).not.toContain('/goal resume');
+  });
+
+  it('records a user interrupt when the abort lands inside the settle window', async () => {
+    // The same Ctrl+C a moment earlier is routed by `routeAbort` and named a
+    // user interrupt; landing in `finishTurn`'s persistence window must not
+    // change what the journal says happened.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const runAbortController = new AbortController();
+    let enteredFinishTurn: () => void = () => {};
+    const inFinishTurn = new Promise<void>((resolve) => {
+      enteredFinishTurn = resolve;
+    });
+    vi.spyOn(goalRuntime, 'finishTurn').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          enteredFinishTurn();
+          runAbortController.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        }),
+    );
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        },
+      ]),
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-settle-window-interrupt',
+      { abortController: runAbortController, recoverableCancellation: true },
+    ).catch(() => undefined);
+    await inFinishTurn;
+    runAbortController.abort();
+    await run;
+
+    expect(goalRuntime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+    });
+  });
+
+  it('records a user interrupt when a Goal run is cancelled outside any budget', async () => {
+    // `routeAbort` is the writer here, and with no budget tripped the stop
+    // is the user's own, not a run that ran out of its allowance.
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const runAbortController = new AbortController();
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        runAbortController.abort();
+        yield {
+          type: LlmEventType.UserCancelled,
+        } as ServerLlmStreamEvent;
+      })(),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-user-cancel',
+      { abortController: runAbortController, recoverableCancellation: true },
+    ).catch(() => undefined);
+
+    expect(goalRuntime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+    });
+  });
+
+  it('records the headless register when a Goal run ends with structured output', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    (mockConfig.getJsonSchema as Mock).mockReturnValue({
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+    });
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'ok' }],
+    });
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-structured-goal',
+            name: 'structured_output',
+            args: { summary: 'done' },
+            isClientInitiated: false,
+            prompt_id: 'goal-structured-output',
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-structured-output',
+    );
+
+    const { goal } = goalRuntime.getSnapshot();
+    expect(goal).toMatchObject({
+      status: 'paused',
+      lastReason: GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+    });
+    // The run succeeded; nothing here failed, and the process is exiting.
+    expect(goal?.lastReason).not.toContain('could not finish');
+    expect(goal?.lastReason).not.toContain('/goal resume');
   });
 
   it('claims an active Goal for real user input before binding the host', async () => {
@@ -1346,7 +2414,7 @@ describe('runNonInteractive', () => {
     expect(beginTurn.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(mockConfig.bindGoalTurnHost).mock.invocationCallOrder[0]!,
     );
-    expect(mockGeminiClient.sendMessageStream.mock.calls[0]![3]).toMatchObject({
+    expect(mockLlmClient.sendMessageStream.mock.calls[0]![3]).toMatchObject({
       type: SendMessageType.UserQuery,
       goalOrigin: 'user',
       goalTurnKey: 'goal-real-user',
@@ -1377,12 +2445,12 @@ describe('runNonInteractive', () => {
     await vi.waitFor(() =>
       expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
     );
-    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
 
     await finishOccupyingTurn(occupyingPermit!);
     await run;
 
-    const sendOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
+    const sendOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
     expect(sendOptions).toMatchObject({
       type: SendMessageType.UserQuery,
       goalOrigin: 'user',
@@ -1396,7 +2464,7 @@ describe('runNonInteractive', () => {
     expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
   });
 
-  it('emits direct Goal v2 state before the legacy partial projection', async () => {
+  it('emits Goal v2 state as the only Goal stream event with partial messages on', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('active');
@@ -1418,17 +2486,17 @@ describe('runNonInteractive', () => {
       )
       .map(({ event }) => event?.type)
       .filter((type) => type === 'goal_state' || type === 'active_goal');
-    expect(goalEventTypes).toEqual(['goal_state', 'active_goal']);
-    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(goalEventTypes).toEqual(['goal_state']);
+    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
   const headlessImageParts: Part[] = [
     { text: 'inspect this image' },
     { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
   ];
-  const finishedEvents: ServerGeminiStreamEvent[] = [
+  const finishedEvents: ServerLlmStreamEvent[] = [
     {
-      type: GeminiEventType.Finished,
+      type: LlmEventType.Finished,
       value: {
         reason: undefined,
         usageMetadata: { totalTokenCount: 1 },
@@ -1470,15 +2538,15 @@ describe('runNonInteractive', () => {
 
   it('should process input and write text output', async () => {
     setupMetricsMock();
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Hello' },
-      { type: GeminiEventType.Content, value: ' World' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Hello' },
+      { type: LlmEventType.Content, value: ' World' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -1489,7 +2557,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'Test input' }],
       expect.any(AbortSignal),
       'prompt-id-1',
@@ -1514,8 +2582,8 @@ describe('runNonInteractive', () => {
       permission: { handleWorkflowApproval },
     } as unknown as ControlService;
     const approvalSignal = new AbortController().signal;
-    mockGeminiClient.sendMessageStream.mockImplementation(
-      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+    mockLlmClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerLlmStreamEvent> {
         const callback = setApprovalRequestCallback.mock.calls[0]?.[0] as
           | WorkflowApprovalRequestCallback
           | undefined;
@@ -1530,7 +2598,7 @@ describe('runNonInteractive', () => {
           approvalSignal,
         );
         yield {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -1558,10 +2626,10 @@ describe('runNonInteractive', () => {
     mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
       setApprovalRequestCallback,
     });
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -1582,10 +2650,10 @@ describe('runNonInteractive', () => {
     vi.mocked(mockConfig.consumePendingRecoveredAgentsNotice).mockReturnValue(
       'Restored 2 background agents from the previous session.',
     );
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
         },
       ]),
@@ -1599,7 +2667,7 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockConfig.consumePendingRecoveredAgentsNotice).toHaveBeenCalled();
-    const [request] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    const [request] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     // The notice is prepended as a system-reminder ahead of the user prompt.
     expect(request).toEqual([
       {
@@ -1623,8 +2691,9 @@ describe('runNonInteractive', () => {
     vi.mocked(mockConfig.consumePendingRecoveredAgentsNotice).mockReturnValue(
       'Restored 2 background agents from the previous session.',
     );
-    mockGeminiClient.getChat = vi.fn(() => ({
+    mockLlmClient.getChat = vi.fn(() => ({
       getDebugResponses: mockGetDebugResponses,
+      getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistory: vi.fn().mockReturnValue([
         {
           role: 'model',
@@ -1632,10 +2701,10 @@ describe('runNonInteractive', () => {
         },
       ]),
     }));
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
         },
       ]),
@@ -1650,7 +2719,7 @@ describe('runNonInteractive', () => {
     expect(
       mockConfig.consumePendingRecoveredAgentsNotice,
     ).not.toHaveBeenCalled();
-    const [request] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    const [request] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(request).toEqual([
       {
         functionResponse: {
@@ -1675,8 +2744,8 @@ describe('runNonInteractive', () => {
     vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
     vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
     let emittedApproval = false;
-    mockGeminiClient.sendMessageStream.mockImplementation(
-      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+    mockLlmClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerLlmStreamEvent> {
         if (!emittedApproval) {
           emittedApproval = true;
           teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
@@ -1694,7 +2763,7 @@ describe('runNonInteractive', () => {
           });
         }
         yield {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -1711,7 +2780,11 @@ describe('runNonInteractive', () => {
     );
 
     await vi.waitFor(() =>
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: expect.stringContaining(
+          'requires an explicit interactive approval surface',
+        ),
+      }),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -1736,8 +2809,8 @@ describe('runNonInteractive', () => {
     vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
     vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
     let emittedApproval = false;
-    mockGeminiClient.sendMessageStream.mockImplementation(
-      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+    mockLlmClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerLlmStreamEvent> {
         if (!emittedApproval) {
           emittedApproval = true;
           teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
@@ -1755,7 +2828,7 @@ describe('runNonInteractive', () => {
           });
         }
         yield {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -1772,7 +2845,11 @@ describe('runNonInteractive', () => {
     );
 
     await vi.waitFor(() =>
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: expect.stringContaining(
+          `current approval mode (${ApprovalMode.DEFAULT})`,
+        ),
+      }),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -1795,18 +2872,19 @@ describe('runNonInteractive', () => {
       // The orphan strip + restore is owned by the Retry send path in
       // client.ts (covered by client.test.ts); here we only assert the
       // continuation hands off to that path with Retry semantics.
-      mockGeminiClient.getChat = vi.fn(() => ({
+      mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([
             { role: 'user', parts: [{ text: 'do the thing' }] },
           ]),
       }));
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
           },
         ]),
@@ -1816,7 +2894,7 @@ describe('runNonInteractive', () => {
         continueInterrupted: true,
       });
 
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
         [{ text: 'do the thing' }],
         expect.any(AbortSignal),
         'prompt-c1',
@@ -1827,19 +2905,20 @@ describe('runNonInteractive', () => {
     it('adds plan mode reminders to an interrupted prompt replay', async () => {
       setupMetricsMock();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
-      mockGeminiClient.getChat = vi.fn(() => ({
+      mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+      mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([
             { role: 'user', parts: [{ text: 'do the thing' }] },
           ]),
       }));
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
           },
         ]),
@@ -1850,7 +2929,7 @@ describe('runNonInteractive', () => {
       });
 
       const [request, , , options] =
-        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+        mockLlmClient.sendMessageStream.mock.calls[0]!;
       expect(options).toEqual(
         expect.objectContaining({ type: SendMessageType.Retry }),
       );
@@ -1862,8 +2941,9 @@ describe('runNonInteractive', () => {
 
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
       setupMetricsMock();
-      mockGeminiClient.getChat = vi.fn(() => ({
+      mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -1871,10 +2951,10 @@ describe('runNonInteractive', () => {
           },
         ]),
       }));
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
           },
         ]),
@@ -1885,7 +2965,7 @@ describe('runNonInteractive', () => {
       });
 
       const [request, , , options] =
-        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+        mockLlmClient.sendMessageStream.mock.calls[0]!;
       expect(options).toEqual(
         expect.objectContaining({ type: SendMessageType.ToolResult }),
       );
@@ -1903,8 +2983,9 @@ describe('runNonInteractive', () => {
     it('adds plan mode reminders to a continued tool result without moving function responses', async () => {
       setupMetricsMock();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      mockGeminiClient.getChat = vi.fn(() => ({
+      mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -1912,10 +2993,10 @@ describe('runNonInteractive', () => {
           },
         ]),
       }));
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
           },
         ]),
@@ -1932,7 +3013,7 @@ describe('runNonInteractive', () => {
       );
 
       const [request, , , options] =
-        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+        mockLlmClient.sendMessageStream.mock.calls[0]!;
       expect(options).toEqual(
         expect.objectContaining({ type: SendMessageType.ToolResult }),
       );
@@ -1950,8 +3031,9 @@ describe('runNonInteractive', () => {
 
     it('is a no-op when the last turn ended cleanly', async () => {
       setupMetricsMock();
-      mockGeminiClient.getChat = vi.fn(() => ({
+      mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
@@ -1961,7 +3043,115 @@ describe('runNonInteractive', () => {
         continueInterrupted: true,
       });
 
-      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cancelled model prompt after a completed local command', async () => {
+      setupMetricsMock();
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'do the thing' }],
+      };
+      markApiHistoryPrompt(content, 'client-A');
+      const historyOwner = { history: [content] } as unknown as LlmChat;
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: () => LlmChat.prototype.getHistory.call(historyOwner),
+        getHistoryShallow: () =>
+          LlmChat.prototype.getHistoryShallow.call(historyOwner),
+      }));
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            uuid: 'user-A',
+            type: 'user',
+            promptId: 'client-A',
+            daemonPromptId: 'daemon-A',
+            message: content,
+          },
+          {
+            uuid: 'cancel-A',
+            type: 'system',
+            subtype: 'turn_result',
+            promptId: 'client-A',
+            systemPayload: {
+              promptId: 'daemon-A',
+              state: 'cancelled',
+              cancelledAt: 1,
+              cancelReason: 'user',
+              endedAt: 2,
+            },
+          },
+          {
+            uuid: 'docs-B',
+            type: 'user',
+            promptId: 'client-B',
+            daemonPromptId: 'daemon-B',
+            message: { role: 'user', parts: [{ text: '/docs' }] },
+          },
+          {
+            uuid: 'complete-B',
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'daemon-B',
+              state: 'completed',
+              endedAt: 3,
+            },
+          },
+        ]);
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-continue-A',
+        { continueInterrupted: true },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No interrupted turn to continue.'),
+      );
+    });
+
+    it('refuses direct continuation of an unknown legacy cancellation', async () => {
+      setupMetricsMock();
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            type: 'system',
+            subtype: 'turn_result',
+            uuid: 'cancel',
+            systemPayload: {
+              promptId: 'turn-9',
+              state: 'cancelled',
+              cancelledAt: 1,
+              endedAt: 2,
+            },
+          },
+        ]);
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c5',
+        { continueInterrupted: true },
+      );
+      expect(exitCode).toBe(0);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
   });
 
@@ -1975,15 +3165,15 @@ describe('runNonInteractive', () => {
       .spyOn(process.stdout, 'destroy')
       .mockReturnValue(process.stdout);
 
-    mockGeminiClient.sendMessageStream.mockImplementation(
-      async function* mockStream(): AsyncGenerator<ServerGeminiStreamEvent> {
+    mockLlmClient.sendMessageStream.mockImplementation(
+      async function* mockStream(): AsyncGenerator<ServerLlmStreamEvent> {
         process.stdout.emit(
           'error',
           Object.assign(new Error('EPIPE'), { code: 'EPIPE' }),
         );
-        yield { type: GeminiEventType.Content, value: 'Hello' };
+        yield { type: LlmEventType.Content, value: 'Hello' };
         yield {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 0 },
@@ -1997,10 +3187,103 @@ describe('runNonInteractive', () => {
     expect(stdoutDestroySpy).toHaveBeenCalled();
   });
 
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'surfaces Stop hook system messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          { type: LlmEventType.HookSystemMessage, value: warning },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-cap');
+      const warnings = processStderrSpy.mock.calls.filter(([text]) =>
+        String(text).includes(warning),
+      );
+      expect(warnings).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+    },
+  );
+
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'sanitizes queued Stop hook messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      mockMonitorRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          if (!callback) return;
+          callback(
+            'Monitor event',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_1',
+              toolUseId: 'tool_mon_1',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        },
+      );
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'done' },
+            ...finishedEvents,
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.HookSystemMessage,
+              value: '\u001b[2J' + warning + '\u202e',
+            },
+            ...finishedEvents,
+          ]),
+        );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-drain');
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        processStderrSpy.mock.calls.filter(([text]) =>
+          String(text).includes(warning),
+        ),
+      ).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+      const output = processStderrSpy.mock.calls
+        .map(([text]) => String(text))
+        .join('');
+      expect(output).not.toContain('\u001b');
+      expect(output).not.toContain('\u202e');
+    },
+  );
+
+  it('neutralizes terminal control characters in Stop hook system messages', async () => {
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.HookSystemMessage,
+          value: 'hook says \u001b[2Jhello\u202e',
+        },
+      ]),
+    );
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-output');
+    const output = processStderrSpy.mock.calls
+      .map(([text]) => String(text))
+      .join('');
+    expect(output).toContain('hook says');
+    expect(output).toContain('hello');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u202e');
+  });
+
   it('returns non-zero and skips pending tool calls after loop detection', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'testTool',
@@ -2009,14 +3292,14 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-loop-detected',
       },
     };
-    const events: ServerGeminiStreamEvent[] = [
+    const events: ServerLlmStreamEvent[] = [
       toolCallEvent,
       {
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -2037,8 +3320,8 @@ describe('runNonInteractive', () => {
 
   it('shows the always-on hint (not the skipLoopDetection escape) for a consecutive-identical halt', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'run_shell_command',
@@ -2047,14 +3330,14 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-consecutive-loop',
       },
     };
-    const events: ServerGeminiStreamEvent[] = [
+    const events: ServerLlmStreamEvent[] = [
       toolCallEvent,
       {
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -2083,8 +3366,8 @@ describe('runNonInteractive', () => {
 
   it('shows the skipLoopDetection escape hint for a heuristic loop type', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'run_shell_command',
@@ -2093,14 +3376,14 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-heuristic-loop',
       },
     };
-    const events: ServerGeminiStreamEvent[] = [
+    const events: ServerLlmStreamEvent[] = [
       toolCallEvent,
       {
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.REPETITIVE_THOUGHTS },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -2127,13 +3410,13 @@ describe('runNonInteractive', () => {
 
   it('describes a chanting halt as output-or-reasoning repetition', async () => {
     setupMetricsMock();
-    const events: ServerGeminiStreamEvent[] = [
+    const events: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -2158,14 +3441,14 @@ describe('runNonInteractive', () => {
 
   it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
     setupMetricsMock();
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Partial work' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
       {
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -2195,14 +3478,14 @@ describe('runNonInteractive', () => {
   it('marks JSON output as an error when loop detection halts the run', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Partial work' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
       {
-        type: GeminiEventType.LoopDetected,
+        type: LlmEventType.LoopDetected,
         value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -2234,11 +3517,11 @@ describe('runNonInteractive', () => {
   it('finalizes and reports recording failure before the JSON terminal result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'Answer' },
+        { type: LlmEventType.Content, value: 'Answer' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
         },
       ]),
@@ -2315,11 +3598,11 @@ describe('runNonInteractive', () => {
       OutputFormat.STREAM_JSON,
     );
     setupMetricsMock();
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'Answer' },
+        { type: LlmEventType.Content, value: 'Answer' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
         },
       ]),
@@ -2350,8 +3633,8 @@ describe('runNonInteractive', () => {
 
   it('should handle a single tool call and respond', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'testTool',
@@ -2366,16 +3649,16 @@ describe('runNonInteractive', () => {
       executionStatus: 'success',
     });
 
-    const firstCallEvents: ServerGeminiStreamEvent[] = [toolCallEvent];
-    const secondCallEvents: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Final answer' },
+    const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
+    const secondCallEvents: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Final answer' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
       .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
@@ -2386,7 +3669,7 @@ describe('runNonInteractive', () => {
       'prompt-id-2',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
@@ -2396,7 +3679,7 @@ describe('runNonInteractive', () => {
       }),
     );
     // Verify first call has type: UserQuery
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       1,
       [{ text: 'Use a tool' }],
       expect.any(AbortSignal),
@@ -2408,7 +3691,7 @@ describe('runNonInteractive', () => {
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'Tool response' }],
       expect.any(AbortSignal),
@@ -2417,14 +3700,12 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
     // Verify recordCompletedToolCall is called with the tool name and args.
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
       'testTool',
       { arg1: 'value1' },
     );
     // Verify consumePendingMemoryTaskPromises is called at the end of the session.
-    expect(
-      mockGeminiClient.consumePendingMemoryTaskPromises,
-    ).toHaveBeenCalled();
+    expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
   });
 
   it('uses a tool-selected full-turn model for the next request', async () => {
@@ -2445,11 +3726,11 @@ describe('runNonInteractive', () => {
         };
       },
     );
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-image',
               name: 'screenshot_tool',
@@ -2459,7 +3740,7 @@ describe('runNonInteractive', () => {
             },
           },
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'skill-after-image',
               name: 'skill_tool',
@@ -2472,9 +3753,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Image understood' },
+          { type: LlmEventType.Content, value: 'Image understood' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -2490,7 +3771,7 @@ describe('runNonInteractive', () => {
       'prompt-tool-image',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'Tool response with image' }, { text: 'Skill response' }],
       expect.any(AbortSignal),
@@ -2523,11 +3804,11 @@ describe('runNonInteractive', () => {
         return { responseParts: [{ text: 'other' }], modelOverride: undefined };
       },
     );
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-image-a',
               name: 'screenshot_tool',
@@ -2537,7 +3818,7 @@ describe('runNonInteractive', () => {
             },
           },
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-image-b',
               name: 'screenshot_tool',
@@ -2550,9 +3831,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Image understood' },
+          { type: LlmEventType.Content, value: 'Image understood' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -2570,7 +3851,7 @@ describe('runNonInteractive', () => {
 
     expect(accepted['a']).toBe(true);
     expect(accepted['b']).toBe(false);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'first image' }, { text: 'second image' }],
       expect.any(AbortSignal),
@@ -2625,11 +3906,11 @@ describe('runNonInteractive', () => {
       },
     );
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'tool-main',
               name: 'some_tool',
@@ -2642,9 +3923,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Main done' },
+          { type: LlmEventType.Content, value: 'Main done' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -2655,7 +3936,7 @@ describe('runNonInteractive', () => {
       .mockReturnValueOnce(
         createStreamFromEvents([
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'drain-tool-a',
               name: 'screenshot_tool',
@@ -2665,7 +3946,7 @@ describe('runNonInteractive', () => {
             },
           },
           {
-            type: GeminiEventType.ToolCallRequest,
+            type: LlmEventType.ToolCallRequest,
             value: {
               callId: 'drain-tool-b',
               name: 'screenshot_tool',
@@ -2678,9 +3959,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Drain done' },
+          { type: LlmEventType.Content, value: 'Drain done' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -2698,7 +3979,7 @@ describe('runNonInteractive', () => {
 
     expect(accepted['a']).toBe(true);
     expect(accepted['b']).toBe(false);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       4,
       [{ text: 'drain image a' }, { text: 'drain image b' }],
       expect.any(AbortSignal),
@@ -2708,10 +3989,10 @@ describe('runNonInteractive', () => {
   });
 
   describe('parallel tool execution', () => {
-    const finishTurn: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'done' },
+    const finishTurn: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'done' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
       },
     ];
@@ -2720,9 +4001,9 @@ describe('runNonInteractive', () => {
       ids: string[],
       name: string,
       promptId: string,
-    ): ServerGeminiStreamEvent[] {
+    ): ServerLlmStreamEvent[] {
       return ids.map((callId) => ({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId,
           name,
@@ -2779,7 +4060,7 @@ describe('runNonInteractive', () => {
         }),
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
             ...toolCallEvents(
@@ -2813,7 +4094,7 @@ describe('runNonInteractive', () => {
         callId: 'enter-plan',
         name: ToolNames.ENTER_PLAN_MODE,
       });
-      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+      const nextTurnParts = mockLlmClient.sendMessageStream.mock
         .calls[1][0] as Part[];
       expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
         'write-before-entry',
@@ -2840,6 +4121,242 @@ describe('runNonInteractive', () => {
           .map((metadata) => metadata.executionStatus),
       ).toEqual(['not_started', 'not_started', 'not_started']);
     });
+
+    it('stamps a Goal turn’s tool results with the permit that asked for them', async () => {
+      // The evidence catalog derives provenance from this stamp; without it a
+      // headless Goal produces no `external_fact` at all, so a completion can
+      // only ever cite the model's own words and the verifier refuses it.
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name) =>
+          ({ name, kind: Kind.Read }) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name) => name === ToolNames.GET_GOAL || name === ToolNames.UPDATE_GOAL,
+      );
+      const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response:
+                  request.callId === 'shell-failed'
+                    ? { error: 'command failed' }
+                    : { output: 'ok' },
+              },
+            },
+          ],
+          resultDisplay:
+            request.callId === 'shell-failed' ? 'command failed' : 'ok',
+          ...(request.callId === 'shell-failed'
+            ? {
+                error: new Error('command failed'),
+                errorType: ToolErrorType.EXECUTION_FAILED,
+              }
+            : {}),
+        }),
+      );
+      const goalToolCall = (
+        callId: string,
+        name: string,
+        args: Record<string, unknown> = {},
+      ) => ({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId,
+          name,
+          args,
+          isClientInitiated: false,
+          prompt_id: 'p-goal',
+          goalContext: permit,
+        },
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            goalToolCall('shell-1', ToolNames.READ_FILE),
+            goalToolCall('goal-read', ToolNames.GET_GOAL),
+            goalToolCall('goal-update-bridged', ToolNames.TOOL_CALL, {
+              name: ToolNames.UPDATE_GOAL,
+              arguments: {},
+            }),
+            goalToolCall('shell-failed', ToolNames.SHELL),
+          ] as unknown as ServerLlmStreamEvent[]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'work the goal',
+        'p-goal',
+      );
+
+      const optionsByCallId = new Map(
+        recordToolResult.mock.calls.map((call) => [call[1]?.callId, call[2]]),
+      );
+      // An ordinary tool becomes citable external evidence...
+      expect(optionsByCallId.get('shell-1')).toEqual({ goalContext: permit });
+      // ...while the Goal's own reads stay out of the catalog.
+      expect(optionsByCallId.get('goal-read')).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+      expect(optionsByCallId.get('goal-update-bridged')).toEqual({
+        goalContext: permit,
+        provenance: 'goal_runtime',
+      });
+      // A failed command is evidence too -- it is exactly what an
+      // `infeasible` completion cites -- so the stamp must not depend on the
+      // tool succeeding.
+      expect(
+        recordToolResult.mock.calls.find(
+          (call) => call[1]?.callId === 'shell-failed',
+        )?.[1],
+      ).toMatchObject({ status: 'error' });
+      expect(optionsByCallId.get('shell-failed')).toEqual({
+        goalContext: permit,
+      });
+    });
+
+    it('leaves tool results outside a Goal turn unstamped', async () => {
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Read,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'ok' },
+              },
+            },
+          ],
+          resultDisplay: 'ok',
+        }),
+      );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents(
+            toolCallEvents(['plain-1'], ToolNames.READ_FILE, 'p-plain'),
+          ),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'plain work',
+        'p-plain',
+      );
+
+      expect(recordToolResult).toHaveBeenCalled();
+      for (const call of recordToolResult.mock.calls) {
+        expect(call[2]).toBeUndefined();
+      }
+    });
+
+    it.each([
+      ['no hooks', false, ['git status', 'git status'], 2],
+      ['a PreToolUse hook', true, ['git status', 'git status'], 1],
+      [
+        'a skill earlier in the batch',
+        false,
+        ['skill', 'git status', 'git status'],
+        1,
+      ],
+    ])(
+      'limits read-only shell call concurrency with %s',
+      async (_label, preToolUseHook, commands, maxInFlight) => {
+        setupMetricsMock();
+        Object.assign(mockConfig, {
+          getDisableAllHooks: () => false,
+          hasHooksForEvent: (event: string) =>
+            preToolUseHook && event === 'PreToolUse',
+        });
+        vi.mocked(mockToolRegistry.getTool).mockImplementation(
+          (name: string) =>
+            ({
+              kind: name === ToolNames.SKILL ? Kind.Other : Kind.Execute,
+            }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+        );
+        let inFlight = 0;
+        let peak = 0;
+        mockCoreExecuteToolCall.mockImplementation(
+          async (_config: unknown, req: { callId: string; name: string }) => {
+            if (req.name !== ToolNames.SKILL) {
+              inFlight += 1;
+              peak = Math.max(peak, inFlight);
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              inFlight -= 1;
+            }
+            return { responseParts: [{ text: `resp-${req.callId}` }] };
+          },
+        );
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents(
+              commands.map((command, index) => ({
+                type: LlmEventType.ToolCallRequest,
+                value: {
+                  callId: `shell-${index}`,
+                  name: command === 'skill' ? ToolNames.SKILL : ToolNames.SHELL,
+                  args: command === 'skill' ? {} : { command },
+                  isClientInitiated: false,
+                  prompt_id: 'p-shell',
+                },
+              })),
+            ),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+        await runNonInteractive(mockConfig, mockSettings, 'go', 'p-shell');
+
+        expect(peak).toBe(maxInFlight);
+      },
+    );
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
       setupMetricsMock();
@@ -2872,7 +4389,7 @@ describe('runNonInteractive', () => {
         },
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents(
             toolCallEvents(
@@ -2889,6 +4406,185 @@ describe('runNonInteractive', () => {
       expect(started).toBe(total);
       expect(startOrder).toEqual(['tool-1', 'tool-2', 'tool-3']);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
+    });
+
+    it.each(['object', 'string'])('parallelizes %s bridges', async (format) => {
+      setupMetricsMock();
+      const targetName = 'mcp__docs__read';
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name: string) => name === targetName,
+      );
+
+      const total = 2;
+      let started = 0;
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      // R4-6: capture what production actually hands to executeToolCall —
+      // the envelope must survive partitioning (a refactor forwarding the
+      // computed unwrapped request would run the hidden target under its
+      // own name and desync the provider's function-call/response names).
+      const executedRequests: Array<{
+        callId: string;
+        name: string;
+        args: Record<string, unknown>;
+      }> = [];
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          executedRequests.push({
+            callId: request.callId,
+            name: request.name,
+            args: request.args as Record<string, unknown>,
+          });
+          started += 1;
+          if (started === total) openGate();
+          await gate;
+          const response = {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: ToolNames.TOOL_CALL,
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          };
+          await options.onAllToolCallsComplete?.([
+            {
+              status: 'success',
+              request: {
+                ...request,
+                name: targetName,
+                args: { path: request.callId },
+              },
+              response,
+              durationMs: 1,
+            } as never,
+          ]);
+          return response;
+        },
+      );
+
+      const bridgeEvents = ['bridge-1', 'bridge-2'].map((callId) => ({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId,
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: targetName,
+            arguments:
+              format === 'string'
+                ? JSON.stringify({ path: callId })
+                : { path: callId },
+          },
+          isClientInitiated: false,
+          prompt_id: 'p-bridge-parallel',
+        },
+      })) as ServerLlmStreamEvent[];
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(bridgeEvents))
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'read both',
+        'p-bridge-parallel',
+      );
+
+      expect(started).toBe(total);
+      expect(executedRequests).toHaveLength(2);
+      for (const req of executedRequests) {
+        const args = { path: req.callId };
+        expect(req.name).toBe(ToolNames.TOOL_CALL);
+        expect(req.args).toEqual({
+          name: targetName,
+          arguments: format === 'string' ? JSON.stringify(args) : args,
+        });
+      }
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        targetName,
+        { path: 'bridge-1' },
+      );
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        targetName,
+        { path: 'bridge-2' },
+      );
+    });
+
+    it('degrades a malformed string-arguments envelope without throwing', async () => {
+      // A truncated model output leaves `arguments` as unparseable text; the
+      // partition predicate must pass the envelope through untouched (the
+      // bridge's own refusal downstream) rather than throw synchronously and
+      // abort the headless turn.
+      setupMetricsMock();
+      const targetName = 'mcp__docs__read';
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name: string) => name === targetName,
+      );
+
+      const executedNames: string[] = [];
+      mockCoreExecuteToolCall.mockImplementation(async (_config, request) => {
+        executedNames.push(request.name);
+        return {
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        };
+      });
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'bridge-bad',
+                name: ToolNames.TOOL_CALL,
+                args: { name: targetName, arguments: '{"path":' },
+                isClientInitiated: false,
+                prompt_id: 'p-bridge-malformed',
+              },
+            },
+          ] as ServerLlmStreamEvent[]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'read',
+          'p-bridge-malformed',
+        ),
+      ).resolves.not.toThrow();
+      // The envelope survived to execution untouched (not unwrapped, not
+      // thrown on): the bridge itself produces the graceful refusal.
+      expect(executedNames).toEqual([ToolNames.TOOL_CALL]);
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
@@ -2916,7 +4612,7 @@ describe('runNonInteractive', () => {
           }),
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents(
             toolCallEvents(['a', 'b', 'c'], 'read', 'p-order'),
@@ -2936,7 +4632,7 @@ describe('runNonInteractive', () => {
 
       // The next model turn must receive the tool responses in the original
       // request order a, b, c — not the completion order c, a, b.
-      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+      const nextTurnParts = mockLlmClient.sendMessageStream.mock
         .calls[1][0] as Part[];
       const ids = nextTurnParts
         .map((part) => part.functionResponse?.id)
@@ -2983,7 +4679,7 @@ describe('runNonInteractive', () => {
           persistedOutputFiles: [],
         }),
       );
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents(toolCallEvents(['a', 'b'], 'read', 'p-cap')),
         )
@@ -2991,7 +4687,7 @@ describe('runNonInteractive', () => {
 
       await runNonInteractive(mockConfig, mockSettings, 'go', 'p-cap');
 
-      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+      const nextTurnParts = mockLlmClient.sendMessageStream.mock
         .calls[1][0] as Part[];
       const total = nextTurnParts.reduce((sum, part) => {
         const output = part.functionResponse?.response?.['output'];
@@ -3024,7 +4720,7 @@ describe('runNonInteractive', () => {
           }),
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents(toolCallEvents(['e1', 'e2'], 'edit', 'p-seq')),
         )
@@ -3054,7 +4750,7 @@ describe('runNonInteractive', () => {
         responseParts: [{ text: 'r' }],
       });
 
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents(
           toolCallEvents(['t1', 't2', 't3'], 'read', 'p-budget'),
         ),
@@ -3108,7 +4804,7 @@ describe('runNonInteractive', () => {
           }),
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
             ...toolCallEvents(['r1', 'r2'], 'read', 'p-mixed'),
@@ -3170,7 +4866,7 @@ describe('runNonInteractive', () => {
             }),
         );
 
-        mockGeminiClient.sendMessageStream
+        mockLlmClient.sendMessageStream
           .mockReturnValueOnce(
             createStreamFromEvents(
               toolCallEvents(['c1', 'c2', 'c3', 'c4'], 'read', 'p-cap'),
@@ -3239,7 +4935,7 @@ describe('runNonInteractive', () => {
         },
       );
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents(
             toolCallEvents(['s1', 's2'], 'search_file_content', 'p-alias'),
@@ -3260,8 +4956,8 @@ describe('runNonInteractive', () => {
   it('should ignore duplicate provider tool-call ids across rounds', async () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         providerCallId: 'tool-1',
@@ -3274,14 +4970,14 @@ describe('runNonInteractive', () => {
     const toolResponse: Part[] = [{ text: 'Tool response' }];
     mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
+          { type: LlmEventType.Content, value: 'Final answer' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 10 },
@@ -3297,11 +4993,11 @@ describe('runNonInteractive', () => {
       'prompt-id-dup',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
     expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
 
-    const duplicateParts = mockGeminiClient.sendMessageStream.mock.calls[2][0];
+    const duplicateParts = mockLlmClient.sendMessageStream.mock.calls[2][0];
     expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-1"',
     );
@@ -3311,8 +5007,8 @@ describe('runNonInteractive', () => {
   it('should stop repeated duplicate provider tool-call responses', async () => {
     setupMetricsMock();
     vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         providerCallId: 'tool-1',
@@ -3322,8 +5018,8 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-dup-loop',
       },
     };
-    const freshToolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const freshToolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-2',
         providerCallId: 'tool-2',
@@ -3337,7 +5033,7 @@ describe('runNonInteractive', () => {
       responseParts: [{ text: 'Tool response' }],
     });
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
@@ -3352,11 +5048,11 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
     expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
 
-    const duplicateParts = mockGeminiClient.sendMessageStream.mock.calls[2][0];
+    const duplicateParts = mockLlmClient.sendMessageStream.mock.calls[2][0];
     expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-1"',
     );
@@ -3377,7 +5073,7 @@ describe('runNonInteractive', () => {
 
   it('should stop repeated duplicate provider tool-call responses from drain items', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+    mockLlmClient.getHistoryToolCallFingerprints.mockReturnValue(
       new Map([
         ['tool-drain', getToolCallFingerprint('testTool', { arg1: 'value1' })],
       ]),
@@ -3401,8 +5097,8 @@ describe('runNonInteractive', () => {
       });
     });
 
-    const duplicateToolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const duplicateToolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-drain__qwen_dup_2',
         providerCallId: 'tool-drain',
@@ -3412,8 +5108,8 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-drain-dup-loop',
       },
     };
-    const freshToolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const freshToolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-fresh',
         providerCallId: 'tool-fresh',
@@ -3424,12 +5120,12 @@ describe('runNonInteractive', () => {
       },
     };
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          { type: LlmEventType.Content, value: 'Monitor launched.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 2 },
@@ -3450,16 +5146,16 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
-    const drainPromptIds = mockGeminiClient.sendMessageStream.mock.calls
+    const drainPromptIds = mockLlmClient.sendMessageStream.mock.calls
       .slice(1)
       .map((call) => call[2]);
     expect(new Set(drainPromptIds)).toEqual(
       new Set(['prompt-id-drain-dup-loop/automatic/2']),
     );
 
-    const duplicateParts = mockGeminiClient.sendMessageStream.mock
+    const duplicateParts = mockLlmClient.sendMessageStream.mock
       .calls[2][0] as Part[];
     expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-drain"',
@@ -3471,7 +5167,7 @@ describe('runNonInteractive', () => {
 
   it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+    mockLlmClient.getHistoryToolCallFingerprints.mockReturnValue(
       new Map([
         [
           'tool-history',
@@ -3479,8 +5175,8 @@ describe('runNonInteractive', () => {
         ],
       ]),
     );
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-history__qwen_dup_2',
         providerCallId: 'tool-history',
@@ -3491,13 +5187,13 @@ describe('runNonInteractive', () => {
       },
     };
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
+          { type: LlmEventType.Content, value: 'Final answer' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 10 },
@@ -3513,11 +5209,11 @@ describe('runNonInteractive', () => {
       'prompt-id-history-dup',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
-    expect(mockGeminiClient.recordCompletedToolCall).not.toHaveBeenCalled();
+    expect(mockLlmClient.recordCompletedToolCall).not.toHaveBeenCalled();
 
-    const duplicateParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    const duplicateParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
     expect(duplicateParts[0].functionResponse?.id).toBe(
       'tool-history__qwen_dup_2',
     );
@@ -3529,7 +5225,7 @@ describe('runNonInteractive', () => {
 
   it('executes an id-colliding tool call whose args differ from the handled call', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+    mockLlmClient.getHistoryToolCallFingerprints.mockReturnValue(
       new Map([
         [
           'tool-history',
@@ -3537,8 +5233,8 @@ describe('runNonInteractive', () => {
         ],
       ]),
     );
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-history__qwen_dup_2',
         providerCallId: 'tool-history',
@@ -3564,13 +5260,13 @@ describe('runNonInteractive', () => {
       errorType: undefined,
     });
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
+          { type: LlmEventType.Content, value: 'Final answer' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 10 },
@@ -3587,8 +5283,8 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    const resultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const resultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
     expect(
       JSON.stringify(resultParts[0].functionResponse?.response),
     ).not.toContain('Duplicate provider tool call id');
@@ -3612,8 +5308,8 @@ describe('runNonInteractive', () => {
       flush: vi.fn().mockResolvedValue(undefined),
     });
     vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-    const firstToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const firstToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         providerCallId: 'tool-1',
@@ -3623,8 +5319,8 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-same-batch-dup',
       },
     };
-    const duplicateToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const duplicateToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         providerCallId: 'tool-1',
@@ -3664,15 +5360,15 @@ describe('runNonInteractive', () => {
       },
     );
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([firstToolCall, duplicateToolCall]),
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
+          { type: LlmEventType.Content, value: 'Final answer' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 10 },
@@ -3688,11 +5384,11 @@ describe('runNonInteractive', () => {
       'prompt-id-same-batch-dup',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
 
-    const toolResultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    const toolResultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
     expect(toolResultParts).toHaveLength(2);
     expect(toolResultParts[0]).toEqual({ text: 'Tool response' });
     expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
@@ -3711,8 +5407,8 @@ describe('runNonInteractive', () => {
 
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'errorTool',
@@ -3736,17 +5432,17 @@ describe('runNonInteractive', () => {
       ],
       resultDisplay: 'Execution failed',
     });
-    const finalResponse: ServerGeminiStreamEvent[] = [
+    const finalResponse: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Sorry, let me try again.',
       },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
 
@@ -3758,8 +5454,8 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockCoreExecuteToolCall).toHaveBeenCalled();
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [
         {
@@ -3778,10 +5474,87 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
 
+  it.each([
+    {
+      label: 'a call denied for approval',
+      approvalRequired: true as const,
+      reason:
+        'Qwen Code requires permission to use "run_shell_command", but that permission was declined (non-interactive mode cannot prompt for confirmation).',
+      expected: 'use the -y flag (YOLO mode)',
+      unexpected: 'was not run',
+    },
+    {
+      label: 'a call blocked by a hook',
+      approvalRequired: undefined,
+      reason: 'no shell today',
+      expected: 'Warning: Tool "run_shell_command" was not run: no shell today',
+      unexpected: 'requires user approval',
+    },
+  ])(
+    'tells the headless user why $label did not run',
+    async ({ approvalRequired, reason, expected, unexpected }) => {
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-denied',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-denied',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: 'tool-denied',
+        error: new Error(reason),
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'tool-denied',
+              name: 'run_shell_command',
+              response: { error: reason },
+            },
+          },
+        ],
+        resultDisplay: reason,
+        ...(approvalRequired ? { approvalRequired } : {}),
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Done.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Run ls',
+        'prompt-id-denied',
+      );
+
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(expected);
+      expect(stderr).not.toContain(unexpected);
+    },
+  );
+
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
     const apiError = new Error('API connection failed: token=secret');
-    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+    mockLlmClient.sendMessageStream.mockImplementation(() => {
       throw apiError;
     });
 
@@ -3803,8 +5576,8 @@ describe('runNonInteractive', () => {
 
   it('should not exit if a tool is not found, and should send error back to model', async () => {
     setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'nonexistentTool',
@@ -3818,18 +5591,18 @@ describe('runNonInteractive', () => {
       resultDisplay: 'Tool "nonexistentTool" not found in registry.',
       responseParts: [],
     });
-    const finalResponse: ServerGeminiStreamEvent[] = [
+    const finalResponse: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: "Sorry, I can't find that tool.",
       },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
 
@@ -3841,7 +5614,7 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockCoreExecuteToolCall).toHaveBeenCalled();
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(processStdoutSpy).toHaveBeenCalledWith(
       "Sorry, I can't find that tool.\n",
     );
@@ -3884,14 +5657,14 @@ describe('runNonInteractive', () => {
     });
 
     // Mock a simple stream response from the Gemini client
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Summary complete.' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Summary complete.' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -3899,7 +5672,7 @@ describe('runNonInteractive', () => {
     await runNonInteractive(mockConfig, mockSettings, rawInput, 'prompt-id-7');
 
     // 5. Assert that sendMessageStream was called with the PROCESSED parts, not the raw input
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       processedParts,
       expect.any(AbortSignal),
       'prompt-id-7',
@@ -3925,8 +5698,8 @@ describe('runNonInteractive', () => {
     const selector = 'vision-agent\0https://vision.example/v1\0';
     let acceptedSameSelector = false;
     let rejectedDifferentSelector = false;
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'vision-tool-1',
         name: 'testTool',
@@ -3949,11 +5722,11 @@ describe('runNonInteractive', () => {
         };
       },
     );
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'done' },
+          { type: LlmEventType.Content, value: 'done' },
           ...finishedEvents,
         ]),
       );
@@ -3970,7 +5743,7 @@ describe('runNonInteractive', () => {
     });
     expect(acceptedSameSelector).toBe(true);
     expect(rejectedDifferentSelector).toBe(true);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       1,
       headlessImageParts,
       expect.any(AbortSignal),
@@ -3981,7 +5754,7 @@ describe('runNonInteractive', () => {
         submittedPrompt: 'inspect @image.png',
       },
     );
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'tool response' }],
       expect.any(AbortSignal),
@@ -4015,8 +5788,8 @@ describe('runNonInteractive', () => {
         });
       },
     );
-    const drainToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const drainToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'drain-tool-1',
         name: 'testTool',
@@ -4028,7 +5801,7 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockResolvedValue({
       responseParts: [{ text: 'drain tool response' }],
     });
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
       .mockReturnValueOnce(createStreamFromEvents([drainToolCall]))
       .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
@@ -4040,7 +5813,7 @@ describe('runNonInteractive', () => {
       'prompt-drain-isolation',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'task result' }],
       expect.any(AbortSignal),
@@ -4050,7 +5823,7 @@ describe('runNonInteractive', () => {
         modelOverride: undefined,
       }),
     );
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       3,
       [{ text: 'drain tool response' }],
       expect.any(AbortSignal),
@@ -4079,7 +5852,7 @@ describe('runNonInteractive', () => {
       modelId: 'vision-bridge',
       egressOccurred: true,
     });
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
 
@@ -4095,7 +5868,7 @@ describe('runNonInteractive', () => {
       parts: headlessImageParts,
       signal: expect.any(AbortSignal),
     });
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'machine transcription' }],
       expect.any(AbortSignal),
       'prompt-vision-bridge',
@@ -4127,7 +5900,7 @@ describe('runNonInteractive', () => {
       modelId: 'vision-bridge',
       egressOccurred: true,
     });
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
     const writes: string[] = [];
@@ -4165,7 +5938,7 @@ describe('runNonInteractive', () => {
     await mockHeadlessImageInput();
     configureHeadlessVisionModel({ id: 'vision-bridge' });
     runVisionBridgeSpy.mockRejectedValue(new Error('bridge unavailable'));
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
 
@@ -4176,7 +5949,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-failed',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'inspect this image' }],
       expect.any(AbortSignal),
       'prompt-vision-bridge-failed',
@@ -4203,7 +5976,7 @@ describe('runNonInteractive', () => {
       modelId: 'vision-bridge',
       egressOccurred: true,
     });
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
 
@@ -4214,7 +5987,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-skipped',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'inspect this image' }],
       expect.any(AbortSignal),
       'prompt-vision-bridge-skipped',
@@ -4240,7 +6013,7 @@ describe('runNonInteractive', () => {
       id: 'vision-agent',
       agentCapable: true,
     });
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
 
@@ -4256,7 +6029,7 @@ describe('runNonInteractive', () => {
     }
 
     expect(resolveForModel).not.toHaveBeenCalled();
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [
         { text: 'inspect this image' },
         expect.objectContaining({
@@ -4294,18 +6067,18 @@ describe('runNonInteractive', () => {
     expect(resolveForModel).toHaveBeenCalledWith('vision-agent', {
       failClosed: true,
     });
-    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('should process input and write JSON output with stats', async () => {
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Hello World' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Hello World' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
@@ -4318,7 +6091,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'Test input' }],
       expect.any(AbortSignal),
       'prompt-id-1',
@@ -4354,8 +6127,8 @@ describe('runNonInteractive', () => {
   it('should write JSON output with stats for tool-only commands (no text response)', async () => {
     // Test the scenario where a command completes successfully with only tool calls
     // but no text response - this would have caught the original bug
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'testTool',
@@ -4368,23 +6141,23 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
 
     // First call returns only tool call, no content
-    const firstCallEvents: ServerGeminiStreamEvent[] = [
+    const firstCallEvents: ServerLlmStreamEvent[] = [
       toolCallEvent,
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
       },
     ];
 
     // Second call returns no content (tool-only completion)
-    const secondCallEvents: ServerGeminiStreamEvent[] = [
+    const secondCallEvents: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
       },
     ];
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
       .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
@@ -4425,7 +6198,7 @@ describe('runNonInteractive', () => {
       'prompt-id-tool-only',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
@@ -4458,13 +6231,13 @@ describe('runNonInteractive', () => {
 
   it('should write JSON output with stats for empty response commands', async () => {
     // Test the scenario where a command completes but produces no content at all
-    const events: ServerGeminiStreamEvent[] = [
+    const events: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
@@ -4477,7 +6250,7 @@ describe('runNonInteractive', () => {
       'prompt-id-empty',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'Empty response test' }],
       expect.any(AbortSignal),
       'prompt-id-empty',
@@ -4515,7 +6288,7 @@ describe('runNonInteractive', () => {
     setupMetricsMock();
     const testError = new Error('Invalid input provided');
 
-    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+    mockLlmClient.sendMessageStream.mockImplementation(() => {
       throw testError;
     });
 
@@ -4550,13 +6323,73 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits init before startup logs when a Mod fails in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      for (const write of [processStdoutSpy, processStderrSpy]) {
+        write.mockImplementation((...args: unknown[]) => {
+          const callback = args.at(-1);
+          if (typeof callback === 'function') queueMicrotask(() => callback());
+          return true;
+        });
+      }
+      const close = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        (_config, _settings, adapter) =>
+          ({
+            initialize: vi
+              .fn()
+              .mockRejectedValue(new Error('MOD_START_FAILED')),
+            close,
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn().mockImplementationOnce(() => {
+              adapter.emitSystemMessage('ui_log', {
+                plugin: 'broken',
+                text: 'MOD_START_LOG',
+              });
+            }),
+          }) as unknown as ModSession,
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, '/hello', 'mod-failure'),
+      ).rejects.toThrow();
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages[0]).toMatchObject({ type: 'system', subtype: 'init' });
+      expect(messages[1]).toMatchObject({
+        type: 'system',
+        subtype: 'ui_log',
+        data: { plugin: 'broken', text: 'MOD_START_LOG' },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: expect.stringContaining('MOD_START_FAILED') },
+      });
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalled();
+    },
+  );
+
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
     setupMetricsMock();
 
     // Simulate an API error event (like 401 unauthorized)
-    const apiErrorEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.Error,
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
       value: {
         error: {
           message: '401 Incorrect API key provided',
@@ -4565,7 +6398,7 @@ describe('runNonInteractive', () => {
       },
     };
 
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([apiErrorEvent]),
     );
 
@@ -4596,6 +6429,47 @@ describe('runNonInteractive', () => {
     expect(errorOutput).toContain('Incorrect API key provided');
   });
 
+  it('fails stream-json runs when the model stream emits an API error', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
+      value: {
+        error: {
+          message: '429 Too Many Requests',
+          status: 429,
+        },
+      },
+    };
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('429 Too Many Requests') },
+    });
+  });
+
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
     // Regression test for the bug where a 4xx error event flowed through
     // both the stream handler and handleError, each calling
@@ -4620,17 +6494,18 @@ describe('runNonInteractive', () => {
       }
     ).getChatRecordingService = () => ({ finalize, flush });
 
-    const apiErrorEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.Error,
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
       value: {
         error: {
           message: '402 Model gpt-oss-120b is not available for billing.',
           status: 402,
+          requestId: 'a30a1854-1925-4da8-8803-73fee2865116',
         },
       },
     };
 
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([apiErrorEvent]),
     );
 
@@ -4670,6 +6545,14 @@ describe('runNonInteractive', () => {
         expect(line.match(/\[API Error: /g)?.length ?? 0).toBe(1);
       }
     }
+
+    // End-to-end pin for issue #14115: the StructuredError's requestId must
+    // survive the whole forwarding chain onto the user-facing stderr line
+    // (inside the closing bracket, so the idempotency guard above still
+    // recognizes the line as formatted).
+    expect(stderrOutput).toContain(
+      '(request_id: a30a1854-1925-4da8-8803-73fee2865116)',
+    );
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
@@ -4677,7 +6560,7 @@ describe('runNonInteractive', () => {
     setupMetricsMock();
     const fatalError = new FatalInputError('Invalid command syntax provided');
 
-    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+    mockLlmClient.sendMessageStream.mockImplementation(() => {
       throw fatalError;
     });
 
@@ -4725,14 +6608,14 @@ describe('runNonInteractive', () => {
     };
     mockGetCommands.mockReturnValue([mockCommand]);
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Response from command' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Response from command' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -4744,7 +6627,7 @@ describe('runNonInteractive', () => {
     );
 
     // Ensure the prompt sent to the model is from the command, not the raw input
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'Prompt from command' }],
       expect.any(AbortSignal),
       'prompt-id-slash',
@@ -4789,14 +6672,14 @@ describe('runNonInteractive', () => {
     // No commands are mocked, so any slash command is "unknown"
     mockGetCommands.mockReturnValue([]);
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Response to unknown' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Response to unknown' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -4808,7 +6691,7 @@ describe('runNonInteractive', () => {
     );
 
     // Ensure the raw input is sent to the model
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: '/unknowncommand' }],
       expect.any(AbortSignal),
       'prompt-id-unknown',
@@ -4885,14 +6768,14 @@ describe('runNonInteractive', () => {
     };
     mockGetCommands.mockReturnValue([mockCommand]);
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Acknowledged' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Acknowledged' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -4923,14 +6806,14 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Hello stream' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Hello stream' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 4 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -4980,13 +6863,13 @@ describe('runNonInteractive', () => {
       return true;
     });
     const turnAbortController = new AbortController();
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       (async function* () {
         turnAbortController.abort(new TurnInterruptedError());
         yield {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
-        } as ServerGeminiStreamEvent;
+        } as ServerLlmStreamEvent;
       })(),
     );
 
@@ -5042,11 +6925,11 @@ describe('runNonInteractive', () => {
         });
       },
     );
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'Fork launched.' },
+        { type: LlmEventType.Content, value: 'Fork launched.' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 2 },
@@ -5150,12 +7033,12 @@ describe('runNonInteractive', () => {
       );
     });
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          { type: LlmEventType.Content, value: 'Monitor launched.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 2 },
@@ -5165,9 +7048,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Observed.' },
+          { type: LlmEventType.Content, value: 'Observed.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -5183,8 +7066,8 @@ describe('runNonInteractive', () => {
       'prompt-monitor',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: notificationXml }],
       expect.any(AbortSignal),
@@ -5265,12 +7148,12 @@ describe('runNonInteractive', () => {
         todoWorkChainId: 'chain-2',
       });
     });
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Started.' },
+          { type: LlmEventType.Content, value: 'Started.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -5280,9 +7163,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'First notification.' },
+          { type: LlmEventType.Content, value: 'First notification.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -5292,9 +7175,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Second notification.' },
+          { type: LlmEventType.Content, value: 'Second notification.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -5310,8 +7193,8 @@ describe('runNonInteractive', () => {
       'prompt-monitor-work-chains',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: firstNotificationXml }],
       expect.any(AbortSignal),
@@ -5320,7 +7203,7 @@ describe('runNonInteractive', () => {
         todoWorkChainId: 'chain-1',
       }),
     );
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
       3,
       [{ text: secondNotificationXml }],
       expect.any(AbortSignal),
@@ -5345,11 +7228,11 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'Handled once' },
+        { type: LlmEventType.Content, value: 'Handled once' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 2 } },
         },
       ]),
@@ -5427,11 +7310,11 @@ describe('runNonInteractive', () => {
       });
       monitorStatus = 'cancelled';
     });
-    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'Monitor stopped.' },
+        { type: LlmEventType.Content, value: 'Monitor stopped.' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: {
             reason: undefined,
             usageMetadata: { totalTokenCount: 2 },
@@ -5447,7 +7330,7 @@ describe('runNonInteractive', () => {
       'prompt-monitor-cancel',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
     const envelopes = writes
       .join('')
       .split('\n')
@@ -5556,8 +7439,8 @@ describe('runNonInteractive', () => {
       );
     });
 
-    async function* secondTurnStream(): AsyncGenerator<ServerGeminiStreamEvent> {
-      yield { type: GeminiEventType.Content, value: 'Observed.' };
+    async function* secondTurnStream(): AsyncGenerator<ServerLlmStreamEvent> {
+      yield { type: LlmEventType.Content, value: 'Observed.' };
       monitorNotificationCallback?.(
         'Monitor "logs" event #2: still running',
         secondNotificationXml,
@@ -5569,7 +7452,7 @@ describe('runNonInteractive', () => {
         },
       );
       yield {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: {
           reason: undefined,
           usageMetadata: { totalTokenCount: 1 },
@@ -5577,12 +7460,12 @@ describe('runNonInteractive', () => {
       };
     }
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          { type: LlmEventType.Content, value: 'Monitor launched.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 2 },
@@ -5599,7 +7482,7 @@ describe('runNonInteractive', () => {
       'prompt-monitor-cutover',
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
 
     const envelopes = writes
       .join('')
@@ -5722,12 +7605,12 @@ describe('runNonInteractive', () => {
       );
     });
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          { type: LlmEventType.Content, value: 'Monitor launched.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 2 },
@@ -5737,9 +7620,9 @@ describe('runNonInteractive', () => {
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Observed.' },
+          { type: LlmEventType.Content, value: 'Observed.' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -5828,9 +7711,9 @@ describe('runNonInteractive', () => {
       return current;
     });
 
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'All done' },
+        { type: LlmEventType.Content, value: 'All done' },
       ]),
     );
 
@@ -5874,14 +7757,14 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Response from envelope' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Response from envelope' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -5926,7 +7809,7 @@ describe('runNonInteractive', () => {
     expect(assistantEnvelope).toBeTruthy();
 
     // Verify the model received the correct parts from userMessage
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'Message from stream-json input' }],
       expect.any(AbortSignal),
       'prompt-envelope',
@@ -5953,8 +7836,8 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'testTool',
@@ -5973,16 +7856,16 @@ describe('runNonInteractive', () => {
     ];
     mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
 
-    const firstCallEvents: ServerGeminiStreamEvent[] = [toolCallEvent];
-    const secondCallEvents: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Final response' },
+    const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
+    const secondCallEvents: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Final response' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
       .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
@@ -6055,8 +7938,8 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-error',
         name: 'errorTool',
@@ -6082,17 +7965,17 @@ describe('runNonInteractive', () => {
       resultDisplay: 'Tool execution failed',
     });
 
-    const finalResponse: ServerGeminiStreamEvent[] = [
+    const finalResponse: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'I encountered an error',
       },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
       },
     ];
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
 
@@ -6152,15 +8035,15 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Hello' },
-      { type: GeminiEventType.Content, value: ' World' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Hello' },
+      { type: LlmEventType.Content, value: ' World' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -6209,18 +8092,18 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const events: ServerGeminiStreamEvent[] = [
+    const events: ServerLlmStreamEvent[] = [
       {
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: { subject: 'Analysis', description: 'Processing request' },
       },
-      { type: GeminiEventType.Content, value: 'Response text' },
+      { type: LlmEventType.Content, value: 'Response text' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 8 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -6267,8 +8150,8 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const toolCall1: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCall1: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-1',
         name: 'firstTool',
@@ -6277,8 +8160,8 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-multi',
       },
     };
-    const toolCall2: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const toolCall2: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'tool-2',
         name: 'secondTool',
@@ -6296,16 +8179,16 @@ describe('runNonInteractive', () => {
         responseParts: [{ text: 'Second tool result' }],
       });
 
-    const firstCallEvents: ServerGeminiStreamEvent[] = [toolCall1, toolCall2];
-    const secondCallEvents: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Combined response' },
+    const firstCallEvents: ServerLlmStreamEvent[] = [toolCall1, toolCall2];
+    const secondCallEvents: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Combined response' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 15 } },
       },
     ];
 
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
       .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
@@ -6375,8 +8258,8 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const duplicateToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const duplicateToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'dup_id_0001',
         name: 'read_file',
@@ -6385,8 +8268,8 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-dup',
       },
     };
-    const replayedToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const replayedToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: 'dup_id_0001',
         name: 'read_file',
@@ -6407,15 +8290,15 @@ describe('runNonInteractive', () => {
         },
       ],
     });
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([duplicateToolCall, replayedToolCall]),
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'done' },
+          { type: LlmEventType.Content, value: 'done' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -6442,7 +8325,7 @@ describe('runNonInteractive', () => {
       expect.any(Object),
     );
 
-    const toolResultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    const toolResultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
     expect(toolResultParts).toHaveLength(2);
     expect(toolResultParts[0].functionResponse?.response?.['output']).toBe(
       'first',
@@ -6477,8 +8360,8 @@ describe('runNonInteractive', () => {
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
     setupMetricsMock();
 
-    const firstToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const firstToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: '',
         name: 'read_file',
@@ -6487,8 +8370,8 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-empty',
       },
     };
-    const secondToolCall: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
+    const secondToolCall: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
       value: {
         callId: '',
         name: 'read_file',
@@ -6509,15 +8392,15 @@ describe('runNonInteractive', () => {
         },
       ],
     });
-    mockGeminiClient.sendMessageStream
+    mockLlmClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([firstToolCall, secondToolCall]),
       )
       .mockReturnValueOnce(
         createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'done' },
+          { type: LlmEventType.Content, value: 'done' },
           {
-            type: GeminiEventType.Finished,
+            type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
@@ -6571,14 +8454,14 @@ describe('runNonInteractive', () => {
       return true;
     });
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Response' },
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Response' },
       {
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
       },
     ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(events),
     );
 
@@ -6604,7 +8487,7 @@ describe('runNonInteractive', () => {
       },
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'Simple string content' }],
       expect.any(AbortSignal),
       'prompt-string-content',
@@ -6616,7 +8499,7 @@ describe('runNonInteractive', () => {
     );
 
     // UserMessage with array of text blocks
-    mockGeminiClient.sendMessageStream.mockClear();
+    mockLlmClient.sendMessageStream.mockClear();
     const userMessageBlocks: CLIUserMessage = {
       type: 'user',
       uuid: 'test-uuid-2',
@@ -6641,7 +8524,7 @@ describe('runNonInteractive', () => {
       },
     );
 
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'First part' }, { text: 'Second part' }],
       expect.any(AbortSignal),
       'prompt-blocks-content',
@@ -6670,11 +8553,11 @@ describe('runNonInteractive', () => {
     const skipSpy = vi.spyOn(scheduler, 'setSkipDurableFire');
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-    mockGeminiClient.sendMessageStream.mockReturnValue(
+    mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
-        { type: GeminiEventType.Content, value: 'ok' },
+        { type: LlmEventType.Content, value: 'ok' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
         },
       ]),
@@ -6749,8 +8632,8 @@ describe('runNonInteractive', () => {
       // (hypothetical side-effecting) tool. The break must prevent the
       // second tool from running.
       const structuredArgs = { summary: 'done' };
-      const structuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const structuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured',
           name: 'structured_output',
@@ -6759,8 +8642,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-structured',
         },
       };
-      const trailingCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const trailingCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-trailing',
           name: 'side_effect_tool',
@@ -6774,7 +8657,7 @@ describe('runNonInteractive', () => {
         responseParts: [{ text: 'ok' }],
       });
 
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents([structuredCall, trailingCall]),
       );
 
@@ -6794,7 +8677,7 @@ describe('runNonInteractive', () => {
       expect(firstCallArg.name).toBe('structured_output');
 
       // And we should not have sent a second follow-up turn.
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
 
       // abortAll() must be called so any in-flight background agents are
       // torn down before we emit the terminal result.
@@ -6879,8 +8762,8 @@ describe('runNonInteractive', () => {
       // having already executed write_file would violate the "structured
       // output is the terminal contract" guarantee.
       const structuredArgs = { summary: 'done' };
-      const leadingCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const leadingCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured',
           name: 'side_effect_tool',
@@ -6889,8 +8772,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-leading',
         },
       };
-      const structuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const structuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured',
           name: 'structured_output',
@@ -6904,7 +8787,7 @@ describe('runNonInteractive', () => {
         responseParts: [{ text: 'ok' }],
       });
 
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents([leadingCall, structuredCall]),
       );
 
@@ -6923,7 +8806,7 @@ describe('runNonInteractive', () => {
       };
       expect(onlyCallArg.name).toBe('structured_output');
       // No follow-up turn should have been issued.
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
       expect(abortAllSpy).toHaveBeenCalledTimes(1);
 
       const events = writes
@@ -7006,8 +8889,8 @@ describe('runNonInteractive', () => {
       });
 
       const goodArgs = { summary: 'ok' };
-      const badStructured: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const badStructured: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-bad',
           name: 'structured_output',
@@ -7016,8 +8899,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-multi-struct',
         },
       };
-      const goodStructured: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const goodStructured: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-good',
           name: 'structured_output',
@@ -7027,7 +8910,7 @@ describe('runNonInteractive', () => {
         },
       };
 
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents([badStructured, goodStructured]),
       );
 
@@ -7073,7 +8956,7 @@ describe('runNonInteractive', () => {
       ]);
 
       // No retry turn was needed.
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
       expect(abortAllSpy).toHaveBeenCalledTimes(1);
 
       // Result must reflect the second (successful) structured_output's
@@ -7108,8 +8991,8 @@ describe('runNonInteractive', () => {
       // tool returns a tool-execution error). The session must NOT terminate
       // — `!toolResponse.error` keeps `structuredSubmission` undefined and
       // we feed the validation failure back so the model can retry.
-      const invalidStructured: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const invalidStructured: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-invalid',
           name: 'structured_output',
@@ -7119,8 +9002,8 @@ describe('runNonInteractive', () => {
         },
       };
       // Second turn: model retries with valid args.
-      const validStructured: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const validStructured: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-valid',
           name: 'structured_output',
@@ -7130,7 +9013,7 @@ describe('runNonInteractive', () => {
         },
       };
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(createStreamFromEvents([invalidStructured]))
         .mockReturnValueOnce(createStreamFromEvents([validStructured]));
 
@@ -7168,7 +9051,7 @@ describe('runNonInteractive', () => {
 
       // A second sendMessageStream call confirms the retry turn was issued
       // — the failed first attempt did not short-circuit the run.
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     });
 
     it('errors with non-zero exit when model emits plain text instead of structured_output', async () => {
@@ -7189,14 +9072,14 @@ describe('runNonInteractive', () => {
         return true;
       });
 
-      const plainTextTurn: ServerGeminiStreamEvent[] = [
-        { type: GeminiEventType.Content, value: 'Here is my answer as text.' },
+      const plainTextTurn: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Here is my answer as text.' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
         },
       ];
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents(plainTextTurn),
       );
 
@@ -7229,6 +9112,44 @@ describe('runNonInteractive', () => {
       });
     });
 
+    it('reports only the accepted attempt in the structured-output preview', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({ type: 'object' });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned prose' },
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'accepted prose' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Should call structured_output',
+          'prompt-id-preview-retry',
+        ),
+      ).resolves.toBe(1);
+
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      const result = messages.find(
+        (message: { type?: string }) => message.type === 'result',
+      );
+      expect(result.error.message).toContain('accepted prose');
+      expect(result.error.message).not.toContain('abandoned prose');
+    });
+
     it('synthesises tool_result for suppressed sibling calls when structured_output fails validation', async () => {
       // Same-turn batch: [side_effect_tool, structured_output(bad)]. The
       // pre-scan suppresses the side_effect_tool; structured_output then
@@ -7244,8 +9165,8 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
       setupMetricsMock();
 
-      const leadingCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const leadingCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-leading',
           name: 'side_effect_tool',
@@ -7254,8 +9175,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-suppress-pair',
         },
       };
-      const badStructuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const badStructuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-bad',
           name: 'structured_output',
@@ -7264,8 +9185,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-suppress-pair',
         },
       };
-      const goodStructuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const goodStructuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-good',
           name: 'structured_output',
@@ -7275,7 +9196,7 @@ describe('runNonInteractive', () => {
         },
       };
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([leadingCall, badStructuredCall]),
         )
@@ -7317,8 +9238,8 @@ describe('runNonInteractive', () => {
       // The retry message sent to the model must contain BOTH a tool_result
       // for the suppressed side_effect_tool and one for the failed
       // structured_output, so every prior tool_use is paired.
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
-      const retryParts = mockGeminiClient.sendMessageStream.mock.calls[1][0] as
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      const retryParts = mockLlmClient.sendMessageStream.mock.calls[1][0] as
         | Array<{
             functionResponse?: { id?: string; name?: string };
           }>
@@ -7378,8 +9299,8 @@ describe('runNonInteractive', () => {
       (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
       setupMetricsMock();
 
-      const firstSideEffectCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const firstSideEffectCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-side',
           providerCallId: 'tool-side',
@@ -7389,8 +9310,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-dup-structured',
         },
       };
-      const duplicateSideEffectCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const duplicateSideEffectCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-side',
           providerCallId: 'tool-side',
@@ -7403,8 +9324,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-dup-structured',
         },
       };
-      const badStructuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const badStructuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-bad',
           name: 'structured_output',
@@ -7413,8 +9334,8 @@ describe('runNonInteractive', () => {
           prompt_id: 'prompt-id-dup-structured',
         },
       };
-      const goodStructuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const goodStructuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-good',
           name: 'structured_output',
@@ -7424,7 +9345,7 @@ describe('runNonInteractive', () => {
         },
       };
 
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(createStreamFromEvents([firstSideEffectCall]))
         .mockReturnValueOnce(
           createStreamFromEvents([duplicateSideEffectCall, badStructuredCall]),
@@ -7476,8 +9397,8 @@ describe('runNonInteractive', () => {
         'structured_output',
       ]);
 
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(3);
-      const retryParts = mockGeminiClient.sendMessageStream.mock.calls[2][0] as
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      const retryParts = mockLlmClient.sendMessageStream.mock.calls[2][0] as
         | Array<{
             functionResponse?: {
               id?: string;
@@ -7562,8 +9483,8 @@ describe('runNonInteractive', () => {
       });
 
       const drainStructuredArgs = { summary: 'drain-captured' };
-      const drainStructuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const drainStructuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-drain-structured',
           name: 'structured_output',
@@ -7576,12 +9497,12 @@ describe('runNonInteractive', () => {
       // First turn: plain text, no tool calls — drains into the queue.
       // Drain turn: model invokes structured_output as the reply to the
       // notification.
-      mockGeminiClient.sendMessageStream
+      mockLlmClient.sendMessageStream
         .mockReturnValueOnce(
           createStreamFromEvents([
-            { type: GeminiEventType.Content, value: 'Monitor launched.' },
+            { type: LlmEventType.Content, value: 'Monitor launched.' },
             {
-              type: GeminiEventType.Finished,
+              type: LlmEventType.Finished,
               value: {
                 reason: undefined,
                 usageMetadata: { totalTokenCount: 2 },
@@ -7608,7 +9529,7 @@ describe('runNonInteractive', () => {
 
       // Two stream calls: main + drain reply. structured_output executed
       // exactly once (during drain).
-      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
       const drainCallArg = mockCoreExecuteToolCall.mock.calls[0][1] as {
         name: string;
@@ -7714,8 +9635,8 @@ describe('runNonInteractive', () => {
       });
 
       const structuredArgs = { summary: 'done' };
-      const structuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const structuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured',
           name: 'structured_output',
@@ -7727,7 +9648,7 @@ describe('runNonInteractive', () => {
       mockCoreExecuteToolCall.mockResolvedValue({
         responseParts: [{ text: 'ok' }],
       });
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents([structuredCall]),
       );
 
@@ -7748,7 +9669,7 @@ describe('runNonInteractive', () => {
       // 1000 ms is generous (test env CI noise) while still proving the
       // cap exists; without the cap, an infinitely-true
       // hasUnfinalizedTasks would never return.
-      expect(elapsed).toBeLessThan(1000);
+      expectWithinLatencyBudget(elapsed, 1000);
 
       // Find the result event and the simulated cancellation
       // task_notification. The notification must appear BEFORE the
@@ -7810,8 +9731,8 @@ describe('runNonInteractive', () => {
       });
 
       const structuredArgs = { summary: 'text-mode-ok' };
-      const structuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
+      const structuredCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-structured-text',
           name: 'structured_output',
@@ -7823,7 +9744,7 @@ describe('runNonInteractive', () => {
       mockCoreExecuteToolCall.mockResolvedValue({
         responseParts: [{ text: 'ok' }],
       });
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
         createStreamFromEvents([structuredCall]),
       );
 
@@ -7870,6 +9791,11 @@ describe('runNonInteractive', () => {
         'worktree-real',
       );
       await fs.mkdir(worktreeDir, { recursive: true });
+      await fs.writeFile(
+        path.join(worktreeDir, '.qwen-session'),
+        'test-session-id',
+        'utf8',
+      );
       const sidecarPath = path.join(realTmpDir, 'sidecar.worktree.json');
       const sidecar = {
         slug: 'resume-test',
@@ -7894,14 +9820,14 @@ describe('runNonInteractive', () => {
         vi.fn().mockReturnValue(sessionService);
 
       setupMetricsMock();
-      const events: ServerGeminiStreamEvent[] = [
-        { type: GeminiEventType.Content, value: 'ok' },
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'ok' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
         },
       ];
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents(events),
       );
 
@@ -7915,7 +9841,7 @@ describe('runNonInteractive', () => {
 
         // The user message sent to the model should now begin with a
         // <system-reminder> block carrying the restore notice.
-        const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0] as [
+        const [parts] = mockLlmClient.sendMessageStream.mock.calls[0] as [
           Array<{ text?: string }>,
         ];
         expect(parts.length).toBeGreaterThanOrEqual(2);
@@ -7935,14 +9861,14 @@ describe('runNonInteractive', () => {
       (mockConfig.getResumedSessionData as Mock).mockReturnValue(undefined);
 
       setupMetricsMock();
-      const events: ServerGeminiStreamEvent[] = [
-        { type: GeminiEventType.Content, value: 'ok' },
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'ok' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
         },
       ];
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents(events),
       );
 
@@ -7953,7 +9879,7 @@ describe('runNonInteractive', () => {
         'prompt-id-no-resume',
       );
 
-      const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0] as [
+      const [parts] = mockLlmClient.sendMessageStream.mock.calls[0] as [
         Array<{ text?: string }>,
       ];
       // Exactly one part — the user prompt, no reminder prefix.
@@ -7990,14 +9916,14 @@ describe('runNonInteractive', () => {
         vi.fn().mockReturnValue(sessionService);
 
       setupMetricsMock();
-      const events: ServerGeminiStreamEvent[] = [
-        { type: GeminiEventType.Content, value: 'ok' },
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'ok' },
         {
-          type: GeminiEventType.Finished,
+          type: LlmEventType.Finished,
           value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
         },
       ];
-      mockGeminiClient.sendMessageStream.mockReturnValue(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents(events),
       );
 
@@ -8014,7 +9940,7 @@ describe('runNonInteractive', () => {
           code: 'ENOENT',
         });
         // No <system-reminder> injected — the user prompt is the only part.
-        const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0] as [
+        const [parts] = mockLlmClient.sendMessageStream.mock.calls[0] as [
           Array<{ text?: string }>,
         ];
         expect(parts.length).toBe(1);
@@ -8023,5 +9949,145 @@ describe('runNonInteractive', () => {
         await fs.rm(realTmpDir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('formatGoalState', () => {
+  const goalSnapshot = (
+    overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+  ): GoalSnapshotV2 => ({
+    v: 2,
+    activity: 'idle',
+    goal: {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the release notes',
+      status: 'active',
+      evidenceCursor: { recordId: null },
+      turnCount: 0,
+      activeTimeMs: 0,
+      tokensUsed: 0,
+      createdAt: 0,
+      updatedAt: 0,
+      ...overrides,
+    },
+  });
+
+  it('shows budgets on a stopped Goal in the usage order', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          turnBudget: 20,
+          activeTimeMs: 723_000,
+          activeTimeBudgetMs: 1_800_000,
+          tokensUsed: 1234,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 of 20 turns · 12m 3s of 30m active · 1,234 tokens',
+    );
+  });
+
+  it('does not add active time without a budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, activeTimeMs: 723_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn');
+  });
+
+  it('hides budgets before any usage', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnBudget: 20, activeTimeBudgetMs: 1_800_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes');
+  });
+
+  it('reports turns and spend against the budget', () => {
+    // Spelled out rather than abbreviated: this output is read in a terminal
+    // and piped into scripts, neither of which is helped by `1.2k`.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          turnCount: 3,
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal active: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens',
+    );
+  });
+
+  it('reports spend alone when the Goal has no budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, tokensUsed: 900 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn · 900 tokens');
+  });
+
+  it('omits the spend it has none of', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 2, tokenBudget: 30_000_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 2 turns');
+  });
+
+  it('says nothing about usage for a Goal that has not run', () => {
+    expect(formatGoalState(goalSnapshot(), 'status')).toBe(
+      'Goal active: ship the release notes',
+    );
+  });
+
+  it('keeps the stop reason below the usage line', () => {
+    // The reason is why the Goal is where it is; the figures are context for
+    // it, so they read first.
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          tokensUsed: 1_234,
+          tokenBudget: 30_000_000,
+          lastReason: 'Paused with /goal pause.',
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 turns · 1,234 of 30,000,000 tokens\nReason: Paused with /goal pause.',
+    );
+  });
+
+  it('writes no control sequence from a stop reason to stdout', () => {
+    // A pause reason can embed a raw provider error.
+    const output = formatGoalState(
+      goalSnapshot({
+        status: 'paused',
+        lastReason: 'paused\r\u001b]52;c;ZXh0cmFjdGVk\u0007 by user',
+      }),
+      'status',
+    );
+
+    expect(output).toContain('Reason: paused');
+    expect(output).not.toContain('\r');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u0007');
+  });
+
+  it('has no usage to report for a cleared Goal', () => {
+    expect(
+      formatGoalState({ v: 2, activity: 'idle', goal: null }, 'clear'),
+    ).toBe('Goal cleared.');
   });
 });

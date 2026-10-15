@@ -25,8 +25,8 @@ Node.js 22 or later and npm are required.
 When first used, the skill runs these commands itself:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.0
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.0
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.7
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
 ```
 
 Restart Qwen Code after the MCP server is first added. The skill then resumes
@@ -42,17 +42,37 @@ execution path; there is no legacy fallback.
 ## Use
 
 Ask Qwen Code to use `$computer-use` for the desktop task. After bootstrap, it
-follows the standard Computer Use workflow:
+uses the app workflow on macOS:
 
-1. discovers the exact application and window;
-2. observes full accessibility state;
-3. acts through current semantic element tokens when possible;
-4. fetches fresh state after every mutation;
-5. verifies the requested result; and
-6. closes the SDK client and resets the REPL.
+1. binds the application with `computer.getApp(nameOrIdentifierOrPath)`;
+2. reads `app.getState()` for compact accessibility text, followed by automatic
+   incremental updates;
+3. performs one or more actions using the short element IDs in that text;
+4. fetches the latest state before deciding what to do next; and
+5. closes the SDK client and resets the REPL only when no other persistent
+   state is needed.
 
 The driver is the only component that computes observation diffs. Model code
 uses the typed SDK methods and does not dispatch arbitrary driver tool names.
+The app handle tracks the current window and dialogs, keeps native element
+identity internally, and delegates input to the native driver. Model code does
+not choose foreground/background modes. Unconfirmed actions are not replayed.
+`getState()` can open a discovered stopped app; actions never restart it.
+Existing exact-window APIs remain available on Windows and Linux.
+
+```js
+const app = await computer.getApp('Microsoft Excel');
+nodeRepl.write((await app.getState()).text);
+// Use an element ID from the returned state.
+await app.click(37);
+await app.typeText('hello');
+nodeRepl.write((await app.getState()).text);
+```
+
+Refresh state after opening or closing a dialog before reusing element IDs.
+Each App state refresh captures the current screenshot internally. The default
+return keeps it hidden; request it explicitly with
+`app.getState({ includeScreenshot: true })` when the model needs the image.
 
 ## Permissions
 
@@ -65,6 +85,32 @@ On macOS, accessibility observation and input require Accessibility permission.
 Screenshots additionally require Screen Recording permission. macOS may
 attribute the grant to the terminal or IDE that launched Qwen Code. Windows and
 Linux use their platform accessibility and input facilities.
+
+## Use the computer in front of you from a remote session
+
+When Qwen Code runs on a headless machine (a dev box, a server), the skill can
+still drive the desktop you are sitting at: that computer lends its own
+`node_repl` to one remote session. It works on macOS today.
+
+Set it up once on your computer:
+
+```bash
+npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install
+```
+
+This installs `node_repl` and the SDK under `~/.qwen/desktop-relay` and registers
+a launchd socket on `127.0.0.1:47821`. Nothing runs in the background; launchd
+starts a short-lived process only when something connects.
+
+- **From the Web Shell.** The remote daemon must run with
+  `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`, and the Web Shell must be a secure page
+  (https, or `http://localhost` through an SSH tunnel). In a session, choose
+  **Use this computer** in the sidebar footer, then **Connect this computer**.
+
+A dialog on your computer asks you to allow every connection. An allowed session
+can run code on your computer with your permissions and see and control its
+screen, just like local Computer Use, until you disconnect it or it ends. macOS
+asks to allow `node` under Accessibility and Screen Recording the first time.
 
 ## Troubleshooting
 
