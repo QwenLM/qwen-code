@@ -50,7 +50,8 @@ class ManagedSchemaConfigurationTest {
                             Integer.class);
             var session = jdbc.queryForMap("SELECT "
                     + ManagedSchemaProjection.SESSION.columns().replace(
-                            ", runtime_request_key, csi_guard", "") + " FROM ma_session");
+                            ", runtime_request_key, csi_guard", "")
+                            .replace(", model_id, model_revision", "") + " FROM ma_session");
             assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(version);
             assertThatThrownBy(() -> ManagedSchema.initialize(source))
                     .hasRootCauseMessage(
@@ -75,7 +76,9 @@ class ManagedSchemaConfigurationTest {
             assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session"))
                     .containsAllEntriesOf(session)
                     .containsEntry("csi_guard", false)
-                    .containsEntry("runtime_request_key", null);
+                    .containsEntry("runtime_request_key", null)
+                    .containsEntry("model_id", null)
+                    .containsEntry("model_revision", 0L);
             assertThat(
                             jdbc.queryForObject(
                                     "SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE"
@@ -165,7 +168,8 @@ class ManagedSchemaConfigurationTest {
                                 + " ORDER BY \"installed_rank\"");
         var session = jdbc.queryForMap("SELECT "
                     + ManagedSchemaProjection.SESSION.columns().replace(
-                            ", runtime_request_key, csi_guard", "") + " FROM ma_session");
+                            ", runtime_request_key, csi_guard", "")
+                            .replace(", model_id, model_revision", "") + " FROM ma_session");
         assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(2);
         assertThat(sessionListColumns(source))
                 .containsExactly("tenant_id", "gmt_modified", "session_id");
