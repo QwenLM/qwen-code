@@ -77,7 +77,7 @@ class ManagedAgentStoreChildCreationFenceTest {
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
-                        + " delivery_state, created_at)"
+                        + " delivery_state, gmt_create)"
                         + " VALUES ('DOMAIN', ?, ?, 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",

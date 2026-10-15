@@ -1341,7 +1341,9 @@ export class HostedTeamSession {
       const chains = this.chains();
       const view = hostedMemberView(chains, member.childRunId);
       const recorded = ` "${owner}" was not notified: task_update records the board only.`;
-      if (isEndedMember(view)) {
+      if (view.stoppingBeforeStart) {
+        notice = `${recorded} ${owner}'s latest continuation is being stopped before it started; if it ends without starting, ${owner} can take work again. Check task_list once it settles.`;
+      } else if (isEndedMember(view)) {
         notice = `${recorded} ${owner} cannot take more work: it ${view.stopping ? 'is being stopped' : view.stopRequestedCompletion ? 'completed after a stop was requested' : `has ${view.state}`}.`;
       } else if (view.neverStarted !== undefined) {
         const neverStarted = hostedNeverStarted(
@@ -1434,15 +1436,16 @@ export class HostedTeamSession {
     // or delete it; a new owner is checked, and so is a kept owner when the
     // call moves the task to another open status, so a member that ended
     // never lands on open work.
-    if (owner != null && owner !== task.owner)
+    if (owner != null && owner !== task.owner) {
       this.assertOwner(team, owner, status === 'completed', turnPrefix);
-    else if (
+    } else if (
       (owner === undefined || owner === task.owner) &&
       task.owner !== null &&
       status !== task.status &&
       status !== 'completed'
-    )
+    ) {
       this.assertOwner(team, task.owner, false, turnPrefix, number);
+    }
     if (
       status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
@@ -1677,7 +1680,11 @@ export class HostedTeamSession {
         : view.state === 'cancelled'
           ? 'was cancelled'
           : `has ${view.state}`;
-      // No run of it completed, so it did no task's work.
+      if (completing && view.stopping)
+        throw new HostedTeamRefusal(
+          `Member "${owner}" is being stopped and has not completed a run yet. Complete the task with this owner only after task_list shows its run completed; otherwise record the member that did it, or "leader".`,
+        );
+      // No settled run of an ended member could have done the task's work.
       if (completing)
         throw new HostedTeamRefusal(
           `Member "${owner}" ${ended} without completing a run, so it did not do this task's work. Record the member that did it, or "leader".`,
@@ -1699,7 +1706,7 @@ export class HostedTeamSession {
         this.messagesTo(view.neverStarted.childRunId),
       );
       throw new HostedTeamRefusal(
-        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}, then update the task in the same turn${unassign}.`,
+        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}. Then update the task in the same turn${unassign}.`,
       );
     }
     if (

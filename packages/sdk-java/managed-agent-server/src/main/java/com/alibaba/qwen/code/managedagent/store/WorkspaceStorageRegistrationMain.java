@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -28,7 +29,7 @@ public final class WorkspaceStorageRegistrationMain {
         String url = System.getenv("W1_JDBC_URL");
         String user = System.getenv("W1_JDBC_USER");
         String password = System.getenv("W1_JDBC_PASSWORD");
-        if (url == null || url.isBlank() || user == null || user.isBlank() || password == null) {
+        if (StringUtils.isBlank(url) || StringUtils.isBlank(user) || password == null) {
             throw new IllegalStateException("W1_JDBC_URL, W1_JDBC_USER and W1_JDBC_PASSWORD are required");
         }
         DriverManagerDataSource dataSource = new DriverManagerDataSource(url, user, password);

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -111,7 +112,7 @@ class WorkspaceSchemaConsolidationTest {
         root("root");
         long now = System.currentTimeMillis();
         for (String id : java.util.List.of("parent", "child")) {
-            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
                     + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
                     + " context_revision, workspace_config_ref, workspace_policy_ref, creator_actor_key, parent_session_id)"
                     + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', ?, ?, 'root', 1, 'storage', '.', ?, 1, ?, ?, ?, ?)",
@@ -206,12 +207,8 @@ class WorkspaceSchemaConsolidationTest {
             roots.add(new Object[] {scope, index == 0 ? "JOURNAL" : "SNAPSHOT", WorkspaceOperations.hash("owner", id), resource,
                     index == 0 ? 1L : null, id.getBytes(StandardCharsets.UTF_8)});
         }
-        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
-                + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
-                + " VALUES (?, ?, 'tenant', 'root', 'session', ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', CURRENT_TIMESTAMP(6))", resources);
-        jdbc.batchUpdate("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
-                + " tenant_id, workspace_id, session_id, journal_revision, resource_id, created_at)"
-                + " VALUES (?, ?, ?, 1, ?, 'tenant', 'root', 'session', ?, ?, CURRENT_TIMESTAMP(6))", roots);
+        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'root', 'session', ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
+        jdbc.batchUpdate("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, gmt_create) VALUES (?, ?, ?, 1, ?, 'tenant', 'root', 'session', ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", roots);
         var catalog = new WorkspaceCsiCheckpointSnapshotStore(jdbc.getDataSource(),
                 new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
                         new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("test", new byte[32])), new ObjectMapper());
