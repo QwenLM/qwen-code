@@ -5,6 +5,7 @@
  */
 
 import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   LlmRequestPreparationError,
   type LlmPreparedRequest,
@@ -575,7 +576,11 @@ export async function runHostedHarnessTextTurn(input: {
             modelFailure = false;
             throw new Error('Hosted Harness no-tool turn refused a tool call.');
           } else if (event.type === LlmEventType.Error) {
-            throw new Error(event.value.error.message);
+            // Format rather than flatten: the formatter keeps a resolved provider
+            // request id on the message, so the daemon stderr line and the
+            // StopFailure hook's error_details keep an id the operator can
+            // quote to their provider.
+            throw new Error(parseAndFormatApiError(event.value.error));
           } else if (event.type === LlmEventType.UserCancelled) {
             modelFailure = false;
             throw new Error('Hosted Harness turn was cancelled.');

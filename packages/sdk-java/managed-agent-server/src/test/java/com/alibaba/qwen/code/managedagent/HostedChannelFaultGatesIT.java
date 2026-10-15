@@ -1,7 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
@@ -15,6 +13,19 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -39,18 +50,8 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.test.system.CapturedOutput;
-import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
-import org.springframework.core.Ordered;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 // FG7 (issue #13802): multi-process fault gates for the channel domains.
 // One Spring (channels on an isolated internal listener) and one packaged
@@ -466,14 +467,14 @@ class HostedChannelFaultGatesIT {
                 "--qwen.managed-agent.internal-server.port=" + internal);
         internalPort = internal;
         jdbc = spring.getBean(JdbcTemplate.class);
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
                 + " (?, ?, 1, ?, 'Workspace', ?, ?, 'ACTIVE')", tenant,
                 "workspace-0", "storage-0",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, role) VALUES (?, ?, ?,"
                 + " 'OPERATOR')", tenant, "workspace-0",
                 ACTOR.getBytes(StandardCharsets.UTF_8));
@@ -561,9 +562,11 @@ class HostedChannelFaultGatesIT {
             List<String> triggers) {
         String trigger = support.newTriggerName();
         triggers.add(trigger);
+        String channel = "ma_operation".equals(table)
+                ? "JSON_UNQUOTE(JSON_EXTRACT(NEW.request_json, '$.channelId'))" : "NEW.channel_id";
         jdbc.execute("CREATE TRIGGER " + trigger + " " + timing + " ON "
                 + table + " FOR EACH ROW BEGIN IF NEW.tenant_id = '" + tenant
-                + "' AND NEW.channel_instance_id = '" + channelId + "' AND ("
+                + "' AND " + channel + " = '" + channelId + "' AND ("
                 + condition + ") THEN SIGNAL SQLSTATE '45000' SET"
                 + " MESSAGE_TEXT = '" + marker + "'; END IF; END");
     }
@@ -1174,7 +1177,7 @@ class HostedChannelFaultGatesIT {
             switch (fault) {
                 case "route-admit" -> {
                     createChannelTrigger(tenant, channelId,
-                            "qwen_managed_channel_route", "BEFORE UPDATE",
+                            "ma_operation", "BEFORE UPDATE",
                             "NEW.state = 'admitted' AND OLD.state = 'staged'",
                             "FG7B_route-admit", triggers);
                     JsonNode refused = support.drive(caseDir, "admit-attempt",
@@ -1212,8 +1215,8 @@ class HostedChannelFaultGatesIT {
                 }
                 case "delivery-commit" -> {
                     createChannelTrigger(tenant, channelId,
-                            "qwen_managed_channel_delivery", "BEFORE UPDATE",
-                            "OLD.state = 'sending' AND NEW.state = 'delivered'",
+                            "ma_delivery", "BEFORE UPDATE",
+                            "OLD.transport_state = 'sending' AND NEW.transport_state = 'delivered'",
                             "FG7B_delivery-commit", triggers);
                     JsonNode first = support.drive(caseDir, "full-turn", base,
                             Map.of("exitAfterFirstReceiptError", true));

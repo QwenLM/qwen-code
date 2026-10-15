@@ -1,5 +1,19 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -11,19 +25,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 
 /**
  * The retention pass raises a Session's replay floor as far as its Snapshot
@@ -44,9 +45,11 @@ import org.springframework.boot.test.context.SpringBootTest;
         "qwen.managed-agent.events.replay-floor-interval=10ms"
 })
 class ReplayFloorAdvancerTest {
-
     @Autowired
     private ManagedAgentStore store;
+
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @Test
     void scheduledPassRaisesTheFloorToTheSnapshotCoverage() {
@@ -57,6 +60,10 @@ class ReplayFloorAdvancerTest {
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .snapshotThroughSequence() == last);
+        // This pass runs after any earlier page cursors have expired.
+        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
+                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .floorSequence() == last);
@@ -67,6 +74,10 @@ class ReplayFloorAdvancerTest {
         String tenant = tenant();
         String sessionId = session(tenant);
         long last = append(tenant, sessionId, 3);
+        await().atMost(Duration.ofSeconds(10)).until(() -> store.findReplayWindow(tenant, sessionId).snapshotThroughSequence() == last);
+        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
+                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .floorSequence() == last);

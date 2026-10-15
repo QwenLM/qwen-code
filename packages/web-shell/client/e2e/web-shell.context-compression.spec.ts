@@ -105,7 +105,15 @@ for (const theme of ['light', 'dark']) {
     });
     const ring = page.locator('[data-web-shell-context-usage]');
     await expect(ring).toHaveAttribute('aria-label', '64.0% context used');
-    await ring.click();
+    // The ring opens the details panel, so the transcript snapshot this
+    // scenario asserts on comes from the slash command instead.
+    const snapshotEditor = page.locator(
+      '[data-web-shell-composer-surface] .cm-content[contenteditable="true"]',
+    );
+    await snapshotEditor.fill('/context');
+    await page
+      .getByRole('button', { name: 'Send message', exact: true })
+      .click();
     const historical = page
       .getByRole('group', { name: 'Context Usage', exact: true })
       .first();

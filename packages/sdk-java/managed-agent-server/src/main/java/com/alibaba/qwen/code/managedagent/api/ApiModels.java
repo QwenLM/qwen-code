@@ -1,15 +1,16 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+
 import java.util.List;
 import java.util.Map;
-import jakarta.validation.constraints.NotNull;
-import com.fasterxml.jackson.annotation.JsonAnySetter;
 
 public final class ApiModels {
     private ApiModels() {
@@ -39,7 +40,11 @@ public final class ApiModels {
     }
 
     public record UpdateSessionRequest(
-            @NotBlank @Size(max = 256) String title) {
+            // Single policy owner: ManagedAgentService.validRenameTitle
+            // (256 + control-characters + non-blank), so the rename route
+            // answers the specific invalid_title code instead of bean
+            // validation's generic envelope.
+            String title) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

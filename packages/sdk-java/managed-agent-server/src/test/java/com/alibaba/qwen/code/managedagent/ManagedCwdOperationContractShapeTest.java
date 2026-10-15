@@ -1,16 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.Set;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Instance-level validation of the cwd operation request/response shapes
@@ -21,7 +21,6 @@ import org.junit.jupiter.api.Test;
  * discriminated cwd instances' conformance to the published contracts.
  */
 class ManagedCwdOperationContractShapeTest {
-
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SESSION_ID =
