@@ -3029,8 +3029,14 @@ export function useComposerCore(
           ? view.state.doc === editorDocAtSubmit
           : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
         composerTagsRef.current === composerTagsAtSubmit &&
-        pastedImagesRef.current === pastedImagesAtSubmit &&
-        pastedFilesRef.current === pastedFilesAtSubmit &&
+        // Removing submitted attachments must not leave their siblings staged.
+        // Any newly added object still identifies a different draft.
+        pastedImagesRef.current.every((image) =>
+          pastedImagesAtSubmit.includes(image),
+        ) &&
+        pastedFilesRef.current.every((file) =>
+          pastedFilesAtSubmit.includes(file),
+        ) &&
         restoredInputAnnotationsRef.current ===
           restoredInputAnnotationsAtSubmit &&
         shellModeRef.current === shellModeAtSubmit;
@@ -3184,7 +3190,6 @@ export function useComposerCore(
 
     let attachmentKeyRepeat = false;
     const removeLastAttachment = (view: EditorView): boolean => {
-      if (attachmentKeyRepeat) return false;
       if (imageIngestionLaneRef.current.pendingBatches > 0) return false;
       if (view.state.doc.length > 0) return false;
       if (pastedFilesRef.current.length > 0) {
@@ -3206,6 +3211,7 @@ export function useComposerCore(
       {
         key: 'Backspace',
         run: (view) => {
+          if (attachmentKeyRepeat) return false;
           const selection = view.state.selection.main;
           if (!selection.empty || selection.from !== 0) return false;
           let hasInlineTagAtStart = false;
@@ -3230,6 +3236,7 @@ export function useComposerCore(
       {
         key: 'Delete',
         run: (view) => {
+          if (attachmentKeyRepeat) return false;
           const selection = view.state.selection.main;
           if (!selection.empty || selection.from !== 0) return false;
           let hasInlineTagAtStart = false;

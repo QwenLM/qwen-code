@@ -9,15 +9,24 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
-import { useComposerCore, type UseComposerCoreReturn } from './useComposerCore';
+import {
+  useComposerCore,
+  type UseComposerCoreReturn,
+  type UseComposerCoreOptions,
+  type ComposerSubmitCommit,
+} from './useComposerCore';
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 let latest: UseComposerCoreReturn | null = null;
 
-function Harness() {
+function Harness({
+  onSubmit,
+}: {
+  onSubmit?: UseComposerCoreOptions['onSubmit'];
+}) {
   const composer = useComposerCore({
-    onSubmit: vi.fn(),
+    onSubmit: onSubmit ?? vi.fn(),
     commands: [],
     editorTheme: {},
   });
@@ -29,14 +38,14 @@ function Harness() {
   );
 }
 
-async function mount() {
+async function mount(onSubmit?: UseComposerCoreOptions['onSubmit']) {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
   await act(async () => {
     root!.render(
       <I18nProvider language="en">
-        <Harness />
+        <Harness onSubmit={onSubmit} />
       </I18nProvider>,
     );
   });
@@ -106,6 +115,113 @@ function pressKey(key: string, repeat = false) {
 }
 
 describe('useComposerCore issue #10794 attachment deletion', () => {
+  it.each(['Backspace', 'Delete'])(
+    'preserves remaining staged tags during repeated %s',
+    async (key) => {
+      await mount();
+      await pasteImages([
+        new File(['png'], 'photo.png', { type: 'image/png' }),
+      ]);
+      act(() =>
+        latest!.addTags([
+          { id: 'first', value: 'first' },
+          { id: 'second', value: 'second' },
+        ]),
+      );
+      pressKey(key);
+      expect(latest!.composerTags).toHaveLength(1);
+      const remainingTag = latest!.composerTags[0];
+      pressKey(key, true);
+      expect(latest!.composerTags).toEqual([remainingTag]);
+      expect(latest!.pastedImages).toHaveLength(1);
+      pressKey(key);
+      expect(latest!.composerTags).toEqual([]);
+      expect(latest!.pastedImages).toHaveLength(1);
+    },
+  );
+
+  for (const laterEdit of ['none', 'file', 'text'] as const) {
+    it.each(['Backspace', 'Delete'])(
+      `commits a deferred submission after image removal with ${laterEdit} later edit and %s`,
+      async (key) => {
+        let commit!: ComposerSubmitCommit;
+        let isCurrentDraft!: () => boolean;
+        const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+          (_text, _images, _files, accepted, metadata) => {
+            commit = accepted!;
+            isCurrentDraft = metadata!.isCurrentDraft!;
+            return false;
+          },
+        );
+        await mount(onSubmit);
+        await pasteImages([
+          new File(['first'], 'first.png', { type: 'image/png' }),
+          new File(['second'], 'second.png', { type: 'image/png' }),
+        ]);
+        act(() => latest!.submitText());
+        expect(onSubmit).toHaveBeenCalledOnce();
+        expect(commit).toBeTypeOf('function');
+        expect(latest!.pastedImages).toHaveLength(2);
+        expect(isCurrentDraft()).toBe(true);
+        pressKey(key);
+        expect(latest!.pastedImages).toHaveLength(1);
+        expect(isCurrentDraft()).toBe(false);
+        if (laterEdit === 'file') {
+          await act(async () => {
+            expect(
+              latest!.ingestFiles([
+                new File(['new draft'], 'new.txt', { type: 'text/plain' }),
+              ]),
+            ).toBe(true);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
+          expect(latest!.pastedFiles).toHaveLength(1);
+        } else if (laterEdit === 'text') {
+          act(() => latest!.handle.setText('new draft'));
+        }
+        act(() => commit());
+        if (laterEdit === 'none') {
+          expect(latest!.pastedImages).toEqual([]);
+          expect(latest!.pastedFiles).toEqual([]);
+        } else {
+          expect(latest!.pastedImages).toHaveLength(1);
+          if (laterEdit === 'file') expect(latest!.pastedFiles).toHaveLength(1);
+          if (laterEdit === 'text') expect(latest!.getText()).toBe('new draft');
+        }
+      },
+    );
+  }
+
+  it.each(['Backspace', 'Delete'])(
+    'clears remaining files when a deferred submission commits after %s',
+    async (key) => {
+      let commit!: ComposerSubmitCommit;
+      let isCurrentDraft!: () => boolean;
+      await mount((_text, _images, _files, accepted, metadata) => {
+        commit = accepted!;
+        isCurrentDraft = metadata!.isCurrentDraft!;
+        return false;
+      });
+      await act(async () => {
+        expect(
+          latest!.ingestFiles([
+            new File(['first'], 'first.txt', { type: 'text/plain' }),
+            new File(['second'], 'second.txt', { type: 'text/plain' }),
+          ]),
+        ).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(latest!.pastedFiles).toHaveLength(2);
+      act(() => latest!.submitText());
+      expect(isCurrentDraft()).toBe(true);
+      pressKey(key);
+      expect(latest!.pastedFiles).toHaveLength(1);
+      expect(isCurrentDraft()).toBe(false);
+      act(() => commit());
+      expect(latest!.pastedFiles).toEqual([]);
+    },
+  );
+
   for (const kind of ['images', 'files', 'folded text'] as const) {
     it.each(['Backspace', 'Delete'])(
       `preserves remaining ${kind} during key repeat with %s`,
